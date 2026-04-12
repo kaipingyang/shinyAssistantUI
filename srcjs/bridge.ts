@@ -11,6 +11,7 @@ export type ToolCallPayload = {
   toolName: string;
   args: Record<string, unknown>;
   argsText: string;
+  annotations?: Record<string, unknown>;
 };
 
 export type RunCallbacks = {

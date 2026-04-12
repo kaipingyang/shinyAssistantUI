@@ -54,14 +54,16 @@ assistantUIServer <- function(id, handler, show_thread_list = FALSE) {
     on_error <- function(message) {
       session$sendCustomMessage(paste0(input_id, ":error"), list(message = message))
     }
-    on_tool_call <- function(tool_call_id, tool_name, args = list()) {
+    on_tool_call <- function(tool_call_id, tool_name, args = list(),
+                             annotations = list()) {
       session$sendCustomMessage(
         paste0(input_id, ":tool-call"),
         list(
-          toolCallId = tool_call_id,
-          toolName   = tool_name,
-          args       = args,
-          argsText   = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE))
+          toolCallId  = tool_call_id,
+          toolName    = tool_name,
+          args        = args,
+          argsText    = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)),
+          annotations = annotations
         )
       )
     }
@@ -79,8 +81,8 @@ assistantUIServer <- function(id, handler, show_thread_list = FALSE) {
       on_chunk       = on_chunk,
       on_done        = on_done,
       on_error       = on_error,
-      on_tool_call   = on_tool_call,
-      on_tool_result = on_tool_result
+      on_tool_call   = on_tool_call,   # function(id, name, args, annotations)
+      on_tool_result = on_tool_result  # function(id, result, is_error)
     )
     handler_params <- names(formals(handler))
     call_args <- if ("..." %in% handler_params) all_args

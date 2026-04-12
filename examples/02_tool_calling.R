@@ -15,9 +15,8 @@ get_weather <- tool(
   },
   name        = "get_weather",
   description = "Get current weather information for a city",
-  arguments   = list(
-    city = type_string("The name of the city")
-  )
+  arguments   = list(city = type_string("The name of the city")),
+  annotations = tool_annotations(title = "Weather Lookup", icon = "cloud-sun")
 )
 
 calculate <- tool(
@@ -33,7 +32,8 @@ calculate <- tool(
     expression = type_string(
       "A valid R expression, e.g. 'sqrt(144)' or '2^10 / 4'"
     )
-  )
+  ),
+  annotations = tool_annotations(title = "Calculator", icon = "calculator")
 )
 
 # ── 每线程独立 Chat 对象 ──────────────────────────────────────────────────────
@@ -60,7 +60,8 @@ get_chat <- function(thread_id) {
     current$on_tool_call(
       tool_call_id = request@id,
       tool_name    = request@name,
-      args         = request@arguments
+      args         = request@arguments,
+      annotations  = request@tool@annotations
     )
   })
 

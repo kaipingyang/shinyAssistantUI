@@ -4,9 +4,28 @@ import { Thread, ThreadList } from "@assistant-ui/react-ui";
 import { ThreadListItemPrimitive, ThreadListPrimitive } from "@assistant-ui/react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import {
-  PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon,
-  Trash2Icon, MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
+  PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
+  MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
+  AlertCircleIcon, CheckCircle2Icon,
+  CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
+  CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
 } from "lucide-react";
+import type { ComponentType } from "react";
+
+// ── lucide 图标名称映射（供 tool_annotations(icon=...) 使用）─────────────────
+type IconComponent = ComponentType<{ size?: number; color?: string; style?: React.CSSProperties }>;
+const TOOL_ICONS: Record<string, IconComponent> = {
+  "cloud-sun":     CloudSunIcon,
+  "calculator":    CalculatorIcon,
+  "search":        SearchIcon,
+  "database":      DatabaseIcon,
+  "code":          CodeIcon,
+  "globe":         GlobeIcon,
+  "zap":           ZapIcon,
+  "terminal":      TerminalIcon,
+  "flask":         FlaskConicalIcon,
+  "wrench":        WrenchIcon,
+};
 import "@assistant-ui/react-ui/styles/index.css";
 import { useShinyRuntime } from "./runtime";
 
@@ -134,66 +153,93 @@ function CustomThreadListItem() {
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
 function GenericToolCard({ toolName, argsText, args, result, isError }: ToolCallMessagePartProps) {
   const [open, setOpen] = useState(false);
-  const pending = result === undefined;
-  // Shiny 可能把 json class 对象内联序列化，做防御性 stringify
+  const pending  = result === undefined;
+  const done     = !pending && !isError;
+  const errored  = !pending && !!isError;
+
+  // annotations 存在 artifact 字段（由 runtime.ts 从 ToolCallPayload.annotations 写入）
+  const annotations = artifact as Record<string, unknown> | undefined;
+  const iconName = annotations?.icon as string | undefined;
+  const toolTitle = (annotations?.title as string | undefined) ?? toolName;
+
+  // 成功时：tool 定义的图标，或 CheckCircle2；失败时：AlertCircle
+  const SuccessIcon: IconComponent = (iconName && TOOL_ICONS[iconName]) ?? CheckCircle2Icon;
+  const HeaderIcon: IconComponent  = errored ? AlertCircleIcon
+    : pending ? WrenchIcon
+    : SuccessIcon;
+  const iconColor = errored ? "#dc2626" : pending ? "#9ca3af" : "#16a34a";
+
+  // 卡片整体背景
+  const cardBg = errored ? "#fef2f2"
+    : done    ? "hsl(0,0%,97%)"
+    : "#ffffff";
+  const cardBorder = errored ? "#fecaca"
+    : done    ? "#e5e7eb"
+    : "#e5e7eb";
+
+  // argsText 防御性 stringify（Shiny 可能把 json class 内联为对象）
   const argsDisplay = typeof argsText === "string"
-    ? argsText
-    : JSON.stringify(args ?? argsText, null, 2);
-  const resultDisplay = result === undefined ? ""
+    ? argsText : JSON.stringify(args ?? argsText, null, 2);
+  const resultDisplay = pending ? ""
     : typeof result === "string" ? result
     : JSON.stringify(result, null, 2);
 
   return (
     <div style={{
-      border: "1px solid var(--aui-border, #e5e7eb)",
+      border: `1px solid ${cardBorder}`,
       borderRadius: "8px",
       fontSize: "13px",
       overflow: "hidden",
       marginBottom: "4px",
-      background: "var(--aui-background, #fff)",
+      background: cardBg,
     }}>
-      {/* 头部：工具名 + 状态 */}
+      {/* 头部：图标 + 工具名 + 展开箭头 */}
       <button
         onClick={() => setOpen((v) => !v)}
         style={{
-          width: "100%", display: "flex", alignItems: "center", gap: "6px",
-          padding: "6px 10px", background: "none", border: "none",
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
           cursor: "pointer", textAlign: "left",
           color: "var(--aui-foreground, #111827)",
         }}
       >
-        <WrenchIcon size={13} style={{ flexShrink: 0, color: "#6b7280" }} />
-        <span style={{ fontWeight: 500, flex: 1 }}>{toolName}</span>
-        <span style={{
-          fontSize: "11px", padding: "1px 6px", borderRadius: "999px",
-          background: pending ? "#fef9c3" : isError ? "#fee2e2" : "#dcfce7",
-          color: pending ? "#854d0e" : isError ? "#991b1b" : "#166534",
-        }}>
-          {pending ? "running…" : isError ? "error" : "done"}
-        </span>
-        {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+        <HeaderIcon size={14} style={{ flexShrink: 0 }} color={iconColor} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{toolTitle}</span>
+        {pending && (
+          <span style={{ fontSize: "11px", color: "#9ca3af" }}>running…</span>
+        )}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
       </button>
 
       {/* 展开：参数 + 结果 */}
       {open && (
-        <div style={{ borderTop: "1px solid var(--aui-border, #e5e7eb)", padding: "8px 10px" }}>
-          <div style={{ color: "#6b7280", marginBottom: "4px", fontSize: "11px" }}>Arguments</div>
+        <div style={{
+          borderTop: `1px solid ${cardBorder}`,
+          padding: "8px 10px",
+        }}>
+          <div style={{ color: "#9ca3af", marginBottom: "4px", fontSize: "11px",
+                        textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Arguments
+          </div>
           <pre style={{
             margin: 0, padding: "6px 8px", borderRadius: "4px",
-            background: "#f9fafb", fontSize: "12px", overflowX: "auto",
-            whiteSpace: "pre-wrap", wordBreak: "break-all",
+            background: "rgba(0,0,0,0.04)", fontSize: "12px",
+            overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
           }}>
             {argsDisplay}
           </pre>
-          {result !== undefined && (
+
+          {!pending && (
             <>
-              <div style={{ color: "#6b7280", marginTop: "8px", marginBottom: "4px", fontSize: "11px" }}>
+              <div style={{ color: "#9ca3af", marginTop: "10px", marginBottom: "4px",
+                            fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
                 Result
               </div>
               <pre style={{
                 margin: 0, padding: "6px 8px", borderRadius: "4px",
-                background: isError ? "#fef2f2" : "#f9fafb",
-                color: isError ? "#991b1b" : undefined,
+                background: errored ? "rgba(220,38,38,0.06)" : "rgba(0,0,0,0.04)",
+                color: errored ? "#991b1b" : undefined,
                 fontSize: "12px", overflowX: "auto",
                 whiteSpace: "pre-wrap", wordBreak: "break-all",
               }}>

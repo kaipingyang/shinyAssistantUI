@@ -261,6 +261,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                     toolName: toolCall.toolName,
                     args: toolCall.args,
                     argsText: toolCall.argsText,
+                    artifact: toolCall.annotations,
                   },
                 ],
               },
