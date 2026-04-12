@@ -1,0 +1,24 @@
+{
+  "name": "shinyassistantui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "latest",
+    "@assistant-ui/react-markdown": "latest",
+    "@assistant-ui/react-ui": "^0.2.1",
+    "cmdk": "latest",
+    "react": "^18",
+    "react-dom": "^18"
+  },
+  "devDependencies": {
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "latest",
+    "vite": "^5.4.21"
+  }
+}

@@ -1,0 +1,22 @@
+Package: shinyAssistantUI
+Title: AI Assistant Chat UI for Shiny
+Version: 0.1.0
+Authors@R: person("Kaiping", "Yang", role = c("aut", "cre"),
+                  email = "1260146556@qq.com")
+Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
+    htmlwidget, providing a full-featured AI chat UI with streaming output,
+    slash command menu, file attachments, and tool call display.
+    Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based
+    AI backend.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports:
+    htmlwidgets,
+    reactR,
+    shiny
+Suggests:
+    bslib,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

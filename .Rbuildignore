@@ -1,0 +1,10 @@
+^LICENSE\.md$
+^\.git$
+^\.github$
+^node_modules$
+^srcjs$
+^package\.json$
+^package-lock\.json$
+^vite\.config\.ts$
+^tsconfig\.json$
+^examples$

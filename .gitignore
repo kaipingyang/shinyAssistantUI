@@ -1,0 +1,7 @@
+*.Rcheck/
+.Rhistory
+.RData
+.Rproj.user/
+*.tar.gz
+node_modules/
+.claude/
