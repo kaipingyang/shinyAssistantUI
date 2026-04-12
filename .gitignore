@@ -5,3 +5,5 @@
 *.tar.gz
 node_modules/
 .claude/
+*.png
+*.jpg

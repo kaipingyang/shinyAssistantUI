@@ -7,6 +7,7 @@ import type {
   ExternalStoreThreadData,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
+import type { ShinyBridge } from "./bridge";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -29,6 +30,21 @@ function saveThreads(inputId: string, threads: ExternalStoreThreadData<"regular"
   } catch {}
 }
 
+function loadArchivedThreads(inputId: string): ExternalStoreThreadData<"archived">[] {
+  try {
+    const raw = localStorage.getItem(storageKey(inputId, "archived"));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveArchivedThreads(inputId: string, threads: ExternalStoreThreadData<"archived">[]) {
+  try {
+    localStorage.setItem(storageKey(inputId, "archived"), JSON.stringify(threads));
+  } catch {}
+}
+
 function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
   try {
     const raw = localStorage.getItem(storageKey(inputId, `msgs:${threadId}`));
@@ -44,6 +60,12 @@ function saveMessages(inputId: string, threadId: string, msgs: ThreadMessageLike
   } catch {}
 }
 
+function deleteMessages(inputId: string, threadId: string) {
+  try {
+    localStorage.removeItem(storageKey(inputId, `msgs:${threadId}`));
+  } catch {}
+}
+
 function makeThreadId() {
   return `t_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -51,11 +73,21 @@ function makeThreadId() {
 // ── hook ────────────────────────────────────────────────────────────────────
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
-  const bridge = useRef(createShinyBridge(inputId));
+  // 懒初始化：避免每次 render 都调用 createShinyBridge（会重复注册 Shiny handler
+  // 覆盖旧的，但 useRef 还是返回第一个 bridge，导致 handler 和 callbacks 对应的闭包不一致）
+  const bridge = useRef<ShinyBridge>(null!);
+  if (!bridge.current) {
+    bridge.current = createShinyBridge(inputId);
+  }
 
   // 线程列表（持久化）
   const [threads, setThreads] = useState<ExternalStoreThreadData<"regular">[]>(() =>
     loadThreads(inputId)
+  );
+
+  // 归档线程列表（持久化）
+  const [archivedThreads, setArchivedThreads] = useState<ExternalStoreThreadData<"archived">[]>(() =>
+    loadArchivedThreads(inputId)
   );
 
   // 当前 threadId
@@ -109,6 +141,32 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [inputId, currentThreadId]
   );
 
+  // ── 切换到第一个可用线程或新建 ────────────────────────────────────────────
+  const switchAwayFrom = useCallback(
+    (removedId: string, currentThreads: ExternalStoreThreadData<"regular">[]) => {
+      const remaining = currentThreads.filter((t) => t.id !== removedId);
+      if (remaining.length > 0) {
+        setCurrentThreadId(remaining[0].id);
+      } else {
+        const newId = makeThreadId();
+        const newThread: ExternalStoreThreadData<"regular"> = {
+          id: newId,
+          status: "regular",
+          title: "新对话",
+        };
+        setThreads((prev) => {
+          const next = [newThread, ...prev.filter((t) => t.id !== removedId)];
+          saveThreads(inputId, next);
+          return next;
+        });
+        setCurrentThreadId(newId);
+      }
+      setIsRunning(false);
+      streamingIdRef.current = null;
+    },
+    [inputId]
+  );
+
   // ── 注册 clear（新建线程）────────────────────────────────────────────────
   useEffect(() => {
     bridge.current.onClear(() => {
@@ -139,27 +197,26 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       const threadId = currentThreadId;
 
+      // 第一条消息自动命名线程（在任何 updater 外直接读当前 state）
+      const isFirstMsg = (messagesMap[threadId] ?? []).length === 0;
+      if (isFirstMsg) {
+        const title = text.slice(0, 20) + (text.length > 20 ? "…" : "");
+        setThreads((ts) => {
+          const next = ts.map((t) => (t.id === threadId ? { ...t, title } : t));
+          saveThreads(inputId, next);
+          return next;
+        });
+      }
+
       // 追加用户消息
-      setCurrentMessages((prev) => {
-        const updated = [
-          ...prev,
-          {
-            id: `user-${Date.now()}`,
-            role: "user" as const,
-            content: [{ type: "text" as const, text }],
-          },
-        ];
-        // 第一条消息自动命名线程
-        if (prev.length === 0) {
-          const title = text.slice(0, 20) + (text.length > 20 ? "…" : "");
-          setThreads((ts) => {
-            const next = ts.map((t) => (t.id === threadId ? { ...t, title } : t));
-            saveThreads(inputId, next);
-            return next;
-          });
-        }
-        return updated;
-      });
+      setCurrentMessages((prev) => [
+        ...prev,
+        {
+          id: `user-${Date.now()}`,
+          role: "user" as const,
+          content: [{ type: "text" as const, text }],
+        },
+      ]);
 
       setIsRunning(true);
 
@@ -214,7 +271,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       bridge.current.sendUserMessage(text, threadId);
     },
-    [inputId, currentThreadId, setCurrentMessages]
+    [inputId, currentThreadId, setCurrentMessages, messagesMap]
   );
 
   // ── threadList adapter ───────────────────────────────────────────────────
@@ -222,6 +279,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => ({
       threadId: currentThreadId,
       threads,
+      archivedThreads,
       onSwitchToNewThread: () => {
         const newId = makeThreadId();
         const newThread: ExternalStoreThreadData<"regular"> = {
@@ -237,16 +295,59 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         setCurrentThreadId(newId);
         setIsRunning(false);
         streamingIdRef.current = null;
-        bridge.current.setRunCallbacks(null);
+        // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
       },
       onSwitchToThread: (threadId: string) => {
         setCurrentThreadId(threadId);
         setIsRunning(false);
         streamingIdRef.current = null;
-        bridge.current.setRunCallbacks(null);
+        // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
+      },
+      onArchive: (threadId: string) => {
+        setThreads((prev) => {
+          const target = prev.find((t) => t.id === threadId);
+          const next = prev.filter((t) => t.id !== threadId);
+          saveThreads(inputId, next);
+          if (target) {
+            setArchivedThreads((arch) => {
+              const nextArch = [
+                { ...target, status: "archived" as const },
+                ...arch,
+              ];
+              saveArchivedThreads(inputId, nextArch);
+              return nextArch;
+            });
+          }
+          if (threadId === currentThreadId) {
+            switchAwayFrom(threadId, prev);
+          }
+          return next;
+        });
+      },
+      onDelete: (threadId: string) => {
+        // 从活跃或归档列表中删除
+        setThreads((prev) => {
+          const inActive = prev.some((t) => t.id === threadId);
+          if (!inActive) return prev;
+          const next = prev.filter((t) => t.id !== threadId);
+          saveThreads(inputId, next);
+          deleteMessages(inputId, threadId);
+          if (threadId === currentThreadId) {
+            switchAwayFrom(threadId, prev);
+          }
+          return next;
+        });
+        setArchivedThreads((prev) => {
+          const inArchived = prev.some((t) => t.id === threadId);
+          if (!inArchived) return prev;
+          const next = prev.filter((t) => t.id !== threadId);
+          saveArchivedThreads(inputId, next);
+          deleteMessages(inputId, threadId);
+          return next;
+        });
       },
     }),
-    [inputId, currentThreadId, threads]
+    [inputId, currentThreadId, threads, archivedThreads, switchAwayFrom]
   );
 
   return useExternalStoreRuntime({

@@ -35,7 +35,7 @@ assistantUIServer <- function(id, handler, show_thread_list = FALSE) {
     msg <- session$input[[input_id]]
     if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
 
-    thread_id <- msg$thread_id %||% "default"
+    thread_id <- msg$threadId %||% "default"
 
     on_chunk <- function(text) {
       session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))

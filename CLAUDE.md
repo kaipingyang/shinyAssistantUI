@@ -102,6 +102,27 @@ devtools::build()      # build tarball
 
 `.Rbuildignore` excludes `node_modules/`, `srcjs/`, `package.json`, `vite.config.ts`, `examples/`.
 
+## Gotchas
+
+### useRef lazy initialization（关键）
+
+**不要** 写 `useRef(sideEffectFn())`——参数在**每次 render** 都会被求值，即使 `useRef` 只用第一次的值。凡是初始化有副作用（注册 handler、创建连接等）的 ref，必须用懒初始化模式：
+
+```typescript
+// ❌ 错误：createShinyBridge 每次 render 都会被调用
+const bridge = useRef(createShinyBridge(inputId));
+
+// ✅ 正确：只在第一次调用
+const bridge = useRef<ShinyBridge>(null!);
+if (!bridge.current) bridge.current = createShinyBridge(inputId);
+```
+
+**背景**：这个错误曾导致一个难以定位的 bug。`createShinyBridge` 在每次 re-render 时都重新调用 `Shiny.addCustomMessageHandler`，把 Shiny 的 handler 替换成了新 bridge 的闭包（`currentCallbacks = null`）。`useRef` 仍然持有第一个 bridge，`setRunCallbacks` 也写入第一个 bridge，但 chunks 到达时触发的是最新 handler 的闭包——callbacks 为 null，消息被静默丢弃，表现为只有加载动画、没有回复。
+
+### R 端接收 JS 消息的属性名用 camelCase
+
+JS 通过 `Shiny.setInputValue` 发送 `{ threadId, text, ... }`，R 端用 `msg$threadId`（camelCase），**不是** `msg$thread_id`。Shiny 保留 JSON 属性名，不做任何大小写转换。
+
 ## Known gaps / future work
 
 - Slash command `/` menu (cmdk installed, not yet wired up)
