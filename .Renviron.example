@@ -1,0 +1,11 @@
+# Copy this file to .Renviron (never commit .Renviron) and fill in your values.
+# Restart R after editing .Renviron for changes to take effect.
+
+# OpenAI-compatible endpoint (e.g. Azure Databricks serving endpoint)
+OPENAI_BASE_URL=https://<your-workspace>.azuredatabricks.net/serving-endpoints
+
+# Model name served at the endpoint
+OPENAI_MODEL=<your-model>
+
+# API key / token
+OPENAI_API_KEY=<your-token>
