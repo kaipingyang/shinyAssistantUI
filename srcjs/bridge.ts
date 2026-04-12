@@ -6,42 +6,49 @@ declare const Shiny: {
   addCustomMessageHandler: (type: string, handler: (data: unknown) => void) => void;
 };
 
-export type ChunkHandler = (text: string) => void;
-export type DoneHandler = () => void;
-export type ErrorHandler = (message: string) => void;
+export type RunCallbacks = {
+  onChunk: (text: string) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+};
 
 export interface ShinyBridge {
-  sendUserMessage: (text: string, attachments?: string[]) => void;
-  onChunk: (handler: ChunkHandler) => void;
-  onDone: (handler: DoneHandler) => void;
-  onError: (handler: ErrorHandler) => void;
-  onNewMessage: (handler: DoneHandler) => void;
-  onClear: (handler: DoneHandler) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: string[]) => void;
+  setRunCallbacks: (callbacks: RunCallbacks | null) => void;
+  onClear: (handler: () => void) => void;
 }
 
 export function createShinyBridge(inputId: string): ShinyBridge {
+  let currentCallbacks: RunCallbacks | null = null;
+
+  // 注册一次，内部路由到当前运行的回调
+  Shiny.addCustomMessageHandler(`${inputId}:chunk`, (data) => {
+    const d = data as { text: string };
+    currentCallbacks?.onChunk(d.text);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:done`, (_data) => {
+    currentCallbacks?.onDone();
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
+    const d = data as { message: string };
+    currentCallbacks?.onError(d.message);
+  });
+
   return {
-    sendUserMessage(text, attachments = []) {
-      Shiny.setInputValue(inputId, { text, attachments, ts: Date.now() }, { priority: "event" });
+    sendUserMessage(text, threadId, attachments = []) {
+      Shiny.setInputValue(
+        inputId,
+        { text, threadId, attachments, ts: Date.now() },
+        { priority: "event" }
+      );
     },
-    onChunk(handler) {
-      Shiny.addCustomMessageHandler(`${inputId}:chunk`, (data) => {
-        const d = data as { text: string };
-        handler(d.text);
-      });
+
+    setRunCallbacks(callbacks) {
+      currentCallbacks = callbacks;
     },
-    onDone(handler) {
-      Shiny.addCustomMessageHandler(`${inputId}:done`, (_data) => handler());
-    },
-    onError(handler) {
-      Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
-        const d = data as { message: string };
-        handler(d.message);
-      });
-    },
-    onNewMessage(handler) {
-      Shiny.addCustomMessageHandler(`${inputId}:new_message`, (_data) => handler());
-    },
+
     onClear(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:clear`, (_data) => handler());
     },

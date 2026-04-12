@@ -61,7 +61,7 @@ HTMLWidgets.widget({
         }
         root.render(
           <ErrorBoundary>
-            <AssistantUI inputId={x.inputId} />
+            <AssistantUI inputId={x.inputId} config={x.config ?? {}} />
           </ErrorBoundary>
         );
       },
