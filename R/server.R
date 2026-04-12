@@ -61,7 +61,7 @@ assistantUIServer <- function(id, handler, show_thread_list = FALSE) {
           toolCallId = tool_call_id,
           toolName   = tool_name,
           args       = args,
-          argsText   = jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)
+          argsText   = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE))
         )
       )
     }

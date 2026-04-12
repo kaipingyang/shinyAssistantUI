@@ -132,9 +132,16 @@ function CustomThreadListItem() {
 }
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
-function GenericToolCard({ toolName, argsText, result, isError }: ToolCallMessagePartProps) {
+function GenericToolCard({ toolName, argsText, args, result, isError }: ToolCallMessagePartProps) {
   const [open, setOpen] = useState(false);
   const pending = result === undefined;
+  // Shiny 可能把 json class 对象内联序列化，做防御性 stringify
+  const argsDisplay = typeof argsText === "string"
+    ? argsText
+    : JSON.stringify(args ?? argsText, null, 2);
+  const resultDisplay = result === undefined ? ""
+    : typeof result === "string" ? result
+    : JSON.stringify(result, null, 2);
 
   return (
     <div style={{
@@ -176,7 +183,7 @@ function GenericToolCard({ toolName, argsText, result, isError }: ToolCallMessag
             background: "#f9fafb", fontSize: "12px", overflowX: "auto",
             whiteSpace: "pre-wrap", wordBreak: "break-all",
           }}>
-            {argsText}
+            {argsDisplay}
           </pre>
           {result !== undefined && (
             <>
@@ -190,7 +197,7 @@ function GenericToolCard({ toolName, argsText, result, isError }: ToolCallMessag
                 fontSize: "12px", overflowX: "auto",
                 whiteSpace: "pre-wrap", wordBreak: "break-all",
               }}>
-                {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+                {resultDisplay}
               </pre>
             </>
           )}
