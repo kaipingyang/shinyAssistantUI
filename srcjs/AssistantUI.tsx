@@ -151,7 +151,7 @@ function CustomThreadListItem() {
 }
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
-function GenericToolCard({ toolName, argsText, args, result, isError }: ToolCallMessagePartProps) {
+function GenericToolCard({ toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
   const [open, setOpen] = useState(false);
   const pending  = result === undefined;
   const done     = !pending && !isError;
