@@ -6,8 +6,17 @@ declare const Shiny: {
   addCustomMessageHandler: (type: string, handler: (data: unknown) => void) => void;
 };
 
+export type ToolCallPayload = {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  argsText: string;
+};
+
 export type RunCallbacks = {
   onChunk: (text: string) => void;
+  onToolCall: (toolCall: ToolCallPayload) => void;
+  onToolResult: (toolCallId: string, result: unknown, isError: boolean) => void;
   onDone: () => void;
   onError: (message: string) => void;
 };
@@ -34,6 +43,15 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
     const d = data as { message: string };
     currentCallbacks?.onError(d.message);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:tool-call`, (data) => {
+    currentCallbacks?.onToolCall(data as ToolCallPayload);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:tool-result`, (data) => {
+    const d = data as { toolCallId: string; result: unknown; isError?: boolean };
+    currentCallbacks?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
   });
 
   return {

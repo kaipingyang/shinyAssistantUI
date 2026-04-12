@@ -2,7 +2,11 @@ import React, { useState, useRef, useEffect } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
 import { Thread, ThreadList } from "@assistant-ui/react-ui";
 import { ThreadListItemPrimitive, ThreadListPrimitive } from "@assistant-ui/react";
-import { PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon, MoreHorizontalIcon } from "lucide-react";
+import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import {
+  PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon,
+  Trash2Icon, MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
+} from "lucide-react";
 import "@assistant-ui/react-ui/styles/index.css";
 import { useShinyRuntime } from "./runtime";
 
@@ -127,6 +131,75 @@ function CustomThreadListItem() {
   );
 }
 
+// ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
+function GenericToolCard({ toolName, argsText, result, isError }: ToolCallMessagePartProps) {
+  const [open, setOpen] = useState(false);
+  const pending = result === undefined;
+
+  return (
+    <div style={{
+      border: "1px solid var(--aui-border, #e5e7eb)",
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: "var(--aui-background, #fff)",
+    }}>
+      {/* 头部：工具名 + 状态 */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "6px",
+          padding: "6px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <WrenchIcon size={13} style={{ flexShrink: 0, color: "#6b7280" }} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{toolName}</span>
+        <span style={{
+          fontSize: "11px", padding: "1px 6px", borderRadius: "999px",
+          background: pending ? "#fef9c3" : isError ? "#fee2e2" : "#dcfce7",
+          color: pending ? "#854d0e" : isError ? "#991b1b" : "#166534",
+        }}>
+          {pending ? "running…" : isError ? "error" : "done"}
+        </span>
+        {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+      </button>
+
+      {/* 展开：参数 + 结果 */}
+      {open && (
+        <div style={{ borderTop: "1px solid var(--aui-border, #e5e7eb)", padding: "8px 10px" }}>
+          <div style={{ color: "#6b7280", marginBottom: "4px", fontSize: "11px" }}>Arguments</div>
+          <pre style={{
+            margin: 0, padding: "6px 8px", borderRadius: "4px",
+            background: "#f9fafb", fontSize: "12px", overflowX: "auto",
+            whiteSpace: "pre-wrap", wordBreak: "break-all",
+          }}>
+            {argsText}
+          </pre>
+          {result !== undefined && (
+            <>
+              <div style={{ color: "#6b7280", marginTop: "8px", marginBottom: "4px", fontSize: "11px" }}>
+                Result
+              </div>
+              <pre style={{
+                margin: 0, padding: "6px 8px", borderRadius: "4px",
+                background: isError ? "#fef2f2" : "#f9fafb",
+                color: isError ? "#991b1b" : undefined,
+                fontSize: "12px", overflowX: "auto",
+                whiteSpace: "pre-wrap", wordBreak: "break-all",
+              }}>
+                {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── 侧边栏（不含折叠按钮）───────────────────────────────────────────────────
 function ThreadListSidebar() {
   return (
@@ -202,7 +275,11 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             minHeight: 0,
             "--aui-thread-max-width": "9999px",
           } as React.CSSProperties}>
-            <Thread />
+            <Thread
+              assistantMessage={{
+                components: { ToolFallback: GenericToolCard },
+              }}
+            />
           </div>
         </div>
 

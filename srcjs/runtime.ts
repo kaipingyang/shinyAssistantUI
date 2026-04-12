@@ -244,6 +244,47 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
+        onToolCall: (toolCall) => {
+          // 每个 tool call 作为独立的 assistant 消息插入
+          streamingIdRef.current = null; // 中断当前文本流（如有）
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated: ThreadMessageLike[] = [
+              ...threadMsgs,
+              {
+                id: `tool-${toolCall.toolCallId}`,
+                role: "assistant" as const,
+                content: [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    args: toolCall.args,
+                    argsText: toolCall.argsText,
+                  },
+                ],
+              },
+            ];
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onToolResult: (toolCallId, result, isError) => {
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated = threadMsgs.map((m) => {
+              const part = m.content[0];
+              if (part?.type !== "tool-call") return m;
+              if ((part as { toolCallId?: string }).toolCallId !== toolCallId) return m;
+              return {
+                ...m,
+                content: [{ ...part, result, isError }],
+              };
+            });
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
         onDone: () => {
           streamingIdRef.current = null;
           setIsRunning(false);
