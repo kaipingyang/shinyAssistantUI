@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
 import { Thread, ThreadList } from "@assistant-ui/react-ui";
-import { ThreadListItemPrimitive, ThreadListPrimitive } from "@assistant-ui/react";
+import { ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI } from "@assistant-ui/react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import {
   PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
   MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
-  AlertCircleIcon, CheckCircle2Icon,
+  AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
 } from "lucide-react";
@@ -149,6 +149,187 @@ function CustomThreadListItem() {
     </ThreadListItemPrimitive.Root>
   );
 }
+
+// ── 天气卡片 helpers ──────────────────────────────────────────────────────────
+function weatherGradient(condition: string): string {
+  const c = condition.toLowerCase();
+  if (c.includes("thunder") || c.includes("storm"))
+    return "linear-gradient(160deg,#0f172a 0%,#1e293b 55%,#312e81 100%)";
+  if (c.includes("heavy rain") || c.includes("downpour"))
+    return "linear-gradient(160deg,#0f172a 0%,#1e3a5f 100%)";
+  if (c.includes("rain") || c.includes("shower") || c.includes("drizzle"))
+    return "linear-gradient(160deg,#1e3a5f 0%,#1e4976 50%,#2563eb 100%)";
+  if (c.includes("snow") || c.includes("blizzard") || c.includes("flurr"))
+    return "linear-gradient(160deg,#bfdbfe 0%,#eff6ff 100%)";
+  if (c.includes("fog") || c.includes("mist") || c.includes("haze"))
+    return "linear-gradient(160deg,#9ca3af 0%,#d1d5db 100%)";
+  if (c.includes("overcast"))
+    return "linear-gradient(160deg,#374151 0%,#4b5563 100%)";
+  if (c.includes("cloud") || c.includes("partly"))
+    return "linear-gradient(160deg,#1d4ed8 0%,#3b82f6 55%,#93c5fd 100%)";
+  if (c.includes("wind"))
+    return "linear-gradient(160deg,#0891b2 0%,#0e7490 60%,#164e63 100%)";
+  // sunny / clear
+  return "linear-gradient(160deg,#0369a1 0%,#0ea5e9 50%,#38bdf8 100%)";
+}
+
+function weatherEmoji(condition: string): string {
+  const c = condition.toLowerCase();
+  if (c.includes("thunder") || c.includes("storm"))  return "⛈️";
+  if (c.includes("heavy rain") || c.includes("downpour")) return "🌧️";
+  if (c.includes("light rain") || c.includes("drizzle")) return "🌦️";
+  if (c.includes("rain") || c.includes("shower"))    return "🌧️";
+  if (c.includes("snow") || c.includes("blizzard"))  return "❄️";
+  if (c.includes("fog") || c.includes("mist"))       return "🌫️";
+  if (c.includes("overcast"))                        return "☁️";
+  if (c.includes("partly") || c.includes("cloud"))   return "⛅";
+  if (c.includes("wind"))                            return "🌬️";
+  return "☀️";
+}
+
+interface WeatherResult {
+  city: string;
+  temperature: number;
+  unit?: string;
+  condition: string;
+  high: number;
+  low: number;
+  humidity?: number;
+  wind?: number;
+  forecast?: Array<{ day: string; high: number; low: number; condition: string }>;
+}
+
+function WeatherCard({ args, result, isError }: ToolCallMessagePartProps) {
+  const city = (args as Record<string, unknown>)?.city as string | undefined;
+
+  // ── 加载中 ──
+  if (result === undefined) {
+    return (
+      <div style={{
+        borderRadius: "14px", overflow: "hidden",
+        background: "linear-gradient(160deg,#334155 0%,#475569 100%)",
+        padding: "20px 22px", color: "white", maxWidth: "360px",
+        opacity: 0.75,
+      }}>
+        <div style={{ fontSize: "13px", opacity: 0.8 }}>{city ?? "Loading…"}</div>
+        <div style={{ fontSize: "52px", fontWeight: 200, lineHeight: 1.1, marginTop: "4px" }}>
+          —°
+        </div>
+        <div style={{ fontSize: "13px", opacity: 0.7, marginTop: "4px" }}>
+          Fetching weather…
+        </div>
+      </div>
+    );
+  }
+
+  // ── 错误 ──
+  if (isError) {
+    return (
+      <div style={{
+        borderRadius: "14px", border: "1px solid #fecaca",
+        background: "#fef2f2", padding: "14px 16px",
+        display: "flex", alignItems: "center", gap: "8px",
+        fontSize: "13px", color: "#991b1b", maxWidth: "360px",
+      }}>
+        <AlertCircleIcon size={15} />
+        <span>{typeof result === "string" ? result : "Weather lookup failed"}</span>
+      </div>
+    );
+  }
+
+  const d = result as WeatherResult;
+  const unit = d.unit ?? "F";
+  const gradient = weatherGradient(d.condition);
+  const emoji = weatherEmoji(d.condition);
+  const isSnow = d.condition.toLowerCase().includes("snow");
+  const textColor = isSnow ? "#1e3a5f" : "white";
+  const mutedColor = isSnow ? "rgba(30,58,95,0.65)" : "rgba(255,255,255,0.70)";
+  const dividerColor = isSnow ? "rgba(30,58,95,0.18)" : "rgba(255,255,255,0.22)";
+
+  return (
+    <div style={{
+      borderRadius: "14px", overflow: "hidden",
+      background: gradient, maxWidth: "360px",
+      boxShadow: "0 4px 20px rgba(0,0,0,0.18)",
+    }}>
+      {/* ── 主区域 ── */}
+      <div style={{ padding: "20px 22px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div style={{ fontSize: "14px", color: textColor, fontWeight: 500 }}>
+              {d.city}
+            </div>
+            <div style={{
+              fontSize: "68px", fontWeight: 200, lineHeight: 1,
+              color: textColor, marginTop: "4px", letterSpacing: "-2px",
+            }}>
+              {d.temperature}°{unit}
+            </div>
+            <div style={{ marginTop: "6px", display: "flex", gap: "10px", fontSize: "13px", color: mutedColor }}>
+              <span>↑ {d.high}°</span>
+              <span>↓ {d.low}°</span>
+            </div>
+            <div style={{ marginTop: "6px", fontSize: "14px", color: textColor }}>
+              {d.condition}
+            </div>
+          </div>
+          <div style={{ fontSize: "52px", lineHeight: 1, marginTop: "2px" }}>
+            {emoji}
+          </div>
+        </div>
+
+        {/* 湿度 + 风速 */}
+        {(d.humidity !== undefined || d.wind !== undefined) && (
+          <div style={{
+            display: "flex", gap: "16px", marginTop: "14px",
+            fontSize: "12px", color: mutedColor,
+          }}>
+            {d.humidity !== undefined && (
+              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <DropletIcon size={12} /> {d.humidity}%
+              </span>
+            )}
+            {d.wind !== undefined && (
+              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <WindIcon size={12} /> {d.wind} mph
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── 预报行 ── */}
+      {d.forecast && d.forecast.length > 0 && (
+        <div style={{
+          borderTop: `1px solid ${dividerColor}`,
+          display: "flex",
+          padding: "12px 22px 16px",
+          gap: "0",
+        }}>
+          {d.forecast.map((f) => (
+            <div key={f.day} style={{
+              flex: 1, textAlign: "center",
+              fontSize: "12px", color: textColor,
+            }}>
+              <div style={{ color: mutedColor, marginBottom: "4px", fontSize: "11px" }}>{f.day}</div>
+              <div style={{ fontSize: "18px", lineHeight: 1, marginBottom: "4px" }}>
+                {weatherEmoji(f.condition)}
+              </div>
+              <div style={{ fontWeight: 500 }}>{f.high}°</div>
+              <div style={{ color: mutedColor }}>{f.low}°</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 注册为 get_weather 专属 UI
+const WeatherToolUI = makeAssistantToolUI({
+  toolName: "get_weather",
+  render: WeatherCard,
+});
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
 function GenericToolCard({ toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
@@ -329,6 +510,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             "--aui-thread-max-width": "9999px",
           } as React.CSSProperties}>
             <Thread
+              tools={[WeatherToolUI]}
               assistantMessage={{
                 components: { ToolFallback: GenericToolCard },
               }}
