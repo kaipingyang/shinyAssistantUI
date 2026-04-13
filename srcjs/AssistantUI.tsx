@@ -311,68 +311,28 @@ function WeatherCard({ args, result, isError }: ToolCallMessagePartProps) {
   );
 }
 
-// ── get_weather 专属卡：状态头条 + 天气卡片一体 ───────────────────────────────
-function WeatherToolCard({ toolName, args, argsText, result, isError, artifact }: ToolCallMessagePartProps) {
-  const [showArgs, setShowArgs] = useState(false);
-  const pending = result === undefined;
-  const errored = !pending && !!isError;
-  const annotations = artifact as Record<string, unknown> | undefined;
-  const toolTitle = (annotations?.title as string | undefined) ?? toolName;
-
-  const headerBg    = errored ? "#fef2f2" : pending ? "#ffffff" : "hsl(0,0%,97%)";
-  const headerBorder = errored ? "#fecaca" : "#e5e7eb";
-  const HeaderIcon: IconComponent = errored ? AlertCircleIcon : pending ? WrenchIcon : CheckCircle2Icon;
-  const iconColor = errored ? "#dc2626" : pending ? "#9ca3af" : "#16a34a";
-  const argsDisplay = typeof argsText === "string" ? argsText : JSON.stringify(args ?? argsText, null, 2);
-
+// ── get_weather 专属：GenericToolCard 小条 + 独立天气卡片 ─────────────────────
+function WeatherToolCard(props: ToolCallMessagePartProps) {
+  const { toolName, args, argsText, result, isError, artifact } = props;
   return (
-    <div style={{ marginBottom: "4px" }}>
-      {/* 状态头条 */}
-      <div style={{
-        border: `1px solid ${headerBorder}`,
-        borderRadius: pending || errored ? "8px" : "8px 8px 0 0",
-        background: headerBg,
-        fontSize: "13px",
-      }}>
-        <button
-          onClick={() => setShowArgs((v) => !v)}
-          style={{
-            width: "100%", display: "flex", alignItems: "center", gap: "7px",
-            padding: "7px 10px", background: "none", border: "none",
-            cursor: "pointer", textAlign: "left",
-            color: "var(--aui-foreground, #111827)",
-          }}
-        >
-          <HeaderIcon size={14} style={{ flexShrink: 0 }} color={iconColor} />
-          <span style={{ fontWeight: 500, flex: 1 }}>{toolTitle}</span>
-          {pending && <span style={{ fontSize: "11px", color: "#9ca3af" }}>running…</span>}
-          {showArgs
-            ? <ChevronDownIcon size={13} color="#9ca3af" />
-            : <ChevronRightIcon size={13} color="#9ca3af" />}
-        </button>
-        {showArgs && (
-          <div style={{ borderTop: `1px solid ${headerBorder}`, padding: "8px 10px" }}>
-            <pre style={{
-              margin: 0, padding: "6px 8px", borderRadius: "4px",
-              background: "rgba(0,0,0,0.04)", fontSize: "12px",
-              overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
-            }}>
-              {argsDisplay}
-            </pre>
-          </div>
-        )}
-      </div>
+    <>
+      {/* 1. 复用 GenericToolCard 作为工具调用状态条 */}
+      <GenericToolCard {...props} />
 
-      {/* 天气卡片（pending 时显示骨架，done 时显示完整卡片）*/}
-      {!errored && (
-        <div style={{ borderRadius: "0 0 8px 8px", overflow: "hidden" }}>
-          <WeatherCard args={args} result={result} isError={isError} artifact={artifact}
-            argsText={argsText} toolName={toolName} addResult={() => {}} resume={() => {}}
-            status={{ type: pending ? "running" : "complete" } as never}
-          />
+      {/* 2. 天气卡片：独立元素，固定宽度，仅 done/pending 时显示 */}
+      {!isError && (
+        <div style={{ marginTop: "6px", maxWidth: "360px" }}>
+          <div style={{ borderRadius: "14px", overflow: "hidden",
+                        boxShadow: "0 4px 20px rgba(0,0,0,0.18)" }}>
+            <WeatherCard args={args} result={result} isError={isError}
+              artifact={artifact} argsText={argsText} toolName={toolName}
+              addResult={() => {}} resume={() => {}}
+              status={{ type: result === undefined ? "running" : "complete" } as never}
+            />
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
