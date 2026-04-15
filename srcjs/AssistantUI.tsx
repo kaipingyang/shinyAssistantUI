@@ -1,16 +1,14 @@
-import React, { useState, useRef, useEffect, useMemo, createContext, useContext } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
 import { Thread, ThreadList } from "@assistant-ui/react-ui";
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive,
   unstable_useToolMentionAdapter,
-  unstable_useSlashCommandAdapter,
-  useThreadRuntime,
+  useAui,
 } from "@assistant-ui/react";
 import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
-import type { CreateAppendMessage } from "@assistant-ui/core";
 import {
   PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
   MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
@@ -460,10 +458,26 @@ interface ComposerConfigCtx {
 }
 const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [] });
 
+// 从光标位置向后扫描，遇到空白停止，找到 "/" 即返回触发位置（与库内 detectTrigger 逻辑一致）
+function detectSlashTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
+  const upToCursor = text.slice(0, cursorPos);
+  for (let i = upToCursor.length - 1; i >= 0; i--) {
+    const ch = upToCursor[i];
+    if (/\s/.test(ch)) return null;
+    if (ch === "/" && (i === 0 || /\s/.test(upToCursor[i - 1]))) {
+      return { query: upToCursor.slice(i + 1), offset: i };
+    }
+  }
+  return null;
+}
+
 function ShinyComposer() {
   const { tools, commands } = useContext(ShinyComposerCtx);
-  const thread = useThreadRuntime();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aui = useAui() as any;
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // ── @ mention adapter ─────────────────────────────────────────────────────
   const mentionAdapter = unstable_useToolMentionAdapter({
     tools: tools.map(t => ({
       id: t.name, type: "tool" as const, label: t.name, description: t.description,
@@ -471,24 +485,65 @@ function ShinyComposer() {
     includeModelContextTools: false,
   });
 
-  const slashAdapter = unstable_useSlashCommandAdapter({
-    commands: commands.map(c => ({
-      name: c.name,
-      label: c.name,
-      description: c.description,
-      execute: () => {
-        thread.append({
-          role: "user",
-          content: [{ type: "text", text: c.prompt }],
-        } as CreateAppendMessage);
-      },
-    })),
-  });
+  // ── / command：完全自定义弹窗，不使用 TriggerPopoverRoot ─────────────────
+  // 原因：TriggerPopoverRoot 依赖 @assistant-ui/tap 的 tapEffectEvent，
+  // 在生产构建下 selectItem 闭包可能读到旧的 trigger 值；
+  // 且 React 事件委托可能晚于浏览器焦点切换，onMouseDown preventDefault 失效。
+  // 自定义方案：纯 React state + input 原生事件，彻底绕开以上两个问题。
+  const [slashState, setSlashState] = useState<{ query: string; offset: number } | null>(null);
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const pos = e.target.selectionStart ?? e.target.value.length;
+    setSlashState(detectSlashTrigger(e.target.value, pos));
+  }, []);
+
+  const handleInputSelect = useCallback((e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const ta = e.target as HTMLTextAreaElement;
+    const pos = ta.selectionStart ?? ta.value.length;
+    setSlashState(detectSlashTrigger(ta.value, pos));
+  }, []);
+
+  // 失焦时关闭弹窗（用户点到 composer 外）
+  // 注意：点击 slash 条目时由于 onPointerDown+onMouseDown preventDefault，不会触发此 blur
+  const handleInputBlur = useCallback(() => {
+    setSlashState(null);
+  }, []);
+
+  const filteredCommands = useMemo(() => {
+    if (!slashState) return [];
+    const q = slashState.query.toLowerCase();
+    return q
+      ? commands.filter(c =>
+          c.name.toLowerCase().includes(q) ||
+          (c.description?.toLowerCase().includes(q) ?? false))
+      : commands;
+  }, [commands, slashState]);
+
+  const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
+    const ta = inputRef.current;
+    if (!ta) return;
+    // 直接从 DOM 读取当前文本和光标位置，避免 React state 的异步问题
+    const text = aui.composer().getState().text as string;
+    const cursorPos = ta.selectionStart ?? text.length;
+    const trigger = detectSlashTrigger(text, cursorPos);
+    const insertText = `/${cmd.name} `;
+    const triggerStart = trigger?.offset ?? cursorPos;
+    const triggerEnd   = trigger ? trigger.offset + 1 + trigger.query.length : cursorPos;
+    const newText = text.slice(0, triggerStart) + insertText + text.slice(triggerEnd).trimStart();
+    aui.composer().setText(newText);
+    setSlashState(null);
+    setTimeout(() => {
+      ta.focus();
+      const pos = triggerStart + insertText.length;
+      ta.setSelectionRange(pos, pos);
+    }, 0);
+  }, [aui]);
 
   const popoverStyle: React.CSSProperties = {
     position: "absolute",
     bottom: "calc(100% + 6px)",
-    left: 0,
+    left: 16,   // 与 ComposerPrimitive.Root padding 对齐
+    right: 16,
     background: "white",
     border: "1px solid #e5e7eb",
     borderRadius: "10px",
@@ -516,16 +571,13 @@ function ShinyComposer() {
   const hasTools    = tools.length > 0;
   const hasCommands = commands.length > 0;
 
-  // placeholder 根据实际功能动态生成
   const hints = [
     hasTools    && "@ to mention",
     hasCommands && "/ for commands",
   ].filter(Boolean).join(", ");
-  const placeholder = hints
-    ? `Send a message… (${hints})`
-    : "Send a message…";
+  const placeholder = hints ? `Send a message… (${hints})` : "Send a message…";
 
-  // ── 输入框 + 底部按钮（始终渲染）─────────────────────────────────────────
+  // ── 输入框 ────────────────────────────────────────────────────────────────
   const inputBox = (
     <div style={{
       border: "1px solid #e5e7eb",
@@ -536,7 +588,11 @@ function ShinyComposer() {
       boxSizing: "border-box",
     }}>
       <ComposerPrimitive.Input
+        ref={inputRef}
         placeholder={placeholder}
+        onChange={handleInputChange}
+        onSelect={handleInputSelect}
+        onBlur={handleInputBlur}
         style={{
           width: "100%", border: "none", outline: "none",
           resize: "none", fontSize: "14px",
@@ -554,7 +610,6 @@ function ShinyComposer() {
         >
           +
         </ComposerPrimitive.AddAttachment>
-
         <ComposerPrimitive.Send
           style={{
             background: "#374151", border: "none", borderRadius: "50%",
@@ -569,32 +624,53 @@ function ShinyComposer() {
     </div>
   );
 
-  // ── / 命令弹窗（只在有 commands 时渲染）──────────────────────────────────
-  const slashPopover = hasCommands ? (
-    <ComposerPrimitive.Unstable_TriggerPopoverPopover style={popoverStyle}>
-      <ComposerPrimitive.Unstable_TriggerPopoverItems>
-        {(items) => (
+  // ── / 命令弹窗：纯 React state 驱动，onPointerDown+onMouseDown 双保险防 blur ─
+  const slashPopover = hasCommands && slashState !== null && filteredCommands.length > 0 ? (
+    <div
+      style={popoverStyle}
+      onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
+      onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+    >
+      {filteredCommands.map(cmd => (
+        <button
+          key={cmd.name}
+          type="button"
+          style={itemStyle}
+          // 条目级别也阻止，确保在任何浏览器下 click 前不触发 blur
+          onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
+          onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+          onClick={() => handleCommandSelect(cmd)}
+        >
+          <span style={{ fontWeight: 500 }}>/{cmd.name}</span>
+          {cmd.description && (
+            <span style={{ color: "#6b7280", flex: 1 }}>{cmd.description}</span>
+          )}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  // ── @ 工具弹窗（MentionRoot 管理，保持不变）─────────────────────────────
+  const mentionPopover = hasTools ? (
+    <ComposerPrimitive.Unstable_MentionPopover
+      style={{ ...popoverStyle, minWidth: "280px" }}
+      onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+    >
+      <ComposerPrimitive.Unstable_MentionCategories>
+        {(categories) => (
           <div>
-            {items.map((item, index) => (
-              <ComposerPrimitive.Unstable_TriggerPopoverItem
-                key={item.id} item={item} index={index}
-                style={itemStyle}
+            {categories.map(cat => (
+              <ComposerPrimitive.Unstable_MentionCategoryItem
+                key={cat.id} categoryId={cat.id}
+                style={{ ...itemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
               >
-                <span style={{ fontWeight: 500 }}>/{item.label}</span>
-                {item.description && (
-                  <span style={{ color: "#6b7280", flex: 1 }}>{item.description}</span>
-                )}
-              </ComposerPrimitive.Unstable_TriggerPopoverItem>
+                <span style={{ fontWeight: 500, fontSize: "13px" }}>{cat.label}</span>
+                <ChevronRightIcon size={12} color="#9ca3af" />
+              </ComposerPrimitive.Unstable_MentionCategoryItem>
             ))}
           </div>
         )}
-      </ComposerPrimitive.Unstable_TriggerPopoverItems>
-    </ComposerPrimitive.Unstable_TriggerPopoverPopover>
-  ) : null;
-
-  // ── @ 工具弹窗（只在有 tools 时渲染）────────────────────────────────────
-  const mentionPopover = hasTools ? (
-    <ComposerPrimitive.Unstable_MentionPopover style={{ ...popoverStyle, minWidth: "280px" }}>
+      </ComposerPrimitive.Unstable_MentionCategories>
       <ComposerPrimitive.Unstable_MentionBack
         style={{
           display: "flex", alignItems: "center", gap: "6px",
@@ -614,15 +690,12 @@ function ShinyComposer() {
                 style={{
                   display: "flex", flexDirection: "column", gap: "2px",
                   padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
-                  background: "none", border: "none", width: "100%",
-                  textAlign: "left",
+                  background: "none", border: "none", width: "100%", textAlign: "left",
                 }}
               >
                 <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
                 {item.description && (
-                  <span style={{ fontSize: "12px", color: "#6b7280" }}>
-                    {item.description}
-                  </span>
+                  <span style={{ fontSize: "12px", color: "#6b7280" }}>{item.description}</span>
                 )}
               </ComposerPrimitive.Unstable_MentionItem>
             ))}
@@ -632,30 +705,29 @@ function ShinyComposer() {
     </ComposerPrimitive.Unstable_MentionPopover>
   ) : null;
 
-  // ── 按需包裹 SlashCommandRoot / MentionRoot ───────────────────────────────
-  // 只有配置了对应数据时才包裹，避免空列表时弹出空白框
-  const withSlash = hasCommands ? (
-    <ComposerPrimitive.Unstable_SlashCommandRoot adapter={slashAdapter}>
-      {inputBox}
-      {slashPopover}
-    </ComposerPrimitive.Unstable_SlashCommandRoot>
-  ) : inputBox;
-
+  // ── 按需包裹 MentionRoot（@ mentions 保留 library 实现）────────────────────
   const withMention = hasTools ? (
     <ComposerPrimitive.Unstable_MentionRoot
       adapter={mentionAdapter}
       trigger="@"
       formatter={unstable_defaultDirectiveFormatter}
     >
-      {withSlash}
+      {inputBox}
+      {slashPopover}
       {mentionPopover}
     </ComposerPrimitive.Unstable_MentionRoot>
-  ) : withSlash;
+  ) : (
+    <>
+      {inputBox}
+      {slashPopover}
+    </>
+  );
 
+  // ComposerPrimitive.Root 渲染为 <form>，放最外层确保 Enter 触发 form.requestSubmit()
   return (
-    <div style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
+    <ComposerPrimitive.Root style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
       {withMention}
-    </div>
+    </ComposerPrimitive.Root>
   );
 }
 
