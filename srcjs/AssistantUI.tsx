@@ -513,119 +513,148 @@ function ShinyComposer() {
     textAlign: "left",
   };
 
+  const hasTools    = tools.length > 0;
+  const hasCommands = commands.length > 0;
+
+  // placeholder 根据实际功能动态生成
+  const hints = [
+    hasTools    && "@ to mention",
+    hasCommands && "/ for commands",
+  ].filter(Boolean).join(", ");
+  const placeholder = hints
+    ? `Send a message… (${hints})`
+    : "Send a message…";
+
+  // ── 输入框 + 底部按钮（始终渲染）─────────────────────────────────────────
+  const inputBox = (
+    <div style={{
+      border: "1px solid #e5e7eb",
+      borderRadius: "12px",
+      background: "white",
+      padding: "10px 12px",
+      width: "100%",
+      boxSizing: "border-box",
+    }}>
+      <ComposerPrimitive.Input
+        placeholder={placeholder}
+        style={{
+          width: "100%", border: "none", outline: "none",
+          resize: "none", fontSize: "14px",
+          background: "transparent", fontFamily: "inherit",
+        }}
+      />
+      <div style={{ display: "flex", alignItems: "center",
+                    justifyContent: "space-between", marginTop: "8px" }}>
+        <ComposerPrimitive.AddAttachment
+          style={{
+            background: "none", border: "none", cursor: "pointer",
+            fontSize: "20px", color: "#6b7280", padding: "2px 6px",
+            lineHeight: 1, display: "flex", alignItems: "center",
+          }}
+        >
+          +
+        </ComposerPrimitive.AddAttachment>
+
+        <ComposerPrimitive.Send
+          style={{
+            background: "#374151", border: "none", borderRadius: "50%",
+            width: "30px", height: "30px", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "white", fontSize: "14px", flexShrink: 0,
+          }}
+        >
+          ↑
+        </ComposerPrimitive.Send>
+      </div>
+    </div>
+  );
+
+  // ── / 命令弹窗（只在有 commands 时渲染）──────────────────────────────────
+  const slashPopover = hasCommands ? (
+    <ComposerPrimitive.Unstable_TriggerPopoverPopover style={popoverStyle}>
+      <ComposerPrimitive.Unstable_TriggerPopoverItems>
+        {(items) => (
+          <div>
+            {items.map((item, index) => (
+              <ComposerPrimitive.Unstable_TriggerPopoverItem
+                key={item.id} item={item} index={index}
+                style={itemStyle}
+              >
+                <span style={{ fontWeight: 500 }}>/{item.label}</span>
+                {item.description && (
+                  <span style={{ color: "#6b7280", flex: 1 }}>{item.description}</span>
+                )}
+              </ComposerPrimitive.Unstable_TriggerPopoverItem>
+            ))}
+          </div>
+        )}
+      </ComposerPrimitive.Unstable_TriggerPopoverItems>
+    </ComposerPrimitive.Unstable_TriggerPopoverPopover>
+  ) : null;
+
+  // ── @ 工具弹窗（只在有 tools 时渲染）────────────────────────────────────
+  const mentionPopover = hasTools ? (
+    <ComposerPrimitive.Unstable_MentionPopover style={{ ...popoverStyle, minWidth: "280px" }}>
+      <ComposerPrimitive.Unstable_MentionBack
+        style={{
+          display: "flex", alignItems: "center", gap: "6px",
+          padding: "4px 8px", fontSize: "12px", color: "#6b7280",
+          background: "none", border: "none", cursor: "pointer",
+          marginBottom: "4px", width: "100%",
+        }}
+      >
+        ← BACK
+      </ComposerPrimitive.Unstable_MentionBack>
+      <ComposerPrimitive.Unstable_MentionItems>
+        {(items) => (
+          <div>
+            {items.map((item, index) => (
+              <ComposerPrimitive.Unstable_MentionItem
+                key={item.id} item={item} index={index}
+                style={{
+                  display: "flex", flexDirection: "column", gap: "2px",
+                  padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
+                  background: "none", border: "none", width: "100%",
+                  textAlign: "left",
+                }}
+              >
+                <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
+                {item.description && (
+                  <span style={{ fontSize: "12px", color: "#6b7280" }}>
+                    {item.description}
+                  </span>
+                )}
+              </ComposerPrimitive.Unstable_MentionItem>
+            ))}
+          </div>
+        )}
+      </ComposerPrimitive.Unstable_MentionItems>
+    </ComposerPrimitive.Unstable_MentionPopover>
+  ) : null;
+
+  // ── 按需包裹 SlashCommandRoot / MentionRoot ───────────────────────────────
+  // 只有配置了对应数据时才包裹，避免空列表时弹出空白框
+  const withSlash = hasCommands ? (
+    <ComposerPrimitive.Unstable_SlashCommandRoot adapter={slashAdapter}>
+      {inputBox}
+      {slashPopover}
+    </ComposerPrimitive.Unstable_SlashCommandRoot>
+  ) : inputBox;
+
+  const withMention = hasTools ? (
+    <ComposerPrimitive.Unstable_MentionRoot
+      adapter={mentionAdapter}
+      trigger="@"
+      formatter={unstable_defaultDirectiveFormatter}
+    >
+      {withSlash}
+      {mentionPopover}
+    </ComposerPrimitive.Unstable_MentionRoot>
+  ) : withSlash;
+
   return (
     <div style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
-      <ComposerPrimitive.Unstable_MentionRoot
-        adapter={mentionAdapter}
-        trigger="@"
-        formatter={unstable_defaultDirectiveFormatter}
-      >
-        <ComposerPrimitive.Unstable_SlashCommandRoot adapter={slashAdapter}>
-
-          {/* 输入框容器 */}
-          <div style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: "12px",
-            background: "white",
-            padding: "10px 12px",
-            width: "100%",
-            boxSizing: "border-box",
-          }}>
-            <ComposerPrimitive.Input
-              placeholder="Send a message… (@ to mention, / for commands)"
-              style={{
-                width: "100%", border: "none", outline: "none",
-                resize: "none", fontSize: "14px",
-                background: "transparent", fontFamily: "inherit",
-              }}
-            />
-            <div style={{ display: "flex", alignItems: "center",
-                          justifyContent: "space-between", marginTop: "8px" }}>
-              <ComposerPrimitive.AddAttachment
-                style={{
-                  background: "none", border: "none", cursor: "pointer",
-                  fontSize: "20px", color: "#6b7280", padding: "2px 6px",
-                  lineHeight: 1, display: "flex", alignItems: "center",
-                }}
-              >
-                +
-              </ComposerPrimitive.AddAttachment>
-
-              <ComposerPrimitive.Send
-                style={{
-                  background: "#374151", border: "none", borderRadius: "50%",
-                  width: "30px", height: "30px", cursor: "pointer",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  color: "white", fontSize: "14px", flexShrink: 0,
-                }}
-              >
-                ↑
-              </ComposerPrimitive.Send>
-            </div>
-          </div>
-
-          {/* / 命令弹窗 */}
-          <ComposerPrimitive.Unstable_TriggerPopoverPopover style={popoverStyle}>
-            <ComposerPrimitive.Unstable_TriggerPopoverItems>
-              {(items) => (
-                <div>
-                  {items.map((item, index) => (
-                    <ComposerPrimitive.Unstable_TriggerPopoverItem
-                      key={item.id} item={item} index={index}
-                      style={itemStyle}
-                    >
-                      <span style={{ fontWeight: 500 }}>/{item.label}</span>
-                      {item.description && (
-                        <span style={{ color: "#6b7280", flex: 1 }}>{item.description}</span>
-                      )}
-                    </ComposerPrimitive.Unstable_TriggerPopoverItem>
-                  ))}
-                </div>
-              )}
-            </ComposerPrimitive.Unstable_TriggerPopoverItems>
-          </ComposerPrimitive.Unstable_TriggerPopoverPopover>
-
-        </ComposerPrimitive.Unstable_SlashCommandRoot>
-
-        {/* @ 工具弹窗（在 SlashCommandRoot 外，使用 MentionRoot 的 context）*/}
-        <ComposerPrimitive.Unstable_MentionPopover style={{ ...popoverStyle, minWidth: "280px" }}>
-          <ComposerPrimitive.Unstable_MentionBack
-            style={{
-              display: "flex", alignItems: "center", gap: "6px",
-              padding: "4px 8px", fontSize: "12px", color: "#6b7280",
-              background: "none", border: "none", cursor: "pointer",
-              marginBottom: "4px", width: "100%",
-            }}
-          >
-            ← BACK
-          </ComposerPrimitive.Unstable_MentionBack>
-          <ComposerPrimitive.Unstable_MentionItems>
-            {(items) => (
-              <div>
-                {items.map((item, index) => (
-                  <ComposerPrimitive.Unstable_MentionItem
-                    key={item.id} item={item} index={index}
-                    style={{
-                      display: "flex", flexDirection: "column", gap: "2px",
-                      padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
-                      background: "none", border: "none", width: "100%",
-                      textAlign: "left",
-                    }}
-                  >
-                    <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
-                    {item.description && (
-                      <span style={{ fontSize: "12px", color: "#6b7280" }}>
-                        {item.description}
-                      </span>
-                    )}
-                  </ComposerPrimitive.Unstable_MentionItem>
-                ))}
-              </div>
-            )}
-          </ComposerPrimitive.Unstable_MentionItems>
-        </ComposerPrimitive.Unstable_MentionPopover>
-
-      </ComposerPrimitive.Unstable_MentionRoot>
+      {withMention}
     </div>
   );
 }
