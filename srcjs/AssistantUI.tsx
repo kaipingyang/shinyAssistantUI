@@ -1,8 +1,16 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
 import { Thread, ThreadList } from "@assistant-ui/react-ui";
-import { ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI } from "@assistant-ui/react";
+import {
+  ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
+  ComposerPrimitive,
+  unstable_useToolMentionAdapter,
+  unstable_useSlashCommandAdapter,
+  useThreadRuntime,
+} from "@assistant-ui/react";
+import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import type { CreateAppendMessage } from "@assistant-ui/core";
 import {
   PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
   MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
@@ -445,6 +453,181 @@ function GenericToolCard({ toolName, argsText, args, result, isError, artifact }
   );
 }
 
+// ── ShinyComposer：自定义输入框（@ mention / / commands / + 上传）────────────
+interface ComposerConfigCtx {
+  tools:    Array<{ name: string; description: string }>;
+  commands: Array<{ name: string; description: string; prompt: string }>;
+}
+const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [] });
+
+function ShinyComposer() {
+  const { tools, commands } = useContext(ShinyComposerCtx);
+  const thread = useThreadRuntime();
+
+  const mentionAdapter = unstable_useToolMentionAdapter({
+    tools: tools.map(t => ({
+      id: t.name, type: "tool" as const, label: t.name, description: t.description,
+    })),
+    includeModelContextTools: false,
+  });
+
+  const slashAdapter = unstable_useSlashCommandAdapter({
+    commands: commands.map(c => ({
+      name: c.name,
+      label: c.name,
+      description: c.description,
+      execute: () => {
+        thread.append({
+          role: "user",
+          content: [{ type: "text", text: c.prompt }],
+        } as CreateAppendMessage);
+      },
+    })),
+  });
+
+  const popoverStyle: React.CSSProperties = {
+    position: "absolute",
+    bottom: "calc(100% + 6px)",
+    left: 0,
+    background: "white",
+    border: "1px solid #e5e7eb",
+    borderRadius: "10px",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+    minWidth: "260px",
+    maxWidth: "340px",
+    padding: "6px",
+    zIndex: 200,
+  };
+
+  const itemStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "10px",
+    padding: "8px 10px",
+    borderRadius: "6px",
+    cursor: "pointer",
+    fontSize: "13px",
+    background: "none",
+    border: "none",
+    width: "100%",
+    textAlign: "left",
+  };
+
+  return (
+    <div style={{ padding: "0 16px 16px", position: "relative" }}>
+      <ComposerPrimitive.Unstable_MentionRoot
+        adapter={mentionAdapter}
+        trigger="@"
+        formatter={unstable_defaultDirectiveFormatter}
+      >
+        <ComposerPrimitive.Unstable_SlashCommandRoot adapter={slashAdapter}>
+
+          {/* 输入框容器 */}
+          <div style={{
+            border: "1px solid #e5e7eb",
+            borderRadius: "12px",
+            background: "white",
+            padding: "10px 12px",
+          }}>
+            <ComposerPrimitive.Input
+              placeholder="Send a message… (@ to mention, / for commands)"
+              style={{
+                width: "100%", border: "none", outline: "none",
+                resize: "none", fontSize: "14px",
+                background: "transparent", fontFamily: "inherit",
+              }}
+            />
+            <div style={{ display: "flex", alignItems: "center",
+                          justifyContent: "space-between", marginTop: "8px" }}>
+              <ComposerPrimitive.AddAttachment
+                style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  fontSize: "20px", color: "#6b7280", padding: "2px 6px",
+                  lineHeight: 1, display: "flex", alignItems: "center",
+                }}
+              >
+                +
+              </ComposerPrimitive.AddAttachment>
+
+              <ComposerPrimitive.Send
+                style={{
+                  background: "#374151", border: "none", borderRadius: "50%",
+                  width: "30px", height: "30px", cursor: "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "white", fontSize: "14px", flexShrink: 0,
+                }}
+              >
+                ↑
+              </ComposerPrimitive.Send>
+            </div>
+          </div>
+
+          {/* / 命令弹窗 */}
+          <ComposerPrimitive.Unstable_TriggerPopoverPopover style={popoverStyle}>
+            <ComposerPrimitive.Unstable_TriggerPopoverItems>
+              {(items) => (
+                <div>
+                  {items.map((item, index) => (
+                    <ComposerPrimitive.Unstable_TriggerPopoverItem
+                      key={item.id} item={item} index={index}
+                      style={itemStyle}
+                    >
+                      <span style={{ fontWeight: 500 }}>/{item.label}</span>
+                      {item.description && (
+                        <span style={{ color: "#6b7280", flex: 1 }}>{item.description}</span>
+                      )}
+                    </ComposerPrimitive.Unstable_TriggerPopoverItem>
+                  ))}
+                </div>
+              )}
+            </ComposerPrimitive.Unstable_TriggerPopoverItems>
+          </ComposerPrimitive.Unstable_TriggerPopoverPopover>
+
+        </ComposerPrimitive.Unstable_SlashCommandRoot>
+
+        {/* @ 工具弹窗（在 SlashCommandRoot 外，使用 MentionRoot 的 context）*/}
+        <ComposerPrimitive.Unstable_MentionPopover style={{ ...popoverStyle, minWidth: "280px" }}>
+          <ComposerPrimitive.Unstable_MentionBack
+            style={{
+              display: "flex", alignItems: "center", gap: "6px",
+              padding: "4px 8px", fontSize: "12px", color: "#6b7280",
+              background: "none", border: "none", cursor: "pointer",
+              marginBottom: "4px", width: "100%",
+            }}
+          >
+            ← BACK
+          </ComposerPrimitive.Unstable_MentionBack>
+          <ComposerPrimitive.Unstable_MentionItems>
+            {(items) => (
+              <div>
+                {items.map((item, index) => (
+                  <ComposerPrimitive.Unstable_MentionItem
+                    key={item.id} item={item} index={index}
+                    style={{
+                      display: "flex", flexDirection: "column", gap: "2px",
+                      padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
+                      background: "none", border: "none", width: "100%",
+                      textAlign: "left",
+                    }}
+                  >
+                    <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
+                    {item.description && (
+                      <span style={{ fontSize: "12px", color: "#6b7280" }}>
+                        {item.description}
+                      </span>
+                    )}
+                  </ComposerPrimitive.Unstable_MentionItem>
+                ))}
+              </div>
+            )}
+          </ComposerPrimitive.Unstable_MentionItems>
+        </ComposerPrimitive.Unstable_MentionPopover>
+
+      </ComposerPrimitive.Unstable_MentionRoot>
+    </div>
+  );
+}
+
 // ── 侧边栏（不含折叠按钮）───────────────────────────────────────────────────
 function ThreadListSidebar() {
   return (
@@ -468,68 +651,84 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const showThreadList = config?.show_thread_list === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  // composer context — tools 和 commands 从 R 的 config 读取
+  const composerCtx = useMemo<ComposerConfigCtx>(() => ({
+    tools:    (config?.tools    as ComposerConfigCtx["tools"])    ?? [],
+    commands: (config?.commands as ComposerConfigCtx["commands"]) ?? [],
+  }), [config]);
+
+  // starter suggestions — 传给 Thread welcome.suggestions
+  const suggestions = useMemo(() => {
+    const raw = config?.suggestions as Array<{ prompt: string; text?: string }> | undefined;
+    return (raw ?? []).map(s => ({ prompt: s.prompt, text: s.text ?? s.prompt }));
+  }, [config]);
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <div style={{ display: "flex", height: "100%" }}>
+      <ShinyComposerCtx.Provider value={composerCtx}>
+        <div style={{ display: "flex", height: "100%" }}>
 
-        {/* 侧边栏 */}
-        {showThreadList && (
-          <div style={{
-            width: sidebarOpen ? 220 : 0,
-            minWidth: sidebarOpen ? 220 : 0,
-            overflow: "hidden",
-            flexShrink: 0,
-            transition: "width 0.15s ease, min-width 0.15s ease",
-          }}>
-            {sidebarOpen && <ThreadListSidebar />}
-          </div>
-        )}
-
-        {/* 侧边栏和主栏之间无分隔线，靠背景色差区分（同 shadcn/ui sidebar） */}
-
-        {/* 主聊天区 */}
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-
-          {/* 折叠按钮放在主栏顶部 */}
+          {/* 侧边栏 */}
           {showThreadList && (
-            <div style={{ padding: "6px 8px", flexShrink: 0 }}>
-              <button
-                onClick={() => setSidebarOpen((v) => !v)}
-                title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-                style={{
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "4px",
-                  borderRadius: "4px",
-                  color: "var(--aui-muted-foreground, #6b7280)",
-                  display: "flex",
-                  alignItems: "center",
-                }}
-              >
-                {sidebarOpen
-                  ? <PanelLeftCloseIcon size={16} />
-                  : <PanelLeftOpenIcon size={16} />
-                }
-              </button>
+            <div style={{
+              width: sidebarOpen ? 220 : 0,
+              minWidth: sidebarOpen ? 220 : 0,
+              overflow: "hidden",
+              flexShrink: 0,
+              transition: "width 0.15s ease, min-width 0.15s ease",
+            }}>
+              {sidebarOpen && <ThreadListSidebar />}
             </div>
           )}
 
-          <div style={{
-            flex: 1,
-            minHeight: 0,
-            "--aui-thread-max-width": "9999px",
-          } as React.CSSProperties}>
-            <Thread
-              tools={[WeatherToolUI]}
-              assistantMessage={{
-                components: { ToolFallback: GenericToolCard },
-              }}
-            />
-          </div>
-        </div>
+          {/* 侧边栏和主栏之间无分隔线，靠背景色差区分（同 shadcn/ui sidebar） */}
 
-      </div>
+          {/* 主聊天区 */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+
+            {/* 折叠按钮放在主栏顶部 */}
+            {showThreadList && (
+              <div style={{ padding: "6px 8px", flexShrink: 0 }}>
+                <button
+                  onClick={() => setSidebarOpen((v) => !v)}
+                  title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: "4px",
+                    borderRadius: "4px",
+                    color: "var(--aui-muted-foreground, #6b7280)",
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                >
+                  {sidebarOpen
+                    ? <PanelLeftCloseIcon size={16} />
+                    : <PanelLeftOpenIcon size={16} />
+                  }
+                </button>
+              </div>
+            )}
+
+            <div style={{
+              flex: 1,
+              minHeight: 0,
+              "--aui-thread-max-width": "9999px",
+            } as React.CSSProperties}>
+              <Thread
+                tools={[WeatherToolUI]}
+                welcome={{ suggestions }}
+                components={{ Composer: ShinyComposer }}
+                assistantMessage={{
+                  components: { ToolFallback: GenericToolCard },
+                }}
+              />
+            </div>
+          </div>
+
+        </div>
+      </ShinyComposerCtx.Provider>
     </AssistantRuntimeProvider>
   );
 }

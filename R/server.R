@@ -27,15 +27,33 @@
 #' @param show_thread_list Logical. If `TRUE`, a thread list sidebar is shown
 #'   inside the widget for switching between conversations. Default `FALSE`
 #'   (backward-compatible).
+#' @param suggestions List of starter suggestion bubbles shown before the first
+#'   message. Each element is a list with `prompt` (required, the text sent on
+#'   click) and optional `text` (display label, defaults to `prompt`).
+#' @param commands List of slash-command definitions. Each element is a list
+#'   with `name` (e.g. `"summarize"`), `description`, and `prompt` (the message
+#'   sent immediately when the command is selected).
+#' @param tools List of tool definitions for the \@ mention menu. Each element
+#'   is a list with `name` and `description`. Typically mirrors the tools
+#'   registered with ellmer.
 #'
 #' @return A list with a `clear()` function that creates a new thread in the UI.
 #' @export
-assistantUIServer <- function(id, handler, show_thread_list = FALSE) {
+assistantUIServer <- function(id, handler,
+                              show_thread_list = FALSE,
+                              suggestions      = list(),
+                              commands         = list(),
+                              tools            = list()) {
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
 
   session$output[[id]] <- renderAssistantUI(
-    config  = list(show_thread_list = show_thread_list),
+    config = list(
+      show_thread_list = show_thread_list,
+      suggestions      = suggestions,
+      commands         = commands,
+      tools            = tools
+    ),
     outputId = id
   )
 

@@ -133,7 +133,31 @@ server <- function(input, output, session) {
   assistantUIServer(
     "chat",
     handler          = handler,
-    show_thread_list = TRUE
+    show_thread_list = TRUE,
+
+    suggestions = list(
+      list(prompt = "What's the weather in San Francisco?",
+           text   = "What's the weather in San Francisco?"),
+      list(prompt = "Calculate the result of 2^10 / 4",
+           text   = "Calculate 2^10 / 4")
+    ),
+
+    commands = list(
+      list(name        = "summarize",
+           description = "Summarize the conversation",
+           prompt      = "Please summarize our conversation so far in a few sentences."),
+      list(name        = "translate",
+           description = "Translate text to another language",
+           prompt      = "Please translate the above text to English."),
+      list(name        = "help",
+           description = "List available commands",
+           prompt      = "What tools and commands are available? Please list them.")
+    ),
+
+    tools = list(
+      list(name = "get_weather", description = "Get current weather for a city"),
+      list(name = "calculate",   description = "Evaluate a mathematical expression")
+    )
   )
 }
 
