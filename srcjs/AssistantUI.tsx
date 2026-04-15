@@ -514,7 +514,7 @@ function ShinyComposer() {
   };
 
   return (
-    <div style={{ padding: "0 16px 16px", position: "relative" }}>
+    <div style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
       <ComposerPrimitive.Unstable_MentionRoot
         adapter={mentionAdapter}
         trigger="@"
@@ -528,6 +528,8 @@ function ShinyComposer() {
             borderRadius: "12px",
             background: "white",
             padding: "10px 12px",
+            width: "100%",
+            boxSizing: "border-box",
           }}>
             <ComposerPrimitive.Input
               placeholder="Send a message… (@ to mention, / for commands)"
