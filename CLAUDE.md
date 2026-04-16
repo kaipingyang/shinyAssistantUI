@@ -156,6 +156,30 @@ setSlashState(prev => {
 
 详见 `.claude/docs/react-useeffect-object-identity.md`。
 
+## CRITICAL: R 示例 app 必须用 bslib，禁止用 Shiny 原生布局函数
+
+所有 `examples/` 下的 Shiny app **必须**使用 `bslib` 的布局函数，**禁止**使用 Shiny 原生函数：
+
+| 禁止使用 | 替换为 |
+|---|---|
+| `fluidPage()` | `bslib::page_fluid()` |
+| `navbarPage()` | `bslib::page_navbar()` |
+| `sidebarLayout()` | `bslib::layout_sidebar()` |
+| `column()` / `fluidRow()` | `bslib::layout_columns()` |
+| `wellPanel()` | `bslib::card()` |
+
+示例写法：
+```r
+library(bslib)
+ui <- page_fluid(
+  layout_columns(
+    col_widths = c(3, 9),
+    card(...),          # 左栏
+    assistantUIOutput("chat", height = "80vh")
+  )
+)
+```
+
 ## Known gaps / future work
 
 - File attachment handling (bridge has `attachments` field, UI not yet configured)

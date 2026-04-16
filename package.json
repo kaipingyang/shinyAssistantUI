@@ -3,13 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite build --watch"
+    "build": "~/.nvm/versions/node/v18.20.8/bin/node ./node_modules/.bin/vite build",
+    "dev": "~/.nvm/versions/node/v18.20.8/bin/node ./node_modules/.bin/vite build --watch"
   },
   "dependencies": {
     "@assistant-ui/react": "latest",
     "@assistant-ui/react-lexical": "^0.0.6",
     "@assistant-ui/react-markdown": "latest",
+    "@assistant-ui/react-syntax-highlighter": "^0.12.9",
     "@assistant-ui/react-ui": "^0.2.1",
     "@lexical/react": "^0.43.0",
     "@lexical/utils": "^0.43.0",

@@ -1,6 +1,42 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
-import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar, makeMarkdownText } from "@assistant-ui/react-ui";
+import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar, makeMarkdownText, CodeHeader } from "@assistant-ui/react-ui";
+import { makePrismLightSyntaxHighlighter } from "@assistant-ui/react-syntax-highlighter";
+import { PrismLight } from "react-syntax-highlighter";
+import {
+  oneLight, ghcolors, vs, solarizedlight,
+  vscDarkPlus, dracula, nord, nightOwl, oneDark,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
+import rLang from "react-syntax-highlighter/dist/esm/languages/prism/r";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+PrismLight.registerLanguage("r", rLang);
+PrismLight.registerLanguage("python", python);
+PrismLight.registerLanguage("javascript", javascript);
+PrismLight.registerLanguage("typescript", typescript);
+PrismLight.registerLanguage("sql", sql);
+PrismLight.registerLanguage("bash", bash);
+PrismLight.registerLanguage("json", json);
+PrismLight.registerLanguage("yaml", yaml);
+
+// 主题名称 → 样式对象的映射（供 R 端 code_theme 参数选择）
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const CODE_THEMES: Record<string, any> = {
+  "one-light":    oneLight,
+  "ghcolors":     ghcolors,
+  "vs":           vs,
+  "solarized-light": solarizedlight,
+  "vsc-dark-plus": vscDarkPlus,
+  "dracula":      dracula,
+  "nord":         nord,
+  "night-owl":    nightOwl,
+  "one-dark":     oneDark,
+};
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive,
@@ -34,8 +70,7 @@ const TOOL_ICONS: Record<string, IconComponent> = {
 };
 import { LexicalComposerInput, $createMentionNode } from "@assistant-ui/react-lexical";
 
-// assistant 气泡 Markdown 渲染（模块级别，只创建一次）
-const MarkdownText = makeMarkdownText();
+// MarkdownText 在组件内按 code_theme 动态创建（见 AssistantUI 组件）
 import {
   $getSelection, $isRangeSelection, $isTextNode,
   KEY_ENTER_COMMAND, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ESCAPE_COMMAND,
@@ -952,6 +987,14 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const showThreadList = config?.show_thread_list === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  // 语法高亮主题：按 config.code_theme 选择，默认 one-light
+  const MarkdownText = useMemo(() => {
+    const themeName = (config?.code_theme as string) ?? "one-light";
+    const style = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
+    const SyntaxHighlighter = makePrismLightSyntaxHighlighter({ style });
+    return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter } });
+  }, [config?.code_theme]);
+
   // composer context — tools 和 commands 从 R 的 config 读取
   const composerCtx = useMemo<ComposerConfigCtx>(() => ({
     tools:    (config?.tools    as ComposerConfigCtx["tools"])    ?? [],
@@ -1024,6 +1067,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
                 assistantMessage={{
                   components: { Text: MarkdownText, ToolFallback: GenericToolCard },
                 }}
+                strings={(config?.strings ?? undefined) as never}
               />
             </div>
           </div>

@@ -1,8 +1,9 @@
 library(shiny)
+library(bslib)
 devtools::load_all(here::here())
 
-ui <- fluidPage(
-  tags$h3("shinyAssistantUI — 最小示例"),
+ui <- page_fluid(
+  h3("shinyAssistantUI — 最小示例"),
   assistantUIOutput("chat", height = "80vh")
 )
 

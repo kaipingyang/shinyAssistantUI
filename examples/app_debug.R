@@ -1,7 +1,8 @@
 library(shiny)
+library(bslib)
 devtools::load_all(here::here())
 
-ui <- fluidPage(
+ui <- page_fluid(
   tags$h3("Debug: 诊断每一层"),
 
   # 层1: 纯 uiOutput (最基础的 Shiny 输出)

@@ -36,6 +36,25 @@
 #' @param tools List of tool definitions for the \@ mention menu. Each element
 #'   is a list with `name` and `description`. Typically mirrors the tools
 #'   registered with ellmer.
+#' @param code_theme Character string selecting the syntax-highlighting theme
+#'   for code blocks. Available light themes: `"one-light"` (default),
+#'   `"ghcolors"`, `"vs"`, `"solarized-light"`. Available dark themes:
+#'   `"vsc-dark-plus"`, `"dracula"`, `"nord"`, `"night-owl"`, `"one-dark"`.
+#' @param strings Optional named list for overriding UI text (tooltips, labels,
+#'   placeholders). `NULL` (default) keeps all built-in English strings. Example
+#'   for a Chinese UI:
+#'   ```r
+#'   strings = list(
+#'     assistantMessage = list(
+#'       copy   = list(tooltip = "复制"),
+#'       reload = list(tooltip = "重新生成")
+#'     ),
+#'     editComposer = list(
+#'       send   = list(label = "发送"),
+#'       cancel = list(label = "取消")
+#'     )
+#'   )
+#'   ```
 #'
 #' @return A list with a `clear()` function that creates a new thread in the UI.
 #' @export
@@ -43,17 +62,25 @@ assistantUIServer <- function(id, handler,
                               show_thread_list = FALSE,
                               suggestions      = list(),
                               commands         = list(),
-                              tools            = list()) {
+                              tools            = list(),
+                              code_theme       = "one-light",
+                              strings          = NULL) {
+  force(show_thread_list); force(suggestions); force(commands)
+  force(tools); force(code_theme); force(strings)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
 
+  config <- list(
+    show_thread_list = show_thread_list,
+    suggestions      = suggestions,
+    commands         = commands,
+    tools            = tools,
+    code_theme       = code_theme
+  )
+  if (!is.null(strings)) config$strings <- strings
+
   session$output[[id]] <- renderAssistantUI(
-    config = list(
-      show_thread_list = show_thread_list,
-      suggestions      = suggestions,
-      commands         = commands,
-      tools            = tools
-    ),
+    config   = config,
     outputId = id
   )
 
