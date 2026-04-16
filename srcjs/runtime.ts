@@ -72,7 +72,14 @@ function makeThreadId() {
 
 // ── hook ────────────────────────────────────────────────────────────────────
 
+type CommandDef = { name: string; description: string; prompt: string };
+
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
+  // 从 config 提取 commands，用于 /commandName → cmd.prompt 展开（useMemo 稳定引用）
+  const commands = useMemo(
+    () => (config?.commands as CommandDef[] | undefined) ?? [],
+    [config],
+  );
   // 懒初始化：避免每次 render 都调用 createShinyBridge（会重复注册 Shiny handler
   // 覆盖旧的，但 useRef 还是返回第一个 bridge，导致 handler 和 callbacks 对应的闭包不一致）
   const bridge = useRef<ShinyBridge>(null!);
@@ -190,10 +197,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── onNew ────────────────────────────────────────────────────────────────
   const onNew = useCallback(
     async (msg: AppendMessage) => {
+      // 气泡显示用原始文本（含 /commandName chip 序列化结果）
       const text = msg.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
         .map((c) => c.text)
         .join("");
+
+      // 发给 R 的文本：把 /commandName → cmd.prompt 展开
+      // （chip directiveText = "/commandName"，R 需要收到实际 prompt）
+      let sendText = text;
+      for (const cmd of commands) {
+        if (sendText.includes(`/${cmd.name}`)) {
+          sendText = sendText.split(`/${cmd.name}`).join(cmd.prompt);
+        }
+      }
 
       const threadId = currentThreadId;
 
@@ -311,9 +328,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
       });
 
-      bridge.current.sendUserMessage(text, threadId);
+      bridge.current.sendUserMessage(sendText, threadId);
     },
-    [inputId, currentThreadId, setCurrentMessages, messagesMap]
+    [inputId, currentThreadId, setCurrentMessages, messagesMap, commands]
   );
 
   // ── threadList adapter ───────────────────────────────────────────────────

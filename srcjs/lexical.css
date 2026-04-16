@@ -26,6 +26,16 @@
   white-space: nowrap;
 }
 
+/* ── @ mention 弹窗条目 hover + 键盘导航高亮 ─────────────────────────────── */
+/* data-highlighted 由 TriggerPopoverResource 自动添加到键盘选中的条目 */
+.aui-mention-popover-item {
+  background: none;
+}
+.aui-mention-popover-item:hover,
+.aui-mention-popover-item[data-highlighted] {
+  background: #f3f4f6;
+}
+
 /* ── @ mention chip — 浅蓝色背景 + 蓝色字 ─────────────────────────────── */
 .aui-mention-chip {
   display: inline-flex;

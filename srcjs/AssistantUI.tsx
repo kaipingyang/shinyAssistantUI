@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
-import { Thread, ThreadList } from "@assistant-ui/react-ui";
+import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar } from "@assistant-ui/react-ui";
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
-  ComposerPrimitive,
+  ComposerPrimitive, MessagePrimitive,
   unstable_useToolMentionAdapter,
-  useAui,
+  useAui, useMessagePartText,
 } from "@assistant-ui/react";
 import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
@@ -33,7 +33,12 @@ const TOOL_ICONS: Record<string, IconComponent> = {
   "wrench":        WrenchIcon,
 };
 import { LexicalComposerInput, $createMentionNode } from "@assistant-ui/react-lexical";
-import { $getSelection, $isRangeSelection, $isTextNode } from "lexical";
+import {
+  $getSelection, $isRangeSelection, $isTextNode,
+  KEY_ENTER_COMMAND, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ESCAPE_COMMAND,
+  COMMAND_PRIORITY_CRITICAL,
+} from "lexical";
+import { mergeRegister } from "@lexical/utils";
 import "@assistant-ui/react-ui/styles/index.css";
 import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
@@ -454,6 +459,62 @@ function GenericToolCard({ toolName, argsText, args, result, isError, artifact }
   );
 }
 
+// ── 消息气泡 chip 渲染 ──────────────────────────────────────────────────────
+// 解析 :tool[name] 和 /commandName 为蓝色 chip，其余为普通文本
+function renderMessageWithChips(text: string): React.ReactNode[] {
+  const regex = /(:tool\[([^\]]+)\])|(\/[a-zA-Z][a-zA-Z0-9_-]*)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
+    if (match[1]) {
+      // :tool[name] → chip，label 不含 @
+      parts.push(
+        <span key={key++} className="aui-mention-chip" data-mention-type="tool">
+          <span className="aui-mention-chip-label">{match[2]}</span>
+        </span>,
+      );
+    } else if (match[3]) {
+      // /commandName → chip（仅在行首或空白后）
+      const charBefore = match.index > 0 ? text[match.index - 1] : " ";
+      if (/\s/.test(charBefore) || match.index === 0) {
+        parts.push(
+          <span key={key++} className="aui-mention-chip" data-mention-type="slash">
+            <span className="aui-mention-chip-label">{match[3]}</span>
+          </span>,
+        );
+      } else {
+        parts.push(match[3]);
+      }
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts;
+}
+
+// 自定义用户消息文本渲染（chip + 普通文本混合）
+function UserMessageChipText() {
+  const { text } = useMessagePartText();
+  return <p className="aui-text">{renderMessageWithChips(text)}</p>;
+}
+
+// 自定义 UserMessage：保留原有操作栏和分支选择器
+function CustomUserMessage() {
+  return (
+    <UserMessage.Root>
+      <UserMessage.Attachments />
+      <MessagePrimitive.If hasContent>
+        <UserActionBar />
+        <UserMessage.Content components={{ Text: UserMessageChipText }} />
+      </MessagePrimitive.If>
+      <BranchPicker />
+    </UserMessage.Root>
+  );
+}
+
 // ── ShinyComposer：自定义输入框（@ mention / / commands / + 上传）────────────
 interface ComposerConfigCtx {
   tools:    Array<{ name: string; description: string }>;
@@ -479,8 +540,16 @@ function ShinyComposer() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
 
-  // ── Lexical editor ref（用于 / 命令 chip 插入）────────────────────────────
+  // ── Lexical editor ref（用于 / 命令 chip 插入 + 键盘命令注册）──────────────
   const lexicalRef = useRef<HTMLDivElement>(null);
+
+  // ── / 命令键盘导航 state + latest-ref pattern ─────────────────────────────
+  // latest-ref：在 useEffect 的 Lexical command 回调里安全访问最新值（跳过 deps 重新注册）
+  const [focusedCommandIndex, setFocusedCommandIndex] = useState(0);
+  const slashStateRef    = useRef<typeof slashState>(null);
+  const filteredCmdsRef  = useRef<typeof filteredCommands>([]);
+  const focusedIdxRef    = useRef(0);
+  const handleCmdSelRef  = useRef<typeof handleCommandSelect>(null!);
 
   // ── @ mention adapter ─────────────────────────────────────────────────────
   const mentionAdapter = unstable_useToolMentionAdapter({
@@ -495,6 +564,7 @@ function ShinyComposer() {
   // 替代方案：onKeyUp 时从 window.getSelection() 获取当前文本节点的光标位置，
   // 再扫描当前文本节点内是否有 / 触发词；offset 用 fullText.lastIndexOf 映射回全文位置。
   const [slashState, setSlashState] = useState<{ query: string; offset: number } | null>(null);
+  slashStateRef.current = slashState; // latest-ref 同步（render 阶段赋值，不触发重渲染）
 
   const handleKeyUp = useCallback(() => {
     const text = (aui as any).composer().getState().text as string;
@@ -540,6 +610,7 @@ function ShinyComposer() {
           (c.description?.toLowerCase().includes(q) ?? false))
       : commands;
   }, [commands, slashState]);
+  filteredCmdsRef.current = filteredCommands; // latest-ref 同步
 
   const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
     setSlashState(null);
@@ -579,10 +650,11 @@ function ShinyComposer() {
       const startOffset = triggerInNode.offset;
       const endOffset   = triggerInNode.offset + 1 + triggerInNode.query.length; // +1 for "/"
 
-      // 创建 chip：label 含 "/"，directiveText = cmd.prompt（发送给 R 的实际内容）
+      // 创建 chip：label = "/commandName"，directiveText 也是 "/commandName"
+      // runtime.ts 的 onNew 负责把 /commandName 展开为 cmd.prompt 再发给 R
       const mentionNode = $createMentionNode(
         { id: cmd.name, type: "slash" as const, label: "/" + cmd.name },
-        cmd.prompt,
+        "/" + cmd.name,
       );
 
       if (startOffset === 0 && endOffset === nodeText.length) {
@@ -600,6 +672,48 @@ function ShinyComposer() {
       mentionNode.selectNext();
     });
   }, [aui, slashState]);
+  // latest-ref 同步（render 阶段）
+  focusedIdxRef.current   = focusedCommandIndex;
+  handleCmdSelRef.current = handleCommandSelect;
+
+  // 弹窗开关时重置焦点索引
+  useEffect(() => { setFocusedCommandIndex(0); }, [slashState]);
+
+  // 注册 COMMAND_PRIORITY_CRITICAL 键盘处理（优先于 LexicalComposerInput 内部的 PRIORITY_HIGH）
+  // 依赖数组为空 []：仅挂载时注册一次，运行时通过 latest-ref 读取最新状态
+  useEffect(() => {
+    const ce = lexicalRef.current?.querySelector("[contenteditable]") as HTMLElement | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const editor = (ce as any)?.__lexicalEditor;
+    if (!editor) return undefined;
+    return mergeRegister(
+      editor.registerCommand(KEY_ENTER_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        e?.preventDefault();
+        const idx = Math.min(focusedIdxRef.current, filteredCmdsRef.current.length - 1);
+        handleCmdSelRef.current(filteredCmdsRef.current[idx]);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ARROW_DOWN_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        e?.preventDefault();
+        setFocusedCommandIndex(i => (i + 1) % filteredCmdsRef.current.length);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ARROW_UP_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        e?.preventDefault();
+        setFocusedCommandIndex(i => (i - 1 + filteredCmdsRef.current.length) % filteredCmdsRef.current.length);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ESCAPE_COMMAND, (_e: KeyboardEvent | null) => {
+        if (!slashStateRef.current) return false;
+        setSlashState(null);
+        setFocusedCommandIndex(0);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+    );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const popoverStyle: React.CSSProperties = {
     position: "absolute",
@@ -695,14 +809,18 @@ function ShinyComposer() {
       onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
       onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
     >
-      {filteredCommands.map(cmd => (
+      {filteredCommands.map((cmd, index) => (
         <button
           key={cmd.name}
           type="button"
-          style={itemStyle}
-          // 条目级别也阻止，确保在任何浏览器下 click 前不触发 blur
+          style={{
+            ...itemStyle,
+            // 键盘焦点高亮（鼠标 hover 由 onMouseEnter 处理）
+            background: index === focusedCommandIndex ? "#f3f4f6" : "none",
+          }}
           onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
           onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+          onMouseEnter={() => setFocusedCommandIndex(index)}
           onClick={() => handleCommandSelect(cmd)}
         >
           <span style={{ fontWeight: 500 }}>/{cmd.name}</span>
@@ -726,7 +844,10 @@ function ShinyComposer() {
             {categories.map(cat => (
               <ComposerPrimitive.Unstable_MentionCategoryItem
                 key={cat.id} categoryId={cat.id}
-                style={{ ...itemStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                className="aui-mention-popover-item"
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                         gap: "10px", padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
+                         fontSize: "13px", border: "none", width: "100%", textAlign: "left" }}
               >
                 <span style={{ fontWeight: 500, fontSize: "13px" }}>{cat.label}</span>
                 <ChevronRightIcon size={12} color="#9ca3af" />
@@ -751,10 +872,11 @@ function ShinyComposer() {
             {items.map((item, index) => (
               <ComposerPrimitive.Unstable_MentionItem
                 key={item.id} item={item} index={index}
+                className="aui-mention-popover-item"
                 style={{
                   display: "flex", flexDirection: "column", gap: "2px",
                   padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
-                  background: "none", border: "none", width: "100%", textAlign: "left",
+                  border: "none", width: "100%", textAlign: "left",
                 }}
               >
                 <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
@@ -886,7 +1008,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               <Thread
                 tools={[WeatherToolUI]}
                 welcome={{ suggestions }}
-                components={{ Composer: ShinyComposer }}
+                components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage }}
                 assistantMessage={{
                   components: { ToolFallback: GenericToolCard },
                 }}
