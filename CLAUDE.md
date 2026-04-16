@@ -123,11 +123,41 @@ if (!bridge.current) bridge.current = createShinyBridge(inputId);
 
 JS 通过 `Shiny.setInputValue` 发送 `{ threadId, text, ... }`，R 端用 `msg$threadId`（camelCase），**不是** `msg$thread_id`。Shiny 保留 JSON 属性名，不做任何大小写转换。
 
+### @assistant-ui/tap 生产模式 tapEffectEvent 陈旧回调（关键）
+
+`tapEffectEvent` 在 `process.env.NODE_ENV === "production"` 时直接返回 `callbackRef.current`（旧回调），而不是稳定包装函数。导致 `@` mention 的 `handleKeyDown` 里捕获的 `open` 永远是上一帧的 `false`，键盘导航完全失效。
+
+**修复**：`vite.config.ts` 里加 transform 插件，把 `@assistant-ui/tap` 的 `env.js` 替换为 `export const isDevelopment = true`：
+
+```typescript
+{
+  name: "patch-tap-is-development",
+  transform(code, id) {
+    if (id.includes("@assistant-ui/tap") && id.endsWith("/env.js"))
+      return { code: "export const isDevelopment = true;\n", map: null };
+  },
+},
+```
+
+详见 `.claude/docs/tap-production-bug.md`。
+
+### useEffect 依赖数组与对象引用稳定性
+
+`useEffect([objState])` 每次 render 都比较引用。若 setState 每次传新对象（即使值相同），effect 每次都触发。例如 `setSlashState({ query, offset })` 每次 keyup 创建新对象 → 触发重置焦点的 effect → 方向键焦点归零。
+
+**修复**：用 functional update，值不变时返回 `prev`（同一引用）：
+
+```typescript
+setSlashState(prev => {
+  if (prev && prev.query === next.query && prev.offset === next.offset) return prev;
+  return next;
+});
+```
+
+详见 `.claude/docs/react-useeffect-object-identity.md`。
+
 ## Known gaps / future work
 
-- Slash command `/` menu (cmdk installed, not yet wired up)
 - File attachment handling (bridge has `attachments` field, UI not yet configured)
-- Tool call display cards
-- Thread history list (`ThreadListPrimitive`)
 - Theme customization API (CSS variables)
 - Interrupt support (`on_chunk` cancellation)
