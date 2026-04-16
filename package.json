@@ -8,9 +8,13 @@
   },
   "dependencies": {
     "@assistant-ui/react": "latest",
+    "@assistant-ui/react-lexical": "^0.0.6",
     "@assistant-ui/react-markdown": "latest",
     "@assistant-ui/react-ui": "^0.2.1",
+    "@lexical/react": "^0.43.0",
+    "@lexical/utils": "^0.43.0",
     "cmdk": "latest",
+    "lexical": "^0.43.0",
     "react": "^18",
     "react-dom": "^18"
   },

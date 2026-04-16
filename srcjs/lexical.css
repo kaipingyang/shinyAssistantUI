@@ -1,0 +1,45 @@
+/* ── Lexical contenteditable reset ─────────────────────────────────────── */
+.aui-lexical-editor {
+  position: relative;
+  width: 100%;
+}
+
+/* 去掉浏览器默认 outline（黑色边框） */
+.aui-lexical-input {
+  outline: none;
+  border: none;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* placeholder 绝对定位叠在 contenteditable 上 */
+.aui-lexical-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  color: #9ca3af;
+  user-select: none;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* ── @ mention chip — 浅蓝色背景 + 蓝色字 ─────────────────────────────── */
+.aui-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+  vertical-align: middle;
+  line-height: 1.4;
+}

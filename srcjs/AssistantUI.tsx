@@ -32,7 +32,10 @@ const TOOL_ICONS: Record<string, IconComponent> = {
   "flask":         FlaskConicalIcon,
   "wrench":        WrenchIcon,
 };
+import { LexicalComposerInput, $createMentionNode } from "@assistant-ui/react-lexical";
+import { $getSelection, $isRangeSelection, $isTextNode } from "lexical";
 import "@assistant-ui/react-ui/styles/index.css";
+import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
 
 // ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
@@ -475,7 +478,9 @@ function ShinyComposer() {
   const { tools, commands } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Lexical editor ref（用于 / 命令 chip 插入）────────────────────────────
+  const lexicalRef = useRef<HTMLDivElement>(null);
 
   // ── @ mention adapter ─────────────────────────────────────────────────────
   const mentionAdapter = unstable_useToolMentionAdapter({
@@ -486,26 +491,43 @@ function ShinyComposer() {
   });
 
   // ── / command：完全自定义弹窗，不使用 TriggerPopoverRoot ─────────────────
-  // 原因：TriggerPopoverRoot 依赖 @assistant-ui/tap 的 tapEffectEvent，
-  // 在生产构建下 selectItem 闭包可能读到旧的 trigger 值；
-  // 且 React 事件委托可能晚于浏览器焦点切换，onMouseDown preventDefault 失效。
-  // 自定义方案：纯 React state + input 原生事件，彻底绕开以上两个问题。
+  // LexicalComposerInput 是 contenteditable div，无 selectionStart API。
+  // 替代方案：onKeyUp 时从 window.getSelection() 获取当前文本节点的光标位置，
+  // 再扫描当前文本节点内是否有 / 触发词；offset 用 fullText.lastIndexOf 映射回全文位置。
   const [slashState, setSlashState] = useState<{ query: string; offset: number } | null>(null);
 
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const pos = e.target.selectionStart ?? e.target.value.length;
-    setSlashState(detectSlashTrigger(e.target.value, pos));
-  }, []);
-
-  const handleInputSelect = useCallback((e: React.SyntheticEvent<HTMLTextAreaElement>) => {
-    const ta = e.target as HTMLTextAreaElement;
-    const pos = ta.selectionStart ?? ta.value.length;
-    setSlashState(detectSlashTrigger(ta.value, pos));
-  }, []);
+  const handleKeyUp = useCallback(() => {
+    const text = (aui as any).composer().getState().text as string;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) {
+      setSlashState(detectSlashTrigger(text, text.length));
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const focusNode = range.endContainer;
+    const focusOffset = range.endOffset;
+    // 只看当前文本节点内光标之前的内容（避免跨 chip 节点的复杂性）
+    const nodeText = focusNode.nodeType === Node.TEXT_NODE
+      ? (focusNode.textContent ?? "").slice(0, focusOffset)
+      : "";
+    const triggerInNode = detectSlashTrigger(nodeText, nodeText.length);
+    if (!triggerInNode) {
+      setSlashState(null);
+      return;
+    }
+    // 将节点内局部 offset 映射回全文 (aui text 含 :tool[] 序列化)
+    const slashPattern = "/" + triggerInNode.query;
+    const fullSlashPos = text.lastIndexOf(slashPattern);
+    if (fullSlashPos === -1) {
+      setSlashState(null);
+      return;
+    }
+    setSlashState({ query: triggerInNode.query, offset: fullSlashPos });
+  }, [aui]);
 
   // 失焦时关闭弹窗（用户点到 composer 外）
   // 注意：点击 slash 条目时由于 onPointerDown+onMouseDown preventDefault，不会触发此 blur
-  const handleInputBlur = useCallback(() => {
+  const handleBlur = useCallback(() => {
     setSlashState(null);
   }, []);
 
@@ -520,24 +542,64 @@ function ShinyComposer() {
   }, [commands, slashState]);
 
   const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
-    const ta = inputRef.current;
-    if (!ta) return;
-    // 直接从 DOM 读取当前文本和光标位置，避免 React state 的异步问题
-    const text = aui.composer().getState().text as string;
-    const cursorPos = ta.selectionStart ?? text.length;
-    const trigger = detectSlashTrigger(text, cursorPos);
-    const insertText = `/${cmd.name} `;
-    const triggerStart = trigger?.offset ?? cursorPos;
-    const triggerEnd   = trigger ? trigger.offset + 1 + trigger.query.length : cursorPos;
-    const newText = text.slice(0, triggerStart) + insertText + text.slice(triggerEnd).trimStart();
-    aui.composer().setText(newText);
     setSlashState(null);
-    setTimeout(() => {
-      ta.focus();
-      const pos = triggerStart + insertText.length;
-      ta.setSelectionRange(pos, pos);
-    }, 0);
-  }, [aui]);
+
+    // 通过 DOM 拿到 Lexical editor 实例（Lexical 把它挂在 contenteditable 元素上）
+    const contentEditable = lexicalRef.current?.querySelector("[contenteditable]") as HTMLElement | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const editor = (contentEditable as any)?.__lexicalEditor;
+
+    if (!editor) {
+      // Fallback：editor 未挂载时降级为纯文本替换
+      const text = (aui as any).composer().getState().text as string;
+      const trigger = slashState;
+      const insertText = `/${cmd.name} `;
+      const triggerStart = trigger?.offset ?? text.length;
+      const triggerEnd   = trigger ? trigger.offset + 1 + trigger.query.length : text.length;
+      const newText = text.slice(0, triggerStart) + insertText + text.slice(triggerEnd).trimStart();
+      (aui as any).composer().setText(newText);
+      return;
+    }
+
+    editor.update(() => {
+      const selection = $getSelection();
+      if (!$isRangeSelection(selection)) return;
+      const anchor = selection.anchor;
+      if (anchor.type !== "text") return;
+      const anchorNode = anchor.getNode();
+      if (!$isTextNode(anchorNode)) return;
+
+      const nodeText = anchorNode.getTextContent();
+      const anchorOffset = anchor.offset;
+
+      // 在当前文本节点内找到 / 触发词的范围
+      const triggerInNode = detectSlashTrigger(nodeText, anchorOffset);
+      if (!triggerInNode) return;
+
+      const startOffset = triggerInNode.offset;
+      const endOffset   = triggerInNode.offset + 1 + triggerInNode.query.length; // +1 for "/"
+
+      // 创建 chip：label 含 "/"，directiveText = cmd.prompt（发送给 R 的实际内容）
+      const mentionNode = $createMentionNode(
+        { id: cmd.name, type: "slash" as const, label: "/" + cmd.name },
+        cmd.prompt,
+      );
+
+      if (startOffset === 0 && endOffset === nodeText.length) {
+        anchorNode.replace(mentionNode);
+      } else if (startOffset === 0) {
+        const [leftNode, rightNode] = anchorNode.splitText(endOffset);
+        if (rightNode) rightNode.insertBefore(mentionNode);
+        leftNode?.remove();
+      } else {
+        const parts = anchorNode.splitText(startOffset, endOffset);
+        const targetNode = parts[1];
+        if (targetNode) targetNode.replace(mentionNode);
+      }
+
+      mentionNode.selectNext();
+    });
+  }, [aui, slashState]);
 
   const popoverStyle: React.CSSProperties = {
     position: "absolute",
@@ -579,24 +641,26 @@ function ShinyComposer() {
 
   // ── 输入框 ────────────────────────────────────────────────────────────────
   const inputBox = (
-    <div style={{
-      border: "1px solid #e5e7eb",
-      borderRadius: "12px",
-      background: "white",
-      padding: "10px 12px",
-      width: "100%",
-      boxSizing: "border-box",
-    }}>
-      <ComposerPrimitive.Input
-        ref={inputRef}
+    <div
+      ref={lexicalRef}
+      style={{
+        border: "1px solid #e5e7eb",
+        borderRadius: "12px",
+        background: "white",
+        padding: "10px 12px",
+        width: "100%",
+        boxSizing: "border-box",
+      }}
+    >
+      <LexicalComposerInput
         placeholder={placeholder}
-        onChange={handleInputChange}
-        onSelect={handleInputSelect}
-        onBlur={handleInputBlur}
+        onKeyUp={handleKeyUp}
+        onBlur={handleBlur}
         style={{
           width: "100%", border: "none", outline: "none",
-          resize: "none", fontSize: "14px",
+          fontSize: "14px", lineHeight: "1.5",
           background: "transparent", fontFamily: "inherit",
+          minHeight: "24px",
         }}
       />
       <div style={{ display: "flex", alignItems: "center",
