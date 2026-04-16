@@ -1068,6 +1068,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
                   components: { Text: MarkdownText, ToolFallback: GenericToolCard },
                 }}
                 strings={(config?.strings ?? undefined) as never}
+                assistantAvatar={(config?.assistant_avatar ?? undefined) as never}
               />
             </div>
           </div>

@@ -56,17 +56,26 @@
 #'   )
 #'   ```
 #'
+#' @param assistant_avatar Named list controlling the assistant's avatar.
+#'   Fields: `fallback` (1–2 character string or emoji shown when no image is
+#'   set), `src` (URL to an image), `alt` (alt text). Defaults to
+#'   `list(fallback = "AI")`. Example with custom image:
+#'   ```r
+#'   assistant_avatar = list(src = "https://example.com/logo.png", fallback = "AI")
+#'   ```
+#'
 #' @return A list with a `clear()` function that creates a new thread in the UI.
 #' @export
 assistantUIServer <- function(id, handler,
-                              show_thread_list = FALSE,
-                              suggestions      = list(),
-                              commands         = list(),
-                              tools            = list(),
-                              code_theme       = "one-light",
-                              strings          = NULL) {
+                              show_thread_list  = FALSE,
+                              suggestions       = list(),
+                              commands          = list(),
+                              tools             = list(),
+                              code_theme        = "one-light",
+                              strings           = NULL,
+                              assistant_avatar  = list(fallback = "AI")) {
   force(show_thread_list); force(suggestions); force(commands)
-  force(tools); force(code_theme); force(strings)
+  force(tools); force(code_theme); force(strings); force(assistant_avatar)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
 
@@ -77,7 +86,8 @@ assistantUIServer <- function(id, handler,
     tools            = tools,
     code_theme       = code_theme
   )
-  if (!is.null(strings)) config$strings <- strings
+  if (!is.null(strings))          config$strings          <- strings
+  if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
