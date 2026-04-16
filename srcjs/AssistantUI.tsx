@@ -569,30 +569,38 @@ function ShinyComposer() {
   const handleKeyUp = useCallback(() => {
     const text = (aui as any).composer().getState().text as string;
     const sel = window.getSelection();
+
+    let nextState: { query: string; offset: number } | null = null;
+
     if (!sel || !sel.rangeCount) {
-      setSlashState(detectSlashTrigger(text, text.length));
-      return;
+      nextState = detectSlashTrigger(text, text.length);
+    } else {
+      const range = sel.getRangeAt(0);
+      const focusNode = range.endContainer;
+      const focusOffset = range.endOffset;
+      // 只看当前文本节点内光标之前的内容（避免跨 chip 节点的复杂性）
+      const nodeText = focusNode.nodeType === Node.TEXT_NODE
+        ? (focusNode.textContent ?? "").slice(0, focusOffset)
+        : "";
+      const triggerInNode = detectSlashTrigger(nodeText, nodeText.length);
+      if (triggerInNode) {
+        // 将节点内局部 offset 映射回全文 (aui text 含 :tool[] 序列化)
+        const slashPattern = "/" + triggerInNode.query;
+        const fullSlashPos = text.lastIndexOf(slashPattern);
+        if (fullSlashPos !== -1) {
+          nextState = { query: triggerInNode.query, offset: fullSlashPos };
+        }
+      }
     }
-    const range = sel.getRangeAt(0);
-    const focusNode = range.endContainer;
-    const focusOffset = range.endOffset;
-    // 只看当前文本节点内光标之前的内容（避免跨 chip 节点的复杂性）
-    const nodeText = focusNode.nodeType === Node.TEXT_NODE
-      ? (focusNode.textContent ?? "").slice(0, focusOffset)
-      : "";
-    const triggerInNode = detectSlashTrigger(nodeText, nodeText.length);
-    if (!triggerInNode) {
-      setSlashState(null);
-      return;
-    }
-    // 将节点内局部 offset 映射回全文 (aui text 含 :tool[] 序列化)
-    const slashPattern = "/" + triggerInNode.query;
-    const fullSlashPos = text.lastIndexOf(slashPattern);
-    if (fullSlashPos === -1) {
-      setSlashState(null);
-      return;
-    }
-    setSlashState({ query: triggerInNode.query, offset: fullSlashPos });
+
+    // 用 functional update 避免相同值时创建新对象引用
+    // 若 query/offset 不变则返回 prev（同一引用），防止触发 useEffect([slashState])
+    // 进而重置 focusedCommandIndex（按方向键时焦点被意外归零的 bug 来源）
+    setSlashState(prev => {
+      if (nextState === null) return prev === null ? prev : null;
+      if (prev && prev.query === nextState.query && prev.offset === nextState.offset) return prev;
+      return nextState;
+    });
   }, [aui]);
 
   // 失焦时关闭弹窗（用户点到 composer 外）
