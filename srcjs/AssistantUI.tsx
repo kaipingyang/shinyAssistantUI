@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
-import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar } from "@assistant-ui/react-ui";
+import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar, makeMarkdownText } from "@assistant-ui/react-ui";
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive,
@@ -33,6 +33,9 @@ const TOOL_ICONS: Record<string, IconComponent> = {
   "wrench":        WrenchIcon,
 };
 import { LexicalComposerInput, $createMentionNode } from "@assistant-ui/react-lexical";
+
+// assistant 气泡 Markdown 渲染（模块级别，只创建一次）
+const MarkdownText = makeMarkdownText();
 import {
   $getSelection, $isRangeSelection, $isTextNode,
   KEY_ENTER_COMMAND, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ESCAPE_COMMAND,
@@ -40,6 +43,7 @@ import {
 } from "lexical";
 import { mergeRegister } from "@lexical/utils";
 import "@assistant-ui/react-ui/styles/index.css";
+import "@assistant-ui/react-ui/styles/markdown.css";
 import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
 
@@ -1018,7 +1022,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
                 welcome={{ suggestions }}
                 components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage }}
                 assistantMessage={{
-                  components: { ToolFallback: GenericToolCard },
+                  components: { Text: MarkdownText, ToolFallback: GenericToolCard },
                 }}
               />
             </div>
