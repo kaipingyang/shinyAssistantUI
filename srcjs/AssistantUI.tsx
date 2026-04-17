@@ -51,6 +51,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
+  MicIcon, MicOffIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -826,15 +827,35 @@ function ShinyComposer() {
       />
       <div style={{ display: "flex", alignItems: "center",
                     justifyContent: "space-between", marginTop: "8px" }}>
-        <ComposerPrimitive.AddAttachment
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            fontSize: "20px", color: "#6b7280", padding: "2px 6px",
-            lineHeight: 1, display: "flex", alignItems: "center",
-          }}
-        >
-          +
-        </ComposerPrimitive.AddAttachment>
+        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+          <ComposerPrimitive.AddAttachment
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              fontSize: "20px", color: "#6b7280", padding: "2px 6px",
+              lineHeight: 1, display: "flex", alignItems: "center",
+            }}
+          >
+            +
+          </ComposerPrimitive.AddAttachment>
+          <ComposerPrimitive.Dictate
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "#6b7280", padding: "2px 4px",
+              display: "flex", alignItems: "center",
+            }}
+          >
+            <MicIcon size={16} />
+          </ComposerPrimitive.Dictate>
+          <ComposerPrimitive.StopDictation
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "#ef4444", padding: "2px 4px",
+              display: "flex", alignItems: "center",
+            }}
+          >
+            <MicOffIcon size={16} />
+          </ComposerPrimitive.StopDictation>
+        </div>
         <ComposerPrimitive.Send
           style={{
             background: "#374151", border: "none", borderRadius: "50%",

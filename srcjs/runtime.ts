@@ -1,6 +1,6 @@
 // useShinyRuntime — ExternalStoreRuntime + 多线程 + localStorage 持久化
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
-import { useExternalStoreRuntime } from "@assistant-ui/react";
+import { useExternalStoreRuntime, WebSpeechDictationAdapter } from "@assistant-ui/react";
 import type {
   ThreadMessageLike,
   AppendMessage,
@@ -458,6 +458,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     convertMessage: (m) => m,
     adapters: {
       threadList: threadListAdapter,
+      dictation: WebSpeechDictationAdapter.isSupported() ? new WebSpeechDictationAdapter() : undefined,
     },
   });
 }
