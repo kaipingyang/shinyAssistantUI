@@ -43,6 +43,7 @@ import {
   unstable_useToolMentionAdapter,
   useAui, useMessagePartText,
 } from "@assistant-ui/react";
+import { useThreadIsRunning } from "@assistant-ui/core/react";
 import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import {
@@ -51,7 +52,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
-  MicIcon, MicOffIcon,
+  MicIcon, MicOffIcon, SquareIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -579,6 +580,7 @@ function ShinyComposer() {
   const { tools, commands } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
+  const isRunning = useThreadIsRunning();
 
   // ── Lexical editor ref（用于 / 命令 chip 插入 + 键盘命令注册）──────────────
   const lexicalRef = useRef<HTMLDivElement>(null);
@@ -856,16 +858,29 @@ function ShinyComposer() {
             <MicOffIcon size={16} />
           </ComposerPrimitive.StopDictation>
         </div>
-        <ComposerPrimitive.Send
-          style={{
-            background: "#374151", border: "none", borderRadius: "50%",
-            width: "30px", height: "30px", cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            color: "white", fontSize: "14px", flexShrink: 0,
-          }}
-        >
-          ↑
-        </ComposerPrimitive.Send>
+        {!isRunning ? (
+          <ComposerPrimitive.Send
+            style={{
+              background: "#374151", border: "none", borderRadius: "50%",
+              width: "30px", height: "30px", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "white", fontSize: "14px", flexShrink: 0,
+            }}
+          >
+            ↑
+          </ComposerPrimitive.Send>
+        ) : (
+          <ComposerPrimitive.Cancel
+            style={{
+              background: "#374151", border: "none", borderRadius: "50%",
+              width: "30px", height: "30px", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "white", flexShrink: 0,
+            }}
+          >
+            <SquareIcon size={12} fill="white" stroke="white" />
+          </ComposerPrimitive.Cancel>
+        )}
       </div>
     </div>
   );

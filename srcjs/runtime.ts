@@ -374,6 +374,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [currentThreadId, messagesMap, setCurrentMessages, startRun]
   );
 
+  // ── onCancel ─────────────────────────────────────────────────────────────
+  const onCancel = useCallback(async () => {
+    streamingIdRef.current = null;
+    setIsRunning(false);
+    bridge.current.setRunCallbacks(null);
+  }, []);
+
   // ── threadList adapter ───────────────────────────────────────────────────
   const threadListAdapter = useMemo(
     () => ({
@@ -455,6 +462,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     isRunning,
     onNew,
     onReload,
+    onCancel,
     convertMessage: (m) => m,
     adapters: {
       threadList: threadListAdapter,
