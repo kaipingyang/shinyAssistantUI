@@ -5,6 +5,7 @@ import type {
   ThreadMessageLike,
   AppendMessage,
   ExternalStoreThreadData,
+  StartRunConfig,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
 import type { ShinyBridge } from "./bridge";
@@ -194,6 +195,108 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── 启动一次 streaming run（onNew 和 onReload 共用）────────────────────────
+  const startRun = useCallback(
+    (threadId: string, sendFn: () => void) => {
+      setIsRunning(true);
+      streamingIdRef.current = null;
+
+      bridge.current.setRunCallbacks({
+        onChunk: (chunkText) => {
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            let updated: ThreadMessageLike[];
+            if (!streamingIdRef.current) {
+              const id = `assistant-${Date.now()}`;
+              streamingIdRef.current = id;
+              updated = [
+                ...threadMsgs,
+                { id, role: "assistant", content: [{ type: "text", text: chunkText }] },
+              ];
+            } else {
+              updated = threadMsgs.map((m) => {
+                if (m.id !== streamingIdRef.current) return m;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const c0 = (m.content as any)[0];
+                const prev2 = c0?.type === "text" ? (c0.text as string) : "";
+                return { ...m, content: [{ type: "text", text: prev2 + chunkText }] };
+              });
+            }
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onToolCall: (toolCall) => {
+          streamingIdRef.current = null;
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated: ThreadMessageLike[] = [
+              ...threadMsgs,
+              {
+                id: `tool-${toolCall.toolCallId}`,
+                role: "assistant" as const,
+                content: [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: toolCall.toolCallId,
+                    toolName: toolCall.toolName,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    args: toolCall.args as any,
+                    argsText: toolCall.argsText,
+                    artifact: toolCall.annotations,
+                  },
+                ],
+              },
+            ];
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onToolResult: (toolCallId, result, isError) => {
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated = threadMsgs.map((m): ThreadMessageLike => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const part = (m.content as any)[0] as Record<string, unknown> | undefined;
+              if (part?.type !== "tool-call") return m;
+              if (part.toolCallId !== toolCallId) return m;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return { ...m, content: [{ ...part, result, isError }] } as any;
+            });
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onDone: () => {
+          streamingIdRef.current = null;
+          setIsRunning(false);
+          bridge.current.setRunCallbacks(null);
+        },
+        onError: (errMsg) => {
+          streamingIdRef.current = null;
+          setIsRunning(false);
+          bridge.current.setRunCallbacks(null);
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated = [
+              ...threadMsgs,
+              {
+                id: `error-${Date.now()}`,
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: `⚠ Error: ${errMsg}` }],
+              },
+            ];
+            saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+      });
+
+      sendFn();
+    },
+    [inputId] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   // ── onNew ────────────────────────────────────────────────────────────────
   const onNew = useCallback(
     async (msg: AppendMessage) => {
@@ -235,102 +338,40 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
       ]);
 
-      setIsRunning(true);
+      startRun(threadId, () => bridge.current.sendUserMessage(sendText, threadId));
+    },
+    [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, startRun]
+  );
 
-      // 注册本次运行回调（push → state）
-      bridge.current.setRunCallbacks({
-        onChunk: (chunkText) => {
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            let updated: ThreadMessageLike[];
-            if (!streamingIdRef.current) {
-              const id = `assistant-${Date.now()}`;
-              streamingIdRef.current = id;
-              updated = [
-                ...threadMsgs,
-                { id, role: "assistant", content: [{ type: "text", text: chunkText }] },
-              ];
-            } else {
-              updated = threadMsgs.map((m) => {
-                if (m.id !== streamingIdRef.current) return m;
-                const prev2 = m.content[0]?.type === "text" ? m.content[0].text : "";
-                return { ...m, content: [{ type: "text", text: prev2 + chunkText }] };
-              });
-            }
-            saveMessages(inputId, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
-        onToolCall: (toolCall) => {
-          // 每个 tool call 作为独立的 assistant 消息插入
-          streamingIdRef.current = null; // 中断当前文本流（如有）
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            const updated: ThreadMessageLike[] = [
-              ...threadMsgs,
-              {
-                id: `tool-${toolCall.toolCallId}`,
-                role: "assistant" as const,
-                content: [
-                  {
-                    type: "tool-call" as const,
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
-                    args: toolCall.args,
-                    argsText: toolCall.argsText,
-                    artifact: toolCall.annotations,
-                  },
-                ],
-              },
-            ];
-            saveMessages(inputId, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
-        onToolResult: (toolCallId, result, isError) => {
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            const updated = threadMsgs.map((m) => {
-              const part = m.content[0];
-              if (part?.type !== "tool-call") return m;
-              if ((part as { toolCallId?: string }).toolCallId !== toolCallId) return m;
-              return {
-                ...m,
-                content: [{ ...part, result, isError }],
-              };
-            });
-            saveMessages(inputId, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
-        onDone: () => {
-          streamingIdRef.current = null;
-          setIsRunning(false);
-          bridge.current.setRunCallbacks(null);
-        },
-        onError: (errMsg) => {
-          streamingIdRef.current = null;
-          setIsRunning(false);
-          bridge.current.setRunCallbacks(null);
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            const updated = [
-              ...threadMsgs,
-              {
-                id: `error-${Date.now()}`,
-                role: "assistant" as const,
-                content: [{ type: "text" as const, text: `⚠ Error: ${errMsg}` }],
-              },
-            ];
-            saveMessages(inputId, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
+  // ── onReload ─────────────────────────────────────────────────────────────
+  // parentId = 触发本次 assistant 回复的 user 消息 ID
+  const onReload = useCallback(
+    async (parentId: string | null, _config: StartRunConfig) => {
+      const threadId = currentThreadId;
+      const msgs = messagesMap[threadId] ?? [];
+      console.log("[onReload] parentId=", parentId, "msgs=", msgs.map(m => ({ id: m.id, role: m.role })));
+
+      // 找到 parent user 消息的文本
+      const parentMsg = parentId ? msgs.find((m) => m.id === parentId) : null;
+      const rawContent = parentMsg?.content;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const contentArr: any[] = Array.isArray(rawContent) ? rawContent : [];
+      const userText = contentArr
+        .filter((c) => c?.type === "text")
+        .map((c) => c.text as string)
+        .join("");
+
+      if (!userText) return;
+
+      // 删除 parentId 之后的所有消息（即上一条 assistant 回复）
+      setCurrentMessages((prev) => {
+        const idx = parentId ? prev.findIndex((m) => m.id === parentId) : -1;
+        return idx >= 0 ? prev.slice(0, idx + 1) : prev;
       });
 
-      bridge.current.sendUserMessage(sendText, threadId);
+      startRun(threadId, () => bridge.current.sendReload(userText, threadId));
     },
-    [inputId, currentThreadId, setCurrentMessages, messagesMap, commands]
+    [currentThreadId, messagesMap, setCurrentMessages, startRun]
   );
 
   // ── threadList adapter ───────────────────────────────────────────────────
@@ -413,6 +454,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     messages,
     isRunning,
     onNew,
+    onReload,
     convertMessage: (m) => m,
     adapters: {
       threadList: threadListAdapter,

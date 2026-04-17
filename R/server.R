@@ -6,7 +6,7 @@
 #' @param id The module ID matching the `outputId` passed to [assistantUIOutput()].
 #' @param handler A function with signature
 #'   `function(message, thread_id, on_chunk, on_done, on_error,
-#'              on_tool_call, on_tool_result)` where:
+#'              on_tool_call, on_tool_result, is_reload)` where:
 #'   * `message` — character string of the user's message.
 #'   * `thread_id` — character string identifying the current thread (for
 #'     multi-turn conversation routing).
@@ -17,9 +17,12 @@
 #'     (args should be a named list).
 #'   * `on_tool_result(tool_call_id, result, is_error = FALSE)` — update the
 #'     tool card with the result.
+#'   * `is_reload` — `TRUE` when the user clicked "regenerate"; the handler
+#'     receives the same `message` text and can remove the previous assistant
+#'     turn from the LLM history before re-running.
 #'
-#'   `on_tool_call` and `on_tool_result` are optional: handlers that omit
-#'   them continue to work unchanged.
+#'   All parameters except `message`, `on_chunk`, `on_done`, and `on_error`
+#'   are optional: handlers that omit them continue to work unchanged.
 #'
 #'   The handler may return a promise (from `promises` or `coro`) for async
 #'   streaming; errors from the promise are automatically forwarded via
@@ -99,6 +102,7 @@ assistantUIServer <- function(id, handler,
     if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
 
     thread_id <- msg$threadId %||% "default"
+    is_reload  <- identical(msg$type, "reload")
 
     on_chunk <- function(text) {
       session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
@@ -137,7 +141,8 @@ assistantUIServer <- function(id, handler,
       on_done        = on_done,
       on_error       = on_error,
       on_tool_call   = on_tool_call,   # function(id, name, args, annotations)
-      on_tool_result = on_tool_result  # function(id, result, is_error)
+      on_tool_result = on_tool_result, # function(id, result, is_error)
+      is_reload      = is_reload       # TRUE 时为重新生成请求
     )
     handler_params <- names(formals(handler))
     call_args <- if ("..." %in% handler_params) all_args
