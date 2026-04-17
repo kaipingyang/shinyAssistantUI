@@ -25,6 +25,7 @@ export type RunCallbacks = {
 export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: string[]) => void;
   sendReload: (text: string, threadId: string) => void;
+  sendCancel: (threadId: string) => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
 }
@@ -69,6 +70,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         inputId,
         { type: "reload", text, threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendCancel(threadId) {
+      Shiny.setInputValue(
+        `${inputId}_cancel`,
+        { threadId, ts: Date.now() },
         { priority: "event" }
       );
     },

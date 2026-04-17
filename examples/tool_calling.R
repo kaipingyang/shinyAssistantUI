@@ -101,7 +101,7 @@ get_chat <- function(thread_id) {
 handler <- coro::async(function(
   message, thread_id,
   on_chunk, on_done, on_error,
-  on_tool_call, on_tool_result
+  on_tool_call, on_tool_result, is_cancelled
 ) {
   obj     <- get_chat(thread_id)
   chat    <- obj$chat
@@ -112,7 +112,10 @@ handler <- coro::async(function(
   current$on_tool_result <- on_tool_result
 
   stream <- chat$stream_async(message)
-  for (chunk in coro::await_each(stream)) on_chunk(chunk)
+  for (chunk in coro::await_each(stream)) {
+    if (is_cancelled()) break
+    on_chunk(chunk)
+  }
   on_done()
 
   # 清理，避免泄漏到下次调用

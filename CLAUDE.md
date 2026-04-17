@@ -184,4 +184,17 @@ ui <- page_fluid(
 
 - File attachment handling (bridge has `attachments` field, UI not yet configured)
 - Theme customization API (CSS variables)
-- Interrupt support (`on_chunk` cancellation)
+- Interrupt support — 已实现 Level 1.5：JS 立即停止显示，R 端 stream 跑完但 chunks 静默丢弃。
+  `is_cancelled()` 接口已暴露给 handler，供将来升级使用。真 Level 2 选项：
+
+  | 方案 | 说明 |
+  |------|------|
+  | `callr::r_bg()` 后台进程 + `is_cancelled()` 杀进程 | 真 Level 2，改动大 |
+  | `httr2::req_perform_stream` callback 直接 `return(FALSE)` | 需完全绕开 ellmer |
+  | 当前（Level 1.5） | UI 立即响应，R 跑完静默丢弃 |
+
+  根本限制：R 单线程模型下 Shiny reactive flush 无法在 coro stream 运行期间触发，
+  cancel WebSocket 消息只能在 stream 结束后才被处理。
+
+- File attachment handling (bridge has `attachments` field, UI not yet configured)
+- Theme customization API (CSS variables)

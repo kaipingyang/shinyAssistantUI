@@ -20,6 +20,18 @@
 #'   * `is_reload` — `TRUE` when the user clicked "regenerate"; the handler
 #'     receives the same `message` text and can remove the previous assistant
 #'     turn from the LLM history before re-running.
+#'   * `is_cancelled` — zero-argument function that returns `TRUE` once the
+#'     user has clicked the stop button. Poll this inside your streaming loop
+#'     to implement true server-side cancellation:
+#'     ```r
+#'     for (chunk in stream) {
+#'       if (is_cancelled()) break
+#'       on_chunk(chunk)
+#'     }
+#'     on_done()
+#'     ```
+#'     For [ClaudeAgentSDK][https://github.com/kaipingyang/ClaudeAgentSDK],
+#'     call `client$interrupt()` when `is_cancelled()` returns `TRUE`.
 #'
 #'   All parameters except `message`, `on_chunk`, `on_done`, and `on_error`
 #'   are optional: handlers that omit them continue to work unchanged.
@@ -97,12 +109,28 @@ assistantUIServer <- function(id, handler,
     outputId = id
   )
 
+  # 每线程 cancel 标志（mutable environment，cancel 信号到达时设为 TRUE）
+  cancel_flags <- new.env(parent = emptyenv())
+
+  # 独立 observer 监听 cancel 信号（与主消息 observer 分离，避免 Shiny promise 重入问题）
+  shiny::observeEvent(session$input[[paste0(input_id, "_cancel")]], {
+    msg <- session$input[[paste0(input_id, "_cancel")]]
+    if (is.null(msg)) return()
+    tid <- msg$threadId %||% "default"
+    assign(tid, TRUE, envir = cancel_flags)
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
   shiny::observeEvent(session$input[[input_id]], {
     msg <- session$input[[input_id]]
     if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
 
-    thread_id <- msg$threadId %||% "default"
+    thread_id  <- msg$threadId %||% "default"
     is_reload  <- identical(msg$type, "reload")
+
+    # 新 run 开始前重置 cancel 标志
+    assign(thread_id, FALSE, envir = cancel_flags)
+    # is_cancelled() 供 handler 在 chunk 循环中轮询
+    is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
 
     on_chunk <- function(text) {
       session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
@@ -142,7 +170,8 @@ assistantUIServer <- function(id, handler,
       on_error       = on_error,
       on_tool_call   = on_tool_call,   # function(id, name, args, annotations)
       on_tool_result = on_tool_result, # function(id, result, is_error)
-      is_reload      = is_reload       # TRUE 时为重新生成请求
+      is_reload      = is_reload,      # TRUE 时为重新生成请求
+      is_cancelled   = is_cancelled    # function() 返回 TRUE 表示用户已取消
     )
     handler_params <- names(formals(handler))
     call_args <- if ("..." %in% handler_params) all_args
