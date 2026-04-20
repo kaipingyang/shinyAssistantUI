@@ -239,7 +239,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 return { ...m, content: [{ type: "text", text: prev2 + chunkText }] };
               });
             }
-            saveMessages(inputId, threadId, updated);
+            // 流式过程中不写 localStorage——每个 token 都序列化是主要卡顿来源；
+            // onDone 时统一持久化即可。
             return { ...prev, [threadId]: updated };
           });
         },
@@ -288,6 +289,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           streamingIdRef.current = null;
           setIsRunning(false);
           bridge.current.setRunCallbacks(null);
+          // 流结束后统一持久化（避免逐 chunk 写 localStorage）
+          setMessagesMap((prev) => {
+            const msgs = prev[threadId] ?? [];
+            saveMessages(inputId, threadId, msgs);
+            return prev;
+          });
         },
         onError: (errMsg) => {
           streamingIdRef.current = null;
