@@ -39,7 +39,7 @@ const CODE_THEMES: Record<string, any> = {
 };
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
-  ComposerPrimitive, MessagePrimitive,
+  ComposerPrimitive, MessagePrimitive, AttachmentPrimitive,
   unstable_useToolMentionAdapter,
   useAui, useMessagePartText,
 } from "@assistant-ui/react";
@@ -581,6 +581,20 @@ function ShinyComposer() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const isRunning = useThreadIsRunning();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    for (const file of files) {
+      try {
+        aui.composer().addAttachment(file);
+      } catch (err) {
+        console.error("[ShinyComposer] addAttachment error:", err);
+      }
+    }
+    e.target.value = "";
+  }, [aui]);
 
   // ── Lexical editor ref（用于 / 命令 chip 插入 + 键盘命令注册）──────────────
   const lexicalRef = useRef<HTMLDivElement>(null);
@@ -816,6 +830,41 @@ function ShinyComposer() {
         boxSizing: "border-box",
       }}
     >
+      {/* 待发送附件缩略图 */}
+      <ComposerPrimitive.Attachments>
+        {({ attachment }) => (
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: "4px",
+            background: "#f3f4f6", border: "1px solid #e5e7eb",
+            borderRadius: "6px", padding: "4px 8px", marginBottom: "6px",
+            marginRight: "4px", fontSize: "12px", color: "#374151",
+          }}>
+            {attachment.type === "image" && (attachment as any).content?.[0]?.type === "image" ? (
+              <img
+                src={(attachment as any).content[0].image}
+                alt={attachment.name}
+                style={{ width: "32px", height: "32px", objectFit: "cover", borderRadius: "3px" }}
+              />
+            ) : (
+              <span style={{ fontSize: "14px" }}>📄</span>
+            )}
+            <span style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {attachment.name}
+            </span>
+            <AttachmentPrimitive.Remove asChild>
+              <button
+                type="button"
+                style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  color: "#9ca3af", padding: "0 2px", fontSize: "12px", lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </AttachmentPrimitive.Remove>
+          </div>
+        )}
+      </ComposerPrimitive.Attachments>
       <LexicalComposerInput
         placeholder={placeholder}
         onKeyUp={handleKeyUp}
@@ -830,7 +879,19 @@ function ShinyComposer() {
       <div style={{ display: "flex", alignItems: "center",
                     justifyContent: "space-between", marginTop: "8px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-          <ComposerPrimitive.AddAttachment
+          {/* 原生文件选择：直接触发 input，不经过 ComposerPrimitive.AddAttachment 的 programmatic click */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/png,image/jpeg,image/webp,image/gif,text/plain,text/markdown,text/csv,text/json"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach file"
             style={{
               background: "none", border: "none", cursor: "pointer",
               fontSize: "20px", color: "#6b7280", padding: "2px 6px",
@@ -838,7 +899,7 @@ function ShinyComposer() {
             }}
           >
             +
-          </ComposerPrimitive.AddAttachment>
+          </button>
           <ComposerPrimitive.Dictate
             style={{
               background: "none", border: "none", cursor: "pointer",

@@ -1,6 +1,9 @@
 // useShinyRuntime — ExternalStoreRuntime + 多线程 + localStorage 持久化
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
-import { useExternalStoreRuntime, WebSpeechDictationAdapter } from "@assistant-ui/react";
+import {
+  useExternalStoreRuntime, WebSpeechDictationAdapter,
+  SimpleImageAttachmentAdapter, SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
+} from "@assistant-ui/react";
 import type {
   ThreadMessageLike,
   AppendMessage,
@@ -8,7 +11,7 @@ import type {
   StartRunConfig,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
-import type { ShinyBridge } from "./bridge";
+import type { ShinyBridge, AttachmentData } from "./bridge";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -86,6 +89,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const bridge = useRef<ShinyBridge>(null!);
   if (!bridge.current) {
     bridge.current = createShinyBridge(inputId);
+  }
+
+  // 文件上传适配器（image + 纯文本，稳定引用）
+  const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
+  if (!attachmentAdapter.current) {
+    attachmentAdapter.current = new CompositeAttachmentAdapter([
+      new SimpleImageAttachmentAdapter(),
+      new SimpleTextAttachmentAdapter(),
+    ]);
   }
 
   // 线程列表（持久化）
@@ -203,19 +215,24 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       bridge.current.setRunCallbacks({
         onChunk: (chunkText) => {
+          // 在调用 setMessagesMap 前先快照 ID——updater 是异步调度的，若
+          // onDone 先于 updater 执行会把 streamingIdRef.current 清为 null，
+          // 导致 updater 误判为新消息，产生"末尾碎片"分裂 bubble 的 bug。
+          if (!streamingIdRef.current) {
+            streamingIdRef.current = `assistant-${Date.now()}`;
+          }
+          const msgId = streamingIdRef.current;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             let updated: ThreadMessageLike[];
-            if (!streamingIdRef.current) {
-              const id = `assistant-${Date.now()}`;
-              streamingIdRef.current = id;
+            if (!threadMsgs.find((m) => m.id === msgId)) {
               updated = [
                 ...threadMsgs,
-                { id, role: "assistant", content: [{ type: "text", text: chunkText }] },
+                { id: msgId, role: "assistant", content: [{ type: "text", text: chunkText }] },
               ];
             } else {
               updated = threadMsgs.map((m) => {
-                if (m.id !== streamingIdRef.current) return m;
+                if (m.id !== msgId) return m;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const c0 = (m.content as any)[0];
                 const prev2 = c0?.type === "text" ? (c0.text as string) : "";
@@ -328,6 +345,24 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         });
       }
 
+      // 提取附件：序列化为结构化数据供 R 端使用
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawAttachments: any[] = (msg as any).attachments ?? [];
+      const attachmentData: AttachmentData[] = rawAttachments.map((att: any) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const content: any[] = att.content ?? [];
+        const imgPart  = content.find((p: any) => p.type === "image");
+        const textPart = content.find((p: any) => p.type === "text");
+        const filePart = content.find((p: any) => p.type === "file");
+        if (imgPart)  return { type: "image", name: att.name, data: imgPart.image,  contentType: att.contentType };
+        if (textPart) return { type: "text",  name: att.name, data: textPart.text,  contentType: att.contentType };
+        if (filePart) return { type: "file",  name: att.name, data: filePart.data,  contentType: att.contentType ?? filePart.mimeType };
+        return { type: att.type ?? "file", name: att.name, data: "", contentType: att.contentType };
+      });
+
+      // 存入消息（strip File 对象，无法 JSON 序列化）
+      const storedAttachments = rawAttachments.map((att: any) => ({ ...att, file: undefined }));
+
       // 追加用户消息
       setCurrentMessages((prev) => [
         ...prev,
@@ -335,10 +370,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           id: `user-${Date.now()}`,
           role: "user" as const,
           content: [{ type: "text" as const, text }],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
         },
       ]);
 
-      startRun(threadId, () => bridge.current.sendUserMessage(sendText, threadId));
+      startRun(threadId, () => bridge.current.sendUserMessage(
+        sendText, threadId,
+        attachmentData.length > 0 ? attachmentData : undefined,
+      ));
     },
     [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, startRun]
   );
@@ -468,6 +508,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     convertMessage: (m) => m,
     adapters: {
       threadList: threadListAdapter,
+      attachments: attachmentAdapter.current,
       dictation: WebSpeechDictationAdapter.isSupported() ? new WebSpeechDictationAdapter() : undefined,
     },
   });

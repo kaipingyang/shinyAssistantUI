@@ -99,7 +99,7 @@ get_chat <- function(thread_id) {
 
 # ── handler ──────────────────────────────────────────────────────────────────
 handler <- coro::async(function(
-  message, thread_id,
+  message, thread_id, attachments,
   on_chunk, on_done, on_error,
   on_tool_call, on_tool_result, is_cancelled
 ) {
@@ -111,7 +111,30 @@ handler <- coro::async(function(
   current$on_tool_call   <- on_tool_call
   current$on_tool_result <- on_tool_result
 
-  stream <- chat$stream_async(message)
+  # 构建多模态 content：文字 + 图片附件 + 文本文件附件
+  # 支持类型（ellmer 文档确认）：
+  #   image  → content_image_url(data_url)  PNG/JPEG/WebP/GIF
+  #   text   → 拼入消息体；a$data 已由 JS 包裹为 <attachment name=...>...</attachment>
+  atts <- attachments %||% list()
+
+  img_parts <- lapply(
+    Filter(function(a) identical(a$type, "image"), atts),
+    function(a) content_image_url(a$data)        # data URL 直接可用
+  )
+
+  text_sections <- paste(
+    vapply(Filter(function(a) identical(a$type, "text"), atts),
+           function(a) a$data,                   # 已含 <attachment> 包裹，直接使用
+           character(1)),
+    collapse = "\n"
+  )
+  if (nzchar(text_sections)) {
+    full_message <- paste0(text_sections, "\n\n", message)
+  } else {
+    full_message <- message
+  }
+
+  stream <- do.call(chat$stream_async, c(list(full_message), img_parts))
   for (chunk in coro::await_each(stream)) {
     if (is_cancelled()) break
     on_chunk(chunk)

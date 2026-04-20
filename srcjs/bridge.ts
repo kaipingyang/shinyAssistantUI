@@ -6,6 +6,13 @@ declare const Shiny: {
   addCustomMessageHandler: (type: string, handler: (data: unknown) => void) => void;
 };
 
+export type AttachmentData = {
+  type: string;        // "image" | "text" | "file"
+  name: string;
+  data: string;        // data URL for images, text content for text, base64 for files
+  contentType?: string;
+};
+
 export type ToolCallPayload = {
   toolCallId: string;
   toolName: string;
@@ -23,7 +30,7 @@ export type RunCallbacks = {
 };
 
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: string[]) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[]) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
@@ -58,10 +65,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   return {
-    sendUserMessage(text, threadId, attachments = []) {
+    sendUserMessage(text, threadId, attachments) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments, ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ts: Date.now() },
         { priority: "event" }
       );
     },

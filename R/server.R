@@ -17,6 +17,11 @@
 #'     (args should be a named list).
 #'   * `on_tool_result(tool_call_id, result, is_error = FALSE)` — update the
 #'     tool card with the result.
+#'   * `attachments` — list of named lists, one per file the user attached.
+#'     Each element has `type` (`"image"`, `"text"`, or `"file"`), `name`
+#'     (filename), `data` (data-URL string for images, plain text for text
+#'     files, base64 for other files), and optionally `contentType` (MIME
+#'     type). Empty list `list()` when no attachments are present.
 #'   * `is_reload` — `TRUE` when the user clicked "regenerate"; the handler
 #'     receives the same `message` text and can remove the previous assistant
 #'     turn from the LLM history before re-running.
@@ -170,6 +175,7 @@ assistantUIServer <- function(id, handler,
       on_error       = on_error,
       on_tool_call   = on_tool_call,   # function(id, name, args, annotations)
       on_tool_result = on_tool_result, # function(id, result, is_error)
+      attachments    = msg$attachments %||% list(), # list of attachment objects
       is_reload      = is_reload,      # TRUE 时为重新生成请求
       is_cancelled   = is_cancelled    # function() 返回 TRUE 表示用户已取消
     )
