@@ -216,28 +216,47 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       bridge.current.setRunCallbacks({
         onThinking: (thinkingText) => {
-          const thinkingId = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-          thinkingIdRef.current = thinkingId;
+          // 首次调用时创建 thinking 消息，后续调用追加文本（流式模式）
+          if (!thinkingIdRef.current) {
+            thinkingIdRef.current = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+          }
+          const thinkingId = thinkingIdRef.current;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
-            const updated: ThreadMessageLike[] = [
-              ...threadMsgs,
-              {
-                id: thinkingId,
-                role: "assistant" as const,
-                content: [
+            const existing = threadMsgs.find((m) => m.id === thinkingId);
+            if (!existing) {
+              return {
+                ...prev,
+                [threadId]: [
+                  ...threadMsgs,
                   {
-                    type: "tool-call" as const,
-                    toolCallId: thinkingId,
-                    toolName: "__thinking__",
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    args: {} as any,
-                    argsText: thinkingText,
+                    id: thinkingId,
+                    role: "assistant" as const,
+                    content: [
+                      {
+                        type: "tool-call" as const,
+                        toolCallId: thinkingId,
+                        toolName: "__thinking__",
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        args: {} as any,
+                        argsText: thinkingText,
+                      },
+                    ],
                   },
                 ],
-              },
-            ];
-            return { ...prev, [threadId]: updated };
+              };
+            }
+            // 追加到现有 thinking 消息（流式 thinking_delta）
+            return {
+              ...prev,
+              [threadId]: threadMsgs.map((m): ThreadMessageLike => {
+                if (m.id !== thinkingId) return m;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const part = (m.content as any)[0] as any;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return { ...m, content: [{ ...part, argsText: part.argsText + thinkingText }] } as any;
+              }),
+            };
           });
         },
         onChunk: (chunkText) => {

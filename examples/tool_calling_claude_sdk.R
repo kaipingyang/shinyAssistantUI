@@ -40,6 +40,8 @@ handler <- coro::async(function(
 
   client$send(message)
 
+  # StreamEvent 包含 Anthropic 原始 SSE 事件，可流式输出 thinking 和 text。
+  # AssistantMessage 是完整消息，text/thinking 已通过 StreamEvent 处理，跳过避免重复。
   repeat {
     if (is_cancelled()) {
       client$interrupt()
@@ -50,12 +52,14 @@ handler <- coro::async(function(
 
     done <- FALSE
     for (msg in msgs) {
-      if (inherits(msg, "AssistantMessage")) {
-        for (blk in msg$content) {
-          if (inherits(blk, "ThinkingBlock") && nzchar(blk$thinking)) {
-            on_thinking(blk$thinking)
-          } else if (inherits(blk, "TextBlock") && nzchar(blk$text)) {
-            on_chunk(blk$text)
+      if (inherits(msg, "StreamEvent")) {
+        evt   <- msg$event
+        delta <- evt[["delta"]]
+        if (identical(evt[["type"]], "content_block_delta") && is.list(delta)) {
+          if (identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% "")) {
+            on_thinking(delta[["thinking"]])
+          } else if (identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
+            on_chunk(delta[["text"]])
           }
         }
       } else if (inherits(msg, "PermissionRequestMessage")) {
@@ -82,7 +86,7 @@ handler <- coro::async(function(
     }
 
     if (done) break
-    coro::await(later_promise(0.05))
+    coro::await(later_promise(0.01))
   }
 
   on_done()
