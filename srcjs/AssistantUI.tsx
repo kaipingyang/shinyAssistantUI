@@ -905,6 +905,8 @@ function ShinyComposer() {
     maxWidth: "340px",
     padding: "6px",
     zIndex: 200,
+    maxHeight: "280px",
+    overflowY: "auto",
   };
 
   const itemStyle: React.CSSProperties = {
