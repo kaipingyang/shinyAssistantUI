@@ -11,7 +11,8 @@ get_client <- function(thread_id) {
   if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
   client <- ClaudeSDKClient$new(ClaudeAgentOptions(
     permission_mode             = "default",
-    permission_prompt_tool_name = "stdio"
+    permission_prompt_tool_name = "stdio",
+    include_partial_messages    = TRUE
   ))
   client$connect()
   clients[[thread_id]] <<- client
