@@ -33,6 +33,7 @@ export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[]) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
+  sendToolApproval: (toolCallId: string, approved: boolean) => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
 }
@@ -85,6 +86,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         `${inputId}_cancel`,
         { threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendToolApproval(toolCallId, approved) {
+      Shiny.setInputValue(
+        `${inputId}_tool_approval`,
+        { toolCallId, approved, ts: Date.now() },
         { priority: "event" }
       );
     },

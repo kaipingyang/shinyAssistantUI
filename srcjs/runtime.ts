@@ -506,7 +506,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [inputId, currentThreadId, threads, archivedThreads, switchAwayFrom]
   );
 
-  return useExternalStoreRuntime({
+  const sendToolApproval = useCallback(
+    (toolCallId: string, approved: boolean) => {
+      bridge.current.sendToolApproval(toolCallId, approved);
+    },
+    [] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
     onNew,
@@ -519,4 +526,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       dictation: WebSpeechDictationAdapter.isSupported() ? new WebSpeechDictationAdapter() : undefined,
     },
   });
+
+  return { runtime, sendToolApproval };
 }

@@ -52,7 +52,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
-  MicIcon, MicOffIcon, SquareIcon,
+  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -83,6 +83,10 @@ import "@assistant-ui/react-ui/styles/index.css";
 import "@assistant-ui/react-ui/styles/markdown.css";
 import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
+
+// ── Tool 审批：模块级变量（避免 React context tree 依赖）────────────────────────
+// ToolFallback 由 @assistant-ui 渲染，位置可能在独立 React 树里，context 不可靠。
+let _toolApprovalHandler: ((id: string, approved: boolean) => void) | null = null;
 
 // ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
 function CustomThreadListItem() {
@@ -398,30 +402,41 @@ const WeatherToolUI = makeAssistantToolUI({
 });
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
-function GenericToolCard({ toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
+function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
   const [open, setOpen] = useState(false);
+  const [approvalSent, setApprovalSent] = useState(false);
+
   const pending  = result === undefined;
   const done     = !pending && !isError;
   const errored  = !pending && !!isError;
 
   // annotations 存在 artifact 字段（由 runtime.ts 从 ToolCallPayload.annotations 写入）
   const annotations = artifact as Record<string, unknown> | undefined;
-  const iconName = annotations?.icon as string | undefined;
-  const toolTitle = (annotations?.title as string | undefined) ?? toolName;
+  const iconName        = annotations?.icon as string | undefined;
+  const toolTitle       = (annotations?.title as string | undefined) ?? toolName;
+  const requiresApproval = annotations?.requiresApproval === true;
 
-  // 成功时：tool 定义的图标，或 CheckCircle2；失败时：AlertCircle
+  // 审批等待状态：待处理 + 需要审批 + 尚未发送决策
+  const awaitingApproval = pending && requiresApproval && !approvalSent;
+
+  // 成功时：tool 定义的图标，或 CheckCircle2；失败时：AlertCircle；审批等待：ShieldAlert
   const SuccessIcon: IconComponent = (iconName && TOOL_ICONS[iconName]) ?? CheckCircle2Icon;
-  const HeaderIcon: IconComponent  = errored ? AlertCircleIcon
-    : pending ? WrenchIcon
+  const HeaderIcon: IconComponent  = errored        ? AlertCircleIcon
+    : awaitingApproval              ? ShieldAlertIcon
+    : pending                       ? WrenchIcon
     : SuccessIcon;
-  const iconColor = errored ? "#dc2626" : pending ? "#9ca3af" : "#16a34a";
+  const iconColor = errored ? "#dc2626"
+    : awaitingApproval ? "#d97706"
+    : pending ? "#9ca3af"
+    : "#16a34a";
 
   // 卡片整体背景
-  const cardBg = errored ? "#fef2f2"
-    : done    ? "hsl(0,0%,97%)"
+  const cardBg = errored        ? "#fef2f2"
+    : awaitingApproval          ? "#fffbeb"
+    : done                      ? "hsl(0,0%,97%)"
     : "#ffffff";
-  const cardBorder = errored ? "#fecaca"
-    : done    ? "#e5e7eb"
+  const cardBorder = errored        ? "#fecaca"
+    : awaitingApproval              ? "#fcd34d"
     : "#e5e7eb";
 
   // argsText 防御性 stringify（Shiny 可能把 json class 内联为对象）
@@ -430,6 +445,15 @@ function GenericToolCard({ toolName, argsText, args, result, isError, artifact }
   const resultDisplay = pending ? ""
     : typeof result === "string" ? result
     : JSON.stringify(result, null, 2);
+
+  const handleApprove = () => {
+    setApprovalSent(true);
+    _toolApprovalHandler?.(toolCallId, true);
+  };
+  const handleDeny = () => {
+    setApprovalSent(true);
+    _toolApprovalHandler?.(toolCallId, false);
+  };
 
   return (
     <div style={{
@@ -440,7 +464,7 @@ function GenericToolCard({ toolName, argsText, args, result, isError, artifact }
       marginBottom: "4px",
       background: cardBg,
     }}>
-      {/* 头部：图标 + 工具名 + 展开箭头 */}
+      {/* 头部：图标 + 工具名 + 状态文字 + 展开箭头 */}
       <button
         onClick={() => setOpen((v) => !v)}
         style={{
@@ -452,12 +476,46 @@ function GenericToolCard({ toolName, argsText, args, result, isError, artifact }
       >
         <HeaderIcon size={14} style={{ flexShrink: 0 }} color={iconColor} />
         <span style={{ fontWeight: 500, flex: 1 }}>{toolTitle}</span>
-        {pending && (
+        {awaitingApproval && (
+          <span style={{ fontSize: "11px", color: "#d97706" }}>awaiting approval</span>
+        )}
+        {!awaitingApproval && pending && (
           <span style={{ fontSize: "11px", color: "#9ca3af" }}>running…</span>
         )}
         {open ? <ChevronDownIcon size={13} color="#9ca3af" />
                : <ChevronRightIcon size={13} color="#9ca3af" />}
       </button>
+
+      {/* 审批按钮（始终可见，无需展开） */}
+      {awaitingApproval && (
+        <div style={{
+          borderTop: `1px solid ${cardBorder}`,
+          padding: "8px 10px",
+          display: "flex",
+          gap: "8px",
+        }}>
+          <button
+            onClick={handleApprove}
+            style={{
+              padding: "4px 14px", borderRadius: "5px", fontSize: "12px",
+              fontWeight: 600, cursor: "pointer", border: "none",
+              background: "#16a34a", color: "#fff",
+            }}
+          >
+            Approve
+          </button>
+          <button
+            onClick={handleDeny}
+            style={{
+              padding: "4px 14px", borderRadius: "5px", fontSize: "12px",
+              fontWeight: 600, cursor: "pointer", border: "none",
+              background: "#6b7280", color: "#fff",
+            }}
+          >
+            Deny
+          </button>
+        </div>
+      )}
 
       {/* 展开：参数 + 结果 */}
       {open && (
@@ -1080,7 +1138,7 @@ interface AssistantUIProps {
 }
 
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
-  const runtime = useShinyRuntime(inputId, config);
+  const { runtime, sendToolApproval } = useShinyRuntime(inputId, config);
   const showThreadList = config?.show_thread_list === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -1103,6 +1161,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     const raw = config?.suggestions as Array<{ prompt: string; text?: string }> | undefined;
     return (raw ?? []).map(s => ({ prompt: s.prompt, text: s.text ?? s.prompt }));
   }, [config]);
+
+  // 把 sendToolApproval 存入模块级变量，供 GenericToolCard 直接调用
+  useEffect(() => {
+    _toolApprovalHandler = sendToolApproval;
+    return () => { _toolApprovalHandler = null; };
+  }, [sendToolApproval]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

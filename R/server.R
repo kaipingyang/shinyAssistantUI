@@ -37,6 +37,19 @@
 #'     ```
 #'     For [ClaudeAgentSDK][https://github.com/kaipingyang/ClaudeAgentSDK],
 #'     call `client$interrupt()` when `is_cancelled()` returns `TRUE`.
+#'   * `wait_for_approval` — `function(tool_call_id)` that returns a
+#'     `promises::promise` which resolves to `TRUE` (approved) or `FALSE`
+#'     (denied) once the user clicks Approve/Deny in the tool card UI.
+#'     Use inside a `coro::async` `on_tool_request` callback to pause
+#'     the stream until human approval:
+#'     ```r
+#'     chat$on_tool_request(coro::async(function(request) {
+#'       on_tool_call(request@id, request@name, request@arguments,
+#'                   list(requiresApproval = TRUE))
+#'       approved <- coro::await(wait_for_approval(request@id))
+#'       if (!approved) ellmer::tool_reject("User denied the tool call.")
+#'     }))
+#'     ```
 #'
 #'   All parameters except `message`, `on_chunk`, `on_done`, and `on_error`
 #'   are optional: handlers that omit them continue to work unchanged.
@@ -117,7 +130,61 @@ assistantUIServer <- function(id, handler,
   # 每线程 cancel 标志（mutable environment，cancel 信号到达时设为 TRUE）
   cancel_flags <- new.env(parent = emptyenv())
 
-  # 独立 observer 监听 cancel 信号（与主消息 observer 分离，避免 Shiny promise 重入问题）
+  # ── 静态回调（整个 session 不变）────────────────────────────────────────────
+  on_chunk <- function(text) {
+    session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
+  }
+  on_done <- function() {
+    session$sendCustomMessage(paste0(input_id, ":done"), list())
+  }
+  on_error_fn <- function(msg) {
+    session$sendCustomMessage(paste0(input_id, ":error"), list(message = msg))
+  }
+  on_tool_call <- function(tool_call_id, tool_name, args = list(),
+                           annotations = list()) {
+    session$sendCustomMessage(
+      paste0(input_id, ":tool-call"),
+      list(
+        toolCallId  = tool_call_id,
+        toolName    = tool_name,
+        args        = args,
+        argsText    = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)),
+        annotations = annotations
+      )
+    )
+  }
+  on_tool_result <- function(tool_call_id, result, is_error = FALSE) {
+    session$sendCustomMessage(
+      paste0(input_id, ":tool-result"),
+      list(toolCallId = tool_call_id, result = result, isError = is_error)
+    )
+  }
+
+  # ── tool 审批 ────────────────────────────────────────────────────────────────
+  # wait_for_approval 用 observeEvent 驱动。
+  # 关键：handler 必须通过 ExtendedTask 启动（见下方 stream_task），
+  # 只有 ExtendedTask 才允许 Shiny reactive flush 在 coro::await 挂起期间运行；
+  # 直接从 observeEvent 里启动 handler 则不会触发 reactive flush，导致审批 observer 死锁。
+  approval_resolvers <- new.env(parent = emptyenv())
+
+  shiny::observeEvent(session$input[[paste0(input_id, "_tool_approval")]], {
+    msg <- session$input[[paste0(input_id, "_tool_approval")]]
+    if (is.null(msg)) return()
+    tid <- msg$toolCallId
+    resolver <- get0(tid, envir = approval_resolvers)
+    if (!is.null(resolver)) {
+      rm(list = tid, envir = approval_resolvers)
+      resolver(isTRUE(msg$approved))
+    }
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  wait_for_approval <- function(tool_call_id) {
+    promises::promise(function(resolve, reject) {
+      assign(tool_call_id, resolve, envir = approval_resolvers)
+    })
+  }
+
+  # 独立 observer 监听 cancel 信号
   shiny::observeEvent(session$input[[paste0(input_id, "_cancel")]], {
     msg <- session$input[[paste0(input_id, "_cancel")]]
     if (is.null(msg)) return()
@@ -125,73 +192,57 @@ assistantUIServer <- function(id, handler,
     assign(tid, TRUE, envir = cancel_flags)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
+  # ── ExtendedTask：以 Shiny-aware 异步任务运行 handler ────────────────────────
+  # ExtendedTask 让 Shiny 知道有长时任务在运行，允许 reactive flush 在 await 期间发生，
+  # 从而 _tool_approval / _cancel 等 observer 可以正常触发。
+  stream_task <- shiny::ExtendedTask$new(
+    function(msg_text, thread_id, is_reload, attachments) {
+      is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
+
+      all_args <- list(
+        message           = msg_text,
+        thread_id         = thread_id,
+        on_chunk          = on_chunk,
+        on_done           = on_done,
+        on_error          = on_error_fn,
+        on_tool_call      = on_tool_call,
+        on_tool_result    = on_tool_result,
+        attachments       = attachments,
+        is_reload         = is_reload,
+        is_cancelled      = is_cancelled,
+        wait_for_approval = wait_for_approval
+      )
+      handler_params <- names(formals(handler))
+      call_args <- if ("..." %in% handler_params) all_args
+                   else all_args[names(all_args) %in% handler_params]
+
+      result <- tryCatch(
+        do.call(handler, call_args),
+        error = function(e) { on_error_fn(conditionMessage(e)); NULL }
+      )
+      # 返回 promise（如有）让 ExtendedTask 追踪其生命周期
+      if (inherits(result, "promise")) {
+        promises::catch(result, function(e) { on_error_fn(conditionMessage(e)); NULL })
+      }
+    }
+  )
+
   shiny::observeEvent(session$input[[input_id]], {
     msg <- session$input[[input_id]]
     if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
 
-    thread_id  <- msg$threadId %||% "default"
-    is_reload  <- identical(msg$type, "reload")
+    thread_id <- msg$threadId %||% "default"
+    is_reload <- identical(msg$type, "reload")
 
     # 新 run 开始前重置 cancel 标志
     assign(thread_id, FALSE, envir = cancel_flags)
-    # is_cancelled() 供 handler 在 chunk 循环中轮询
-    is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
 
-    on_chunk <- function(text) {
-      session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
-    }
-    on_done <- function() {
-      session$sendCustomMessage(paste0(input_id, ":done"), list())
-    }
-    on_error <- function(message) {
-      session$sendCustomMessage(paste0(input_id, ":error"), list(message = message))
-    }
-    on_tool_call <- function(tool_call_id, tool_name, args = list(),
-                             annotations = list()) {
-      session$sendCustomMessage(
-        paste0(input_id, ":tool-call"),
-        list(
-          toolCallId  = tool_call_id,
-          toolName    = tool_name,
-          args        = args,
-          argsText    = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)),
-          annotations = annotations
-        )
-      )
-    }
-    on_tool_result <- function(tool_call_id, result, is_error = FALSE) {
-      session$sendCustomMessage(
-        paste0(input_id, ":tool-result"),
-        list(toolCallId = tool_call_id, result = result, isError = is_error)
-      )
-    }
-
-    # 向后兼容：只传 handler 实际声明的参数
-    all_args <- list(
-      message        = msg$text,
-      thread_id      = thread_id,
-      on_chunk       = on_chunk,
-      on_done        = on_done,
-      on_error       = on_error,
-      on_tool_call   = on_tool_call,   # function(id, name, args, annotations)
-      on_tool_result = on_tool_result, # function(id, result, is_error)
-      attachments    = msg$attachments %||% list(), # list of attachment objects
-      is_reload      = is_reload,      # TRUE 时为重新生成请求
-      is_cancelled   = is_cancelled    # function() 返回 TRUE 表示用户已取消
+    stream_task$invoke(
+      msg$text,
+      thread_id,
+      is_reload,
+      msg$attachments %||% list()
     )
-    handler_params <- names(formals(handler))
-    call_args <- if ("..." %in% handler_params) all_args
-                 else all_args[names(all_args) %in% handler_params]
-
-    result <- tryCatch(
-      do.call(handler, call_args),
-      error = function(e) on_error(conditionMessage(e))
-    )
-
-    # 支持异步 handler（返回 promise）
-    if (inherits(result, "promise")) {
-      promises::catch(result, function(e) on_error(conditionMessage(e)))
-    }
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   invisible(list(

@@ -58,6 +58,9 @@ calculate <- tool(
 # ── 每线程独立 Chat 对象 ──────────────────────────────────────────────────────
 # on_tool_request / on_tool_result 是累加回调，只注册一次。
 # 用 environment 做可变引用，每次 handler 调用时更新。
+# calculate 需要审批（任意 R 代码执行前需确认），get_weather 直接放行。
+APPROVAL_TOOLS <- c("calculate")
+
 chats <- list()
 
 get_chat <- function(thread_id) {
@@ -72,17 +75,27 @@ get_chat <- function(thread_id) {
 
   # current 是当次 handler 注入的回调，handler 结束后清空
   current <- new.env(parent = emptyenv())
-  current$on_tool_call   <- NULL
-  current$on_tool_result <- NULL
+  current$on_tool_call      <- NULL
+  current$on_tool_result    <- NULL
+  current$wait_for_approval <- NULL
 
-  chat$on_tool_request(function(request) {
+  chat$on_tool_request(coro::async(function(request) {
+    needs_approval <- request@name %in% APPROVAL_TOOLS
     current$on_tool_call(
       tool_call_id = request@id,
       tool_name    = request@name,
       args         = request@arguments,
-      annotations  = request@tool@annotations
+      annotations  = c(
+        request@tool@annotations %||% list(),
+        list(requiresApproval = needs_approval)
+      )
     )
-  })
+
+    if (needs_approval) {
+      approved <- coro::await(current$wait_for_approval(request@id))
+      if (!approved) ellmer::tool_reject("User denied the tool call.")
+    }
+  }))
 
   chat$on_tool_result(function(result) {
     current$on_tool_result(
@@ -101,15 +114,17 @@ get_chat <- function(thread_id) {
 handler <- coro::async(function(
   message, thread_id, attachments,
   on_chunk, on_done, on_error,
-  on_tool_call, on_tool_result, is_cancelled
+  on_tool_call, on_tool_result, is_cancelled,
+  wait_for_approval
 ) {
   obj     <- get_chat(thread_id)
   chat    <- obj$chat
   current <- obj$current
 
   # 注入本次回调
-  current$on_tool_call   <- on_tool_call
-  current$on_tool_result <- on_tool_result
+  current$on_tool_call      <- on_tool_call
+  current$on_tool_result    <- on_tool_result
+  current$wait_for_approval <- wait_for_approval
 
   # 构建多模态 content：文字 + 图片附件 + 文本文件附件
   # 支持类型（ellmer 文档确认）：
@@ -142,8 +157,9 @@ handler <- coro::async(function(
   on_done()
 
   # 清理，避免泄漏到下次调用
-  current$on_tool_call   <- NULL
-  current$on_tool_result <- NULL
+  current$on_tool_call      <- NULL
+  current$on_tool_result    <- NULL
+  current$wait_for_approval <- NULL
 })
 
 # ── UI ───────────────────────────────────────────────────────────────────────
