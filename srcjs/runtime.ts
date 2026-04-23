@@ -142,6 +142,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   const [isRunning, setIsRunning] = useState(false);
   const streamingIdRef = useRef<string | null>(null);
+  const thinkingIdRef  = useRef<string | null>(null);
 
   // 当前线程消息
   const messages = useMemo(
@@ -214,7 +215,50 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       streamingIdRef.current = null;
 
       bridge.current.setRunCallbacks({
+        onThinking: (thinkingText) => {
+          const thinkingId = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+          thinkingIdRef.current = thinkingId;
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated: ThreadMessageLike[] = [
+              ...threadMsgs,
+              {
+                id: thinkingId,
+                role: "assistant" as const,
+                content: [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: thinkingId,
+                    toolName: "__thinking__",
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    args: {} as any,
+                    argsText: thinkingText,
+                  },
+                ],
+              },
+            ];
+            return { ...prev, [threadId]: updated };
+          });
+        },
         onChunk: (chunkText) => {
+          // Collapse thinking card when text starts arriving
+          if (thinkingIdRef.current) {
+            const tId = thinkingIdRef.current;
+            thinkingIdRef.current = null;
+            setMessagesMap((prev) => {
+              const threadMsgs = prev[threadId] ?? [];
+              return {
+                ...prev,
+                [threadId]: threadMsgs.map((m): ThreadMessageLike => {
+                  if (m.id !== tId) return m;
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const part = (m.content as any)[0] as any;
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  return { ...m, content: [{ ...part, result: "done", isError: false }] } as any;
+                }),
+              };
+            });
+          }
           // 在调用 setMessagesMap 前先快照 ID——updater 是异步调度的，若
           // onDone 先于 updater 执行会把 streamingIdRef.current 清为 null，
           // 导致 updater 误判为新消息，产生"末尾碎片"分裂 bubble 的 bug。
@@ -286,18 +330,30 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onDone: () => {
+          const tId = thinkingIdRef.current;
           streamingIdRef.current = null;
+          thinkingIdRef.current  = null;
           setIsRunning(false);
           bridge.current.setRunCallbacks(null);
-          // 流结束后统一持久化（避免逐 chunk 写 localStorage）
+          // 流结束后统一持久化；顺便把未关闭的 thinking card 标为 done
           setMessagesMap((prev) => {
-            const msgs = prev[threadId] ?? [];
+            let msgs = prev[threadId] ?? [];
+            if (tId) {
+              msgs = msgs.map((m): ThreadMessageLike => {
+                if (m.id !== tId) return m;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const part = (m.content as any)[0] as any;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return { ...m, content: [{ ...part, result: "done", isError: false }] } as any;
+              });
+            }
             saveMessages(inputId, threadId, msgs);
-            return prev;
+            return { ...prev, [threadId]: msgs };
           });
         },
         onError: (errMsg) => {
           streamingIdRef.current = null;
+          thinkingIdRef.current  = null;
           setIsRunning(false);
           bridge.current.setRunCallbacks(null);
           setMessagesMap((prev) => {
@@ -425,6 +481,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const onCancel = useCallback(async () => {
     const threadId = currentThreadId;
     streamingIdRef.current = null;
+    thinkingIdRef.current  = null;
     setIsRunning(false);
     bridge.current.setRunCallbacks(null);
     bridge.current.sendCancel(threadId);

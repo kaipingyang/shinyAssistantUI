@@ -23,6 +23,7 @@ export type ToolCallPayload = {
 
 export type RunCallbacks = {
   onChunk: (text: string) => void;
+  onThinking?: (text: string) => void;
   onToolCall: (toolCall: ToolCallPayload) => void;
   onToolResult: (toolCallId: string, result: unknown, isError: boolean) => void;
   onDone: () => void;
@@ -54,6 +55,11 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
     const d = data as { message: string };
     currentCallbacks?.onError(d.message);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:thinking`, (data) => {
+    const d = data as { text: string };
+    currentCallbacks?.onThinking?.(d.text);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:tool-call`, (data) => {

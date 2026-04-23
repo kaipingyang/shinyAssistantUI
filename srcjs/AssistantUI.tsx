@@ -52,7 +52,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
-  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon,
+  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon, BrainIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -399,6 +399,61 @@ function WeatherToolCard(props: ToolCallMessagePartProps) {
 const WeatherToolUI = makeAssistantToolUI({
   toolName: "get_weather",
   render: WeatherToolCard,
+});
+
+// ── Thinking 卡片（toolName = "__thinking__"）────────────────────────────────
+function ThinkingCard({ argsText, result }: ToolCallMessagePartProps) {
+  const [open, setOpen] = useState(false);
+  const done = result !== undefined;
+
+  return (
+    <div style={{
+      border: "1px solid #e5e7eb",
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: "hsl(0,0%,98%)",
+    }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <BrainIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{done ? "Thought" : "Thinking…"}</span>
+        {!done && <span style={{ fontSize: "11px", color: "#d97706" }}>in progress</span>}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
+      </button>
+
+      {open && argsText && (
+        <div style={{
+          borderTop: "1px solid #e5e7eb",
+          padding: "8px 10px",
+          fontSize: "12px",
+          color: "#6b7280",
+          fontStyle: "italic",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxHeight: "300px",
+          overflowY: "auto",
+          lineHeight: 1.5,
+        }}>
+          {argsText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ThinkingToolUI = makeAssistantToolUI({
+  toolName: "__thinking__",
+  render: ThinkingCard,
 });
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
@@ -1222,7 +1277,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               "--aui-thread-max-width": "9999px",
             } as React.CSSProperties}>
               <Thread
-                tools={[WeatherToolUI]}
+                tools={[WeatherToolUI, ThinkingToolUI]}
                 welcome={{ suggestions }}
                 components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage }}
                 assistantMessage={{

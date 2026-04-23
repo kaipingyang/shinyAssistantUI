@@ -159,6 +159,9 @@ assistantUIServer <- function(id, handler,
       list(toolCallId = tool_call_id, result = result, isError = is_error)
     )
   }
+  on_thinking <- function(text) {
+    session$sendCustomMessage(paste0(input_id, ":thinking"), list(text = text))
+  }
 
   # ── tool 审批 ────────────────────────────────────────────────────────────────
   # wait_for_approval 用 observeEvent 驱动。
@@ -207,6 +210,7 @@ assistantUIServer <- function(id, handler,
         on_error          = on_error_fn,
         on_tool_call      = on_tool_call,
         on_tool_result    = on_tool_result,
+        on_thinking       = on_thinking,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
