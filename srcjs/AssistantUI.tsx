@@ -52,7 +52,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
-  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon, BrainIcon,
+  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -424,7 +424,7 @@ function ThinkingCard({ argsText, result }: ToolCallMessagePartProps) {
           color: "var(--aui-foreground, #111827)",
         }}
       >
-        <BrainIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
+        <LightbulbIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
         <span style={{ fontWeight: 500, flex: 1 }}>{done ? "Thought" : "Thinking…"}</span>
         {!done && <span style={{ fontSize: "11px", color: "#d97706" }}>in progress</span>}
         {open ? <ChevronDownIcon size={13} color="#9ca3af" />
