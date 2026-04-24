@@ -64,8 +64,9 @@
 #'   message. Each element is a list with `prompt` (required, the text sent on
 #'   click) and optional `text` (display label, defaults to `prompt`).
 #' @param commands List of slash-command definitions. Each element is a list
-#'   with `name` (e.g. `"summarize"`), `description`, and `prompt` (the message
-#'   sent immediately when the command is selected).
+#'   with `name` (e.g. `"summarize"`), `description`, `prompt` (the message
+#'   sent immediately when the command is selected), and optional `category`
+#'   (group label shown as a section header in the popover, e.g. `"Git"`).
 #' @param tools List of tool definitions for the \@ mention menu. Each element
 #'   is a list with `name` and `description`. Typically mirrors the tools
 #'   registered with ellmer.

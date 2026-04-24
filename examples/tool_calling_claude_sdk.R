@@ -133,7 +133,17 @@ server <- function(input, output, session) {
       )
     ),
 
-    commands = skills,
+    # commands 支持可选 category 字段：相同 category 的命令在弹窗里归为一组。
+    # load_claude_skills() 返回的命令不含 category，追加自定义分类命令时可混用。
+    commands = c(
+      skills,
+      list(
+        list(name = "git-status",  description = "Show git status",       prompt = "Show the current git status",                 category = "Git"),
+        list(name = "git-log",     description = "Show recent commits",    prompt = "Show the last 10 git commits with git log",    category = "Git"),
+        list(name = "list-files",  description = "List directory contents",prompt = "List the files in the current directory",      category = "Files"),
+        list(name = "find-r-files",description = "Find all R source files",prompt = "Find all .R files recursively in this project",category = "Files")
+      )
+    ),
 
     tools = list(
       list(name = "Bash",     description = "Execute shell commands"),

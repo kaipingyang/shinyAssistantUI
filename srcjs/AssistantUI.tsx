@@ -670,9 +670,16 @@ function CustomUserMessage() {
 }
 
 // ── ShinyComposer：自定义输入框（@ mention / / commands / + 上传）────────────
+interface CommandDef {
+  name: string;
+  description: string;
+  prompt: string;
+  category?: string;
+}
+
 interface ComposerConfigCtx {
   tools:    Array<{ name: string; description: string }>;
-  commands: Array<{ name: string; description: string; prompt: string }>;
+  commands: Array<CommandDef>;
 }
 const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [] });
 
@@ -788,6 +795,17 @@ function ShinyComposer() {
       : commands;
   }, [commands, slashState]);
   filteredCmdsRef.current = filteredCommands; // latest-ref 同步
+
+  // Group filteredCommands by category for section headers（insertion-order preserved）
+  const groupedCommands = useMemo(() => {
+    const map = new Map<string, CommandDef[]>();
+    for (const cmd of filteredCommands) {
+      const cat = cmd.category ?? "";
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(cmd);
+    }
+    return Array.from(map.entries()).map(([cat, cmds]) => ({ cat, cmds }));
+  }, [filteredCommands]);
 
   const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
     setSlashState(null);
@@ -1062,31 +1080,53 @@ function ShinyComposer() {
   );
 
   // ── / 命令弹窗：纯 React state 驱动，onPointerDown+onMouseDown 双保险防 blur ─
+  // Build sections with flat keyboard-nav indices (flatIdx increments across all groups)
+  let flatIdx = 0;
+  const commandSections = groupedCommands.map(({ cat, cmds }) => ({
+    cat,
+    items: cmds.map(cmd => ({ cmd, idx: flatIdx++ })),
+  }));
+
   const slashPopover = hasCommands && slashState !== null && filteredCommands.length > 0 ? (
     <div
       style={popoverStyle}
       onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
       onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
     >
-      {filteredCommands.map((cmd, index) => (
-        <button
-          key={cmd.name}
-          type="button"
-          style={{
-            ...itemStyle,
-            // 键盘焦点高亮（鼠标 hover 由 onMouseEnter 处理）
-            background: index === focusedCommandIndex ? "#f3f4f6" : "none",
-          }}
-          onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
-          onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
-          onMouseEnter={() => setFocusedCommandIndex(index)}
-          onClick={() => handleCommandSelect(cmd)}
-        >
-          <span style={{ fontWeight: 500 }}>/{cmd.name}</span>
-          {cmd.description && (
-            <span style={{ color: "#6b7280", flex: 1 }}>{cmd.description}</span>
+      {commandSections.map(({ cat, items }, secIdx) => (
+        <div key={cat || "__uncategorized__"}>
+          {cat && (
+            <div style={{
+              padding: `${secIdx > 0 ? "8px" : "4px"} 10px 3px`,
+              fontSize: "11px",
+              fontWeight: 600,
+              color: "#9ca3af",
+              textTransform: "uppercase" as const,
+              letterSpacing: "0.06em",
+            }}>
+              {cat}
+            </div>
           )}
-        </button>
+          {items.map(({ cmd, idx }) => (
+            <button
+              key={cmd.name}
+              type="button"
+              style={{
+                ...itemStyle,
+                background: idx === focusedCommandIndex ? "#f3f4f6" : "none",
+              }}
+              onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
+              onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+              onMouseEnter={() => setFocusedCommandIndex(idx)}
+              onClick={() => handleCommandSelect(cmd)}
+            >
+              <span style={{ fontWeight: 500 }}>/{cmd.name}</span>
+              {cmd.description && (
+                <span style={{ color: "#6b7280", flex: 1 }}>{cmd.description}</span>
+              )}
+            </button>
+          ))}
+        </div>
       ))}
     </div>
   ) : null;
