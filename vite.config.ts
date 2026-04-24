@@ -13,7 +13,7 @@ export default defineConfig({
     {
       name: "bump-widget-version",
       closeBundle() {
-        const version = `0.0.${Date.now()}`;
+        const version = `0.0.${Math.floor(Date.now() / 60000)}`;
         const yaml = `dependencies:\n  - name: shinyAssistantUI\n    version: ${version}\n    src: www\n    script: shinyAssistantUI.js\n    stylesheet: style.css\n`;
         writeFileSync("inst/htmlwidgets/assistantUI.yaml", yaml);
       },
