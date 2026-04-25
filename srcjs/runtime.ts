@@ -506,29 +506,31 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendCancel(threadId);
   }, [currentThreadId]);
 
+  // ── switchToNewThread（也暴露给外部 slash command 用）─────────────────────
+  const switchToNewThread = useCallback(() => {
+    const newId = makeThreadId();
+    const newThread: ExternalStoreThreadData<"regular"> = {
+      id: newId,
+      status: "regular",
+      title: "新对话",
+    };
+    setThreads((prev) => {
+      const next = [newThread, ...prev];
+      saveThreads(inputId, next);
+      return next;
+    });
+    setCurrentThreadId(newId);
+    setIsRunning(false);
+    streamingIdRef.current = null;
+  }, [inputId]);
+
   // ── threadList adapter ───────────────────────────────────────────────────
   const threadListAdapter = useMemo(
     () => ({
       threadId: currentThreadId,
       threads,
       archivedThreads,
-      onSwitchToNewThread: () => {
-        const newId = makeThreadId();
-        const newThread: ExternalStoreThreadData<"regular"> = {
-          id: newId,
-          status: "regular",
-          title: "新对话",
-        };
-        setThreads((prev) => {
-          const next = [newThread, ...prev];
-          saveThreads(inputId, next);
-          return next;
-        });
-        setCurrentThreadId(newId);
-        setIsRunning(false);
-        streamingIdRef.current = null;
-        // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
-      },
+      onSwitchToNewThread: switchToNewThread,
       onSwitchToThread: (threadId: string) => {
         setCurrentThreadId(threadId);
         setIsRunning(false);
@@ -603,5 +605,5 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     },
   });
 
-  return { runtime, sendToolApproval };
+  return { runtime, sendToolApproval, switchToNewThread };
 }

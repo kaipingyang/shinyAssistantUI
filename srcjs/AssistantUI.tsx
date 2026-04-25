@@ -677,11 +677,20 @@ interface CommandDef {
   category?: string;
 }
 
+// ── SlashEntry: 统一类型，action（内置操作）或 prompt（用户命令）────────────
+type SlashEntry =
+  | { kind: "action"; id: string; section: string; label: string; description?: string; action: () => void }
+  | { kind: "prompt"; id: string; section: string; label: string; description?: string; cmd: CommandDef }
+
+// Claude Code 固定 6 个 section 顺序
+const SECTION_ORDER = ["Context", "Model", "Customize", "Slash Commands", "Settings", "Support"] as const;
+
 interface ComposerConfigCtx {
-  tools:    Array<{ name: string; description: string }>;
-  commands: Array<CommandDef>;
+  tools:       Array<{ name: string; description: string }>;
+  commands:    Array<CommandDef>;
+  onNewThread: () => void;
 }
-const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [] });
+const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [], onNewThread: () => {} });
 
 // 从光标位置向后扫描，遇到空白停止，找到 "/" 即返回触发位置（与库内 detectTrigger 逻辑一致）
 function detectSlashTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
@@ -697,7 +706,7 @@ function detectSlashTrigger(text: string, cursorPos: number): { query: string; o
 }
 
 function ShinyComposer() {
-  const { tools, commands } = useContext(ShinyComposerCtx);
+  const { tools, commands, onNewThread } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const isRunning = useThreadIsRunning();
@@ -722,10 +731,10 @@ function ShinyComposer() {
   // ── / 命令键盘导航 state + latest-ref pattern ─────────────────────────────
   // latest-ref：在 useEffect 的 Lexical command 回调里安全访问最新值（跳过 deps 重新注册）
   const [focusedCommandIndex, setFocusedCommandIndex] = useState(0);
-  const slashStateRef    = useRef<typeof slashState>(null);
-  const filteredCmdsRef  = useRef<typeof filteredCommands>([]);
-  const focusedIdxRef    = useRef(0);
-  const handleCmdSelRef  = useRef<typeof handleCommandSelect>(null!);
+  const slashStateRef      = useRef<typeof slashState>(null);
+  const filteredEntriesRef = useRef<SlashEntry[]>([]);
+  const focusedIdxRef      = useRef(0);
+  const handleItemSelRef   = useRef<(entry: SlashEntry) => void>(null!);
 
   // ── @ mention adapter ─────────────────────────────────────────────────────
   const mentionAdapter = unstable_useToolMentionAdapter({
@@ -785,27 +794,71 @@ function ShinyComposer() {
     setSlashState(null);
   }, []);
 
-  const filteredCommands = useMemo(() => {
+  // 内置 action entries（Context section）
+  const builtinEntries = useMemo<SlashEntry[]>(() => [
+    {
+      kind: "action" as const,
+      id: "attach-file",
+      section: "Context",
+      label: "Attach file...",
+      description: "Upload a file to include in the conversation",
+      action: () => fileInputRef.current?.click(),
+    },
+    {
+      kind: "action" as const,
+      id: "new-conversation",
+      section: "Context",
+      label: "New conversation",
+      description: "Start a fresh conversation",
+      action: () => onNewThread(),
+    },
+  ], [onNewThread]);
+
+  // 全量 entries：内置 + 用户命令
+  const allEntries = useMemo<SlashEntry[]>(() => {
+    const userEntries: SlashEntry[] = commands.map(cmd => ({
+      kind: "prompt" as const,
+      id: cmd.name,
+      section: cmd.category ?? "Slash Commands",
+      label: "/" + cmd.name,
+      description: cmd.description,
+      cmd,
+    }));
+    return [...builtinEntries, ...userEntries];
+  }, [builtinEntries, commands]);
+
+  // 按 query 过滤（对 label + description 均匹配）
+  const filteredEntries = useMemo<SlashEntry[]>(() => {
     if (!slashState) return [];
     const q = slashState.query.toLowerCase();
-    return q
-      ? commands.filter(c =>
-          c.name.toLowerCase().includes(q) ||
-          (c.description?.toLowerCase().includes(q) ?? false))
-      : commands;
-  }, [commands, slashState]);
-  filteredCmdsRef.current = filteredCommands; // latest-ref 同步
+    if (!q) return allEntries;
+    return allEntries.filter(e =>
+      e.label.toLowerCase().includes(q) ||
+      (e.description?.toLowerCase().includes(q) ?? false)
+    );
+  }, [allEntries, slashState]);
+  filteredEntriesRef.current = filteredEntries; // latest-ref 同步
 
-  // Group filteredCommands by category for section headers（insertion-order preserved）
-  const groupedCommands = useMemo(() => {
-    const map = new Map<string, CommandDef[]>();
-    for (const cmd of filteredCommands) {
-      const cat = cmd.category ?? "";
-      if (!map.has(cat)) map.set(cat, []);
-      map.get(cat)!.push(cmd);
+  // 按 SECTION_ORDER 分组，附带扁平 keyboard-nav 索引
+  const commandSections = useMemo(() => {
+    const map = new Map<string, SlashEntry[]>();
+    for (const entry of filteredEntries) {
+      if (!map.has(entry.section)) map.set(entry.section, []);
+      map.get(entry.section)!.push(entry);
     }
-    return Array.from(map.entries()).map(([cat, cmds]) => ({ cat, cmds }));
-  }, [filteredCommands]);
+    const result: Array<{ section: string; items: Array<{ entry: SlashEntry; idx: number }> }> = [];
+    let idx = 0;
+    for (const s of SECTION_ORDER) {
+      if (!map.has(s)) continue;
+      result.push({ section: s, items: map.get(s)!.map(entry => ({ entry, idx: idx++ })) });
+      map.delete(s);
+    }
+    // 非标准 section（用户自定义 category 不在 SECTION_ORDER 内）追加到末尾
+    for (const [s, entries] of map) {
+      result.push({ section: s, items: entries.map(entry => ({ entry, idx: idx++ })) });
+    }
+    return result;
+  }, [filteredEntries]);
 
   const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
     setSlashState(null);
@@ -867,9 +920,19 @@ function ShinyComposer() {
       mentionNode.selectNext();
     });
   }, [aui, slashState]);
+  // action 和 prompt 统一入口：action 直接执行，prompt 走 Lexical 插入
+  const handleItemSelect = useCallback((entry: SlashEntry) => {
+    if (entry.kind === "action") {
+      setSlashState(null);
+      entry.action();
+    } else {
+      handleCommandSelect(entry.cmd);
+    }
+  }, [handleCommandSelect]);
+
   // latest-ref 同步（render 阶段）
-  focusedIdxRef.current   = focusedCommandIndex;
-  handleCmdSelRef.current = handleCommandSelect;
+  focusedIdxRef.current    = focusedCommandIndex;
+  handleItemSelRef.current = handleItemSelect;
 
   // 弹窗开关时重置焦点索引
   useEffect(() => { setFocusedCommandIndex(0); }, [slashState]);
@@ -883,22 +946,22 @@ function ShinyComposer() {
     if (!editor) return undefined;
     return mergeRegister(
       editor.registerCommand(KEY_ENTER_COMMAND, (e: KeyboardEvent | null) => {
-        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
         e?.preventDefault();
-        const idx = Math.min(focusedIdxRef.current, filteredCmdsRef.current.length - 1);
-        handleCmdSelRef.current(filteredCmdsRef.current[idx]);
+        const idx = Math.min(focusedIdxRef.current, filteredEntriesRef.current.length - 1);
+        handleItemSelRef.current(filteredEntriesRef.current[idx]);
         return true;
       }, COMMAND_PRIORITY_CRITICAL),
       editor.registerCommand(KEY_ARROW_DOWN_COMMAND, (e: KeyboardEvent | null) => {
-        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
         e?.preventDefault();
-        setFocusedCommandIndex(i => (i + 1) % filteredCmdsRef.current.length);
+        setFocusedCommandIndex(i => (i + 1) % filteredEntriesRef.current.length);
         return true;
       }, COMMAND_PRIORITY_CRITICAL),
       editor.registerCommand(KEY_ARROW_UP_COMMAND, (e: KeyboardEvent | null) => {
-        if (!slashStateRef.current || filteredCmdsRef.current.length === 0) return false;
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
         e?.preventDefault();
-        setFocusedCommandIndex(i => (i - 1 + filteredCmdsRef.current.length) % filteredCmdsRef.current.length);
+        setFocusedCommandIndex(i => (i - 1 + filteredEntriesRef.current.length) % filteredEntriesRef.current.length);
         return true;
       }, COMMAND_PRIORITY_CRITICAL),
       editor.registerCommand(KEY_ESCAPE_COMMAND, (_e: KeyboardEvent | null) => {
@@ -941,14 +1004,13 @@ function ShinyComposer() {
     textAlign: "left",
   };
 
-  const hasTools    = tools.length > 0;
-  const hasCommands = commands.length > 0;
+  const hasTools = tools.length > 0;
 
   const hints = [
-    hasTools    && "@ to mention",
-    hasCommands && "/ for commands",
+    hasTools && "@ to mention",
+    "/ for commands",
   ].filter(Boolean).join(", ");
-  const placeholder = hints ? `Send a message… (${hints})` : "Send a message…";
+  const placeholder = `Send a message… (${hints})`;
 
   // ── 输入框 ────────────────────────────────────────────────────────────────
   const inputBox = (
@@ -1079,37 +1141,28 @@ function ShinyComposer() {
     </div>
   );
 
-  // ── / 命令弹窗：纯 React state 驱动，onPointerDown+onMouseDown 双保险防 blur ─
-  // Build sections with flat keyboard-nav indices (flatIdx increments across all groups)
-  let flatIdx = 0;
-  const commandSections = groupedCommands.map(({ cat, cmds }) => ({
-    cat,
-    items: cmds.map(cmd => ({ cmd, idx: flatIdx++ })),
-  }));
-
-  const slashPopover = hasCommands && slashState !== null && filteredCommands.length > 0 ? (
+  // ── / 命令弹窗：6 个固定 section，内置 action + 用户 prompt 命令 ───────────
+  const slashPopover = slashState !== null && filteredEntries.length > 0 ? (
     <div
       style={popoverStyle}
       onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
       onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
     >
-      {commandSections.map(({ cat, items }, secIdx) => (
-        <div key={cat || "__uncategorized__"}>
-          {cat && (
-            <div style={{
-              padding: `${secIdx > 0 ? "8px" : "4px"} 10px 3px`,
-              fontSize: "11px",
-              fontWeight: 600,
-              color: "#9ca3af",
-              textTransform: "uppercase" as const,
-              letterSpacing: "0.06em",
-            }}>
-              {cat}
-            </div>
-          )}
-          {items.map(({ cmd, idx }) => (
+      {commandSections.map(({ section, items }, secIdx) => (
+        <div key={section}>
+          <div style={{
+            padding: `${secIdx > 0 ? "8px" : "4px"} 10px 3px`,
+            fontSize: "11px",
+            fontWeight: 600,
+            color: "#9ca3af",
+            textTransform: "uppercase" as const,
+            letterSpacing: "0.06em",
+          }}>
+            {section}
+          </div>
+          {items.map(({ entry, idx }) => (
             <button
-              key={cmd.name}
+              key={entry.id}
               type="button"
               style={{
                 ...itemStyle,
@@ -1118,11 +1171,11 @@ function ShinyComposer() {
               onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
               onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
               onMouseEnter={() => setFocusedCommandIndex(idx)}
-              onClick={() => handleCommandSelect(cmd)}
+              onClick={() => handleItemSelect(entry)}
             >
-              <span style={{ fontWeight: 500 }}>/{cmd.name}</span>
-              {cmd.description && (
-                <span style={{ color: "#6b7280", flex: 1 }}>{cmd.description}</span>
+              <span style={{ fontWeight: 500 }}>{entry.label}</span>
+              {entry.description && (
+                <span style={{ color: "#6b7280", flex: 1 }}>{entry.description}</span>
               )}
             </button>
           ))}
@@ -1235,7 +1288,7 @@ interface AssistantUIProps {
 }
 
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
-  const { runtime, sendToolApproval } = useShinyRuntime(inputId, config);
+  const { runtime, sendToolApproval, switchToNewThread } = useShinyRuntime(inputId, config);
   const showThreadList = config?.show_thread_list === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -1249,9 +1302,10 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
 
   // composer context — tools 和 commands 从 R 的 config 读取
   const composerCtx = useMemo<ComposerConfigCtx>(() => ({
-    tools:    (config?.tools    as ComposerConfigCtx["tools"])    ?? [],
-    commands: (config?.commands as ComposerConfigCtx["commands"]) ?? [],
-  }), [config]);
+    tools:       (config?.tools    as ComposerConfigCtx["tools"])    ?? [],
+    commands:    (config?.commands as ComposerConfigCtx["commands"]) ?? [],
+    onNewThread: switchToNewThread,
+  }), [config, switchToNewThread]);
 
   // starter suggestions — 传给 Thread welcome.suggestions
   const suggestions = useMemo(() => {
