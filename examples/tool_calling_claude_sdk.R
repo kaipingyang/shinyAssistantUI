@@ -133,11 +133,34 @@ server <- function(input, output, session) {
       )
     ),
 
-    # load_claude_skills() 加载的 skill 文件不含 category，将归入 "Slash Commands" section。
-    # 如需自定义 section，可给命令加 category 字段（对应 Claude Code 的 6 个固定 section 之一）：
-    #   "Context" / "Model" / "Customize" / "Slash Commands" / "Settings" / "Support"
-    # 例：list(name = "my-cmd", description = "...", prompt = "...", category = "Context")
     commands = skills,
+
+    # action_items：点击后触发 on_action(id)，不发消息给模型
+    action_items = list(
+      list(section = "Model",    id = "thinking-on",   label = "Enable thinking",
+           description = "Turn on extended thinking mode"),
+      list(section = "Model",    id = "thinking-off",  label = "Disable thinking",
+           description = "Turn off extended thinking mode"),
+      list(section = "Settings", id = "clear-history", label = "Clear history",
+           description = "Clear all stored conversations"),
+      list(section = "Support",  id = "view-docs",     label = "View help docs",
+           description = "Open shinyAssistantUI documentation")
+    ),
+
+    on_action = function(id) {
+      if (id == "clear-history") {
+        # localStorage 数据由浏览器端持有，R 无法直接清除；
+        # 可发送 clear 信号新建线程，彻底刷新则需用户手动清除浏览器缓存。
+        session$sendCustomMessage(paste0("chat_input:clear"), list())
+      } else if (id == "view-docs") {
+        session$sendCustomMessage("shiny-notification-show", list(
+          message = "shinyAssistantUI: https://github.com/kaipingyang/shinyAssistantUI",
+          type    = "message",
+          duration = 5
+        ))
+      }
+      # thinking-on / thinking-off: 可在此修改传给 handler 的系统提示或模型参数
+    },
 
     tools = list(
       list(name = "Bash",     description = "Execute shell commands"),

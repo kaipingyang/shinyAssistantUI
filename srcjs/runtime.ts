@@ -591,6 +591,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
+  const sendAction = useCallback(
+    (actionId: string) => { bridge.current.sendAction(actionId); },
+    [] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
@@ -605,5 +610,5 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     },
   });
 
-  return { runtime, sendToolApproval, switchToNewThread };
+  return { runtime, sendToolApproval, switchToNewThread, sendAction };
 }

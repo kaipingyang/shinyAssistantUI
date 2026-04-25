@@ -66,7 +66,26 @@
 #' @param commands List of slash-command definitions. Each element is a list
 #'   with `name` (e.g. `"summarize"`), `description`, `prompt` (the message
 #'   sent immediately when the command is selected), and optional `category`
-#'   (group label shown as a section header in the popover, e.g. `"Git"`).
+#'   (group label shown as a section header in the popover). Category should be
+#'   one of the 6 fixed sections: `"Context"`, `"Model"`, `"Customize"`,
+#'   `"Slash Commands"` (default), `"Settings"`, `"Support"`.
+#' @param action_items List of action-type slash-command items. Unlike
+#'   `commands`, these do not send a message to the AI — instead, clicking them
+#'   fires `on_action(id)` on the R side, allowing arbitrary server logic.
+#'   Each element is a list with `section` (one of the 6 fixed section names),
+#'   `id` (unique string passed to `on_action`), `label` (display name), and
+#'   optional `description`. Example:
+#'   ```r
+#'   action_items = list(
+#'     list(section = "Model",   id = "thinking-on",  label = "Enable thinking"),
+#'     list(section = "Support", id = "view-docs",    label = "View help docs",
+#'          description = "Open documentation")
+#'   )
+#'   ```
+#' @param on_action `function(id)` called when the user clicks an item from
+#'   `action_items`. `id` is the string from the item definition. Use this to
+#'   trigger server-side logic (e.g. toggle a setting, open a URL, call
+#'   `clear()`). `NULL` (default) means no handler is registered.
 #' @param tools List of tool definitions for the \@ mention menu. Each element
 #'   is a list with `name` and `description`. Typically mirrors the tools
 #'   registered with ellmer.
@@ -105,11 +124,14 @@ assistantUIServer <- function(id, handler,
                               suggestions       = list(),
                               commands          = list(),
                               tools             = list(),
+                              action_items      = list(),
+                              on_action         = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI")) {
   force(show_thread_list); force(suggestions); force(commands)
-  force(tools); force(code_theme); force(strings); force(assistant_avatar)
+  force(tools); force(action_items); force(on_action)
+  force(code_theme); force(strings); force(assistant_avatar)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
 
@@ -118,6 +140,7 @@ assistantUIServer <- function(id, handler,
     suggestions      = suggestions,
     commands         = commands,
     tools            = tools,
+    action_items     = action_items,
     code_theme       = code_theme
   )
   if (!is.null(strings))          config$strings          <- strings
@@ -186,6 +209,15 @@ assistantUIServer <- function(id, handler,
     promises::promise(function(resolve, reject) {
       assign(tool_call_id, resolve, envir = approval_resolvers)
     })
+  }
+
+  # action_items 点击 → 通知 on_action 回调
+  if (!is.null(on_action)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_action")]], {
+      msg <- session$input[[paste0(input_id, "_action")]]
+      if (is.null(msg)) return()
+      on_action(msg$id)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
   # 独立 observer 监听 cancel 信号

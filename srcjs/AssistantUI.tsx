@@ -685,12 +685,23 @@ type SlashEntry =
 // Claude Code 固定 6 个 section 顺序
 const SECTION_ORDER = ["Context", "Model", "Customize", "Slash Commands", "Settings", "Support"] as const;
 
+interface ActionItemDef {
+  section: string;
+  id: string;
+  label: string;
+  description?: string;
+}
+
 interface ComposerConfigCtx {
   tools:       Array<{ name: string; description: string }>;
   commands:    Array<CommandDef>;
+  actionItems: Array<ActionItemDef>;
   onNewThread: () => void;
+  onAction:    (id: string) => void;
 }
-const ShinyComposerCtx = createContext<ComposerConfigCtx>({ tools: [], commands: [], onNewThread: () => {} });
+const ShinyComposerCtx = createContext<ComposerConfigCtx>({
+  tools: [], commands: [], actionItems: [], onNewThread: () => {}, onAction: () => {},
+});
 
 // 从光标位置向后扫描，遇到空白停止，找到 "/" 即返回触发位置（与库内 detectTrigger 逻辑一致）
 function detectSlashTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
@@ -706,7 +717,7 @@ function detectSlashTrigger(text: string, cursorPos: number): { query: string; o
 }
 
 function ShinyComposer() {
-  const { tools, commands, onNewThread } = useContext(ShinyComposerCtx);
+  const { tools, commands, actionItems, onNewThread, onAction } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const isRunning = useThreadIsRunning();
@@ -814,7 +825,19 @@ function ShinyComposer() {
     },
   ], [onNewThread]);
 
-  // 全量 entries：内置 + 用户命令
+  // R 端 action_items 转为 SlashEntry（点击后通知 R）
+  const actionEntries = useMemo<SlashEntry[]>(() =>
+    actionItems.map(item => ({
+      kind: "action" as const,
+      id: item.id,
+      section: item.section,
+      label: item.label,
+      description: item.description,
+      action: () => onAction(item.id),
+    })),
+  [actionItems, onAction]);
+
+  // 全量 entries：内置 + R action items + 用户命令
   const allEntries = useMemo<SlashEntry[]>(() => {
     const userEntries: SlashEntry[] = commands.map(cmd => ({
       kind: "prompt" as const,
@@ -824,8 +847,8 @@ function ShinyComposer() {
       description: cmd.description,
       cmd,
     }));
-    return [...builtinEntries, ...userEntries];
-  }, [builtinEntries, commands]);
+    return [...builtinEntries, ...actionEntries, ...userEntries];
+  }, [builtinEntries, actionEntries, commands]);
 
   // 按 query 过滤（对 label + description 均匹配）
   const filteredEntries = useMemo<SlashEntry[]>(() => {
@@ -1288,7 +1311,7 @@ interface AssistantUIProps {
 }
 
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
-  const { runtime, sendToolApproval, switchToNewThread } = useShinyRuntime(inputId, config);
+  const { runtime, sendToolApproval, switchToNewThread, sendAction } = useShinyRuntime(inputId, config);
   const showThreadList = config?.show_thread_list === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -1302,10 +1325,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
 
   // composer context — tools 和 commands 从 R 的 config 读取
   const composerCtx = useMemo<ComposerConfigCtx>(() => ({
-    tools:       (config?.tools    as ComposerConfigCtx["tools"])    ?? [],
-    commands:    (config?.commands as ComposerConfigCtx["commands"]) ?? [],
+    tools:       (config?.tools        as ComposerConfigCtx["tools"])       ?? [],
+    commands:    (config?.commands     as ComposerConfigCtx["commands"])    ?? [],
+    actionItems: (config?.action_items as ComposerConfigCtx["actionItems"]) ?? [],
     onNewThread: switchToNewThread,
-  }), [config, switchToNewThread]);
+    onAction:    sendAction,
+  }), [config, switchToNewThread, sendAction]);
 
   // starter suggestions — 传给 Thread welcome.suggestions
   const suggestions = useMemo(() => {
