@@ -996,20 +996,26 @@ function ShinyComposer() {
     );
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 键盘导航时滚动 popover 让焦点行可见
+  const popoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!popoverRef.current) return;
+    const el = popoverRef.current.querySelector<HTMLElement>(`[data-nav-idx="${focusedCommandIndex}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [focusedCommandIndex]);
+
   const popoverStyle: React.CSSProperties = {
     position: "absolute",
     bottom: "calc(100% + 6px)",
-    left: 16,   // 与 ComposerPrimitive.Root padding 对齐
+    left: 16,
     right: 16,
     background: "white",
     border: "1px solid #e5e7eb",
     borderRadius: "10px",
     boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
-    minWidth: "260px",
-    maxWidth: "340px",
     padding: "6px",
     zIndex: 200,
-    maxHeight: "280px",
+    maxHeight: "320px",
     overflowY: "auto",
   };
 
@@ -1167,6 +1173,7 @@ function ShinyComposer() {
   // ── / 命令弹窗：6 个固定 section，内置 action + 用户 prompt 命令 ───────────
   const slashPopover = slashState !== null && filteredEntries.length > 0 ? (
     <div
+      ref={popoverRef}
       style={popoverStyle}
       onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
       onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
@@ -1186,6 +1193,7 @@ function ShinyComposer() {
           {items.map(({ entry, idx }) => (
             <button
               key={entry.id}
+              data-nav-idx={idx}
               type="button"
               style={{
                 ...itemStyle,
