@@ -28,7 +28,7 @@ later_promise <- function(delay = 0.05) {
 
 # ── handler ──────────────────────────────────────────────────────────────────
 handler <- coro::async(function(
-  message, thread_id,
+  message, thread_id, attachments,
   on_chunk, on_done, on_error,
   on_tool_call, on_tool_result, on_thinking,
   is_cancelled, wait_for_approval
@@ -39,7 +39,34 @@ handler <- coro::async(function(
   )
   if (is.null(client)) return(invisible(NULL))
 
-  client$send(message)
+  # 处理附件：图片 + 文本文件
+  atts <- attachments %||% list()
+
+  # 图片附件
+  img_parts <- lapply(
+    Filter(function(a) identical(a$type, "image"), atts),
+    function(a) a$data  # data URL 直接可用
+  )
+
+  # 文本附件合并到消息体
+  text_sections <- paste(
+    vapply(Filter(function(a) identical(a$type, "text"), atts),
+           function(a) a$data,  # 已含 <attachment> 包裹，直接使用
+           character(1)),
+    collapse = "\n"
+  )
+  if (nzchar(text_sections)) {
+    full_message <- paste0(text_sections, "\n\n", message)
+  } else {
+    full_message <- message
+  }
+
+  # 发送消息 + 图片（ClaudeAgentSDK 多模态）
+  if (length(img_parts) > 0) {
+    client$send_with_images(full_message, img_parts)
+  } else {
+    client$send(full_message)
+  }
 
   # StreamEvent 包含 Anthropic 原始 SSE 事件，可流式输出 thinking 和 text。
   # AssistantMessage 是完整消息，text/thinking 已通过 StreamEvent 处理，跳过避免重复。

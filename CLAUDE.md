@@ -183,6 +183,8 @@ ui <- page_fluid(
 ## Known gaps / future work
 
 - Theme customization API (CSS variables)
+- **Gap 1: 流式 tool call 参数（input_json_delta）** — Claude API 逐步吐出工具参数 JSON，当前只在完整后才显示。需要：R 端加 `on_tool_call_start` + `on_tool_call_delta` 回调，bridge 加 `:tool-call-start/delta` 消息，runtime 追加 argsText（类似 thinking）。**阻塞**：ellmer 不暴露 input_json_delta，等 ClaudeAgentSDK 支持。工作量：2-3 小时。
+- **Gap 2: Sub-agent 层级展示** — 多级 agent 调用时展示嵌套工具树。**推荐视觉嵌套**：`annotations.parentToolCallId` + CSS 缩进，不动 runtime 数据模型。工作量：3-4 小时。不推荐真 sub-thread runtime（工作量极大）。
 - Interrupt support — 已实现 Level 1.5：JS 立即停止显示，R 端 stream 跑完但 chunks 静默丢弃。
   `is_cancelled()` 接口已暴露给 handler，供将来升级使用。真 Level 2 选项：
 
@@ -194,3 +196,16 @@ ui <- page_fluid(
 
   根本限制：R 单线程模型下 Shiny reactive flush 无法在 coro stream 运行期间触发，
   cancel WebSocket 消息只能在 stream 结束后才被处理。
+
+## 版本稳定性评估
+
+当前版本已实现 ClaudeAgentSDK 核心需求，基础功能稳定：
+- ✅ 多线程对话 + localStorage 持久化
+- ✅ 工具调用 + 7 种结果类型（table/markdown/code/image/file/html/auto）
+- ✅ 工具审批（requiresApproval）+ 用户取消
+- ✅ 附件上传（image/text/file）
+- ✅ ExtendedTask 异步 + reactive flush
+- ✅ 主要 bug 已修复（duplicate ID、localStorage 腐败、useRef 懒初始化）
+- ✅ 生产模式 tap bug 已绕开
+
+**稳定性**：高。核心流程经过测试，无已知阻塞性问题。Gap 1/2 为增强功能，不影响当前使用。

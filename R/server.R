@@ -13,10 +13,27 @@
 #'   * `on_chunk(text)` — call repeatedly to stream response tokens.
 #'   * `on_done()` — call once when the response is complete.
 #'   * `on_error(msg)` — call to surface an error in the UI.
-#'   * `on_tool_call(tool_call_id, tool_name, args)` — show a tool call card
-#'     (args should be a named list).
+#'   * `on_tool_call(tool_call_id, tool_name, args, annotations)` — show a
+#'     tool call card. `args` should be a named list. `annotations` is an
+#'     optional named list controlling card appearance and result rendering.
+#'     Recognized keys:
+#'     * `icon` — lucide icon name (`"search"`, `"database"`, `"code"`, …)
+#'     * `title` — display name shown in the card header
+#'     * `requiresApproval` — `TRUE` to show Approve/Deny buttons
+#'     * `resultType` — how to render the result from `on_tool_result()`:
+#'       `"auto"` (default, JSON/text in `<pre>`), `"markdown"`,
+#'       `"table"`, `"code"`, `"image"`, `"file"`, `"html"`
+#'     * `resultLang` — language for `resultType = "code"` (e.g. `"r"`,
+#'       `"python"`, `"sql"`; default `"text"`)
+#'     * `resultFilename` — filename for `resultType = "file"` download
+#'       button (e.g. `"results.csv"`; default `"download"`)
 #'   * `on_tool_result(tool_call_id, result, is_error = FALSE)` — update the
 #'     tool card with the result.
+#'     - `resultType = "table"`: pass `jsonlite::toJSON(df, auto_unbox = FALSE)`
+#'     - `resultType = "file"`: pass base64 data URL
+#'       (`paste0("data:text/csv;base64,", jsonlite::base64_enc(chartr(...)))`)
+#'     - `resultType = "html"`: pass HTML string (rendered via
+#'       `dangerouslySetInnerHTML`; only use with trusted tool output)
 #'   * `attachments` — list of named lists, one per file the user attached.
 #'     Each element has `type` (`"image"`, `"text"`, or `"file"`), `name`
 #'     (filename), `data` (data-URL string for images, plain text for text

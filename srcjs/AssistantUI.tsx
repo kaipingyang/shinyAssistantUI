@@ -53,6 +53,7 @@ import {
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
   MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
+  DownloadIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -87,6 +88,10 @@ import { useShinyRuntime } from "./runtime";
 // ── Tool 审批：模块级变量（避免 React context tree 依赖）────────────────────────
 // ToolFallback 由 @assistant-ui 渲染，位置可能在独立 React 树里，context 不可靠。
 let _toolApprovalHandler: ((id: string, approved: boolean) => void) | null = null;
+
+// ── Tool result 代码主题（与 AssistantUI 的 code_theme 保持同步）──────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _codeThemeStyle: any = oneLight;
 
 // ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
 function CustomThreadListItem() {
@@ -456,6 +461,226 @@ const ThinkingToolUI = makeAssistantToolUI({
   render: ThinkingCard,
 });
 
+// ── Tool result 富文本渲染辅助 ────────────────────────────────────────────────
+
+// inline markdown: **bold**, *italic*, `code`, [link](url)
+function parseInline(text: string): React.ReactNode[] {
+  const pattern = /(\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\n]+)\))/g;
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    if (match[2] !== undefined)
+      nodes.push(<strong key={key++}>{match[2]}</strong>);
+    else if (match[3] !== undefined)
+      nodes.push(<em key={key++}>{match[3]}</em>);
+    else if (match[4] !== undefined)
+      nodes.push(<code key={key++} style={{ background: "rgba(0,0,0,0.06)", borderRadius: "3px", padding: "1px 4px", fontSize: "12px", fontFamily: "monospace" }}>{match[4]}</code>);
+    else if (match[5] !== undefined && match[6] !== undefined)
+      nodes.push(<a key={key++} href={match[6]} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>{match[5]}</a>);
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+// block-level markdown: headings, lists, code blocks, paragraphs
+function SimpleMarkdown({ text }: { text: string }) {
+  const nodes: React.ReactNode[] = [];
+  const lines = text.split("\n");
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // fenced code block
+    if (line.startsWith("```")) {
+      const lang = line.slice(3).trim() || "text";
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) { code.push(lines[i]); i++; }
+      i++;
+      nodes.push(
+        <PrismLight key={key++} language={lang} style={_codeThemeStyle}
+          customStyle={{ margin: "6px 0", fontSize: "12px", borderRadius: "4px" }}>
+          {code.join("\n")}
+        </PrismLight>
+      );
+      continue;
+    }
+    // headings
+    const hm = line.match(/^(#{1,3})\s+(.+)/);
+    if (hm) {
+      const level = hm[1].length as 1 | 2 | 3;
+      const Tag = `h${level}` as "h1" | "h2" | "h3";
+      const fs = level === 1 ? "15px" : level === 2 ? "14px" : "13px";
+      nodes.push(<Tag key={key++} style={{ margin: "8px 0 4px", fontSize: fs, fontWeight: 600, lineHeight: 1.3 }}>{parseInline(hm[2])}</Tag>);
+      i++; continue;
+    }
+    // horizontal rule
+    if (/^---+$/.test(line.trim())) {
+      nodes.push(<hr key={key++} style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "8px 0" }} />);
+      i++; continue;
+    }
+    // unordered list
+    if (/^[-*+]\s/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: "2px" }}>{parseInline(lines[i].slice(2))}</li>);
+        i++;
+      }
+      nodes.push(<ul key={key++} style={{ margin: "4px 0", paddingLeft: "18px", fontSize: "13px", lineHeight: "1.5" }}>{items}</ul>);
+      continue;
+    }
+    // ordered list
+    if (/^\d+\.\s/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: "2px" }}>{parseInline(lines[i].replace(/^\d+\.\s/, ""))}</li>);
+        i++;
+      }
+      nodes.push(<ol key={key++} style={{ margin: "4px 0", paddingLeft: "18px", fontSize: "13px", lineHeight: "1.5" }}>{items}</ol>);
+      continue;
+    }
+    // blank line
+    if (line.trim() === "") { i++; continue; }
+    // paragraph (accumulate until next block)
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].startsWith("#") &&
+      !lines[i].startsWith("```") &&
+      !/^[-*+]\s/.test(lines[i]) &&
+      !/^\d+\.\s/.test(lines[i]) &&
+      !/^---+$/.test(lines[i].trim())
+    ) { para.push(lines[i]); i++; }
+    if (para.length > 0)
+      nodes.push(<p key={key++} style={{ margin: "4px 0", fontSize: "13px", lineHeight: "1.5" }}>{parseInline(para.join(" "))}</p>);
+  }
+  return <div>{nodes}</div>;
+}
+
+// render array-of-objects (JSON data frame) as scrollable table
+function TableResult({ data }: { data: unknown }) {
+  let rows: Record<string, unknown>[];
+  try {
+    const parsed = typeof data === "string" ? JSON.parse(data) : data;
+    if (!Array.isArray(parsed) || parsed.length === 0 || typeof parsed[0] !== "object" || parsed[0] === null)
+      throw new Error("not a table");
+    rows = parsed as Record<string, unknown>[];
+  } catch {
+    const display = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    return <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(0,0,0,0.04)", fontSize: "12px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{display}</pre>;
+  }
+  const columns = Object.keys(rows[0]);
+  return (
+    <div style={{ overflowX: "auto", maxHeight: "260px", overflowY: "auto", borderRadius: "4px", border: "1px solid #e5e7eb" }}>
+      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "12px" }}>
+        <thead>
+          <tr>
+            {columns.map(col => (
+              <th key={col} style={{ border: "1px solid #e5e7eb", padding: "4px 8px", background: "#f9fafb", fontWeight: 600, textAlign: "left", position: "sticky", top: 0, whiteSpace: "nowrap" }}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? "white" : "#f9fafb" }}>
+              {columns.map(col => (
+                <td key={col} style={{ border: "1px solid #e5e7eb", padding: "4px 8px", maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {String(row[col] ?? "")}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// dispatch result rendering based on annotations.resultType
+interface ToolResultProps {
+  result: unknown;
+  resultType: string;
+  resultLang: string;
+  isError: boolean;
+  annotations?: Record<string, unknown>;
+}
+function ToolResult({ result, resultType, resultLang, isError, annotations }: ToolResultProps) {
+  const display = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  if (isError) {
+    return (
+      <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(220,38,38,0.06)", color: "#991b1b", fontSize: "12px", overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+        {display}
+      </pre>
+    );
+  }
+  switch (resultType) {
+    case "markdown":
+      return <SimpleMarkdown text={display} />;
+    case "table":
+      return <TableResult data={result} />;
+    case "code":
+      return (
+        <PrismLight language={resultLang} style={_codeThemeStyle}
+          customStyle={{ margin: 0, fontSize: "12px", borderRadius: "4px" }}>
+          {display}
+        </PrismLight>
+      );
+    case "image":
+      return (
+        <img
+          src={typeof result === "string" ? result : ""}
+          alt="tool result"
+          style={{ maxWidth: "100%", borderRadius: "4px", border: "1px solid #e5e7eb" }}
+        />
+      );
+    case "file": {
+      const filename = (annotations?.resultFilename as string | undefined) ?? "download";
+      const src = typeof result === "string" ? result : "";
+      const handleDownload = () => {
+        const a = document.createElement("a");
+        a.href = src;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      };
+      return (
+        <button
+          onClick={handleDownload}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: "6px",
+            padding: "6px 14px", borderRadius: "6px", fontSize: "12px",
+            fontWeight: 500, cursor: "pointer",
+            border: "1px solid #e5e7eb", background: "#f9fafb", color: "#374151",
+          }}
+        >
+          <DownloadIcon size={13} />
+          {filename}
+        </button>
+      );
+    }
+    case "html":
+      return (
+        <div
+          style={{ fontSize: "13px", lineHeight: "1.5" }}
+          // result comes from trusted R handler — no external user input reaches here
+          dangerouslySetInnerHTML={{ __html: display }}
+        />
+      );
+    default:
+      return (
+        <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(0,0,0,0.04)", fontSize: "12px", overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+          {display}
+        </pre>
+      );
+  }
+}
+
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
 function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
   const [open, setOpen] = useState(false);
@@ -470,6 +695,8 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
   const iconName        = annotations?.icon as string | undefined;
   const toolTitle       = (annotations?.title as string | undefined) ?? toolName;
   const requiresApproval = annotations?.requiresApproval === true;
+  const resultType      = (annotations?.resultType as string | undefined) ?? "auto";
+  const resultLang      = (annotations?.resultLang as string | undefined) ?? "text";
 
   // 审批等待状态：待处理 + 需要审批 + 尚未发送决策
   const awaitingApproval = pending && requiresApproval && !approvalSent;
@@ -497,9 +724,6 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
   // argsText 防御性 stringify（Shiny 可能把 json class 内联为对象）
   const argsDisplay = typeof argsText === "string"
     ? argsText : JSON.stringify(args ?? argsText, null, 2);
-  const resultDisplay = pending ? ""
-    : typeof result === "string" ? result
-    : JSON.stringify(result, null, 2);
 
   const handleApprove = () => {
     setApprovalSent(true);
@@ -596,15 +820,7 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
                             fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
                 Result
               </div>
-              <pre style={{
-                margin: 0, padding: "6px 8px", borderRadius: "4px",
-                background: errored ? "rgba(220,38,38,0.06)" : "rgba(0,0,0,0.04)",
-                color: errored ? "#991b1b" : undefined,
-                fontSize: "12px", overflowX: "auto",
-                whiteSpace: "pre-wrap", wordBreak: "break-all",
-              }}>
-                {resultDisplay}
-              </pre>
+              <ToolResult result={result} resultType={resultType} resultLang={resultLang} isError={errored} annotations={annotations} />
             </>
           )}
         </div>
@@ -1351,6 +1567,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     _toolApprovalHandler = sendToolApproval;
     return () => { _toolApprovalHandler = null; };
   }, [sendToolApproval]);
+
+  // code_theme 同步到模块级变量，供 ToolResult 代码块渲染使用
+  useEffect(() => {
+    const themeName = (config?.code_theme as string) ?? "one-light";
+    _codeThemeStyle = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
+  }, [config?.code_theme]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
