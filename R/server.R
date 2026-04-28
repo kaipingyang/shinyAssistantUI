@@ -277,6 +277,8 @@ assistantUIServer <- function(id, handler,
       # 返回 promise（如有）让 ExtendedTask 追踪其生命周期
       if (inherits(result, "promise")) {
         promises::catch(result, function(e) { on_error_fn(conditionMessage(e)); NULL })
+      } else {
+        promises::promise_resolve(NULL)
       }
     }
   )
