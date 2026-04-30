@@ -52,7 +52,16 @@ function saveArchivedThreads(inputId: string, threads: ExternalStoreThreadData<"
 function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
   try {
     const raw = localStorage.getItem(storageKey(inputId, `msgs:${threadId}`));
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const msgs = JSON.parse(raw) as ThreadMessageLike[];
+    // Any tool-call part without a result is stale (session ended mid-run) — mark as interrupted
+    return msgs.map((m): ThreadMessageLike => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const part = (m.content as any)?.[0] as Record<string, unknown> | undefined;
+      if (part?.type !== "tool-call" || part.result !== undefined) return m;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return { ...m, content: [{ ...part, result: "Session ended", isError: true }] } as any;
+    });
   } catch {
     return [];
   }
