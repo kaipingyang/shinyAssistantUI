@@ -511,7 +511,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     streamingIdRef.current = null;
     thinkingIdRef.current  = null;
     setIsRunning(false);
-    bridge.current.setRunCallbacks(null);
+    // Do NOT clear callbacks here — R will still send on_tool_result / on_done
+    // during drain mode after interrupt. Let onDone clear them naturally.
     bridge.current.sendCancel(threadId);
   }, [currentThreadId]);
 
