@@ -115,7 +115,7 @@ handler <- coro::async(function(
   message, thread_id, attachments,
   on_chunk, on_done, on_error,
   on_tool_call, on_tool_result, is_cancelled,
-  wait_for_approval
+  wait_for_approval, register_cancel
 ) {
   obj     <- get_chat(thread_id)
   chat    <- obj$chat
@@ -149,11 +149,22 @@ handler <- coro::async(function(
     full_message <- message
   }
 
-  stream <- do.call(chat$stream_async, c(list(full_message), img_parts))
-  for (chunk in coro::await_each(stream)) {
-    if (is_cancelled()) break
-    on_chunk(chunk)
-  }
+  # Level 2 取消：stream_controller 在 cancel observer 触发时立即关闭 HTTP 连接。
+  # register_cancel 把 ctrl$cancel 注册到 server.R，Stop 信号到达时直接调用。
+  # is_cancelled() 作双保险，处理 approval 等待期间的取消路径。
+  ctrl <- ellmer::stream_controller()
+  register_cancel(function() ctrl$cancel("User interrupted"))
+
+  stream <- do.call(chat$stream_async, c(list(full_message), img_parts, list(controller = ctrl)))
+  tryCatch(
+    for (chunk in coro::await_each(stream)) {
+      if (is_cancelled()) break
+      on_chunk(chunk)
+    },
+    error = function(e) {
+      if (!is_cancelled()) on_error(conditionMessage(e))
+    }
+  )
   on_done()
 
   # 清理，避免泄漏到下次调用

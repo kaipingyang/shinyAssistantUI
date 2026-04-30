@@ -68,6 +68,13 @@
 #'     }))
 #'     ```
 #'
+#'   * `register_cancel` — `function(fn)` that stores a cancel callback for
+#'     the current thread. Call once before starting the stream with a function
+#'     that performs true HTTP cancellation (e.g.
+#'     `register_cancel(function() ctrl$cancel("Interrupted"))`).  When the
+#'     user clicks Stop, `assistantUIServer` calls `fn()` immediately so the
+#'     in-flight HTTP request is closed rather than silently drained.
+#'
 #'   All parameters except `message`, `on_chunk`, `on_done`, and `on_error`
 #'   are optional: handlers that omit them continue to work unchanged.
 #'
@@ -170,6 +177,8 @@ assistantUIServer <- function(id, handler,
 
   # 每线程 cancel 标志（mutable environment，cancel 信号到达时设为 TRUE）
   cancel_flags <- new.env(parent = emptyenv())
+  # 每线程注册的 cancel 函数（handler 注入，cancel 信号到达时立即调用）
+  cancel_fns <- new.env(parent = emptyenv())
 
   # ── 静态回调（整个 session 不变）────────────────────────────────────────────
   on_chunk <- function(text) {
@@ -243,6 +252,12 @@ assistantUIServer <- function(id, handler,
     if (is.null(msg)) return()
     tid <- msg$threadId %||% "default"
     assign(tid, TRUE, envir = cancel_flags)
+    # 调用 handler 注册的 cancel fn（如 stream_controller$cancel()），实现真 HTTP 取消。
+    cancel_fn <- get0(tid, envir = cancel_fns)
+    if (!is.null(cancel_fn)) {
+      rm(list = tid, envir = cancel_fns)
+      tryCatch(cancel_fn(), error = function(e) NULL)
+    }
     # 自动以 FALSE resolve 所有挂起的 wait_for_approval promise，
     # 避免 handler 在 coro::await(wait_for_approval(...)) 处死锁。
     for (key in ls(approval_resolvers)) {
@@ -260,6 +275,9 @@ assistantUIServer <- function(id, handler,
   stream_task <- shiny::ExtendedTask$new(
     function(msg_text, thread_id, is_reload, attachments) {
       is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
+      # register_cancel 供 handler 注册取消函数（如 stream_controller$cancel()）。
+      # cancel observer 收到信号后立即调用，实现真 HTTP 取消。
+      register_cancel <- function(fn) assign(thread_id, fn, envir = cancel_fns)
 
       all_args <- list(
         message           = msg_text,
@@ -273,7 +291,8 @@ assistantUIServer <- function(id, handler,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
-        wait_for_approval = wait_for_approval
+        wait_for_approval = wait_for_approval,
+        register_cancel   = register_cancel
       )
       handler_params <- names(formals(handler))
       call_args <- if ("..." %in% handler_params) all_args
@@ -299,8 +318,9 @@ assistantUIServer <- function(id, handler,
     thread_id <- msg$threadId %||% "default"
     is_reload <- identical(msg$type, "reload")
 
-    # 新 run 开始前重置 cancel 标志
+    # 新 run 开始前重置 cancel 标志和 cancel fn
     assign(thread_id, FALSE, envir = cancel_flags)
+    if (exists(thread_id, envir = cancel_fns)) rm(list = thread_id, envir = cancel_fns)
 
     stream_task$invoke(
       msg$text,
