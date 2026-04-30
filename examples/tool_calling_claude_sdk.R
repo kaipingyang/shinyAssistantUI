@@ -71,12 +71,15 @@ handler <- coro::async(function(
   # StreamEvent 包含 Anthropic 原始 SSE 事件，可流式输出 thinking 和 text。
   # AssistantMessage 是完整消息，text/thinking 已通过 StreamEvent 处理，跳过避免重复。
   interrupted <- FALSE
+  chunk_count <- 0L
 
   repeat {
     # 每次循环顶部检查 cancel
     if (!interrupted && is_cancelled()) {
       interrupted <- TRUE
+      message("[INTERRUPT] cancel detected — sending client$interrupt()")
       tryCatch(client$interrupt(), error = function(e) NULL)
+      message("[INTERRUPT] client$interrupt() sent, entering drain mode")
     }
 
     msgs <- client$poll_messages()
@@ -92,7 +95,11 @@ handler <- coro::async(function(
     for (msg in msgs) {
       # drain 模式：中断后消费消息直到 ResultMessage，防止 stale 消息污染下次请求
       if (interrupted) {
-        if (inherits(msg, "ResultMessage")) { drain_done <- TRUE; break }
+        if (inherits(msg, "ResultMessage")) {
+          message("[INTERRUPT] drain done — ResultMessage received, stream clean")
+          drain_done <- TRUE
+          break
+        }
         next
       }
 
@@ -103,10 +110,12 @@ handler <- coro::async(function(
           if (identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% "")) {
             on_thinking(delta[["thinking"]])
           } else if (identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
+            chunk_count <- chunk_count + 1L
             on_chunk(delta[["text"]])
           }
         }
       } else if (inherits(msg, "PermissionRequestMessage")) {
+        message("[APPROVAL] tool=", msg$tool_name, " id=", msg$request_id, " — waiting for user")
         on_tool_call(
           tool_call_id = msg$request_id,
           tool_name    = msg$tool_name,
@@ -119,16 +128,22 @@ handler <- coro::async(function(
         # await 返回后再次检查 cancel（Stop 在审批等待期间被按下）
         if (!interrupted && is_cancelled()) {
           interrupted <- TRUE
+          message("[INTERRUPT] cancel detected after approval await — deny_tool + interrupt")
           tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
           tryCatch(client$interrupt(), error = function(e) NULL)
+          on_tool_result(msg$request_id, "Interrupted", is_error = TRUE)
+          message("[INTERRUPT] client$interrupt() sent, entering drain mode")
         } else if (approved) {
+          message("[APPROVAL] approved id=", msg$request_id)
           client$approve_tool(msg$request_id)
           on_tool_result(msg$request_id, "Approved", is_error = FALSE)
         } else {
+          message("[APPROVAL] denied id=", msg$request_id)
           client$deny_tool(msg$request_id)
           on_tool_result(msg$request_id, "Denied by user", is_error = TRUE)
         }
       } else if (inherits(msg, "ResultMessage")) {
+        message("[DONE] ResultMessage — chunks=", chunk_count)
         done <- TRUE
         break
       }
