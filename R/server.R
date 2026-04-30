@@ -243,6 +243,15 @@ assistantUIServer <- function(id, handler,
     if (is.null(msg)) return()
     tid <- msg$threadId %||% "default"
     assign(tid, TRUE, envir = cancel_flags)
+    # 自动以 FALSE resolve 所有挂起的 wait_for_approval promise，
+    # 避免 handler 在 coro::await(wait_for_approval(...)) 处死锁。
+    for (key in ls(approval_resolvers)) {
+      resolver <- get0(key, envir = approval_resolvers)
+      if (!is.null(resolver)) {
+        rm(list = key, envir = approval_resolvers)
+        tryCatch(resolver(FALSE), error = function(e) NULL)
+      }
+    }
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   # ── ExtendedTask：以 Shiny-aware 异步任务运行 handler ────────────────────────

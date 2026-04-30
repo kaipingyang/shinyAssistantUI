@@ -70,16 +70,32 @@ handler <- coro::async(function(
 
   # StreamEvent 包含 Anthropic 原始 SSE 事件，可流式输出 thinking 和 text。
   # AssistantMessage 是完整消息，text/thinking 已通过 StreamEvent 处理，跳过避免重复。
+  interrupted <- FALSE
+
   repeat {
-    if (is_cancelled()) {
-      client$interrupt()
-      break
+    # 每次循环顶部检查 cancel
+    if (!interrupted && is_cancelled()) {
+      interrupted <- TRUE
+      tryCatch(client$interrupt(), error = function(e) NULL)
     }
 
     msgs <- client$poll_messages()
 
-    done <- FALSE
+    if (length(msgs) == 0) {
+      coro::await(later_promise(0.05))
+      next
+    }
+
+    done       <- FALSE
+    drain_done <- FALSE
+
     for (msg in msgs) {
+      # drain 模式：中断后消费消息直到 ResultMessage，防止 stale 消息污染下次请求
+      if (interrupted) {
+        if (inherits(msg, "ResultMessage")) { drain_done <- TRUE; break }
+        next
+      }
+
       if (inherits(msg, "StreamEvent")) {
         evt   <- msg$event
         delta <- evt[["delta"]]
@@ -100,7 +116,12 @@ handler <- coro::async(function(
 
         approved <- coro::await(wait_for_approval(msg$request_id))
 
-        if (approved) {
+        # await 返回后再次检查 cancel（Stop 在审批等待期间被按下）
+        if (!interrupted && is_cancelled()) {
+          interrupted <- TRUE
+          tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
+          tryCatch(client$interrupt(), error = function(e) NULL)
+        } else if (approved) {
           client$approve_tool(msg$request_id)
           on_tool_result(msg$request_id, "Approved", is_error = FALSE)
         } else {
@@ -113,7 +134,7 @@ handler <- coro::async(function(
       }
     }
 
-    if (done) break
+    if (drain_done || done) break
     coro::await(later_promise(0.01))
   }
 
