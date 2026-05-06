@@ -153,18 +153,33 @@ handler <- coro::async(function(
   # register_cancel 把 ctrl$cancel 注册到 server.R，Stop 信号到达时直接调用。
   # is_cancelled() 作双保险，处理 approval 等待期间的取消路径。
   ctrl <- ellmer::stream_controller()
-  register_cancel(function() ctrl$cancel("User interrupted"))
+  chunk_count <- 0L
+  register_cancel(function() {
+    message("[INTERRUPT] ctrl$cancel() called — HTTP stream will close on next chunk")
+    ctrl$cancel("User interrupted")
+  })
 
   stream <- do.call(chat$stream_async, c(list(full_message), img_parts, list(controller = ctrl)))
   tryCatch(
     for (chunk in coro::await_each(stream)) {
-      if (is_cancelled()) break
+      if (is_cancelled()) {
+        message("[INTERRUPT] is_cancelled() TRUE — breaking loop, chunks=", chunk_count)
+        break
+      }
+      chunk_count <- chunk_count + 1L
       on_chunk(chunk)
     },
     error = function(e) {
+      message("[STREAM END] error after cancel (expected): ", conditionMessage(e))
       if (!is_cancelled()) on_error(conditionMessage(e))
     }
   )
+  if (ctrl$cancelled) {
+    message("[INTERRUPT] stream_controller confirmed cancelled, reason=", ctrl$reason,
+            " chunks_delivered=", chunk_count)
+  } else {
+    message("[DONE] stream completed normally, chunks=", chunk_count)
+  }
   on_done()
 
   # 清理，避免泄漏到下次调用

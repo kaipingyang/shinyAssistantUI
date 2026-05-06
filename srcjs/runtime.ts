@@ -508,7 +508,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── onCancel ─────────────────────────────────────────────────────────────
   const onCancel = useCallback(async () => {
     const threadId = currentThreadId;
-    streamingIdRef.current = null;
+    // Do NOT null streamingIdRef here — in-flight chunks that arrive before R
+    // detects the cancel would create a new message bubble (second AI avatar).
+    // Let onDone null it naturally once the stream is fully closed.
     thinkingIdRef.current  = null;
     setIsRunning(false);
     // Do NOT clear callbacks here — R will still send on_tool_result / on_done
