@@ -149,10 +149,13 @@ handler <- coro::async(function(
     full_message <- message
   }
 
-  # ellmer 0.4.0 不暴露 stream_controller，Level 2 HTTP 取消暂不可用。
-  # 使用 Level 1.5：is_cancelled() 轮询，Stop 后 UI 立即停，HTTP 流自然耗尽。
-  # register_cancel 接口保留，等 ellmer 升级后可注入 ctrl$cancel。
-  stream <- do.call(chat$stream_async, c(list(full_message), img_parts))
+  # Level 2 取消：stream_controller 在 cancel observer 触发时立即关闭 HTTP 连接。
+  # register_cancel 把 ctrl$cancel 注册到 server.R，Stop 信号到达时直接调用。
+  # is_cancelled() 作双保险，处理 approval 等待期间的取消路径。
+  ctrl <- ellmer::stream_controller()
+  register_cancel(function() ctrl$cancel("User interrupted"))
+
+  stream <- do.call(chat$stream_async, c(list(full_message), img_parts, list(controller = ctrl)))
   tryCatch(
     for (chunk in coro::await_each(stream)) {
       if (is_cancelled()) break
