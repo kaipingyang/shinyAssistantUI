@@ -336,12 +336,13 @@ server <- function(input, output, session) {
     )
   )
 
-  # 启动时注入历史 session 到侧边栏（只列当前项目的 session）
+  # 启动时注入历史 session 到侧边栏（显示全部，不限目录）
   shiny::observe({
     raw <- tryCatch(
-      list_sessions(directory = here::here(), limit = 100L),
+      list_sessions(limit = 100L),
       error = function(e) { message("[SESSIONS] list_sessions error: ", conditionMessage(e)); list() }
     )
+    message("[SESSIONS] list_sessions returned ", length(raw), " sessions")
     sessions_data <- lapply(raw, function(s) list(
       id        = s$session_id,
       title     = s$summary %||% s$first_prompt %||% s$session_id,
