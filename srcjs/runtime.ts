@@ -104,6 +104,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const unloadedSessionIds = useRef(new Set<string>());
   // 稳定 ref，供注册一次的 onSessions 回调读取当前 threadId（绕过 stale closure）
   const currentThreadIdRef = useRef<string>("");
+  // 本次 React 实例（页面加载后）新建的线程 ID 集合。
+  // onSessions 到达时用 server 列表替换 localStorage 线程，但保留这些本地新建线程，
+  // 避免把用户正在进行的对话丢掉。
+  const thisSessionThreadIds = useRef(new Set<string>());
 
   // 文件上传适配器（image + 纯文本，稳定引用）
   const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
@@ -127,7 +131,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // 当前 threadId
   const [currentThreadId, setCurrentThreadId] = useState<string>(() => {
     const saved = loadThreads(inputId);
-    return saved.length > 0 ? saved[0].id : makeThreadId();
+    if (saved.length > 0) return saved[0].id; // 来自 localStorage（上次运行），不追踪
+    const id = makeThreadId();
+    thisSessionThreadIds.current.add(id);       // 本次新建，追踪
+    return id;
   });
   // 每次 render 更新 ref，让注册一次的回调（onSessions 等）始终读到最新值
   currentThreadIdRef.current = currentThreadId;
@@ -185,7 +192,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (remaining.length > 0) {
         setCurrentThreadId(remaining[0].id);
       } else {
-        const newId = makeThreadId();
+      const newId = makeThreadId();
+        thisSessionThreadIds.current.add(newId);
         const newThread: ExternalStoreThreadData<"regular"> = {
           id: newId,
           status: "regular",
@@ -208,6 +216,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   useEffect(() => {
     bridge.current.onClear(() => {
       const newId = makeThreadId();
+      thisSessionThreadIds.current.add(newId);
       const newThread: ExternalStoreThreadData<"regular"> = {
         id: newId,
         status: "regular",
@@ -224,39 +233,57 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
 
     // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
+    // 策略：server 列表到达时【替换】localStorage 线程，而非追加。
+    // 只保留本次 React 实例新建（thisSessionThreadIds）且尚未在 server 上的线程，
+    // 避免旧 localStorage 孤儿线程（t_XXXX）和 server sessions（UUID）同时显示。
     bridge.current.onSessions(({ sessions }: { sessions: SessionItem[] }) => {
-      const existingThreads = loadThreads(inputId);
-      const existingIds = new Set(existingThreads.map((t) => t.id));
+      if (sessions.length === 0) return;
 
-      const newThreads: ExternalStoreThreadData<"regular">[] = [];
-      const newMsgs: Record<string, ThreadMessageLike[]> = {};
+      const serverIds = new Set(sessions.map((s) => s.id));
 
+      // 标记所有无本地消息的 server session 为待懒加载
       for (const s of sessions) {
-        // 无论是否已在列表，空消息的 session 都标记为待加载
-        const existing = loadMessages(inputId, s.id);
-        if (existing.length === 0) {
+        if (loadMessages(inputId, s.id).length === 0) {
           unloadedSessionIds.current.add(s.id);
         }
-        if (!existingIds.has(s.id)) {
-          newThreads.push({ id: s.id, status: "regular" as const, title: s.title || s.id });
-          newMsgs[s.id] = [];
+      }
+
+      const serverThreads: ExternalStoreThreadData<"regular">[] = sessions.map((s) => ({
+        id: s.id, status: "regular" as const, title: s.title || s.id,
+      }));
+
+      setThreads((prev) => {
+        // 保留本次 session 新建且尚未上传 server 的线程（例如用户正在输入）
+        const localNew = prev.filter(
+          (t) => !serverIds.has(t.id) && thisSessionThreadIds.current.has(t.id)
+        );
+        // 本地新建线程排前面，server 历史线程排后面
+        const merged = [...localNew, ...serverThreads];
+        saveThreads(inputId, merged);
+        return merged;
+      });
+
+      setMessagesMap((prev) => {
+        const patch: Record<string, ThreadMessageLike[]> = {};
+        for (const s of sessions) {
+          patch[s.id] = prev[s.id] ?? loadMessages(inputId, s.id);
         }
-      }
+        return { ...prev, ...patch };
+      });
 
-      if (newThreads.length > 0) {
-        setThreads((prev) => {
-          const next = [...prev, ...newThreads]; // 历史 session 追加到末尾
-          saveThreads(inputId, next);
-          return next;
-        });
-        setMessagesMap((prev) => ({ ...prev, ...newMsgs }));
-      }
-
-      // 如果当前线程正好是未加载的 session，立即触发加载
+      // 当前线程若是被替换掉的 localStorage 孤儿线程，切换到第一个 server session
       const cur = currentThreadIdRef.current;
-      if (unloadedSessionIds.current.has(cur)) {
-        bridge.current.sendLoadSession(cur, cur);
-        unloadedSessionIds.current.delete(cur);
+      if (!serverIds.has(cur) && !thisSessionThreadIds.current.has(cur)) {
+        setCurrentThreadId(sessions[0].id);
+      }
+
+      // 如果当前线程是未加载的 server session，立即触发加载
+      const activeCur = serverIds.has(currentThreadIdRef.current)
+        ? currentThreadIdRef.current
+        : sessions[0].id;
+      if (unloadedSessionIds.current.has(activeCur)) {
+        bridge.current.sendLoadSession(activeCur, activeCur);
+        unloadedSessionIds.current.delete(activeCur);
       }
     });
 
@@ -578,6 +605,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── switchToNewThread（也暴露给外部 slash command 用）─────────────────────
   const switchToNewThread = useCallback(() => {
     const newId = makeThreadId();
+    thisSessionThreadIds.current.add(newId);
     const newThread: ExternalStoreThreadData<"regular"> = {
       id: newId,
       status: "regular",
