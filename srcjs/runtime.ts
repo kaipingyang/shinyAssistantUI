@@ -269,6 +269,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return { ...prev, [threadId]: typedMsgs };
       });
     });
+
+    // :sessions handler 已注册，通知 R 可以补发 sessions（解决 React 18 异步 render 时序问题）
+    bridge.current.sendReady();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 启动一次 streaming run（onNew 和 onReload 共用）────────────────────────

@@ -326,9 +326,22 @@ assistantUIServer <- function(id, handler,
     }
   )
 
+  # ── sessions ready 握手：JS handler 注册后补发 sessions ────────────────────
+  # React 18 createRoot().render() 是异步的，Shiny 首次 flush 时 :sessions
+  # handler 尚未注册，消息被静默丢弃。JS ready 信号到达后，用缓存的 sessions 补发。
+  pending_sessions <- NULL
+
+  shiny::observeEvent(session$input[[paste0(input_id, "_sessions_ready")]], {
+    if (!is.null(pending_sessions)) {
+      session$sendCustomMessage(paste0(input_id, ":sessions"), pending_sessions)
+    }
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
   shiny::observeEvent(session$input[[input_id]], {
     msg <- session$input[[input_id]]
-    if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
+    if (is.null(msg)) return()
+    # load_session 消息没有 text 字段，不能用 nzchar 过滤
+    if (!identical(msg$type, "load_session") && !nzchar(trimws(msg$text %||% ""))) return()
 
     # load_session：前端请求某历史 session 的消息记录，不走 stream_task
     if (identical(msg$type, "load_session") && !is.null(on_session_load)) {
@@ -368,6 +381,7 @@ assistantUIServer <- function(id, handler,
       on_tool_result(tool_call_id, result, is_error)
     },
     send_sessions = function(sessions) {
+      pending_sessions <<- sessions
       session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
     }
   ))

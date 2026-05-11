@@ -44,6 +44,7 @@ export interface ShinyBridge {
   sendToolApproval: (toolCallId: string, approved: boolean) => void;
   sendAction: (actionId: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
+  sendReady: () => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
@@ -145,6 +146,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         inputId,
         { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendReady() {
+      Shiny.setInputValue(
+        `${inputId}_sessions_ready`,
+        { ts: Date.now() },
         { priority: "event" }
       );
     },
