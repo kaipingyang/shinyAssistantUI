@@ -108,6 +108,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // onSessions 到达时用 server 列表替换 localStorage 线程，但保留这些本地新建线程，
   // 避免把用户正在进行的对话丢掉。
   const thisSessionThreadIds = useRef(new Set<string>());
+  // server 端调用 send_sessions 后置为 true：消息不再写 localStorage，server 为唯一 truth
+  const isServerMode = useRef(false);
 
   // 文件上传适配器（image + 纯文本，稳定引用）
   const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
@@ -173,12 +175,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [messagesMap, currentThreadId]
   );
 
-  // 更新消息并持久化
+  // 更新消息并持久化（server mode 下跳过写 localStorage）
   const setCurrentMessages = useCallback(
     (updater: (prev: ThreadMessageLike[]) => ThreadMessageLike[]) => {
       setMessagesMap((prev) => {
         const updated = updater(prev[currentThreadId] ?? []);
-        saveMessages(inputId, currentThreadId, updated);
+        if (!isServerMode.current) saveMessages(inputId, currentThreadId, updated);
         return { ...prev, [currentThreadId]: updated };
       });
     },
@@ -239,6 +241,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.onSessions(({ sessions }: { sessions: SessionItem[] }) => {
       if (sessions.length === 0) return;
 
+      // server 提供了 sessions → 切换到 server-authoritative 模式，消息不再写 localStorage
+      isServerMode.current = true;
+
       const serverIds = new Set(sessions.map((s) => s.id));
 
       // 标记所有无本地消息的 server session 为待懒加载
@@ -292,7 +297,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       unloadedSessionIds.current.delete(threadId);
       setMessagesMap((prev) => {
         const typedMsgs = messages as ThreadMessageLike[];
-        saveMessages(inputId, threadId, typedMsgs);
+        if (!isServerMode.current) saveMessages(inputId, threadId, typedMsgs);
         return { ...prev, [threadId]: typedMsgs };
       });
     });
@@ -422,7 +427,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 ],
               },
             ];
-            saveMessages(inputId, threadId, updated);
+            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -437,7 +442,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               return { ...m, content: [{ ...part, result, isError }] } as any;
             });
-            saveMessages(inputId, threadId, updated);
+            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -459,7 +464,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 return { ...m, content: [{ ...part, result: "done", isError: false }] } as any;
               });
             }
-            saveMessages(inputId, threadId, msgs);
+            if (!isServerMode.current) saveMessages(inputId, threadId, msgs);
             return { ...prev, [threadId]: msgs };
           });
         },
@@ -478,7 +483,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 content: [{ type: "text" as const, text: `⚠ Error: ${errMsg}` }],
               },
             ];
-            saveMessages(inputId, threadId, updated);
+            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
