@@ -141,7 +141,21 @@
 #'   assistant_avatar = list(src = "https://example.com/logo.png", fallback = "AI")
 #'   ```
 #'
-#' @return A list with a `clear()` function that creates a new thread in the UI.
+#'   * `on_session_load` — `function(session_id, thread_id, send_thread)` called
+#'     when the frontend requests historical messages for a session thread. Used
+#'     with `send_sessions()` (in the return value) to populate the sidebar with
+#'     Claude Code sessions and lazy-load their messages on click.
+#'     * `session_id` — the Claude session UUID
+#'     * `thread_id` — the UI thread ID (equals `session_id` for imported threads)
+#'     * `send_thread(messages)` — call with a list of `ThreadMessageLike` objects
+#'       (each a named list with `id`, `role`, `content` fields) to populate the
+#'       thread.
+#'
+#' @return A list with a `clear()` function that creates a new thread in the UI,
+#'   `send_tool_call()` / `send_tool_result()` for manual tool card control, and
+#'   `send_sessions(sessions)` for injecting a list of historical session stubs
+#'   into the sidebar (each element: named list with `id`, `title`, `preview`,
+#'   `createdAt` fields).
 #' @export
 assistantUIServer <- function(id, handler,
                               show_thread_list  = FALSE,
@@ -150,11 +164,12 @@ assistantUIServer <- function(id, handler,
                               tools             = list(),
                               action_items      = list(),
                               on_action         = NULL,
+                              on_session_load   = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI")) {
   force(show_thread_list); force(suggestions); force(commands)
-  force(tools); force(action_items); force(on_action)
+  force(tools); force(action_items); force(on_action); force(on_session_load)
   force(code_theme); force(strings); force(assistant_avatar)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
@@ -315,6 +330,18 @@ assistantUIServer <- function(id, handler,
     msg <- session$input[[input_id]]
     if (is.null(msg) || !nzchar(trimws(msg$text %||% ""))) return()
 
+    # load_session：前端请求某历史 session 的消息记录，不走 stream_task
+    if (identical(msg$type, "load_session") && !is.null(on_session_load)) {
+      send_thread <- function(messages) {
+        session$sendCustomMessage(
+          paste0(input_id, ":load-thread"),
+          list(threadId = msg$threadId, messages = messages)
+        )
+      }
+      on_session_load(msg$sessionId, msg$threadId, send_thread)
+      return()
+    }
+
     thread_id <- msg$threadId %||% "default"
     is_reload <- identical(msg$type, "reload")
 
@@ -339,6 +366,9 @@ assistantUIServer <- function(id, handler,
     },
     send_tool_result = function(tool_call_id, result, is_error = FALSE) {
       on_tool_result(tool_call_id, result, is_error)
+    },
+    send_sessions = function(sessions) {
+      session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
     }
   ))
 }

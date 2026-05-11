@@ -21,6 +21,13 @@ export type ToolCallPayload = {
   annotations?: Record<string, unknown>;
 };
 
+export type SessionItem = {
+  id: string;
+  title: string;
+  preview: string;
+  createdAt: number; // ms since epoch
+};
+
 export type RunCallbacks = {
   onChunk: (text: string) => void;
   onThinking?: (text: string) => void;
@@ -36,12 +43,17 @@ export interface ShinyBridge {
   sendCancel: (threadId: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean) => void;
   sendAction: (actionId: string) => void;
+  sendLoadSession: (sessionId: string, threadId: string) => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
+  onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
+  onLoadThread: (handler: (data: { threadId: string; messages: unknown[] }) => void) => void;
 }
 
 export function createShinyBridge(inputId: string): ShinyBridge {
   let currentCallbacks: RunCallbacks | null = null;
+  let sessionsHandler: ((data: { sessions: SessionItem[] }) => void) | null = null;
+  let loadThreadHandler: ((data: { threadId: string; messages: unknown[] }) => void) | null = null;
 
   // 注册一次，内部路由到当前运行的回调
   Shiny.addCustomMessageHandler(`${inputId}:chunk`, (data) => {
@@ -70,6 +82,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:tool-result`, (data) => {
     const d = data as { toolCallId: string; result: unknown; isError?: boolean };
     currentCallbacks?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:sessions`, (data) => {
+    sessionsHandler?.(data as { sessions: SessionItem[] });
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
+    loadThreadHandler?.(data as { threadId: string; messages: unknown[] });
   });
 
   return {
@@ -113,12 +133,28 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
+    sendLoadSession(sessionId, threadId) {
+      Shiny.setInputValue(
+        inputId,
+        { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
     setRunCallbacks(callbacks) {
       currentCallbacks = callbacks;
     },
 
     onClear(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:clear`, (_data) => handler());
+    },
+
+    onSessions(handler) {
+      sessionsHandler = handler;
+    },
+
+    onLoadThread(handler) {
+      loadThreadHandler = handler;
     },
   };
 }

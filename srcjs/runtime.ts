@@ -11,7 +11,7 @@ import type {
   StartRunConfig,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
-import type { ShinyBridge, AttachmentData } from "./bridge";
+import type { ShinyBridge, AttachmentData, SessionItem } from "./bridge";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -100,6 +100,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current = createShinyBridge(inputId);
   }
 
+  // 历史 session 线程中尚未从 R 加载消息的 thread_id 集合（lazy load）
+  const unloadedSessionIds = useRef(new Set<string>());
+  // 稳定 ref，供注册一次的 onSessions 回调读取当前 threadId（绕过 stale closure）
+  const currentThreadIdRef = useRef<string>("");
+
   // 文件上传适配器（image + 纯文本，稳定引用）
   const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
   if (!attachmentAdapter.current) {
@@ -124,6 +129,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     const saved = loadThreads(inputId);
     return saved.length > 0 ? saved[0].id : makeThreadId();
   });
+  // 每次 render 更新 ref，让注册一次的回调（onSessions 等）始终读到最新值
+  currentThreadIdRef.current = currentThreadId;
 
   // 确保初始线程在列表里
   useEffect(() => {
@@ -214,6 +221,53 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setCurrentThreadId(newId);
       setIsRunning(false);
       streamingIdRef.current = null;
+    });
+
+    // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
+    bridge.current.onSessions(({ sessions }: { sessions: SessionItem[] }) => {
+      const existingThreads = loadThreads(inputId);
+      const existingIds = new Set(existingThreads.map((t) => t.id));
+
+      const newThreads: ExternalStoreThreadData<"regular">[] = [];
+      const newMsgs: Record<string, ThreadMessageLike[]> = {};
+
+      for (const s of sessions) {
+        // 无论是否已在列表，空消息的 session 都标记为待加载
+        const existing = loadMessages(inputId, s.id);
+        if (existing.length === 0) {
+          unloadedSessionIds.current.add(s.id);
+        }
+        if (!existingIds.has(s.id)) {
+          newThreads.push({ id: s.id, status: "regular" as const, title: s.title || s.id });
+          newMsgs[s.id] = [];
+        }
+      }
+
+      if (newThreads.length > 0) {
+        setThreads((prev) => {
+          const next = [...prev, ...newThreads]; // 历史 session 追加到末尾
+          saveThreads(inputId, next);
+          return next;
+        });
+        setMessagesMap((prev) => ({ ...prev, ...newMsgs }));
+      }
+
+      // 如果当前线程正好是未加载的 session，立即触发加载
+      const cur = currentThreadIdRef.current;
+      if (unloadedSessionIds.current.has(cur)) {
+        bridge.current.sendLoadSession(cur, cur);
+        unloadedSessionIds.current.delete(cur);
+      }
+    });
+
+    // ── 注册 :load-thread（接收 R 发来的历史消息）─────────────────────────
+    bridge.current.onLoadThread(({ threadId, messages }: { threadId: string; messages: unknown[] }) => {
+      unloadedSessionIds.current.delete(threadId);
+      setMessagesMap((prev) => {
+        const typedMsgs = messages as ThreadMessageLike[];
+        saveMessages(inputId, threadId, typedMsgs);
+        return { ...prev, [threadId]: typedMsgs };
+      });
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -548,6 +602,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         setIsRunning(false);
         streamingIdRef.current = null;
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
+        // 若目标线程是未加载的历史 session，触发懒加载
+        if (unloadedSessionIds.current.has(threadId)) {
+          bridge.current.sendLoadSession(threadId, threadId);
+          unloadedSessionIds.current.delete(threadId);
+        }
       },
       onArchive: (threadId: string) => {
         setThreads((prev) => {

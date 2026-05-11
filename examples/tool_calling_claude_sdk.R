@@ -66,6 +66,46 @@ later_promise <- function(delay = 0.05) {
   message("[SESSION] Saved session_id=", sid, " for thread=", thread_id)
 }
 
+# ── 历史 session 消息格式转换（ClaudeAgentSDK JSONL → ThreadMessageLike）────
+convert_session_messages <- function(msgs) {
+  result <- list()
+  for (m in msgs) {
+    if (m$type == "user") {
+      raw  <- m$message$content
+      text <- if (is.character(raw)) raw
+              else {
+                tb <- Filter(function(b) identical(b[["type"]], "text"), raw)
+                if (!length(tb)) next
+                paste(vapply(tb, function(b) b[["text"]] %||% "", character(1)), collapse = "")
+              }
+      if (!nzchar(trimws(text))) next
+      result[[length(result) + 1L]] <- list(
+        id      = paste0("h-", m$uuid),
+        role    = "user",
+        content = list(list(type = "text", text = text))
+      )
+    } else if (m$type == "assistant") {
+      raw   <- m$message$content
+      parts <- list()
+      if (is.character(raw) && nzchar(raw)) {
+        parts[[1L]] <- list(type = "text", text = raw)
+      } else if (is.list(raw)) {
+        for (blk in raw)
+          if (identical(blk[["type"]], "text") && nzchar(blk[["text"]] %||% ""))
+            parts[[length(parts) + 1L]] <- list(type = "text", text = blk[["text"]])
+      }
+      if (!length(parts)) next
+      result[[length(result) + 1L]] <- list(
+        id      = paste0("h-", m$uuid),
+        role    = "assistant",
+        content = parts,
+        status  = list(type = "complete", reason = "stop")
+      )
+    }
+  }
+  result
+}
+
 # ── handler ──────────────────────────────────────────────────────────────────
 handler <- coro::async(function(
   message, thread_id, attachments,
@@ -214,10 +254,27 @@ skills <- load_claude_skills(project_dir = here::here())
 
 # ── Server ───────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
-  assistantUIServer(
+  ctrl <- assistantUIServer(
     "chat",
     handler          = handler,
     show_thread_list = TRUE,
+
+    on_session_load = function(session_id, thread_id, send_thread) {
+      msgs <- tryCatch(
+        get_session_messages(session_id),
+        error = function(e) {
+          message("[SESSION LOAD] Error for ", session_id, ": ", conditionMessage(e))
+          list()
+        }
+      )
+      send_thread(convert_session_messages(msgs))
+      # 预填充 session_map，让 get_client() resume 时能找到 session_id
+      if (!is.null(session_id) && nzchar(session_id)) {
+        session_map[[thread_id]] <<- session_id
+        save_session_map(session_map)
+        message("[SESSION LOAD] Loaded ", length(msgs), " messages for session=", session_id)
+      }
+    },
 
     suggestions = list(
       list(
@@ -278,6 +335,22 @@ server <- function(input, output, session) {
       list(name = "LS",       description = "List directory contents")
     )
   )
+
+  # 启动时注入历史 session 到侧边栏（只列当前项目的 session）
+  shiny::observe({
+    raw <- tryCatch(
+      list_sessions(directory = here::here(), limit = 100L),
+      error = function(e) { message("[SESSIONS] list_sessions error: ", conditionMessage(e)); list() }
+    )
+    sessions_data <- lapply(raw, function(s) list(
+      id        = s$session_id,
+      title     = s$summary %||% s$first_prompt %||% s$session_id,
+      preview   = s$first_prompt %||% "",
+      createdAt = s$created_at %||% s$last_modified %||% 0
+    ))
+    ctrl$send_sessions(list(sessions = sessions_data))
+    message("[SESSIONS] Sent ", length(sessions_data), " sessions to sidebar")
+  })
 }
 
 shinyApp(ui, server)
