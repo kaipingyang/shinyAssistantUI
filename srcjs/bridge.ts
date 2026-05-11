@@ -54,6 +54,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   let currentCallbacks: RunCallbacks | null = null;
   let sessionsHandler: ((data: { sessions: SessionItem[] }) => void) | null = null;
   let loadThreadHandler: ((data: { threadId: string; messages: unknown[] }) => void) | null = null;
+  // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
+  // 缓冲最后一条，onSessions() 注册时立即回放
+  let bufferedSessions: { sessions: SessionItem[] } | null = null;
 
   // 注册一次，内部路由到当前运行的回调
   Shiny.addCustomMessageHandler(`${inputId}:chunk`, (data) => {
@@ -85,7 +88,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:sessions`, (data) => {
-    sessionsHandler?.(data as { sessions: SessionItem[] });
+    const d = data as { sessions: SessionItem[] };
+    if (sessionsHandler) {
+      sessionsHandler(d);
+    } else {
+      bufferedSessions = d; // 缓冲，等 onSessions() 注册后回放
+    }
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
@@ -151,6 +159,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
 
     onSessions(handler) {
       sessionsHandler = handler;
+      if (bufferedSessions) {       // 回放缓冲的 :sessions 消息
+        handler(bufferedSessions);
+        bufferedSessions = null;
+      }
     },
 
     onLoadThread(handler) {
