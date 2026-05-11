@@ -2,6 +2,24 @@ library(shiny)
 library(ClaudeAgentSDK)
 devtools::load_all(here::here())
 
+# ── Session store（thread_id → Claude session_id，磁盘持久化）───────────────
+# 作用：R 重启后，get_client() 用 resume = sid 恢复历史上下文，
+# 使浏览器 localStorage 里显示的旧线程在模型侧也有完整记忆。
+SESSION_MAP_PATH <- file.path(here::here(), ".claude_session_map.rds")
+
+load_session_map <- function() {
+  if (file.exists(SESSION_MAP_PATH))
+    tryCatch(readRDS(SESSION_MAP_PATH), error = function(e) list())
+  else
+    list()
+}
+
+save_session_map <- function(map) {
+  tryCatch(saveRDS(map, SESSION_MAP_PATH), error = function(e) NULL)
+}
+
+session_map <- load_session_map()
+
 # ── ClaudeSDKClient 池（每线程一个，持久连接）────────────────────────────────
 # permission_prompt_tool_name = "stdio" 将工具权限请求以 PermissionRequestMessage
 # 形式路由到消息流，而非系统弹窗，从而可在 UI 卡片上触发 Approve/Deny。
@@ -9,11 +27,25 @@ clients <- list()
 
 get_client <- function(thread_id) {
   if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
-  client <- ClaudeSDKClient$new(ClaudeAgentOptions(
-    permission_mode             = "default",
-    permission_prompt_tool_name = "stdio",
-    include_partial_messages    = TRUE
-  ))
+
+  stored_sid <- session_map[[thread_id]]
+  opts <- if (!is.null(stored_sid) && nzchar(stored_sid)) {
+    message("[SESSION] Resuming thread=", thread_id, " session_id=", stored_sid)
+    ClaudeAgentOptions(
+      permission_mode             = "default",
+      permission_prompt_tool_name = "stdio",
+      include_partial_messages    = TRUE,
+      resume                      = stored_sid
+    )
+  } else {
+    ClaudeAgentOptions(
+      permission_mode             = "default",
+      permission_prompt_tool_name = "stdio",
+      include_partial_messages    = TRUE
+    )
+  }
+
+  client <- ClaudeSDKClient$new(opts)
   client$connect()
   clients[[thread_id]] <<- client
   client
@@ -24,6 +56,14 @@ later_promise <- function(delay = 0.05) {
   promises::promise(function(resolve, reject) {
     later::later(function() resolve(NULL), delay = delay)
   })
+}
+
+# ── session 持久化辅助 ────────────────────────────────────────────────────────
+.persist_session <- function(thread_id, sid) {
+  if (is.null(sid) || !nzchar(sid)) return(invisible(NULL))
+  session_map[[thread_id]] <<- sid
+  save_session_map(session_map)
+  message("[SESSION] Saved session_id=", sid, " for thread=", thread_id)
 }
 
 # ── handler ──────────────────────────────────────────────────────────────────
@@ -97,6 +137,7 @@ handler <- coro::async(function(
       if (interrupted) {
         if (inherits(msg, "ResultMessage")) {
           message("[INTERRUPT] drain done — ResultMessage received, stream clean")
+          .persist_session(thread_id, msg$session_id)
           drain_done <- TRUE
           break
         }
@@ -144,6 +185,7 @@ handler <- coro::async(function(
         }
       } else if (inherits(msg, "ResultMessage")) {
         message("[DONE] ResultMessage — chunks=", chunk_count)
+        .persist_session(thread_id, msg$session_id)
         done <- TRUE
         break
       }

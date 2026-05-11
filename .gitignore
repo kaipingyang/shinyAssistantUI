@@ -8,3 +8,4 @@ node_modules/
 *.png
 *.jpg
 .Renviron
+.claude_session_map.rds
