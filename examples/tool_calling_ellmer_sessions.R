@@ -253,7 +253,11 @@ handler <- coro::async(function(
            function(a) a$data, character(1)),
     collapse = "\n"
   )
-  full_message <- if (nzchar(text_sections)) paste0(text_sections, "\n\n", message) else message
+  if (nzchar(text_sections)) {
+    full_message <- paste0(text_sections, "\n\n", message)
+  } else {
+    full_message <- message
+  }
 
   ctrl        <- ellmer::stream_controller()
   chunk_count <- 0L
@@ -302,13 +306,13 @@ ui <- tagList(
   tags$head(tags$style(HTML("
     html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
   "))),
-  assistantUIOutput("chat", height = "100vh")
+  assistantUIOutput("ellmer_chat", height = "100vh")
 )
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server <- function(input, output, session) {
   ctrl <- assistantUIServer(
-    "chat",
+    "ellmer_chat",
     handler          = handler,
     show_thread_list = TRUE,
 
