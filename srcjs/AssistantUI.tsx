@@ -41,7 +41,7 @@ import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive, AttachmentPrimitive,
   unstable_useToolMentionAdapter,
-  useAui, useMessagePartText, useMessagePartReasoning,
+  useAui, useAuiState, useMessagePartText, useMessagePartReasoning,
   useThreadListItem,
 } from "@assistant-ui/react";
 import { useThreadIsRunning } from "@assistant-ui/core/react";
@@ -54,7 +54,7 @@ import {
   AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
-  MicIcon, MicOffIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
+  MicIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
   DownloadIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
@@ -1015,6 +1015,27 @@ function detectSlashTrigger(text: string, cursorPos: number): { query: string; o
   return null;
 }
 
+function DictationToggle() {
+  const aui = useAui();
+  const isDictating = useAuiState((s) => s.composer.dictation != null);
+  const hasDictation = useAuiState((s) => !!(s.thread as { capabilities?: { dictation?: boolean } }).capabilities?.dictation);
+  if (!hasDictation) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => isDictating ? aui.composer().stopDictation() : aui.composer().startDictation()}
+      title={isDictating ? "Stop dictation" : "Start dictation"}
+      style={{
+        background: "none", border: "none", cursor: "pointer",
+        color: isDictating ? "#ef4444" : "#6b7280",
+        padding: "2px 4px", display: "flex", alignItems: "center",
+      }}
+    >
+      <MicIcon size={16} />
+    </button>
+  );
+}
+
 function ShinyComposer() {
   const { tools, commands, actionItems, onNewThread, onAction } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1423,24 +1444,7 @@ function ShinyComposer() {
           >
             +
           </button>
-          <ComposerPrimitive.Dictate
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              color: "#6b7280", padding: "2px 4px",
-              display: "flex", alignItems: "center",
-            }}
-          >
-            <MicIcon size={16} />
-          </ComposerPrimitive.Dictate>
-          <ComposerPrimitive.StopDictation
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              color: "#ef4444", padding: "2px 4px",
-              display: "flex", alignItems: "center",
-            }}
-          >
-            <MicOffIcon size={16} />
-          </ComposerPrimitive.StopDictation>
+          <DictationToggle />
         </div>
         {!isRunning ? (
           <ComposerPrimitive.Send
