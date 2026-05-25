@@ -36,18 +36,23 @@ ellmer_session_store <- function(db_path) {
       thread_id  TEXT PRIMARY KEY,
       title      TEXT NOT NULL DEFAULT '',
       first_msg  TEXT NOT NULL DEFAULT '',
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
       state      TEXT NOT NULL
     )
   ")
+  # 当连接对象被 GC 或 R 退出时自动断开，消除 dbDisconnect 警告
+  reg.finalizer(environment(), function(e) {
+    tryCatch(DBI::dbDisconnect(con), error = function(x) NULL)
+  }, onexit = TRUE)
 
   list(
     # 保存或更新 session（ON CONFLICT 不覆盖 first_msg / created_at）
     save = function(thread_id, chat, title = "", first_msg = "") {
       state     <- ellmer_chat_get_state(chat)
       state_str <- jsonlite::toJSON(state, auto_unbox = TRUE)
-      now       <- as.integer(Sys.time() * 1000)
+      # ISO 8601 字符串：无数字精度/溢出问题，可直接在 JS 中被 new Date() 解析
+      now       <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
       DBI::dbExecute(con,
         "INSERT INTO sessions (thread_id, title, first_msg, created_at, updated_at, state)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -315,6 +320,10 @@ server <- function(input, output, session) {
     "ellmer_chat",
     handler          = handler,
     show_thread_list = TRUE,
+
+    on_feedback = function(message_id, type) {
+      message("[FEEDBACK] ", type, " on message=", message_id)
+    },
 
     on_session_load = function(session_id, thread_id, send_thread) {
       # session_id == thread_id（ellmer session 用 thread_id 直接对应 DB 主键）

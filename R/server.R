@@ -165,11 +165,13 @@ assistantUIServer <- function(id, handler,
                               action_items      = list(),
                               on_action         = NULL,
                               on_session_load   = NULL,
+                              on_feedback       = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI")) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
+  force(on_feedback)
   force(code_theme); force(strings); force(assistant_avatar)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
@@ -258,6 +260,15 @@ assistantUIServer <- function(id, handler,
       msg <- session$input[[paste0(input_id, "_action")]]
       if (is.null(msg)) return()
       on_action(msg$id)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # 反馈按钮（👍/👎）→ on_feedback 回调
+  if (!is.null(on_feedback)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_feedback")]], {
+      fb <- session$input[[paste0(input_id, "_feedback")]]
+      if (is.null(fb)) return()
+      on_feedback(fb$messageId, fb$type)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

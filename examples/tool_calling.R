@@ -203,6 +203,10 @@ server <- function(input, output, session) {
     handler          = handler,
     show_thread_list = TRUE,
 
+    on_feedback = function(message_id, type) {
+      message("[FEEDBACK] ", type, " on message=", message_id)
+    },
+
     suggestions = list(
       list(prompt = "What's the weather in San Francisco?",
            text   = "What's the weather in San Francisco?"),

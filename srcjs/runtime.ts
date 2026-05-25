@@ -1,7 +1,10 @@
 // useShinyRuntime — ExternalStoreRuntime + 多线程 + localStorage 持久化
+// Module-level map: thread ID → formatted date string for sidebar display
+export const sessionDates = new Map<string, string>();
+
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import {
-  useExternalStoreRuntime, WebSpeechDictationAdapter,
+  useExternalStoreRuntime, WebSpeechDictationAdapter, WebSpeechSynthesisAdapter,
   SimpleImageAttachmentAdapter, SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
 } from "@assistant-ui/react";
 import type {
@@ -9,6 +12,7 @@ import type {
   AppendMessage,
   ExternalStoreThreadData,
   StartRunConfig,
+  FeedbackAdapter,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
 import type { ShinyBridge, AttachmentData, SessionItem } from "./bridge";
@@ -111,6 +115,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // server 端调用 send_sessions 后置为 true：消息不再写 localStorage，server 为唯一 truth
   const isServerMode = useRef(false);
 
+  // 反馈适配器（稳定引用，通过 bridge 发送到 R 端）
+  const feedbackAdapter = useRef<FeedbackAdapter>({
+    submit: ({ message, type }) => {
+      bridge.current.sendFeedback(message.id, type === "positive" ? "positive" : "negative");
+    },
+  });
+
   // 文件上传适配器（image + 纯文本，稳定引用）
   const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
   if (!attachmentAdapter.current) {
@@ -166,8 +177,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   const [isRunning, setIsRunning] = useState(false);
-  const streamingIdRef = useRef<string | null>(null);
-  const thinkingIdRef  = useRef<string | null>(null);
+  const streamingIdRef  = useRef<string | null>(null);
+  const hasReasoningRef = useRef(false); // thinking arrived before text chunks
 
   // 当前线程消息
   const messages = useMemo(
@@ -246,6 +257,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       const serverIds = new Set(sessions.map((s) => s.id));
 
+      // 填充日期 Map（供侧边栏展示），ISO 字符串直接传入 Date 构造函数
+      for (const s of sessions) {
+        if (s.createdAt) {
+          const d = new Date(s.createdAt);
+          if (!isNaN(d.getTime())) {
+            sessionDates.set(s.id, d.toLocaleDateString(undefined, {
+              year: "numeric", month: "short", day: "numeric",
+            }));
+          }
+        }
+      }
+
       // 标记所有无本地消息的 server session 为待懒加载
       for (const s of sessions) {
         if (loadMessages(inputId, s.id).length === 0) {
@@ -314,68 +337,43 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       bridge.current.setRunCallbacks({
         onThinking: (thinkingText) => {
-          // 首次调用时创建 thinking 消息，后续调用追加文本（流式模式）
-          if (!thinkingIdRef.current) {
-            thinkingIdRef.current = `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+          // Reasoning part stored INLINE in the same assistant message as text
+          if (!streamingIdRef.current) {
+            streamingIdRef.current = `assistant-${Date.now()}`;
           }
-          const thinkingId = thinkingIdRef.current;
+          const msgId = streamingIdRef.current;
+          hasReasoningRef.current = true;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
-            const existing = threadMsgs.find((m) => m.id === thinkingId);
+            const existing = threadMsgs.find((m) => m.id === msgId);
             if (!existing) {
               return {
                 ...prev,
                 [threadId]: [
                   ...threadMsgs,
-                  {
-                    id: thinkingId,
-                    role: "assistant" as const,
-                    content: [
-                      {
-                        type: "tool-call" as const,
-                        toolCallId: thinkingId,
-                        toolName: "__thinking__",
-                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        args: {} as any,
-                        argsText: thinkingText,
-                      },
-                    ],
-                  },
+                  { id: msgId, role: "assistant" as const, content: [{ type: "reasoning" as const, text: thinkingText }] },
                 ],
               };
             }
-            // 追加到现有 thinking 消息（流式 thinking_delta）
+            // Append to reasoning part
             return {
               ...prev,
               [threadId]: threadMsgs.map((m): ThreadMessageLike => {
-                if (m.id !== thinkingId) return m;
+                if (m.id !== msgId) return m;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const part = (m.content as any)[0] as any;
+                const content = [...(m.content as any[])];
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                return { ...m, content: [{ ...part, argsText: part.argsText + thinkingText }] } as any;
+                const ridx = content.findIndex((p: any) => p.type === "reasoning");
+                if (ridx < 0) return m;
+                const updated = [...content];
+                updated[ridx] = { ...content[ridx], text: content[ridx].text + thinkingText };
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return { ...m, content: updated } as any;
               }),
             };
           });
         },
         onChunk: (chunkText) => {
-          // Collapse thinking card when text starts arriving
-          if (thinkingIdRef.current) {
-            const tId = thinkingIdRef.current;
-            thinkingIdRef.current = null;
-            setMessagesMap((prev) => {
-              const threadMsgs = prev[threadId] ?? [];
-              return {
-                ...prev,
-                [threadId]: threadMsgs.map((m): ThreadMessageLike => {
-                  if (m.id !== tId) return m;
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const part = (m.content as any)[0] as any;
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  return { ...m, content: [{ ...part, result: "done", isError: false }] } as any;
-                }),
-              };
-            });
-          }
           // 在调用 setMessagesMap 前先快照 ID——updater 是异步调度的，若
           // onDone 先于 updater 执行会把 streamingIdRef.current 清为 null，
           // 导致 updater 误判为新消息，产生"末尾碎片"分裂 bubble 的 bug。
@@ -385,20 +383,26 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           const msgId = streamingIdRef.current;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
             let updated: ThreadMessageLike[];
-            if (!threadMsgs.find((m) => m.id === msgId)) {
+            if (!existing) {
               updated = [
                 ...threadMsgs,
                 { id: msgId, role: "assistant", content: [{ type: "text", text: chunkText }] },
               ];
             } else {
-              updated = threadMsgs.map((m) => {
-                if (m.id !== msgId) return m;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const content = existing.content as any[];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const tidx = content.findIndex((p: any) => p.type === "text");
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const newContent: any[] = tidx >= 0
+                ? content.map((p: { type: string; text: string }, i: number) => i === tidx ? { ...p, text: p.text + chunkText } : p)
+                : [...content, { type: "text", text: chunkText }];
+              updated = threadMsgs.map((m): ThreadMessageLike =>
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const c0 = (m.content as any)[0];
-                const prev2 = c0?.type === "text" ? (c0.text as string) : "";
-                return { ...m, content: [{ type: "text", text: prev2 + chunkText }] };
-              });
+                m.id === msgId ? ({ ...m, content: newContent } as any) : m
+              );
             }
             // 流式过程中不写 localStorage——每个 token 都序列化是主要卡顿来源；
             // onDone 时统一持久化即可。
@@ -447,30 +451,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onDone: () => {
-          const tId = thinkingIdRef.current;
           streamingIdRef.current = null;
-          thinkingIdRef.current  = null;
+          hasReasoningRef.current = false;
           setIsRunning(false);
           bridge.current.setRunCallbacks(null);
-          // 流结束后统一持久化；顺便把未关闭的 thinking card 标为 done
+          // 流结束后统一持久化
           setMessagesMap((prev) => {
-            let msgs = prev[threadId] ?? [];
-            if (tId) {
-              msgs = msgs.map((m): ThreadMessageLike => {
-                if (m.id !== tId) return m;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const part = (m.content as any)[0] as any;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                return { ...m, content: [{ ...part, result: "done", isError: false }] } as any;
-              });
-            }
+            const msgs = prev[threadId] ?? [];
             if (!isServerMode.current) saveMessages(inputId, threadId, msgs);
             return { ...prev, [threadId]: msgs };
           });
         },
         onError: (errMsg) => {
           streamingIdRef.current = null;
-          thinkingIdRef.current  = null;
+          hasReasoningRef.current = false;
           setIsRunning(false);
           bridge.current.setRunCallbacks(null);
           setMessagesMap((prev) => {
@@ -563,8 +557,33 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, startRun]
   );
 
-  // ── onReload ─────────────────────────────────────────────────────────────
-  // parentId = 触发本次 assistant 回复的 user 消息 ID
+  // ── onEdit ───────────────────────────────────────────────────────────────
+  // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新发送新文本
+  const onEdit = useCallback(
+    async (message: AppendMessage) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const text = (message.content as any[])
+        .filter((p: { type: string }) => p.type === "text")
+        .map((p: { text: string }) => p.text)
+        .join("");
+      if (!text.trim()) return;
+      const threadId = currentThreadIdRef.current;
+      const parentId = message.parentId ?? null;
+      setMessagesMap((prev) => {
+        const threadMsgs = prev[threadId] ?? [];
+        const cutIdx = parentId
+          ? threadMsgs.findIndex((m) => m.id === parentId) + 1
+          : 0;
+        const updated = threadMsgs.slice(0, cutIdx);
+        if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+        return { ...prev, [threadId]: updated };
+      });
+      startRun(threadId, () => bridge.current.sendUserMessage(text, threadId, []));
+    },
+    [inputId, startRun] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // ── onReload ─────────────────────────────────────────────────────────────  // parentId = 触发本次 assistant 回复的 user 消息 ID
   const onReload = useCallback(
     async (parentId: string | null, _config: StartRunConfig) => {
       const threadId = currentThreadId;
@@ -600,7 +619,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // Do NOT null streamingIdRef here — in-flight chunks that arrive before R
     // detects the cancel would create a new message bubble (second AI avatar).
     // Let onDone null it naturally once the stream is fully closed.
-    thinkingIdRef.current  = null;
+    hasReasoningRef.current = false;
     setIsRunning(false);
     // Do NOT clear callbacks here — R will still send on_tool_result / on_done
     // during drain mode after interrupt. Let onDone clear them naturally.
@@ -707,6 +726,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     messages,
     isRunning,
     onNew,
+    onEdit,
     onReload,
     onCancel,
     convertMessage: (m) => m,
@@ -714,6 +734,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       threadList: threadListAdapter,
       attachments: attachmentAdapter.current,
       dictation: WebSpeechDictationAdapter.isSupported() ? new WebSpeechDictationAdapter() : undefined,
+      speech: (typeof window !== "undefined" && "speechSynthesis" in window) ? new WebSpeechSynthesisAdapter() : undefined,
+      feedback: feedbackAdapter.current,
     },
   });
 

@@ -25,7 +25,7 @@ export type SessionItem = {
   id: string;
   title: string;
   preview: string;
-  createdAt: number; // ms since epoch
+  createdAt: string; // ISO 8601 datetime string
 };
 
 export type RunCallbacks = {
@@ -44,6 +44,7 @@ export interface ShinyBridge {
   sendToolApproval: (toolCallId: string, approved: boolean) => void;
   sendAction: (actionId: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
+  sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
   setRunCallbacks: (callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
@@ -146,6 +147,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         inputId,
         { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendFeedback(messageId, type) {
+      Shiny.setInputValue(
+        `${inputId}_feedback`,
+        { messageId, type, ts: Date.now() },
         { priority: "event" }
       );
     },

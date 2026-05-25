@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
-import { Thread, ThreadList, UserMessage, BranchPicker, UserActionBar, makeMarkdownText, CodeHeader } from "@assistant-ui/react-ui";
+import { Thread, ThreadList, AssistantMessage, UserMessage, BranchPicker, UserActionBar, AssistantActionBar, makeMarkdownText, CodeHeader } from "@assistant-ui/react-ui";
 import { makePrismLightSyntaxHighlighter } from "@assistant-ui/react-syntax-highlighter";
 import { PrismLight } from "react-syntax-highlighter";
 import {
@@ -41,11 +41,13 @@ import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive, AttachmentPrimitive,
   unstable_useToolMentionAdapter,
-  useAui, useMessagePartText,
+  useAui, useMessagePartText, useMessagePartReasoning,
+  useThreadListItem,
 } from "@assistant-ui/react";
 import { useThreadIsRunning } from "@assistant-ui/core/react";
 import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { sessionDates } from "./runtime";
 import {
   PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
   MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
@@ -92,12 +94,16 @@ let _toolApprovalHandler: ((id: string, approved: boolean) => void) | null = nul
 // ── Tool result 代码主题（与 AssistantUI 的 code_theme 保持同步）──────────────
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _codeThemeStyle: any = oneLight;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _MarkdownText: React.ComponentType | null = null;
 
 // ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
 function CustomThreadListItem() {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const { id } = useThreadListItem();
+  const date = sessionDates.get(id);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -124,6 +130,11 @@ function CustomThreadListItem() {
         <p className="aui-thread-list-item-title" style={{ margin: 0 }}>
           <ThreadListItemPrimitive.Title fallback="New Chat" />
         </p>
+        {date && (
+          <p style={{ margin: 0, fontSize: "11px", color: "var(--aui-muted-foreground, #9ca3af)", lineHeight: 1.2 }}>
+            {date}
+          </p>
+        )}
       </ThreadListItemPrimitive.Trigger>
 
       {/* 三点按钮：hover 或菜单打开时显示 */}
@@ -460,6 +471,78 @@ const ThinkingToolUI = makeAssistantToolUI({
   toolName: "__thinking__",
   render: ThinkingCard,
 });
+
+// ── InlineReasoningCard（native reasoning part，替代 __thinking__ 伪工具）──────
+function InlineReasoningCard() {
+  const { text, status } = useMessagePartReasoning();
+  const [open, setOpen] = useState(false);
+  const done = (status as { type?: string })?.type === "complete";
+
+  return (
+    <div style={{
+      border: "1px solid #e5e7eb",
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: "hsl(0,0%,98%)",
+    }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <LightbulbIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{done ? "Thought" : "Thinking…"}</span>
+        {!done && <span style={{ fontSize: "11px", color: "#d97706" }}>in progress</span>}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
+      </button>
+
+      {open && text && (
+        <div style={{
+          borderTop: "1px solid #e5e7eb",
+          padding: "8px 10px",
+          fontSize: "12px",
+          color: "#6b7280",
+          fontStyle: "italic",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxHeight: "300px",
+          overflowY: "auto",
+          lineHeight: 1.5,
+        }}>
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CustomAssistantMessage：支持 reasoning part 的 assistant message ────────
+// 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
+// ThinkingToolUI 保留作为向后兼容（加载旧 localStorage 数据时）。
+function CustomAssistantMessage() {
+  return (
+    <AssistantMessage.Root>
+      <AssistantMessage.Avatar />
+      <AssistantMessage.Content
+        components={{
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          Text: (_MarkdownText ?? (() => null)) as any,
+          Reasoning: InlineReasoningCard,
+          tools: { Fallback: GenericToolCard },
+        }}
+      />
+      <AssistantActionBar />
+      <BranchPicker />
+    </AssistantMessage.Root>
+  );
+}
 
 // ── Tool result 富文本渲染辅助 ────────────────────────────────────────────────
 
@@ -1546,6 +1629,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     const SyntaxHighlighter = makePrismLightSyntaxHighlighter({ style });
     return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter } });
   }, [config?.code_theme]);
+  _MarkdownText = MarkdownText;
 
   // composer context — tools 和 commands 从 R 的 config 读取
   const composerCtx = useMemo<ComposerConfigCtx>(() => ({
@@ -1630,9 +1714,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               <Thread
                 tools={[WeatherToolUI, ThinkingToolUI]}
                 welcome={{ suggestions }}
-                components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage }}
+                components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage, AssistantMessage: CustomAssistantMessage }}
+                userMessage={{ allowEdit: true }}
                 assistantMessage={{
-                  components: { Text: MarkdownText, ToolFallback: GenericToolCard },
+                  allowSpeak: true,
+                  allowFeedbackPositive: true,
+                  allowFeedbackNegative: true,
                 }}
                 strings={(config?.strings ?? undefined) as never}
                 assistantAvatar={(config?.assistant_avatar ?? undefined) as never}
