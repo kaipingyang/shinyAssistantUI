@@ -40,12 +40,11 @@ const CODE_THEMES: Record<string, any> = {
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive, AttachmentPrimitive,
-  unstable_useToolMentionAdapter,
+  unstable_useMentionAdapter,
   useAui, useAuiState, useMessagePartText, useMessagePartReasoning,
   useThreadListItem,
 } from "@assistant-ui/react";
 import { useThreadIsRunning } from "@assistant-ui/core/react";
-import { unstable_defaultDirectiveFormatter } from "@assistant-ui/core";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import { sessionDates } from "./runtime";
 import {
@@ -73,7 +72,7 @@ const TOOL_ICONS: Record<string, IconComponent> = {
   "flask":         FlaskConicalIcon,
   "wrench":        WrenchIcon,
 };
-import { LexicalComposerInput, $createMentionNode } from "@assistant-ui/react-lexical";
+import { LexicalComposerInput, $createDirectiveNode } from "@assistant-ui/react-lexical";
 
 // MarkdownText 在组件内按 code_theme 动态创建（见 AssistantUI 组件）
 import {
@@ -1002,6 +1001,31 @@ const ShinyComposerCtx = createContext<ComposerConfigCtx>({
   tools: [], commands: [], actionItems: [], onNewThread: () => {}, onAction: () => {},
 });
 
+// remark-gfm 表格需要完整的 separator 行（|---|---|）才能渲染；流式输出时第一行出现时
+// separator 尚未到达，导致 | 字符以原始文本显示。preprocess 补全不完整的表格头。
+function preprocessStreamingMarkdown(text: string): string {
+  const lines = text.split("\n");
+  let tableStart = -1;
+  let hasSep = false;
+  for (let i = 0; i <= lines.length; i++) {
+    const line = i < lines.length ? lines[i].trim() : "";
+    const isTableRow = line.startsWith("|") && line.endsWith("|");
+    const isSep = isTableRow && /^\|[\s|:_-]+\|$/.test(line);
+    if (isTableRow) {
+      if (tableStart === -1) { tableStart = i; hasSep = false; }
+      if (isSep) hasSep = true;
+    } else {
+      if (tableStart !== -1 && !hasSep) {
+        const cols = lines[tableStart].split("|").filter(s => s.trim()).length;
+        lines.splice(tableStart + 1, 0, "|" + Array(cols).fill(" --- ").join("|") + "|");
+        i++;
+      }
+      tableStart = -1; hasSep = false;
+    }
+  }
+  return lines.join("\n");
+}
+
 // 从光标位置向后扫描，遇到空白停止，找到 "/" 即返回触发位置（与库内 detectTrigger 逻辑一致）
 function detectSlashTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
   const upToCursor = text.slice(0, cursorPos);
@@ -1068,8 +1092,8 @@ function ShinyComposer() {
   const handleItemSelRef   = useRef<(entry: SlashEntry) => void>(null!);
 
   // ── @ mention adapter ─────────────────────────────────────────────────────
-  const mentionAdapter = unstable_useToolMentionAdapter({
-    tools: tools.map(t => ({
+  const mentionAdapter = unstable_useMentionAdapter({
+    items: tools.map(t => ({
       id: t.name, type: "tool" as const, label: t.name, description: t.description,
     })),
     includeModelContextTools: false,
@@ -1243,7 +1267,7 @@ function ShinyComposer() {
 
       // 创建 chip：label = "/commandName"，directiveText 也是 "/commandName"
       // runtime.ts 的 onNew 负责把 /commandName 展开为 cmd.prompt 再发给 R
-      const mentionNode = $createMentionNode(
+      const mentionNode = $createDirectiveNode(
         { id: cmd.name, type: "slash" as const, label: "/" + cmd.name },
         "/" + cmd.name,
       );
@@ -1518,17 +1542,16 @@ function ShinyComposer() {
     </div>
   ) : null;
 
-  // ── @ 工具弹窗（MentionRoot 管理，保持不变）─────────────────────────────
-  const mentionPopover = hasTools ? (
-    <ComposerPrimitive.Unstable_MentionPopover
-      style={{ ...popoverStyle, minWidth: "280px" }}
-      onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
-    >
-      <ComposerPrimitive.Unstable_MentionCategories>
+  // ── @ 工具弹窗（TriggerPopover 管理）─────────────────────────────────────
+  const mentionPopoverContent = hasTools ? (<>
+      <ComposerPrimitive.Unstable_TriggerPopover.Directive
+        formatter={mentionAdapter.directive.formatter}
+      />
+      <ComposerPrimitive.Unstable_TriggerPopoverCategories>
         {(categories) => (
           <div>
             {categories.map(cat => (
-              <ComposerPrimitive.Unstable_MentionCategoryItem
+              <ComposerPrimitive.Unstable_TriggerPopoverCategoryItem
                 key={cat.id} categoryId={cat.id}
                 className="aui-mention-popover-item"
                 style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -1537,12 +1560,12 @@ function ShinyComposer() {
               >
                 <span style={{ fontWeight: 500, fontSize: "13px" }}>{cat.label}</span>
                 <ChevronRightIcon size={12} color="#9ca3af" />
-              </ComposerPrimitive.Unstable_MentionCategoryItem>
+              </ComposerPrimitive.Unstable_TriggerPopoverCategoryItem>
             ))}
           </div>
         )}
-      </ComposerPrimitive.Unstable_MentionCategories>
-      <ComposerPrimitive.Unstable_MentionBack
+      </ComposerPrimitive.Unstable_TriggerPopoverCategories>
+      <ComposerPrimitive.Unstable_TriggerPopoverBack
         style={{
           display: "flex", alignItems: "center", gap: "6px",
           padding: "4px 8px", fontSize: "12px", color: "#6b7280",
@@ -1551,12 +1574,12 @@ function ShinyComposer() {
         }}
       >
         ← BACK
-      </ComposerPrimitive.Unstable_MentionBack>
-      <ComposerPrimitive.Unstable_MentionItems>
+      </ComposerPrimitive.Unstable_TriggerPopoverBack>
+      <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(items) => (
           <div>
             {items.map((item, index) => (
-              <ComposerPrimitive.Unstable_MentionItem
+              <ComposerPrimitive.Unstable_TriggerPopoverItem
                 key={item.id} item={item} index={index}
                 className="aui-mention-popover-item"
                 style={{
@@ -1569,25 +1592,27 @@ function ShinyComposer() {
                 {item.description && (
                   <span style={{ fontSize: "12px", color: "#6b7280" }}>{item.description}</span>
                 )}
-              </ComposerPrimitive.Unstable_MentionItem>
+              </ComposerPrimitive.Unstable_TriggerPopoverItem>
             ))}
           </div>
         )}
-      </ComposerPrimitive.Unstable_MentionItems>
-    </ComposerPrimitive.Unstable_MentionPopover>
-  ) : null;
+      </ComposerPrimitive.Unstable_TriggerPopoverItems>
+    </>) : null;
 
-  // ── 按需包裹 MentionRoot（@ mentions 保留 library 实现）────────────────────
+  // ── 按需包裹 TriggerPopoverRoot（@ mentions 保留 library 实现）──────────────
   const withMention = hasTools ? (
-    <ComposerPrimitive.Unstable_MentionRoot
-      adapter={mentionAdapter}
-      trigger="@"
-      formatter={unstable_defaultDirectiveFormatter}
-    >
+    <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      <ComposerPrimitive.Unstable_TriggerPopover
+        char="@"
+        adapter={mentionAdapter.adapter}
+        style={{ ...popoverStyle, minWidth: "280px" }}
+        onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+      >
+        {mentionPopoverContent}
+      </ComposerPrimitive.Unstable_TriggerPopover>
       {inputBox}
       {slashPopover}
-      {mentionPopover}
-    </ComposerPrimitive.Unstable_MentionRoot>
+    </ComposerPrimitive.Unstable_TriggerPopoverRoot>
   ) : (
     <>
       {inputBox}
@@ -1631,7 +1656,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     const themeName = (config?.code_theme as string) ?? "one-light";
     const style = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
     const SyntaxHighlighter = makePrismLightSyntaxHighlighter({ style });
-    return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter } });
+    return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter }, preprocess: preprocessStreamingMarkdown });
   }, [config?.code_theme]);
   _MarkdownText = MarkdownText;
 

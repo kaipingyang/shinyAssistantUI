@@ -9,3 +9,4 @@ node_modules/
 *.jpg
 .Renviron
 .claude_session_map.rds
+assistant-ui-src/
