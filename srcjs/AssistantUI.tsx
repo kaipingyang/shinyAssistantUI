@@ -39,7 +39,8 @@ const CODE_THEMES: Record<string, any> = {
 };
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
-  ComposerPrimitive, MessagePrimitive, AttachmentPrimitive,
+  ComposerPrimitive, MessagePrimitive, AttachmentPrimitive, ActionBarPrimitive,
+  SelectionToolbarPrimitive,
   unstable_useMentionAdapter,
   useAui, useAuiState, useMessagePartText, useMessagePartReasoning,
   useThreadListItem,
@@ -54,7 +55,7 @@ import {
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
   MicIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
-  DownloadIcon,
+  DownloadIcon, PencilIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -522,6 +523,25 @@ function InlineReasoningCard() {
   );
 }
 
+// ── CustomAssistantActionBar：含 ExportMarkdown 的 action bar ────────────────
+function CustomAssistantActionBar() {
+  return (
+    <AssistantActionBar.Root hideWhenRunning autohide="not-last" autohideFloat="single-branch">
+      <AssistantActionBar.SpeechControl />
+      <AssistantActionBar.Copy />
+      <ActionBarPrimitive.ExportMarkdown
+        className="aui-action-bar-button"
+        title="Export as markdown"
+      >
+        <DownloadIcon size={15} />
+      </ActionBarPrimitive.ExportMarkdown>
+      <AssistantActionBar.Reload />
+      <AssistantActionBar.FeedbackPositive />
+      <AssistantActionBar.FeedbackNegative />
+    </AssistantActionBar.Root>
+  );
+}
+
 // ── CustomAssistantMessage：支持 reasoning part 的 assistant message ────────
 // 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
 // ThinkingToolUI 保留作为向后兼容（加载旧 localStorage 数据时）。
@@ -537,7 +557,37 @@ function CustomAssistantMessage() {
           tools: { Fallback: GenericToolCard },
         }}
       />
-      <AssistantActionBar />
+      <SelectionToolbarPrimitive.Root
+        style={{
+          display: "flex",
+          gap: "2px",
+          background: "#1f2937",
+          borderRadius: "6px",
+          padding: "3px 6px",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+        }}
+      >
+        <SelectionToolbarPrimitive.Quote
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            fontSize: "12px",
+            color: "#f9fafb",
+            padding: "2px 6px",
+            borderRadius: "4px",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            whiteSpace: "nowrap",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "none"; }}
+        >
+          ❝ Quote
+        </SelectionToolbarPrimitive.Quote>
+      </SelectionToolbarPrimitive.Root>
+      <CustomAssistantActionBar />
       <BranchPicker />
     </AssistantMessage.Root>
   );
@@ -959,7 +1009,27 @@ function CustomUserMessage() {
     <UserMessage.Root>
       <UserMessage.Attachments />
       <MessagePrimitive.If hasContent>
-        <UserActionBar />
+        <ActionBarPrimitive.Root
+          hideWhenRunning
+          autohide="not-last"
+          style={{ display: "flex", gap: "4px", order: -1 }}
+          className="aui-user-action-bar-root"
+        >
+          <ActionBarPrimitive.Edit asChild>
+            <button
+              type="button"
+              title="Edit"
+              className="aui-action-bar-button"
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                padding: "4px", borderRadius: "4px", color: "#6b7280",
+                display: "flex", alignItems: "center",
+              }}
+            >
+              <PencilIcon size={14} />
+            </button>
+          </ActionBarPrimitive.Edit>
+        </ActionBarPrimitive.Root>
         <UserMessage.Content components={{ Text: UserMessageChipText }} />
       </MessagePrimitive.If>
       <BranchPicker />
@@ -1398,6 +1468,36 @@ function ShinyComposer() {
         boxSizing: "border-box",
       }}
     >
+      {/* 引用预览区（选中文字后点 Quote 按钮，在输入框上方显示） */}
+      <ComposerPrimitive.Quote
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: "8px",
+          borderLeft: "3px solid #3b82f6",
+          background: "#eff6ff",
+          borderRadius: "4px",
+          padding: "6px 10px",
+          marginBottom: "8px",
+          fontSize: "13px",
+          color: "#1e40af",
+        }}
+      >
+        <ComposerPrimitive.QuoteText
+          style={{ flex: 1, lineClamp: 2, overflow: "hidden",
+                   display: "-webkit-box", WebkitLineClamp: 2,
+                   WebkitBoxOrient: "vertical" } as React.CSSProperties}
+        />
+        <ComposerPrimitive.QuoteDismiss
+          style={{
+            background: "none", border: "none", cursor: "pointer",
+            color: "#6b7280", padding: "0 2px", fontSize: "14px",
+            lineHeight: 1, flexShrink: 0,
+          }}
+        >
+          ×
+        </ComposerPrimitive.QuoteDismiss>
+      </ComposerPrimitive.Quote>
       {/* 待发送附件缩略图 */}
       <ComposerPrimitive.Attachments>
         {({ attachment }) => (
@@ -1621,9 +1721,23 @@ function ShinyComposer() {
   );
 
   // ComposerPrimitive.Root 渲染为 <form>，放最外层确保 Enter 触发 form.requestSubmit()
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   return (
     <ComposerPrimitive.Root style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
-      {withMention}
+      <ComposerPrimitive.AttachmentDropzone
+        onDragEnterCapture={() => setIsDraggingOver(true)}
+        onDragLeaveCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDraggingOver(false);
+        }}
+        onDropCapture={() => setIsDraggingOver(false)}
+        style={isDraggingOver ? {
+          outline: "2px dashed #3b82f6",
+          background: "rgba(59, 130, 246, 0.04)",
+          borderRadius: "12px",
+        } : undefined}
+      >
+        {withMention}
+      </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
 }

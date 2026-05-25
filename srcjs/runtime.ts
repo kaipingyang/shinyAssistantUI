@@ -177,6 +177,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   const [isRunning, setIsRunning] = useState(false);
+  const [suggestions, setSuggestions] = useState<Array<{prompt: string}>>([]);
   const streamingIdRef  = useRef<string | null>(null);
   const hasReasoningRef = useRef(false); // thinking arrived before text chunks
 
@@ -333,6 +334,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const startRun = useCallback(
     (threadId: string, sendFn: () => void) => {
       setIsRunning(true);
+      setSuggestions([]);
       streamingIdRef.current = null;
 
       bridge.current.setRunCallbacks({
@@ -450,10 +452,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
-        onDone: () => {
+        onDone: (doneSuggestions) => {
           streamingIdRef.current = null;
           hasReasoningRef.current = false;
           setIsRunning(false);
+          if (doneSuggestions && doneSuggestions.length > 0) setSuggestions(doneSuggestions);
           bridge.current.setRunCallbacks(null);
           // 流结束后统一持久化
           setMessagesMap((prev) => {
@@ -725,6 +728,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
+    suggestions,
     onNew,
     onEdit,
     onReload,

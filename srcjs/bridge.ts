@@ -33,7 +33,7 @@ export type RunCallbacks = {
   onThinking?: (text: string) => void;
   onToolCall: (toolCall: ToolCallPayload) => void;
   onToolResult: (toolCallId: string, result: unknown, isError: boolean) => void;
-  onDone: () => void;
+  onDone: (suggestions?: Array<{prompt: string}>) => void;
   onError: (message: string) => void;
 };
 
@@ -66,8 +66,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     currentCallbacks?.onChunk(d.text);
   });
 
-  Shiny.addCustomMessageHandler(`${inputId}:done`, (_data) => {
-    currentCallbacks?.onDone();
+  Shiny.addCustomMessageHandler(`${inputId}:done`, (data) => {
+    const d = data as { suggestions?: Array<{prompt: string}> };
+    currentCallbacks?.onDone(d.suggestions);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {

@@ -201,8 +201,8 @@ assistantUIServer <- function(id, handler,
   on_chunk <- function(text) {
     session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
   }
-  on_done <- function() {
-    session$sendCustomMessage(paste0(input_id, ":done"), list())
+  on_done <- function(suggestions = list()) {
+    session$sendCustomMessage(paste0(input_id, ":done"), list(suggestions = suggestions))
   }
   on_error_fn <- function(msg) {
     session$sendCustomMessage(paste0(input_id, ":error"), list(message = msg))

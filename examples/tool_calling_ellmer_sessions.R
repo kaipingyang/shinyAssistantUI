@@ -286,7 +286,10 @@ handler <- coro::async(function(
     }
   )
 
-  on_done()
+  on_done(suggestions = list(
+    list(prompt = "What else can you help me with?"),
+    list(prompt = "Can you give me more details?")
+  ))
 
   # ── 对话完成后持久化到 SQLite ─────────────────────────────────────────────
   if (!is_cancelled() && !ctrl$cancelled) {
