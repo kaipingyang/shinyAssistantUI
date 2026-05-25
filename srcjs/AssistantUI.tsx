@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext, forwardRef } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
 import { Thread, ThreadList, AssistantMessage, UserMessage, BranchPicker, UserActionBar, AssistantActionBar, makeMarkdownText, CodeHeader } from "@assistant-ui/react-ui";
 import { makePrismLightSyntaxHighlighter } from "@assistant-ui/react-syntax-highlighter";
@@ -40,6 +40,8 @@ const CODE_THEMES: Record<string, any> = {
 import {
   ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
   ComposerPrimitive, MessagePrimitive, AttachmentPrimitive, ActionBarPrimitive,
+  ActionBarMorePrimitive,
+  AssistantModalPrimitive,
   SelectionToolbarPrimitive,
   unstable_useMentionAdapter,
   useAui, useAuiState, useMessagePartText, useMessagePartReasoning,
@@ -55,7 +57,7 @@ import {
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
   MicIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
-  DownloadIcon, PencilIcon,
+  DownloadIcon, PencilIcon, BotIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -472,11 +474,18 @@ const ThinkingToolUI = makeAssistantToolUI({
   render: ThinkingCard,
 });
 
+// ── Chain-of-thought collapse context ────────────────────────────────────────
+// true = steps collapsed（reasoning/tools 不渲染）；false = expanded
+const StepsCollapseCtx = createContext(false);
+
 // ── InlineReasoningCard（native reasoning part，替代 __thinking__ 伪工具）──────
 function InlineReasoningCard() {
+  const collapsed = useContext(StepsCollapseCtx);
   const { text, status } = useMessagePartReasoning();
   const [open, setOpen] = useState(false);
   const done = (status as { type?: string })?.type === "complete";
+
+  if (collapsed) return null;
 
   return (
     <div style={{
@@ -524,20 +533,41 @@ function InlineReasoningCard() {
 }
 
 // ── CustomAssistantActionBar：含 ExportMarkdown 的 action bar ────────────────
+const moreItemStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: "8px",
+  padding: "6px 10px", fontSize: "13px", color: "#374151",
+  cursor: "pointer", borderRadius: "4px", outline: "none",
+  background: "none", border: "none", width: "100%", textAlign: "left",
+};
+const moreContentStyle: React.CSSProperties = {
+  background: "white", border: "1px solid #e5e7eb", borderRadius: "8px",
+  padding: "4px", boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+  minWidth: "160px", zIndex: 50,
+};
 function CustomAssistantActionBar() {
   return (
     <AssistantActionBar.Root hideWhenRunning autohide="not-last" autohideFloat="single-branch">
       <AssistantActionBar.SpeechControl />
       <AssistantActionBar.Copy />
-      <ActionBarPrimitive.ExportMarkdown
-        className="aui-action-bar-button"
-        title="Export as markdown"
-      >
-        <DownloadIcon size={15} />
-      </ActionBarPrimitive.ExportMarkdown>
       <AssistantActionBar.Reload />
       <AssistantActionBar.FeedbackPositive />
       <AssistantActionBar.FeedbackNegative />
+      <ActionBarMorePrimitive.Root>
+        <ActionBarMorePrimitive.Trigger
+          className="aui-action-bar-button"
+          title="More options"
+        >
+          <MoreHorizontalIcon size={15} />
+        </ActionBarMorePrimitive.Trigger>
+        <ActionBarMorePrimitive.Content style={moreContentStyle}>
+          <ActionBarMorePrimitive.Item asChild>
+            <ActionBarPrimitive.ExportMarkdown style={moreItemStyle}>
+              <DownloadIcon size={14} />
+              <span>Export Markdown</span>
+            </ActionBarPrimitive.ExportMarkdown>
+          </ActionBarMorePrimitive.Item>
+        </ActionBarMorePrimitive.Content>
+      </ActionBarMorePrimitive.Root>
     </AssistantActionBar.Root>
   );
 }
@@ -546,17 +576,40 @@ function CustomAssistantActionBar() {
 // 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
 // ThinkingToolUI 保留作为向后兼容（加载旧 localStorage 数据时）。
 function CustomAssistantMessage() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts = useAuiState((s: any) => s.message.parts as Array<{type: string}>);
+  const stepCount = parts.filter(p => p.type === "reasoning" || p.type === "tool-call").length;
+  const [stepsCollapsed, setStepsCollapsed] = useState(true);
+
   return (
     <AssistantMessage.Root>
       <AssistantMessage.Avatar />
-      <AssistantMessage.Content
-        components={{
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          Text: (_MarkdownText ?? (() => null)) as any,
-          Reasoning: InlineReasoningCard,
-          tools: { Fallback: GenericToolCard },
-        }}
-      />
+      {stepCount > 0 && (
+        <button
+          onClick={() => setStepsCollapsed(v => !v)}
+          style={{
+            display: "flex", alignItems: "center", gap: "6px",
+            background: "none", border: "none", cursor: "pointer",
+            fontSize: "12px", color: "#6b7280", padding: "2px 4px",
+            borderRadius: "4px", marginBottom: "2px",
+          }}
+        >
+          {stepsCollapsed
+            ? <ChevronRightIcon size={13} />
+            : <ChevronDownIcon size={13} />}
+          <span>{stepsCollapsed ? `Show ${stepCount} step${stepCount > 1 ? "s" : ""}` : `Hide steps`}</span>
+        </button>
+      )}
+      <StepsCollapseCtx.Provider value={stepsCollapsed && stepCount > 0}>
+        <AssistantMessage.Content
+          components={{
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Text: (_MarkdownText ?? (() => null)) as any,
+            Reasoning: InlineReasoningCard,
+            tools: { Fallback: GenericToolCard },
+          }}
+        />
+      </StepsCollapseCtx.Provider>
       <SelectionToolbarPrimitive.Root
         style={{
           display: "flex",
@@ -815,12 +868,14 @@ function ToolResult({ result, resultType, resultLang, isError, annotations }: To
 
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
 function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
+  const collapsed = useContext(StepsCollapseCtx);
   const [open, setOpen] = useState(false);
   const [approvalSent, setApprovalSent] = useState(false);
 
   const pending  = result === undefined;
   const done     = !pending && !isError;
   const errored  = !pending && !!isError;
+  if (collapsed) return null;
 
   // annotations 存在 artifact 字段（由 runtime.ts 从 ToolCallPayload.annotations 写入）
   const annotations = artifact as Record<string, unknown> | undefined;
@@ -1742,9 +1797,40 @@ function ShinyComposer() {
   );
 }
 
+// ── AssistantModal 悬浮气泡 toggle 按钮 ──────────────────────────────────────
+const ModalToggleButton = forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { "data-state"?: "open" | "closed" }
+>(({ "data-state": state, ...rest }, ref) => (
+  <button
+    ref={ref}
+    {...rest}
+    style={{
+      width: "52px",
+      height: "52px",
+      borderRadius: "50%",
+      background: "#111827",
+      border: "none",
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+      color: "white",
+      flexShrink: 0,
+      ...rest.style,
+    }}
+  >
+    {state === "open"
+      ? <ChevronDownIcon size={22} />
+      : <BotIcon size={22} />
+    }
+  </button>
+));
+ModalToggleButton.displayName = "ModalToggleButton";
+
 // ── 侧边栏（不含折叠按钮）───────────────────────────────────────────────────
-function ThreadListSidebar() {
-  return (
+function ThreadListSidebar() {  return (
     <div style={{ height: "100%", overflow: "auto", background: "hsl(0, 0%, 98%)" }}>
       <ThreadListPrimitive.Root className="aui-root aui-thread-list-root">
         <ThreadList.New />
@@ -1763,6 +1849,7 @@ interface AssistantUIProps {
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const { runtime, sendToolApproval, switchToNewThread, sendAction } = useShinyRuntime(inputId, config);
   const showThreadList = config?.show_thread_list === true;
+  const isModal = config?.modal === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // 语法高亮主题：按 config.code_theme 选择，默认 one-light
@@ -1801,6 +1888,54 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     _codeThemeStyle = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
   }, [config?.code_theme]);
 
+  // ── Thread 公共 props（modal 和普通模式共用）──────────────────────────────
+  const threadProps = {
+    tools:           [WeatherToolUI, ThinkingToolUI] as React.ComponentType[],
+    welcome:         { suggestions },
+    components:      { Composer: ShinyComposer, UserMessage: CustomUserMessage, AssistantMessage: CustomAssistantMessage },
+    userMessage:     { allowEdit: true },
+    assistantMessage: {
+      allowSpeak: true,
+      allowFeedbackPositive: true,
+      allowFeedbackNegative: true,
+    },
+    strings:         (config?.strings ?? undefined) as never,
+    assistantAvatar: (config?.assistant_avatar ?? undefined) as never,
+  };
+
+  // ── Modal 模式 ─────────────────────────────────────────────────────────────
+  if (isModal) {
+    return (
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ShinyComposerCtx.Provider value={composerCtx}>
+          <AssistantModalPrimitive.Root>
+            <AssistantModalPrimitive.Anchor className="aui-root aui-modal-anchor">
+              <AssistantModalPrimitive.Trigger asChild>
+                <ModalToggleButton />
+              </AssistantModalPrimitive.Trigger>
+            </AssistantModalPrimitive.Anchor>
+            <AssistantModalPrimitive.Content
+              className="aui-root aui-modal-content"
+              sideOffset={16}
+            >
+              <div style={{
+                width: "400px",
+                height: "580px",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+                "--aui-thread-max-width": "9999px",
+              } as React.CSSProperties}>
+                <Thread {...threadProps} />
+              </div>
+            </AssistantModalPrimitive.Content>
+          </AssistantModalPrimitive.Root>
+        </ShinyComposerCtx.Provider>
+      </AssistantRuntimeProvider>
+    );
+  }
+
+  // ── 普通模式 ───────────────────────────────────────────────────────────────
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ShinyComposerCtx.Provider value={composerCtx}>
@@ -1854,19 +1989,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               minHeight: 0,
               "--aui-thread-max-width": "9999px",
             } as React.CSSProperties}>
-              <Thread
-                tools={[WeatherToolUI, ThinkingToolUI]}
-                welcome={{ suggestions }}
-                components={{ Composer: ShinyComposer, UserMessage: CustomUserMessage, AssistantMessage: CustomAssistantMessage }}
-                userMessage={{ allowEdit: true }}
-                assistantMessage={{
-                  allowSpeak: true,
-                  allowFeedbackPositive: true,
-                  allowFeedbackNegative: true,
-                }}
-                strings={(config?.strings ?? undefined) as never}
-                assistantAvatar={(config?.assistant_avatar ?? undefined) as never}
-              />
+              <Thread {...threadProps} />
             </div>
           </div>
 

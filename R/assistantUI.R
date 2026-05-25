@@ -8,7 +8,12 @@
 #'
 #' @return An HTML output element.
 #' @export
-assistantUIOutput <- function(outputId, width = "100%", height = "600px", ...) {
+assistantUIOutput <- function(outputId, width = "100%", height = "600px",
+                              modal = FALSE, ...) {
+  if (modal) {
+    width  <- "auto"
+    height <- "auto"
+  }
   htmlwidgets::shinyWidgetOutput(
     outputId  = outputId,
     name      = "assistantUI",

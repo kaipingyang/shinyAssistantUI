@@ -168,10 +168,11 @@ assistantUIServer <- function(id, handler,
                               on_feedback       = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
-                              assistant_avatar  = list(fallback = "AI")) {
+                              assistant_avatar  = list(fallback = "AI"),
+                              modal             = FALSE) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
-  force(on_feedback)
+  force(on_feedback); force(modal)
   force(code_theme); force(strings); force(assistant_avatar)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
@@ -182,7 +183,8 @@ assistantUIServer <- function(id, handler,
     commands         = commands,
     tools            = tools,
     action_items     = action_items,
-    code_theme       = code_theme
+    code_theme       = code_theme,
+    modal            = modal
   )
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
