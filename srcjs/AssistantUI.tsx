@@ -86,6 +86,7 @@ import {
 import { mergeRegister } from "@lexical/utils";
 import "@assistant-ui/react-ui/styles/index.css";
 import "@assistant-ui/react-ui/styles/markdown.css";
+import "@assistant-ui/react-ui/styles/modal.css";
 import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
 
@@ -1919,11 +1920,9 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               sideOffset={16}
             >
               <div style={{
-                width: "400px",
                 height: "580px",
                 display: "flex",
                 flexDirection: "column",
-                overflow: "hidden",
                 "--aui-thread-max-width": "9999px",
               } as React.CSSProperties}>
                 <Thread {...threadProps} />
