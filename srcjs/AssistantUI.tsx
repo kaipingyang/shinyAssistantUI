@@ -1918,11 +1918,13 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             <AssistantModalPrimitive.Content
               className="aui-root aui-modal-content"
               sideOffset={16}
+              style={{ height: "580px" }}
             >
               <div style={{
-                height: "580px",
+                height: "100%",
                 display: "flex",
                 flexDirection: "column",
+                overflow: "hidden",
                 "--aui-thread-max-width": "9999px",
               } as React.CSSProperties}>
                 <Thread {...threadProps} />

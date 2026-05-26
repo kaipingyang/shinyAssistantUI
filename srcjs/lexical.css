@@ -36,7 +36,13 @@
   background: #f3f4f6;
 }
 
-/* ── @ mention chip — 浅蓝色背景 + 蓝色字 ─────────────────────────────── */
+/* ── Modal: 防止 thread viewport 出现横向滚动条 ──────────────────────────── */
+/* .aui-thread-viewport 只设了 overflow-y:scroll，overflow-x 默认 auto
+   导致宽内容（code block、tool card）溢出时出现横向滚动条 */
+.aui-modal-content .aui-thread-viewport {
+  overflow-x: hidden;
+}
+
 .aui-mention-chip {
   display: inline-flex;
   align-items: center;
