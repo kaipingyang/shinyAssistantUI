@@ -6,7 +6,7 @@
 ^srcjs$
 ^package\.json$
 ^package-lock\.json$
-^vite\.config\.ts$
+^vite\.config\.mts$
 ^vitest\.config\.ts$
 ^tsconfig\.json$
 ^examples$

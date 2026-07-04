@@ -15,18 +15,22 @@
     "@assistant-ui/react-ui": "^0.2.1",
     "@lexical/react": "^0.43.0",
     "@lexical/utils": "^0.43.0",
+    "clsx": "^2.1.1",
     "cmdk": "latest",
     "lexical": "^0.43.0",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "@vitejs/plugin-react": "^4.7.0",
     "jsdom": "^29.1.1",
+    "tailwindcss": "^4.3.2",
     "typescript": "latest",
     "vite": "^5.4.21",
     "vitest": "^4.1.9"

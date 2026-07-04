@@ -7,7 +7,9 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["srcjs/*"] }
   },
   "include": ["srcjs"]
 }

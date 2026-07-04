@@ -1,11 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { writeFileSync } from "fs";
 
 export default defineConfig({
+  resolve: {
+    alias: { "@": resolve(import.meta.dirname, "srcjs") },
+  },
   plugins: [
     react(),
+    tailwindcss(),
     // @assistant-ui/tap 生产模式下 tapEffectEvent 直接返回 callbackRef.current（陈旧回调），
     // 导致 handleKeyDown 内 open 捕获的是上一帧的 false，键盘导航完全失效。
     // 开发模式返回稳定包装函数（每次调用最新 callback），行为正确。
@@ -32,7 +37,7 @@ export default defineConfig({
   },
   build: {
     lib: {
-      entry: resolve(__dirname, "srcjs/index.tsx"),
+      entry: resolve(import.meta.dirname, "srcjs/index.tsx"),
       name: "shinyAssistantUI",
       formats: ["iife"],
       fileName: () => "shinyAssistantUI.js",
