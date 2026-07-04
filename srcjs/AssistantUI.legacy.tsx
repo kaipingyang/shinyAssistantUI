@@ -1,0 +1,2311 @@
+import React, { useState, useRef, useEffect, useMemo, useCallback, createContext, useContext, forwardRef } from "react";
+import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
+import { Thread, ThreadList, AssistantMessage, UserMessage, BranchPicker, UserActionBar, AssistantActionBar, makeMarkdownText, CodeHeader } from "@assistant-ui/react-ui";
+import { makePrismLightSyntaxHighlighter } from "@assistant-ui/react-syntax-highlighter";
+import { PrismLight } from "react-syntax-highlighter";
+import {
+  oneLight, ghcolors, vs, solarizedlight,
+  vscDarkPlus, dracula, nord, nightOwl, oneDark,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
+import rLang from "react-syntax-highlighter/dist/esm/languages/prism/r";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+PrismLight.registerLanguage("r", rLang);
+PrismLight.registerLanguage("python", python);
+PrismLight.registerLanguage("javascript", javascript);
+PrismLight.registerLanguage("typescript", typescript);
+PrismLight.registerLanguage("sql", sql);
+PrismLight.registerLanguage("bash", bash);
+PrismLight.registerLanguage("json", json);
+PrismLight.registerLanguage("yaml", yaml);
+
+// 主题名称 → 样式对象的映射（供 R 端 code_theme 参数选择）
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const CODE_THEMES: Record<string, any> = {
+  "one-light":    oneLight,
+  "ghcolors":     ghcolors,
+  "vs":           vs,
+  "solarized-light": solarizedlight,
+  "vsc-dark-plus": vscDarkPlus,
+  "dracula":      dracula,
+  "nord":         nord,
+  "night-owl":    nightOwl,
+  "one-dark":     oneDark,
+};
+import {
+  ThreadListItemPrimitive, ThreadListPrimitive, makeAssistantToolUI,
+  ComposerPrimitive, MessagePrimitive, AttachmentPrimitive, ActionBarPrimitive,
+  ActionBarMorePrimitive,
+  AssistantModalPrimitive,
+  SelectionToolbarPrimitive,
+  unstable_useMentionAdapter,
+  useAui, useAuiState, useMessagePartText, useMessagePartReasoning,
+  useThreadListItem,
+} from "@assistant-ui/react";
+import { useThreadIsRunning } from "@assistant-ui/core/react";
+import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { sessionDates } from "./runtime";
+import { safeUrl, preprocessStreamingMarkdown, detectSlashTrigger, computeToolDepth, formatMessageTime } from "./helpers";
+import { registerApprovalHandler, unregisterApprovalHandler, resolveApprovalHandler } from "./approval-registry";
+import {
+  PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
+  MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
+  AlertCircleIcon, CheckCircle2Icon, DropletIcon, WindIcon,
+  CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
+  CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
+  MicIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
+  DownloadIcon, PencilIcon, BotIcon, LinkIcon, ClockIcon,
+} from "lucide-react";
+import type { ComponentType } from "react";
+
+// ── lucide 图标名称映射（供 tool_annotations(icon=...) 使用）─────────────────
+type IconComponent = ComponentType<{ size?: number; color?: string; style?: React.CSSProperties }>;
+const TOOL_ICONS: Record<string, IconComponent> = {
+  "cloud-sun":     CloudSunIcon,
+  "calculator":    CalculatorIcon,
+  "search":        SearchIcon,
+  "database":      DatabaseIcon,
+  "code":          CodeIcon,
+  "globe":         GlobeIcon,
+  "zap":           ZapIcon,
+  "terminal":      TerminalIcon,
+  "flask":         FlaskConicalIcon,
+  "wrench":        WrenchIcon,
+};
+import { LexicalComposerInput, $createDirectiveNode } from "@assistant-ui/react-lexical";
+
+// MarkdownText 在组件内按 code_theme 动态创建（见 AssistantUI 组件）
+import {
+  $getSelection, $isRangeSelection, $isTextNode,
+  KEY_ENTER_COMMAND, KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_ESCAPE_COMMAND,
+  COMMAND_PRIORITY_CRITICAL,
+} from "lexical";
+import { mergeRegister } from "@lexical/utils";
+import "@assistant-ui/react-ui/styles/index.css";
+import "@assistant-ui/react-ui/styles/markdown.css";
+import "@assistant-ui/react-ui/styles/modal.css";
+import "./lexical.css";
+import { useShinyRuntime } from "./runtime";
+
+// ── Tool 审批：注册表已抽到 ./approval-registry（可单测多 widget 路由隔离）────
+
+// ── Tool result 代码主题（与 AssistantUI 的 code_theme 保持同步）──────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _codeThemeStyle: any = oneLight;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _MarkdownText: React.ComponentType | null = null;
+let _showTimestamps = false; // 由 AssistantUI 从 config.show_timestamps 设置
+
+// ── 消息时间戳（从消息 id 解析,gated by config.show_timestamps）──────────────
+function MessageTimestamp() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const id = useAuiState((s: any) => s.message?.id as string | undefined);
+  if (!_showTimestamps) return null;
+  const t = formatMessageTime(id);
+  if (!t) return null;
+  return (
+    <span className="aui-message-timestamp" data-timestamp={t}
+      style={{ fontSize: "10px", color: "var(--aui-muted-foreground, #9ca3af)", padding: "0 2px" }}>
+      {t}
+    </span>
+  );
+}
+
+// ── Thread 操作上下文（rename 等,由 AssistantUI 注入）─────────────────────────
+const ThreadActionsCtx = createContext<{ renameThread: (id: string, title: string) => void }>({
+  renameThread: () => {},
+});
+
+// ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
+function CustomThreadListItem() {
+  const [hovered, setHovered] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const { renameThread } = useContext(ThreadActionsCtx);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const { id, title } = useThreadListItem();
+  const date = sessionDates.get(id);
+
+  const startRename = () => {
+    setDraftTitle(title ?? "");
+    setRenaming(true);
+    setMenuOpen(false);
+  };
+  const commitRename = () => {
+    if (draftTitle.trim()) renameThread(id, draftTitle);
+    setRenaming(false);
+  };
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  return (
+    <ThreadListItemPrimitive.Root
+      className="aui-thread-list-item"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); }}
+      style={{ position: "relative" }}
+    >
+      <ThreadListItemPrimitive.Trigger
+        className="aui-thread-list-item-trigger"
+        style={{ flex: 1, minWidth: 0 }}
+      >
+        {renaming ? (
+          <input
+            autoFocus
+            value={draftTitle}
+            onChange={(e) => setDraftTitle(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") commitRename();
+              else if (e.key === "Escape") setRenaming(false);
+            }}
+            onBlur={commitRename}
+            className="aui-thread-rename-input"
+            style={{
+              width: "100%", fontSize: "13px", padding: "2px 6px",
+              border: "1px solid var(--aui-ring, #3b82f6)", borderRadius: "4px",
+              outline: "none", background: "var(--aui-background, #fff)",
+              color: "var(--aui-foreground, #111827)",
+            }}
+          />
+        ) : (
+          <p className="aui-thread-list-item-title" style={{ margin: 0 }}>
+            <ThreadListItemPrimitive.Title fallback="New Chat" />
+          </p>
+        )}
+        {date && !renaming && (
+          <p style={{ margin: 0, fontSize: "11px", color: "var(--aui-muted-foreground, #9ca3af)", lineHeight: 1.2 }}>
+            {date}
+          </p>
+        )}
+      </ThreadListItemPrimitive.Trigger>
+
+      {/* 三点按钮：hover 或菜单打开时显示 */}
+      <div
+        ref={menuRef}
+        style={{
+          position: "relative",
+          flexShrink: 0,
+          visibility: hovered || menuOpen ? "visible" : "hidden",
+        }}
+      >
+        <button
+          onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: "2px 4px",
+            borderRadius: "4px",
+            color: "var(--aui-muted-foreground, #6b7280)",
+            display: "flex",
+            alignItems: "center",
+          }}
+          title="More options"
+        >
+          <MoreHorizontalIcon size={14} />
+        </button>
+
+        {/* 下拉菜单 */}
+        {menuOpen && (
+          <div style={{
+            position: "absolute",
+            right: 0,
+            top: "calc(100% + 4px)",
+            zIndex: 100,
+            background: "var(--aui-background, white)",
+            border: "1px solid var(--aui-border, #e5e7eb)",
+            borderRadius: "6px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+            minWidth: "140px",
+            padding: "4px",
+          }}>
+            <button
+              onClick={(e) => { e.stopPropagation(); startRename(); }}
+              className="aui-thread-rename-btn"
+              style={{
+                display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                padding: "6px 10px", background: "none", border: "none",
+                cursor: "pointer", borderRadius: "4px", fontSize: "13px",
+                textAlign: "left", color: "var(--aui-foreground, #111827)",
+              }}
+            >
+              <PencilIcon size={13} />
+              Rename
+            </button>
+            <ThreadListItemPrimitive.Archive
+              onClick={() => setMenuOpen(false)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                width: "100%",
+                padding: "6px 10px",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                borderRadius: "4px",
+                fontSize: "13px",
+                textAlign: "left",
+                color: "var(--aui-foreground, #111827)",
+              }}
+            >
+              <ArchiveIcon size={13} />
+              Archive
+            </ThreadListItemPrimitive.Archive>
+
+            <ThreadListItemPrimitive.Delete
+              onClick={() => setMenuOpen(false)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                width: "100%",
+                padding: "6px 10px",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                borderRadius: "4px",
+                fontSize: "13px",
+                textAlign: "left",
+                color: "#ef4444",
+              }}
+            >
+              <Trash2Icon size={13} />
+              Delete
+            </ThreadListItemPrimitive.Delete>
+          </div>
+        )}
+      </div>
+    </ThreadListItemPrimitive.Root>
+  );
+}
+
+// ── 天气卡片 helpers ──────────────────────────────────────────────────────────
+function weatherGradient(condition: string): string {
+  const c = condition.toLowerCase();
+  if (c.includes("thunder") || c.includes("storm"))
+    return "linear-gradient(160deg,#0f172a 0%,#1e293b 55%,#312e81 100%)";
+  if (c.includes("heavy rain") || c.includes("downpour"))
+    return "linear-gradient(160deg,#0f172a 0%,#1e3a5f 100%)";
+  if (c.includes("rain") || c.includes("shower") || c.includes("drizzle"))
+    return "linear-gradient(160deg,#1e3a5f 0%,#1e4976 50%,#2563eb 100%)";
+  if (c.includes("snow") || c.includes("blizzard") || c.includes("flurr"))
+    return "linear-gradient(160deg,#bfdbfe 0%,#eff6ff 100%)";
+  if (c.includes("fog") || c.includes("mist") || c.includes("haze"))
+    return "linear-gradient(160deg,#9ca3af 0%,#d1d5db 100%)";
+  if (c.includes("overcast"))
+    return "linear-gradient(160deg,#374151 0%,#4b5563 100%)";
+  if (c.includes("cloud") || c.includes("partly"))
+    return "linear-gradient(160deg,#1d4ed8 0%,#3b82f6 55%,#93c5fd 100%)";
+  if (c.includes("wind"))
+    return "linear-gradient(160deg,#0891b2 0%,#0e7490 60%,#164e63 100%)";
+  // sunny / clear
+  return "linear-gradient(160deg,#0369a1 0%,#0ea5e9 50%,#38bdf8 100%)";
+}
+
+function weatherEmoji(condition: string): string {
+  const c = condition.toLowerCase();
+  if (c.includes("thunder") || c.includes("storm"))  return "⛈️";
+  if (c.includes("heavy rain") || c.includes("downpour")) return "🌧️";
+  if (c.includes("light rain") || c.includes("drizzle")) return "🌦️";
+  if (c.includes("rain") || c.includes("shower"))    return "🌧️";
+  if (c.includes("snow") || c.includes("blizzard"))  return "❄️";
+  if (c.includes("fog") || c.includes("mist"))       return "🌫️";
+  if (c.includes("overcast"))                        return "☁️";
+  if (c.includes("partly") || c.includes("cloud"))   return "⛅";
+  if (c.includes("wind"))                            return "🌬️";
+  return "☀️";
+}
+
+interface WeatherResult {
+  city: string;
+  temperature: number;
+  unit?: string;
+  condition: string;
+  high: number;
+  low: number;
+  humidity?: number;
+  wind?: number;
+  forecast?: Array<{ day: string; high: number; low: number; condition: string }>;
+}
+
+function WeatherCard({ args, result, isError }: ToolCallMessagePartProps) {
+  const city = (args as Record<string, unknown>)?.city as string | undefined;
+
+  // ── 加载中 ──
+  if (result === undefined) {
+    return (
+      <div style={{
+        background: "linear-gradient(160deg,#334155 0%,#475569 100%)",
+        padding: "20px 22px", color: "white",
+        opacity: 0.8,
+      }}>
+        <div style={{ fontSize: "13px", opacity: 0.8 }}>{city ?? "—"}</div>
+        <div style={{ fontSize: "52px", fontWeight: 200, lineHeight: 1.1, marginTop: "4px" }}>
+          —°
+        </div>
+        <div style={{ fontSize: "13px", opacity: 0.6, marginTop: "4px" }}>
+          Fetching weather…
+        </div>
+      </div>
+    );
+  }
+
+  // 错误由外层 WeatherToolCard 处理，这里不会到达
+  if (isError) return null;
+
+  const d = result as WeatherResult;
+  const unit = d.unit ?? "F";
+  const gradient = weatherGradient(d.condition);
+  const emoji = weatherEmoji(d.condition);
+  const isSnow = d.condition.toLowerCase().includes("snow");
+  const textColor = isSnow ? "#1e3a5f" : "white";
+  const mutedColor = isSnow ? "rgba(30,58,95,0.65)" : "rgba(255,255,255,0.70)";
+  const dividerColor = isSnow ? "rgba(30,58,95,0.18)" : "rgba(255,255,255,0.22)";
+
+  return (
+    <div style={{
+      background: gradient,
+      boxShadow: "0 4px 20px rgba(0,0,0,0.18)",
+    }}>
+      {/* ── 主区域 ── */}
+      <div style={{ padding: "20px 22px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div style={{ fontSize: "14px", color: textColor, fontWeight: 500 }}>
+              {d.city}
+            </div>
+            <div style={{
+              fontSize: "68px", fontWeight: 200, lineHeight: 1,
+              color: textColor, marginTop: "4px", letterSpacing: "-2px",
+            }}>
+              {d.temperature}°{unit}
+            </div>
+            <div style={{ marginTop: "6px", display: "flex", gap: "10px", fontSize: "13px", color: mutedColor }}>
+              <span>↑ {d.high}°</span>
+              <span>↓ {d.low}°</span>
+            </div>
+            <div style={{ marginTop: "6px", fontSize: "14px", color: textColor }}>
+              {d.condition}
+            </div>
+          </div>
+          <div style={{ fontSize: "52px", lineHeight: 1, marginTop: "2px" }}>
+            {emoji}
+          </div>
+        </div>
+
+        {/* 湿度 + 风速 */}
+        {(d.humidity !== undefined || d.wind !== undefined) && (
+          <div style={{
+            display: "flex", gap: "16px", marginTop: "14px",
+            fontSize: "12px", color: mutedColor,
+          }}>
+            {d.humidity !== undefined && (
+              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <DropletIcon size={12} /> {d.humidity}%
+              </span>
+            )}
+            {d.wind !== undefined && (
+              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <WindIcon size={12} /> {d.wind} mph
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── 预报行 ── */}
+      {d.forecast && d.forecast.length > 0 && (
+        <div style={{
+          borderTop: `1px solid ${dividerColor}`,
+          display: "flex",
+          padding: "12px 22px 16px",
+          gap: "0",
+        }}>
+          {d.forecast.map((f) => (
+            <div key={f.day} style={{
+              flex: 1, textAlign: "center",
+              fontSize: "12px", color: textColor,
+            }}>
+              <div style={{ color: mutedColor, marginBottom: "4px", fontSize: "11px" }}>{f.day}</div>
+              <div style={{ fontSize: "18px", lineHeight: 1, marginBottom: "4px" }}>
+                {weatherEmoji(f.condition)}
+              </div>
+              <div style={{ fontWeight: 500 }}>{f.high}°</div>
+              <div style={{ color: mutedColor }}>{f.low}°</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── get_weather 专属：GenericToolCard 小条 + 独立天气卡片 ─────────────────────
+function WeatherToolCard(props: ToolCallMessagePartProps) {
+  const { toolName, args, argsText, result, isError, artifact } = props;
+  return (
+    <>
+      {/* 1. 复用 GenericToolCard 作为工具调用状态条 */}
+      <GenericToolCard {...props} />
+
+      {/* 2. 天气卡片：独立元素，固定宽度，仅 done/pending 时显示 */}
+      {!isError && (
+        <div style={{ marginTop: "6px", maxWidth: "360px" }}>
+          <div style={{ borderRadius: "14px", overflow: "hidden",
+                        boxShadow: "0 4px 20px rgba(0,0,0,0.18)" }}>
+            <WeatherCard args={args} result={result} isError={isError}
+              artifact={artifact} argsText={argsText} toolName={toolName}
+              addResult={() => {}} resume={() => {}}
+              status={{ type: result === undefined ? "running" : "complete" } as never}
+            />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// 注册为 get_weather 专属 UI
+const WeatherToolUI = makeAssistantToolUI({
+  toolName: "get_weather",
+  render: WeatherToolCard,
+});
+
+// ── Thinking 卡片（toolName = "__thinking__"）────────────────────────────────
+function ThinkingCard({ argsText, result }: ToolCallMessagePartProps) {
+  const [open, setOpen] = useState(false);
+  const done = result !== undefined;
+
+  return (
+    <div style={{
+      border: "1px solid #e5e7eb",
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: "hsl(0,0%,98%)",
+    }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <LightbulbIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{done ? "Thought" : "Thinking…"}</span>
+        {!done && <span style={{ fontSize: "11px", color: "#d97706" }}>in progress</span>}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
+      </button>
+
+      {open && argsText && (
+        <div style={{
+          borderTop: "1px solid #e5e7eb",
+          padding: "8px 10px",
+          fontSize: "12px",
+          color: "#6b7280",
+          fontStyle: "italic",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxHeight: "300px",
+          overflowY: "auto",
+          lineHeight: 1.5,
+        }}>
+          {argsText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ThinkingToolUI = makeAssistantToolUI({
+  toolName: "__thinking__",
+  render: ThinkingCard,
+});
+
+// ── Chain-of-thought collapse context ────────────────────────────────────────
+// true = steps collapsed（reasoning/tools 不渲染）；false = expanded
+const StepsCollapseCtx = createContext(false);
+
+// ── InlineReasoningCard（native reasoning part，替代 __thinking__ 伪工具）──────
+function InlineReasoningCard() {
+  const collapsed = useContext(StepsCollapseCtx);
+  const { text, status } = useMessagePartReasoning();
+  const done = (status as { type?: string })?.type === "complete";
+  const [open, setOpen] = useState(true);  // 默认展开，可折叠
+
+  if (collapsed) return null;
+
+  return (
+    <div style={{
+      border: "1px solid #e5e7eb",
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: "hsl(0,0%,98%)",
+    }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <LightbulbIcon size={14} style={{ flexShrink: 0 }} color={done ? "#9ca3af" : "#d97706"} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{done ? "Thought" : "Thinking…"}</span>
+        {!done && <span style={{ fontSize: "11px", color: "#d97706" }}>in progress</span>}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
+      </button>
+
+      {open && text && (
+        <div style={{
+          borderTop: "1px solid #e5e7eb",
+          padding: "8px 10px",
+          fontSize: "12px",
+          color: "#6b7280",
+          fontStyle: "italic",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxHeight: "300px",
+          overflowY: "auto",
+          lineHeight: 1.5,
+        }}>
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CustomAssistantActionBar：含 ExportMarkdown 的 action bar ────────────────
+const moreItemStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: "8px",
+  padding: "6px 10px", fontSize: "13px", color: "#374151",
+  cursor: "pointer", borderRadius: "4px", outline: "none",
+  background: "none", border: "none", width: "100%", textAlign: "left",
+};
+const moreContentStyle: React.CSSProperties = {
+  background: "white", border: "1px solid #e5e7eb", borderRadius: "8px",
+  padding: "4px", boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+  minWidth: "160px", zIndex: 50,
+};
+function CustomAssistantActionBar() {
+  return (
+    <AssistantActionBar.Root hideWhenRunning autohide="not-last" autohideFloat="single-branch">
+      <AssistantActionBar.SpeechControl />
+      <AssistantActionBar.Copy />
+      <AssistantActionBar.Reload />
+      <AssistantActionBar.FeedbackPositive />
+      <AssistantActionBar.FeedbackNegative />
+      <ActionBarMorePrimitive.Root>
+        <ActionBarMorePrimitive.Trigger
+          className="aui-action-bar-button"
+          title="More options"
+        >
+          <MoreHorizontalIcon size={15} />
+        </ActionBarMorePrimitive.Trigger>
+        <ActionBarMorePrimitive.Content style={moreContentStyle}>
+          <ActionBarMorePrimitive.Item asChild>
+            <ActionBarPrimitive.ExportMarkdown style={moreItemStyle}>
+              <DownloadIcon size={14} />
+              <span>Export Markdown</span>
+            </ActionBarPrimitive.ExportMarkdown>
+          </ActionBarMorePrimitive.Item>
+        </ActionBarMorePrimitive.Content>
+      </ActionBarMorePrimitive.Root>
+    </AssistantActionBar.Root>
+  );
+}
+
+// ── SourceCite：引用/来源 part 渲染为可点击脚注链接（sandbox 安全 URL）─────────
+function SourceCite(props: { url?: string; title?: string; sourceType?: string }) {
+  const url = props.url ? safeUrl(props.url) : null;
+  const label = props.title || props.url || "source";
+  return (
+    <span className="aui-source-cite" data-source-url={props.url ?? ""}
+      style={{ display: "inline-flex", alignItems: "center", gap: "4px", margin: "2px 4px 2px 0",
+        padding: "1px 8px", fontSize: "11px", borderRadius: "10px",
+        background: "var(--aui-muted, #f0f2f0)", color: "var(--aui-muted-foreground, #4b5563)",
+        border: "1px solid var(--aui-border, #e5e7eb)" }}>
+      <LinkIcon size={11} />
+      {url ? (
+        <a href={url} target="_blank" rel="noopener noreferrer"
+          style={{ color: "inherit", textDecoration: "none" }}>{label}</a>
+      ) : (
+        <span>{label}</span>
+      )}
+    </span>
+  );
+}
+
+// ── CustomAssistantMessage：支持 reasoning part 的 assistant message ────────// 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
+// ThinkingToolUI 保留作为向后兼容（加载旧 localStorage 数据时）。
+function CustomAssistantMessage() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts = useAuiState((s: any) => s.message.parts as Array<{type: string}>);
+  const reasoningCount = parts.filter(p => p.type === "reasoning").length;
+  const stepCount = parts.filter(p => p.type === "reasoning" || p.type === "tool-call").length;
+  // 只有存在 reasoning part 时才允许折叠（纯工具卡消息折叠后内容全消失）
+  const canCollapse = reasoningCount > 0;
+  const [stepsCollapsed, setStepsCollapsed] = useState(false);
+
+  return (
+    <AssistantMessage.Root>
+      <AssistantMessage.Avatar />
+      {canCollapse && stepCount > 0 && (
+        <button
+          onClick={() => setStepsCollapsed(v => !v)}
+          style={{
+            display: "flex", alignItems: "center", gap: "6px",
+            background: "none", border: "none", cursor: "pointer",
+            fontSize: "12px", color: "#6b7280", padding: "2px 4px",
+            borderRadius: "4px", marginBottom: "2px",
+          }}
+        >
+          {stepsCollapsed
+            ? <ChevronRightIcon size={13} />
+            : <ChevronDownIcon size={13} />}
+          <span>{stepsCollapsed ? `Show ${stepCount} step${stepCount > 1 ? "s" : ""}` : `Hide steps`}</span>
+        </button>
+      )}
+      <StepsCollapseCtx.Provider value={canCollapse && stepsCollapsed && stepCount > 0}>
+        <AssistantMessage.Content
+          components={{
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Text: (_MarkdownText ?? (() => null)) as any,
+            Reasoning: InlineReasoningCard,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Source: SourceCite as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Image: (({ image }: { image: string }) => (
+              <img src={image} alt="assistant image" className="aui-message-image"
+                style={{ maxWidth: "100%", borderRadius: "8px", border: "1px solid var(--aui-border, #e5e7eb)", margin: "4px 0" }} />
+            )) as any,
+          }}
+        />
+      </StepsCollapseCtx.Provider>
+      <SelectionToolbarPrimitive.Root
+        style={{
+          display: "flex",
+          gap: "2px",
+          background: "#1f2937",
+          borderRadius: "6px",
+          padding: "3px 6px",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+        }}
+      >
+        <SelectionToolbarPrimitive.Quote
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            fontSize: "12px",
+            color: "#f9fafb",
+            padding: "2px 6px",
+            borderRadius: "4px",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            whiteSpace: "nowrap",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "none"; }}
+        >
+          ❝ Quote
+        </SelectionToolbarPrimitive.Quote>
+      </SelectionToolbarPrimitive.Root>
+      <CustomAssistantActionBar />
+      <BranchPicker />
+      <MessageTimestamp />
+    </AssistantMessage.Root>
+  );
+}
+
+// ── Tool result 富文本渲染辅助 ────────────────────────────────────────────────
+
+// inline markdown: **bold**, *italic*, `code`, [link](url)
+// safeUrl 已抽到 ./helpers
+function parseInline(text: string): React.ReactNode[] {
+  const pattern = /(\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\n]+)\))/g;
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    if (match[2] !== undefined)
+      nodes.push(<strong key={key++}>{match[2]}</strong>);
+    else if (match[3] !== undefined)
+      nodes.push(<em key={key++}>{match[3]}</em>);
+    else if (match[4] !== undefined)
+      nodes.push(<code key={key++} style={{ background: "rgba(0,0,0,0.06)", borderRadius: "3px", padding: "1px 4px", fontSize: "12px", fontFamily: "monospace" }}>{match[4]}</code>);
+    else if (match[5] !== undefined && match[6] !== undefined) {
+      const href = safeUrl(match[6]);
+      // scheme 不安全：降级为纯文本（保留链接文字，不可点击）
+      if (href === null)
+        nodes.push(<span key={key++}>{match[5]}</span>);
+      else
+        nodes.push(<a key={key++} href={href} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>{match[5]}</a>);
+    }
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+// block-level markdown: headings, lists, code blocks, paragraphs
+function SimpleMarkdown({ text }: { text: string }) {
+  const nodes: React.ReactNode[] = [];
+  const lines = text.split("\n");
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // fenced code block
+    if (line.startsWith("```")) {
+      const lang = line.slice(3).trim() || "text";
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) { code.push(lines[i]); i++; }
+      i++;
+      nodes.push(
+        <PrismLight key={key++} language={lang} style={_codeThemeStyle}
+          customStyle={{ margin: "6px 0", fontSize: "12px", borderRadius: "4px" }}>
+          {code.join("\n")}
+        </PrismLight>
+      );
+      continue;
+    }
+    // headings
+    const hm = line.match(/^(#{1,3})\s+(.+)/);
+    if (hm) {
+      const level = hm[1].length as 1 | 2 | 3;
+      const Tag = `h${level}` as "h1" | "h2" | "h3";
+      const fs = level === 1 ? "15px" : level === 2 ? "14px" : "13px";
+      nodes.push(<Tag key={key++} style={{ margin: "8px 0 4px", fontSize: fs, fontWeight: 600, lineHeight: 1.3 }}>{parseInline(hm[2])}</Tag>);
+      i++; continue;
+    }
+    // horizontal rule
+    if (/^---+$/.test(line.trim())) {
+      nodes.push(<hr key={key++} style={{ border: "none", borderTop: "1px solid #e5e7eb", margin: "8px 0" }} />);
+      i++; continue;
+    }
+    // unordered list
+    if (/^[-*+]\s/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: "2px" }}>{parseInline(lines[i].slice(2))}</li>);
+        i++;
+      }
+      nodes.push(<ul key={key++} style={{ margin: "4px 0", paddingLeft: "18px", fontSize: "13px", lineHeight: "1.5" }}>{items}</ul>);
+      continue;
+    }
+    // ordered list
+    if (/^\d+\.\s/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        items.push(<li key={i} style={{ marginBottom: "2px" }}>{parseInline(lines[i].replace(/^\d+\.\s/, ""))}</li>);
+        i++;
+      }
+      nodes.push(<ol key={key++} style={{ margin: "4px 0", paddingLeft: "18px", fontSize: "13px", lineHeight: "1.5" }}>{items}</ol>);
+      continue;
+    }
+    // blank line
+    if (line.trim() === "") { i++; continue; }
+    // paragraph (accumulate until next block)
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].startsWith("#") &&
+      !lines[i].startsWith("```") &&
+      !/^[-*+]\s/.test(lines[i]) &&
+      !/^\d+\.\s/.test(lines[i]) &&
+      !/^---+$/.test(lines[i].trim())
+    ) { para.push(lines[i]); i++; }
+    if (para.length > 0)
+      nodes.push(<p key={key++} style={{ margin: "4px 0", fontSize: "13px", lineHeight: "1.5" }}>{parseInline(para.join(" "))}</p>);
+  }
+  return <div>{nodes}</div>;
+}
+
+// render array-of-objects (JSON data frame) as scrollable table
+function TableResult({ data }: { data: unknown }) {
+  let rows: Record<string, unknown>[];
+  try {
+    const parsed = typeof data === "string" ? JSON.parse(data) : data;
+    if (!Array.isArray(parsed) || parsed.length === 0 || typeof parsed[0] !== "object" || parsed[0] === null)
+      throw new Error("not a table");
+    rows = parsed as Record<string, unknown>[];
+  } catch {
+    const display = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    return <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(0,0,0,0.04)", fontSize: "12px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{display}</pre>;
+  }
+  const columns = Object.keys(rows[0]);
+  return (
+    <div style={{ overflowX: "auto", maxHeight: "260px", overflowY: "auto", borderRadius: "4px", border: "1px solid #e5e7eb" }}>
+      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "12px" }}>
+        <thead>
+          <tr>
+            {columns.map(col => (
+              <th key={col} style={{ border: "1px solid #e5e7eb", padding: "4px 8px", background: "#f9fafb", fontWeight: 600, textAlign: "left", position: "sticky", top: 0, whiteSpace: "nowrap" }}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? "white" : "#f9fafb" }}>
+              {columns.map(col => (
+                <td key={col} style={{ border: "1px solid #e5e7eb", padding: "4px 8px", maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {String(row[col] ?? "")}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// dispatch result rendering based on annotations.resultType
+interface ToolResultProps {
+  result: unknown;
+  resultType: string;
+  resultLang: string;
+  isError: boolean;
+  annotations?: Record<string, unknown>;
+}
+function ToolResult({ result, resultType, resultLang, isError, annotations }: ToolResultProps) {
+  const display = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  if (isError) {
+    return (
+      <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(220,38,38,0.06)", color: "#991b1b", fontSize: "12px", overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+        {display}
+      </pre>
+    );
+  }
+  switch (resultType) {
+    case "markdown":
+      return <SimpleMarkdown text={display} />;
+    case "table":
+      return <TableResult data={result} />;
+    case "code":
+      return (
+        <PrismLight language={resultLang} style={_codeThemeStyle}
+          customStyle={{ margin: 0, fontSize: "12px", borderRadius: "4px" }}>
+          {display}
+        </PrismLight>
+      );
+    case "image":
+      return (
+        <img
+          src={typeof result === "string" ? result : ""}
+          alt="tool result"
+          style={{ maxWidth: "100%", borderRadius: "4px", border: "1px solid #e5e7eb" }}
+        />
+      );
+    case "file": {
+      const filename = (annotations?.resultFilename as string | undefined) ?? "download";
+      const src = typeof result === "string" ? result : "";
+      const handleDownload = () => {
+        const a = document.createElement("a");
+        a.href = src;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      };
+      return (
+        <button
+          onClick={handleDownload}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: "6px",
+            padding: "6px 14px", borderRadius: "6px", fontSize: "12px",
+            fontWeight: 500, cursor: "pointer",
+            border: "1px solid #e5e7eb", background: "#f9fafb", color: "#374151",
+          }}
+        >
+          <DownloadIcon size={13} />
+          {filename}
+        </button>
+      );
+    }
+    case "html": {
+      // 默认沙箱隔离:iframe sandbox="" 无 allow-scripts/allow-same-origin,
+      // 不可信 HTML(如 WebFetch 抓取内容)无法执行脚本或触达父页面,杜绝 XSS。
+      // annotations.htmlSandbox=false 显式 opt-out(可信内容,如需 Shiny 绑定的交互 HTML)。
+      const sandboxed = annotations?.htmlSandbox !== false;
+      const hRaw = annotations?.resultHeight as string | number | undefined;
+      const height = hRaw == null ? "240px" : (typeof hRaw === "number" ? `${hRaw}px` : hRaw);
+      if (sandboxed) {
+        return (
+          <iframe
+            className="aui-html-sandbox"
+            data-sandboxed="true"
+            sandbox=""
+            srcDoc={display}
+            title="tool result"
+            style={{ width: "100%", height, border: "1px solid #e5e7eb", borderRadius: "4px", background: "#fff" }}
+          />
+        );
+      }
+      return (
+        <div
+          className="aui-html-trusted"
+          style={{ fontSize: "13px", lineHeight: "1.5" }}
+          // opt-out:调用方明确声明可信(annotations.htmlSandbox=false)
+          dangerouslySetInnerHTML={{ __html: display }}
+        />
+      );
+    }
+    default:
+      return (
+        <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(0,0,0,0.04)", fontSize: "12px", overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+          {display}
+        </pre>
+      );
+  }
+}
+
+// ── Sub-agent 层级注册表（D2）────────────────────────────────────────────────
+// toolCallId → parentToolCallId。GenericToolCard 渲染时登记，computeToolDepth 据此
+// 计算缩进深度。按 inputId 命名空间隔离，避免多 widget 同 toolCallId 串扰。
+const _toolParentRegistry = new Map<string, string | null | undefined>();
+function _regKey(inputId: string | undefined, id: string): string {
+  return `${inputId ?? "_"}::${id}`;
+}
+
+// ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
+function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
+  const collapsed = useContext(StepsCollapseCtx);
+
+  const pending  = result === undefined;
+  const done     = !pending && !isError;
+  const errored  = !pending && !!isError;
+
+  // annotations 存在 artifact 字段（由 runtime.ts 从 ToolCallPayload.annotations 写入）
+  const annotations = artifact as Record<string, unknown> | undefined;
+  const iconName        = annotations?.icon as string | undefined;
+  const requiresApproval = annotations?.requiresApproval === true;
+
+  // ── Sub-agent 层级（D2）：登记 parentToolCallId 并算缩进深度 ────────────────
+  const inputIdAnno = annotations?.inputId as string | undefined;
+  const parentToolCallId = annotations?.parentToolCallId as string | null | undefined;
+  _toolParentRegistry.set(_regKey(inputIdAnno, toolCallId), parentToolCallId);
+  // 用命名空间化的注册表算深度：把裸 toolCallId 映射为带 inputId 前缀的键
+  const depth = (() => {
+    const scoped = new Map<string, string | null | undefined>();
+    for (const [k, v] of _toolParentRegistry) {
+      if (k.startsWith(`${inputIdAnno ?? "_"}::`)) {
+        const bareId = k.slice((inputIdAnno ?? "_").length + 2);
+        scoped.set(bareId, v);
+      }
+    }
+    return computeToolDepth(toolCallId, scoped);
+  })();
+  const isNested = depth > 0;
+
+  // defaultOpen：annotations.defaultOpen 覆盖 > 默认策略（pending 展开，done 收起）
+  const defaultOpen = annotations?.defaultOpen !== undefined
+    ? Boolean(annotations.defaultOpen)
+    : pending; // 运行中展开，完成后收起
+
+  const [open, setOpen] = useState(defaultOpen);
+  const [approvalSent, setApprovalSent] = useState(false);
+  const [approvalResult, setApprovalResult] = useState<"approved" | "denied" | null>(null);
+  const [customDenyMsg, setCustomDenyMsg] = useState("");
+
+  if (collapsed) return null;
+  const resultType      = (annotations?.resultType as string | undefined) ?? "auto";
+  const resultLang      = (annotations?.resultLang as string | undefined) ?? "text";
+
+  // title：优先用 annotations.title，否则用 toolName(首个参数值) 格式
+  const toolTitle = (() => {
+    const base = (annotations?.title as string | undefined) ?? toolName;
+    if (annotations?.title) return base;
+    // 从 args 提取第一个值作为摘要，截断超长内容
+    const firstVal = args && typeof args === "object"
+      ? Object.values(args as Record<string, unknown>)[0]
+      : undefined;
+    if (firstVal !== undefined && firstVal !== null) {
+      const snippet = String(firstVal).replace(/\s+/g, " ").trim();
+      const truncated = snippet.length > 60 ? snippet.slice(0, 60) + "…" : snippet;
+      return `${base}(${truncated})`;
+    }
+    return base;
+  })();
+
+  // 审批等待状态：待处理 + 需要审批 + 尚未发送决策
+  const awaitingApproval = pending && requiresApproval && !approvalSent;
+
+  // 成功时：tool 定义的图标，或 CheckCircle2；失败时：AlertCircle；审批等待：ShieldAlert
+  const SuccessIcon: IconComponent = (iconName && TOOL_ICONS[iconName]) ?? CheckCircle2Icon;
+  const HeaderIcon: IconComponent  = errored        ? AlertCircleIcon
+    : awaitingApproval              ? ShieldAlertIcon
+    : pending                       ? WrenchIcon
+    : SuccessIcon;
+  const iconColor = errored ? "#dc2626"
+    : awaitingApproval ? "#d97706"
+    : pending ? "#9ca3af"
+    : "#16a34a";
+
+  // 卡片整体背景
+  const cardBg = errored        ? "#fef2f2"
+    : done                      ? "hsl(0,0%,97%)"
+    : "#ffffff";
+  const cardBorder = errored ? "#fecaca" : "#e5e7eb";
+
+  // argsText 防御性 stringify（Shiny 可能把 json class 内联为对象）
+  const argsDisplay = typeof argsText === "string"
+    ? argsText : JSON.stringify(args ?? argsText, null, 2);
+
+  // suggestions 来自 artifact（R 端传入的 annotations.suggestions）
+  const suggestions = (annotations?.suggestions as Array<{ type: string; behavior?: string; destination?: string; rules?: unknown[]; directories?: string[] }> | undefined) ?? [];
+
+  const handleApprove = (suggestionIdx?: number) => {
+    setApprovalSent(true);
+    setApprovalResult("approved");
+    const handler = resolveApprovalHandler(annotations?.inputId as string | undefined);
+    handler?.(toolCallId, true, suggestionIdx !== undefined ? { suggestionIdx } : undefined);
+  };
+  const handleDeny = (customMessage?: string) => {
+    setApprovalSent(true);
+    setApprovalResult("denied");
+    const handler = resolveApprovalHandler(annotations?.inputId as string | undefined);
+    handler?.(toolCallId, false, customMessage ? { customMessage } : undefined);
+  };
+
+  return (
+    <div style={{
+      marginLeft: isNested ? depth * 20 : 0,
+      borderLeft: isNested ? "2px solid #d1d5db" : "none",
+      paddingLeft: isNested ? 10 : 0,
+    }} data-tool-depth={depth} data-parent-tool-call-id={parentToolCallId ?? undefined}>
+    <div style={{
+      border: `1px solid ${cardBorder}`,
+      borderRadius: "8px",
+      fontSize: "13px",
+      overflow: "hidden",
+      marginBottom: "4px",
+      background: cardBg,
+    }}>
+      {/* 头部：图标 + 工具名 + 状态文字 + 展开箭头 */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", gap: "7px",
+          padding: "7px 10px", background: "none", border: "none",
+          cursor: "pointer", textAlign: "left",
+          color: "var(--aui-foreground, #111827)",
+        }}
+      >
+        <HeaderIcon size={14} style={{ flexShrink: 0 }} color={iconColor} />
+        <span style={{ fontWeight: 500, flex: 1 }}>{toolTitle}</span>
+        {awaitingApproval && (
+          <span style={{ fontSize: "11px", color: "#d97706" }}>awaiting approval</span>
+        )}
+        {!awaitingApproval && pending && (
+          <span style={{ fontSize: "11px", color: "#9ca3af" }}>running…</span>
+        )}
+        {open ? <ChevronDownIcon size={13} color="#9ca3af" />
+               : <ChevronRightIcon size={13} color="#9ca3af" />}
+      </button>
+
+      {/* 审批区：等待时显示按钮，审批后显示结果 badge */}
+      {(awaitingApproval || approvalResult !== null) && (
+        <div style={{
+          borderTop: `1px solid ${cardBorder}`,
+          padding: "8px 10px",
+          display: "flex",
+          flexDirection: "column",
+          gap: "5px",
+        }}>
+          {awaitingApproval ? (<>
+            {/* 动态选项列表：Yes (once) → suggestions → No — 与 Claude Code 终端顺序一致 */}
+            {[
+              { label: "Yes", action: () => handleApprove(), isAllow: true },
+              ...suggestions.map((sug, idx) => {
+                // 动态 label from suggestion content
+                let label = "";
+                if (sug.type === "addRules") {
+                  const rules = sug.rules as Array<{ toolName?: string; ruleContent?: string }> | undefined;
+                  const content = rules?.[0]?.ruleContent ?? "";
+                  const dest = sug.destination === "userSettings" ? "global" : "project";
+                  label = content
+                    ? `Yes, don't ask again for: ${content.length > 50 ? content.slice(0, 50) + "…" : content} (${dest})`
+                    : `Yes, always allow (${dest})`;
+                } else if (sug.type === "addDirectories") {
+                  const dirs = sug.directories as string[] | undefined;
+                  const dir = dirs?.[0] ?? "";
+                  const dest = sug.destination === "userSettings" ? "global" : "this session";
+                  label = dir
+                    ? `Yes, trust "${dir}" for ${dest}`
+                    : `Yes, trust directory`;
+                } else {
+                  label = `Yes (${sug.type})`;
+                }
+                return { label, action: () => handleApprove(idx), isAllow: true };
+              }),
+              { label: "No", action: () => handleDeny(), isAllow: false },
+            ].map((opt, i) => (
+              <button
+                key={i}
+                onClick={opt.action}
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: "8px",
+                  padding: "5px 10px", borderRadius: "5px", fontSize: "12px",
+                  fontWeight: 500, cursor: "pointer", textAlign: "left",
+                  border: `1px solid ${opt.isAllow ? "#d1fae5" : "#fee2e2"}`,
+                  background: opt.isAllow ? "#f0fdf4" : "#fff5f5",
+                  color: opt.isAllow ? "#166534" : "#dc2626",
+                  width: "100%",
+                }}
+              >
+                <span style={{ fontWeight: 700, flexShrink: 0, minWidth: "16px" }}>{i + 1}.</span>
+                <span>{opt.label}</span>
+              </button>
+            ))}
+            {/* 自定义拒绝原因输入 */}
+            <div style={{ display: "flex", gap: "5px", marginTop: "2px" }}>
+              <input
+                type="text"
+                value={customDenyMsg}
+                onChange={e => setCustomDenyMsg(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && customDenyMsg.trim()) handleDeny(customDenyMsg.trim()); }}
+                placeholder="Custom deny message…"
+                style={{
+                  flex: 1, padding: "3px 8px", fontSize: "11px", borderRadius: "4px",
+                  border: "1px solid #d1d5db", outline: "none", color: "#374151",
+                  background: "#fafafa",
+                }}
+              />
+              {customDenyMsg.trim() && (
+                <button
+                  onClick={() => handleDeny(customDenyMsg.trim())}
+                  style={{
+                    padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                    fontWeight: 500, cursor: "pointer", border: "none",
+                    background: "#6b7280", color: "#fff",
+                  }}
+                >
+                  Send
+                </button>
+              )}
+            </div>
+          </>) : approvalResult === "approved" ? (
+            <span style={{
+              fontSize: "11px", fontWeight: 600, color: "#16a34a",
+              background: "#dcfce7", padding: "2px 10px", borderRadius: "5px", alignSelf: "flex-start",
+            }}>✓ Approved</span>
+          ) : (
+            <span style={{
+              fontSize: "11px", fontWeight: 600, color: "#dc2626",
+              background: "#fee2e2", padding: "2px 10px", borderRadius: "5px", alignSelf: "flex-start",
+            }}>✕ Denied</span>
+          )}
+        </div>
+      )}
+
+      {/* 展开：参数 + 结果 */}
+      {open && (
+        <div style={{
+          borderTop: `1px solid ${cardBorder}`,
+          padding: "8px 10px",
+        }}>
+          <div style={{ color: "#9ca3af", marginBottom: "4px", fontSize: "11px",
+                        textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Arguments
+          </div>
+          <pre style={{
+            margin: 0, padding: "6px 8px", borderRadius: "4px",
+            background: "rgba(0,0,0,0.04)", fontSize: "12px",
+            overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
+          }}>
+            {argsDisplay}
+          </pre>
+
+          {!pending && (
+            <>
+              <div style={{ color: "#9ca3af", marginTop: "10px", marginBottom: "4px",
+                            fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Result
+              </div>
+              <ToolResult result={result} resultType={resultType} resultLang={resultLang} isError={errored} annotations={annotations} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+    </div>
+  );
+}
+
+// ── 消息气泡 chip 渲染 ──────────────────────────────────────────────────────
+// 解析 :tool[name] 和 /commandName 为蓝色 chip，其余为普通文本
+function renderMessageWithChips(text: string): React.ReactNode[] {
+  const regex = /(:tool\[([^\]]+)\])|(\/[a-zA-Z][a-zA-Z0-9_-]*)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
+    if (match[1]) {
+      // :tool[name] → chip，label 不含 @
+      parts.push(
+        <span key={key++} className="aui-mention-chip" data-mention-type="tool">
+          <span className="aui-mention-chip-label">{match[2]}</span>
+        </span>,
+      );
+    } else if (match[3]) {
+      // /commandName → chip（仅在行首或空白后）
+      const charBefore = match.index > 0 ? text[match.index - 1] : " ";
+      if (/\s/.test(charBefore) || match.index === 0) {
+        parts.push(
+          <span key={key++} className="aui-mention-chip" data-mention-type="slash">
+            <span className="aui-mention-chip-label">{match[3]}</span>
+          </span>,
+        );
+      } else {
+        parts.push(match[3]);
+      }
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts;
+}
+
+// 自定义用户消息文本渲染（chip + 普通文本混合）
+function UserMessageChipText() {
+  const { text } = useMessagePartText();
+  return <p className="aui-text">{renderMessageWithChips(text)}</p>;
+}
+
+// 自定义 UserMessage：保留原有操作栏和分支选择器
+function CustomUserMessage() {
+  return (
+    <UserMessage.Root>
+      <UserMessage.Attachments />
+      <MessagePrimitive.If hasContent>
+        <ActionBarPrimitive.Root
+          hideWhenRunning
+          autohide="not-last"
+          style={{ display: "flex", gap: "4px", order: -1 }}
+          className="aui-user-action-bar-root"
+        >
+          <ActionBarPrimitive.Edit asChild>
+            <button
+              type="button"
+              title="Edit"
+              className="aui-action-bar-button"
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                padding: "4px", borderRadius: "4px", color: "#6b7280",
+                display: "flex", alignItems: "center",
+              }}
+            >
+              <PencilIcon size={14} />
+            </button>
+          </ActionBarPrimitive.Edit>
+        </ActionBarPrimitive.Root>
+        <UserMessage.Content components={{ Text: UserMessageChipText }} />
+      </MessagePrimitive.If>
+      <BranchPicker />
+      <MessageTimestamp />
+    </UserMessage.Root>
+  );
+}
+
+// ── ShinyComposer：自定义输入框（@ mention / / commands / + 上传）────────────
+interface CommandDef {
+  name: string;
+  description: string;
+  prompt: string;
+  category?: string;
+}
+
+// ── SlashEntry: 统一类型，action（内置操作）或 prompt（用户命令）────────────
+type SlashEntry =
+  | { kind: "action"; id: string; section: string; label: string; description?: string; action: () => void }
+  | { kind: "prompt"; id: string; section: string; label: string; description?: string; cmd: CommandDef }
+
+// Claude Code 固定 6 个 section 顺序
+const SECTION_ORDER = ["Context", "Model", "Customize", "Slash Commands", "Settings", "Support"] as const;
+
+interface ActionItemDef {
+  section: string;
+  id: string;
+  label: string;
+  description?: string;
+}
+
+interface ComposerConfigCtx {
+  tools:       Array<{ name: string; description: string }>;
+  commands:    Array<CommandDef>;
+  actionItems: Array<ActionItemDef>;
+  onNewThread: () => void;
+  onAction:    (id: string) => void;
+  onEnqueue:   (text: string) => void;
+}
+const ShinyComposerCtx = createContext<ComposerConfigCtx>({
+  tools: [], commands: [], actionItems: [], onNewThread: () => {}, onAction: () => {}, onEnqueue: () => {},
+});
+
+// remark-gfm 表格需要完整的 separator 行（|---|---|）才能渲染；流式输出时第一行出现时
+// separator 尚未到达，导致 | 字符以原始文本显示。preprocess 补全不完整的表格头。
+// preprocessStreamingMarkdown / detectSlashTrigger 已抽到 ./helpers
+
+function DictationToggle() {
+  const aui = useAui();
+  const isDictating = useAuiState((s) => s.composer.dictation != null);
+  const hasDictation = useAuiState((s) => !!(s.thread as { capabilities?: { dictation?: boolean } }).capabilities?.dictation);
+  if (!hasDictation) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => isDictating ? aui.composer().stopDictation() : aui.composer().startDictation()}
+      title={isDictating ? "Stop dictation" : "Start dictation"}
+      style={{
+        background: "none", border: "none", cursor: "pointer",
+        color: isDictating ? "#ef4444" : "#6b7280",
+        padding: "2px 4px", display: "flex", alignItems: "center",
+      }}
+    >
+      <MicIcon size={16} />
+    </button>
+  );
+}
+
+function ShinyComposer() {
+  const { tools, commands, actionItems, onNewThread, onAction, onEnqueue } = useContext(ShinyComposerCtx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aui = useAui() as any;
+  const isRunning = useThreadIsRunning();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    for (const file of files) {
+      try {
+        aui.composer().addAttachment(file);
+      } catch (err) {
+        console.error("[ShinyComposer] addAttachment error:", err);
+      }
+    }
+    e.target.value = "";
+  }, [aui]);
+
+  // ── Lexical editor ref（用于 / 命令 chip 插入 + 键盘命令注册）──────────────
+  const lexicalRef = useRef<HTMLDivElement>(null);
+
+  // ── / 命令键盘导航 state + latest-ref pattern ─────────────────────────────
+  // latest-ref：在 useEffect 的 Lexical command 回调里安全访问最新值（跳过 deps 重新注册）
+  const [focusedCommandIndex, setFocusedCommandIndex] = useState(0);
+  const slashStateRef      = useRef<typeof slashState>(null);
+  const filteredEntriesRef = useRef<SlashEntry[]>([]);
+  const focusedIdxRef      = useRef(0);
+  const handleItemSelRef   = useRef<(entry: SlashEntry) => void>(null!);
+
+  // ── @ mention adapter ─────────────────────────────────────────────────────
+  const mentionAdapter = unstable_useMentionAdapter({
+    items: tools.map(t => ({
+      id: t.name, type: "tool" as const, label: t.name, description: t.description,
+    })),
+    includeModelContextTools: false,
+  });
+
+  // ── / command：完全自定义弹窗，不使用 TriggerPopoverRoot ─────────────────
+  // LexicalComposerInput 是 contenteditable div，无 selectionStart API。
+  // 替代方案：onKeyUp 时从 window.getSelection() 获取当前文本节点的光标位置，
+  // 再扫描当前文本节点内是否有 / 触发词；offset 用 fullText.lastIndexOf 映射回全文位置。
+  const [slashState, setSlashState] = useState<{ query: string; offset: number } | null>(null);
+  slashStateRef.current = slashState; // latest-ref 同步（render 阶段赋值，不触发重渲染）
+
+  const handleKeyUp = useCallback(() => {
+    const text = (aui as any).composer().getState().text as string;
+    const sel = window.getSelection();
+
+    let nextState: { query: string; offset: number } | null = null;
+
+    if (!sel || !sel.rangeCount) {
+      nextState = detectSlashTrigger(text, text.length);
+    } else {
+      const range = sel.getRangeAt(0);
+      const focusNode = range.endContainer;
+      const focusOffset = range.endOffset;
+      // 只看当前文本节点内光标之前的内容（避免跨 chip 节点的复杂性）
+      const nodeText = focusNode.nodeType === Node.TEXT_NODE
+        ? (focusNode.textContent ?? "").slice(0, focusOffset)
+        : "";
+      const triggerInNode = detectSlashTrigger(nodeText, nodeText.length);
+      if (triggerInNode) {
+        // 将节点内局部 offset 映射回全文 (aui text 含 :tool[] 序列化)
+        const slashPattern = "/" + triggerInNode.query;
+        const fullSlashPos = text.lastIndexOf(slashPattern);
+        if (fullSlashPos !== -1) {
+          nextState = { query: triggerInNode.query, offset: fullSlashPos };
+        }
+      }
+    }
+
+    // 用 functional update 避免相同值时创建新对象引用
+    // 若 query/offset 不变则返回 prev（同一引用），防止触发 useEffect([slashState])
+    // 进而重置 focusedCommandIndex（按方向键时焦点被意外归零的 bug 来源）
+    setSlashState(prev => {
+      if (nextState === null) return prev === null ? prev : null;
+      if (prev && prev.query === nextState.query && prev.offset === nextState.offset) return prev;
+      return nextState;
+    });
+  }, [aui]);
+
+  // 失焦时关闭弹窗（用户点到 composer 外）
+  // 注意：点击 slash 条目时由于 onPointerDown+onMouseDown preventDefault，不会触发此 blur
+  const handleBlur = useCallback(() => {
+    setSlashState(null);
+  }, []);
+
+  // 内置 action entries（Context section）
+  const builtinEntries = useMemo<SlashEntry[]>(() => [
+    {
+      kind: "action" as const,
+      id: "attach-file",
+      section: "Context",
+      label: "Attach file...",
+      description: "Upload a file to include in the conversation",
+      action: () => fileInputRef.current?.click(),
+    },
+    {
+      kind: "action" as const,
+      id: "new-conversation",
+      section: "Context",
+      label: "New conversation",
+      description: "Start a fresh conversation",
+      action: () => onNewThread(),
+    },
+  ], [onNewThread]);
+
+  // R 端 action_items 转为 SlashEntry（点击后通知 R）
+  const actionEntries = useMemo<SlashEntry[]>(() =>
+    actionItems.map(item => ({
+      kind: "action" as const,
+      id: item.id,
+      section: item.section,
+      label: item.label,
+      description: item.description,
+      action: () => onAction(item.id),
+    })),
+  [actionItems, onAction]);
+
+  // 全量 entries：内置 + R action items + 用户命令
+  const allEntries = useMemo<SlashEntry[]>(() => {
+    const userEntries: SlashEntry[] = commands.map(cmd => ({
+      kind: "prompt" as const,
+      id: cmd.name,
+      section: cmd.category ?? "Slash Commands",
+      label: "/" + cmd.name,
+      description: cmd.description,
+      cmd,
+    }));
+    return [...builtinEntries, ...actionEntries, ...userEntries];
+  }, [builtinEntries, actionEntries, commands]);
+
+  // 按 query 过滤（对 label + description 均匹配）
+  const filteredEntries = useMemo<SlashEntry[]>(() => {
+    if (!slashState) return [];
+    const q = slashState.query.toLowerCase();
+    if (!q) return allEntries;
+    return allEntries.filter(e =>
+      e.label.toLowerCase().includes(q) ||
+      (e.description?.toLowerCase().includes(q) ?? false)
+    );
+  }, [allEntries, slashState]);
+  filteredEntriesRef.current = filteredEntries; // latest-ref 同步
+
+  // 按 SECTION_ORDER 分组，附带扁平 keyboard-nav 索引
+  const commandSections = useMemo(() => {
+    const map = new Map<string, SlashEntry[]>();
+    for (const entry of filteredEntries) {
+      if (!map.has(entry.section)) map.set(entry.section, []);
+      map.get(entry.section)!.push(entry);
+    }
+    const result: Array<{ section: string; items: Array<{ entry: SlashEntry; idx: number }> }> = [];
+    let idx = 0;
+    for (const s of SECTION_ORDER) {
+      if (!map.has(s)) continue;
+      result.push({ section: s, items: map.get(s)!.map(entry => ({ entry, idx: idx++ })) });
+      map.delete(s);
+    }
+    // 非标准 section（用户自定义 category 不在 SECTION_ORDER 内）追加到末尾
+    for (const [s, entries] of map) {
+      result.push({ section: s, items: entries.map(entry => ({ entry, idx: idx++ })) });
+    }
+    return result;
+  }, [filteredEntries]);
+
+  const handleCommandSelect = useCallback((cmd: { name: string; description: string; prompt: string }) => {
+    setSlashState(null);
+
+    // 通过 DOM 拿到 Lexical editor 实例（Lexical 把它挂在 contenteditable 元素上）
+    const contentEditable = lexicalRef.current?.querySelector("[contenteditable]") as HTMLElement | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const editor = (contentEditable as any)?.__lexicalEditor;
+
+    if (!editor) {
+      // Fallback：editor 未挂载时降级为纯文本替换
+      const text = (aui as any).composer().getState().text as string;
+      const trigger = slashState;
+      const insertText = `/${cmd.name} `;
+      const triggerStart = trigger?.offset ?? text.length;
+      const triggerEnd   = trigger ? trigger.offset + 1 + trigger.query.length : text.length;
+      const newText = text.slice(0, triggerStart) + insertText + text.slice(triggerEnd).trimStart();
+      (aui as any).composer().setText(newText);
+      return;
+    }
+
+    editor.update(() => {
+      const selection = $getSelection();
+      if (!$isRangeSelection(selection)) return;
+      const anchor = selection.anchor;
+      if (anchor.type !== "text") return;
+      const anchorNode = anchor.getNode();
+      if (!$isTextNode(anchorNode)) return;
+
+      const nodeText = anchorNode.getTextContent();
+      const anchorOffset = anchor.offset;
+
+      // 在当前文本节点内找到 / 触发词的范围
+      const triggerInNode = detectSlashTrigger(nodeText, anchorOffset);
+      if (!triggerInNode) return;
+
+      const startOffset = triggerInNode.offset;
+      const endOffset   = triggerInNode.offset + 1 + triggerInNode.query.length; // +1 for "/"
+
+      // 创建 chip：label = "/commandName"，directiveText 也是 "/commandName"
+      // runtime.ts 的 onNew 负责把 /commandName 展开为 cmd.prompt 再发给 R
+      const mentionNode = $createDirectiveNode(
+        { id: cmd.name, type: "slash" as const, label: "/" + cmd.name },
+        "/" + cmd.name,
+      );
+
+      if (startOffset === 0 && endOffset === nodeText.length) {
+        anchorNode.replace(mentionNode);
+      } else if (startOffset === 0) {
+        const [leftNode, rightNode] = anchorNode.splitText(endOffset);
+        if (rightNode) rightNode.insertBefore(mentionNode);
+        leftNode?.remove();
+      } else {
+        const parts = anchorNode.splitText(startOffset, endOffset);
+        const targetNode = parts[1];
+        if (targetNode) targetNode.replace(mentionNode);
+      }
+
+      mentionNode.selectNext();
+    });
+  }, [aui, slashState]);
+  // action 和 prompt 统一入口：action 直接执行，prompt 走 Lexical 插入
+  const handleItemSelect = useCallback((entry: SlashEntry) => {
+    if (entry.kind === "action") {
+      setSlashState(null);
+      entry.action();
+    } else {
+      handleCommandSelect(entry.cmd);
+    }
+  }, [handleCommandSelect]);
+
+  // latest-ref 同步（render 阶段）
+  focusedIdxRef.current    = focusedCommandIndex;
+  handleItemSelRef.current = handleItemSelect;
+
+  // 弹窗开关时重置焦点索引
+  useEffect(() => { setFocusedCommandIndex(0); }, [slashState]);
+
+  // 注册 COMMAND_PRIORITY_CRITICAL 键盘处理（优先于 LexicalComposerInput 内部的 PRIORITY_HIGH）
+  // 依赖数组为空 []：仅挂载时注册一次，运行时通过 latest-ref 读取最新状态
+  useEffect(() => {
+    const ce = lexicalRef.current?.querySelector("[contenteditable]") as HTMLElement | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const editor = (ce as any)?.__lexicalEditor;
+    if (!editor) return undefined;
+    return mergeRegister(
+      editor.registerCommand(KEY_ENTER_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
+        e?.preventDefault();
+        const idx = Math.min(focusedIdxRef.current, filteredEntriesRef.current.length - 1);
+        handleItemSelRef.current(filteredEntriesRef.current[idx]);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ARROW_DOWN_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
+        e?.preventDefault();
+        setFocusedCommandIndex(i => (i + 1) % filteredEntriesRef.current.length);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ARROW_UP_COMMAND, (e: KeyboardEvent | null) => {
+        if (!slashStateRef.current || filteredEntriesRef.current.length === 0) return false;
+        e?.preventDefault();
+        setFocusedCommandIndex(i => (i - 1 + filteredEntriesRef.current.length) % filteredEntriesRef.current.length);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+      editor.registerCommand(KEY_ESCAPE_COMMAND, (_e: KeyboardEvent | null) => {
+        if (!slashStateRef.current) return false;
+        setSlashState(null);
+        setFocusedCommandIndex(0);
+        return true;
+      }, COMMAND_PRIORITY_CRITICAL),
+    );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 键盘导航时滚动 popover 让焦点行可见
+  const popoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!popoverRef.current) return;
+    const el = popoverRef.current.querySelector<HTMLElement>(`[data-nav-idx="${focusedCommandIndex}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [focusedCommandIndex]);
+
+  const popoverStyle: React.CSSProperties = {
+    position: "absolute",
+    bottom: "calc(100% + 6px)",
+    left: 16,
+    right: 16,
+    background: "white",
+    border: "1px solid #e5e7eb",
+    borderRadius: "10px",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+    padding: "6px",
+    zIndex: 200,
+    maxHeight: "320px",
+    overflowY: "auto",
+  };
+
+  const itemStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "10px",
+    padding: "8px 10px",
+    borderRadius: "6px",
+    cursor: "pointer",
+    fontSize: "13px",
+    background: "none",
+    border: "none",
+    width: "100%",
+    textAlign: "left",
+  };
+
+  const hasTools = tools.length > 0;
+
+  const hints = [
+    hasTools && "@ to mention",
+    "/ for commands",
+  ].filter(Boolean).join(", ");
+  const placeholder = `Send a message… (${hints})`;
+
+  // ── 输入框 ────────────────────────────────────────────────────────────────
+  const inputBox = (
+    <div
+      ref={lexicalRef}
+      style={{
+        border: "1px solid #e5e7eb",
+        borderRadius: "12px",
+        background: "white",
+        padding: "10px 12px",
+        width: "100%",
+        boxSizing: "border-box",
+      }}
+    >
+      {/* 引用预览区（选中文字后点 Quote 按钮，在输入框上方显示） */}
+      <ComposerPrimitive.Quote
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: "8px",
+          borderLeft: "3px solid #3b82f6",
+          background: "#eff6ff",
+          borderRadius: "4px",
+          padding: "6px 10px",
+          marginBottom: "8px",
+          fontSize: "13px",
+          color: "#1e40af",
+        }}
+      >
+        <ComposerPrimitive.QuoteText
+          style={{ flex: 1, lineClamp: 2, overflow: "hidden",
+                   display: "-webkit-box", WebkitLineClamp: 2,
+                   WebkitBoxOrient: "vertical" } as React.CSSProperties}
+        />
+        <ComposerPrimitive.QuoteDismiss
+          style={{
+            background: "none", border: "none", cursor: "pointer",
+            color: "#6b7280", padding: "0 2px", fontSize: "14px",
+            lineHeight: 1, flexShrink: 0,
+          }}
+        >
+          ×
+        </ComposerPrimitive.QuoteDismiss>
+      </ComposerPrimitive.Quote>
+      {/* 待发送附件缩略图 */}
+      <ComposerPrimitive.Attachments>
+        {({ attachment }) => (
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: "4px",
+            background: "#f3f4f6", border: "1px solid #e5e7eb",
+            borderRadius: "6px", padding: "4px 8px", marginBottom: "6px",
+            marginRight: "4px", fontSize: "12px", color: "#374151",
+          }}>
+            {attachment.type === "image" && (attachment as any).content?.[0]?.type === "image" ? (
+              <img
+                src={(attachment as any).content[0].image}
+                alt={attachment.name}
+                style={{ width: "32px", height: "32px", objectFit: "cover", borderRadius: "3px" }}
+              />
+            ) : (
+              <span style={{ fontSize: "14px" }}>📄</span>
+            )}
+            <span style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {attachment.name}
+            </span>
+            <AttachmentPrimitive.Remove asChild>
+              <button
+                type="button"
+                style={{
+                  background: "none", border: "none", cursor: "pointer",
+                  color: "#9ca3af", padding: "0 2px", fontSize: "12px", lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </AttachmentPrimitive.Remove>
+          </div>
+        )}
+      </ComposerPrimitive.Attachments>
+      <LexicalComposerInput
+        placeholder={placeholder}
+        onKeyUp={handleKeyUp}
+        onBlur={handleBlur}
+        style={{
+          width: "100%", border: "none", outline: "none",
+          fontSize: "14px", lineHeight: "1.5",
+          background: "transparent", fontFamily: "inherit",
+          minHeight: "24px",
+        }}
+      />
+      <div style={{ display: "flex", alignItems: "center",
+                    justifyContent: "space-between", marginTop: "8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+          {/* 原生文件选择：直接触发 input，不经过 ComposerPrimitive.AddAttachment 的 programmatic click */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/png,image/jpeg,image/webp,image/gif,text/plain,text/markdown,text/csv,text/json"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach file"
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              fontSize: "20px", color: "#6b7280", padding: "2px 6px",
+              lineHeight: 1, display: "flex", alignItems: "center",
+            }}
+          >
+            +
+          </button>
+          <DictationToggle />
+        </div>
+        {!isRunning ? (
+          <ComposerPrimitive.Send
+            style={{
+              background: "#374151", border: "none", borderRadius: "50%",
+              width: "30px", height: "30px", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "white", fontSize: "14px", flexShrink: 0,
+            }}
+          >
+            ↑
+          </ComposerPrimitive.Send>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
+            <button
+              type="button"
+              title="Queue message (send after current reply)"
+              className="aui-composer-queue-btn"
+              onClick={() => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const t = ((aui as any).composer().getState().text as string) ?? "";
+                if (t.trim()) {
+                  onEnqueue(t);
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  (aui as any).composer().setText("");
+                }
+              }}
+              style={{
+                background: "var(--aui-muted, #e5e7eb)", border: "none", borderRadius: "50%",
+                width: "30px", height: "30px", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "var(--aui-foreground, #374151)",
+              }}
+            >
+              <ClockIcon size={14} />
+            </button>
+            <ComposerPrimitive.Cancel
+              style={{
+                background: "#374151", border: "none", borderRadius: "50%",
+                width: "30px", height: "30px", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "white", flexShrink: 0,
+              }}
+            >
+              <SquareIcon size={12} fill="white" stroke="white" />
+            </ComposerPrimitive.Cancel>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ── / 命令弹窗：6 个固定 section，内置 action + 用户 prompt 命令 ───────────
+  const slashPopover = slashState !== null && filteredEntries.length > 0 ? (
+    <div
+      ref={popoverRef}
+      style={popoverStyle}
+      onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
+      onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+    >
+      {commandSections.map(({ section, items }, secIdx) => (
+        <div key={section}>
+          <div style={{
+            padding: `${secIdx > 0 ? "8px" : "4px"} 10px 3px`,
+            fontSize: "11px",
+            fontWeight: 600,
+            color: "#9ca3af",
+            textTransform: "uppercase" as const,
+            letterSpacing: "0.06em",
+          }}>
+            {section}
+          </div>
+          {items.map(({ entry, idx }) => (
+            <button
+              key={entry.id}
+              data-nav-idx={idx}
+              type="button"
+              style={{
+                ...itemStyle,
+                background: idx === focusedCommandIndex ? "#f3f4f6" : "none",
+              }}
+              onPointerDown={(e: React.PointerEvent) => e.preventDefault()}
+              onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+              onMouseEnter={() => setFocusedCommandIndex(idx)}
+              onClick={() => handleItemSelect(entry)}
+            >
+              <span style={{ fontWeight: 500 }}>{entry.label}</span>
+              {entry.description && (
+                <span style={{ color: "#6b7280", flex: 1 }}>{entry.description}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  ) : null;
+
+  // ── @ 工具弹窗（TriggerPopover 管理）─────────────────────────────────────
+  const mentionPopoverContent = hasTools ? (<>
+      <ComposerPrimitive.Unstable_TriggerPopover.Directive
+        formatter={mentionAdapter.directive.formatter}
+      />
+      <ComposerPrimitive.Unstable_TriggerPopoverCategories>
+        {(categories) => (
+          <div>
+            {categories.map(cat => (
+              <ComposerPrimitive.Unstable_TriggerPopoverCategoryItem
+                key={cat.id} categoryId={cat.id}
+                className="aui-mention-popover-item"
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                         gap: "10px", padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
+                         fontSize: "13px", border: "none", width: "100%", textAlign: "left" }}
+              >
+                <span style={{ fontWeight: 500, fontSize: "13px" }}>{cat.label}</span>
+                <ChevronRightIcon size={12} color="#9ca3af" />
+              </ComposerPrimitive.Unstable_TriggerPopoverCategoryItem>
+            ))}
+          </div>
+        )}
+      </ComposerPrimitive.Unstable_TriggerPopoverCategories>
+      <ComposerPrimitive.Unstable_TriggerPopoverBack
+        style={{
+          display: "flex", alignItems: "center", gap: "6px",
+          padding: "4px 8px", fontSize: "12px", color: "#6b7280",
+          background: "none", border: "none", cursor: "pointer",
+          marginBottom: "4px", width: "100%",
+        }}
+      >
+        ← BACK
+      </ComposerPrimitive.Unstable_TriggerPopoverBack>
+      <ComposerPrimitive.Unstable_TriggerPopoverItems>
+        {(items) => (
+          <div>
+            {items.map((item, index) => (
+              <ComposerPrimitive.Unstable_TriggerPopoverItem
+                key={item.id} item={item} index={index}
+                className="aui-mention-popover-item"
+                style={{
+                  display: "flex", flexDirection: "column", gap: "2px",
+                  padding: "8px 10px", borderRadius: "6px", cursor: "pointer",
+                  border: "none", width: "100%", textAlign: "left",
+                }}
+              >
+                <span style={{ fontSize: "13px", fontWeight: 500 }}>{item.label}</span>
+                {item.description && (
+                  <span style={{ fontSize: "12px", color: "#6b7280" }}>{item.description}</span>
+                )}
+              </ComposerPrimitive.Unstable_TriggerPopoverItem>
+            ))}
+          </div>
+        )}
+      </ComposerPrimitive.Unstable_TriggerPopoverItems>
+    </>) : null;
+
+  // ── 按需包裹 TriggerPopoverRoot（@ mentions 保留 library 实现）──────────────
+  const withMention = hasTools ? (
+    <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      <ComposerPrimitive.Unstable_TriggerPopover
+        char="@"
+        adapter={mentionAdapter.adapter}
+        style={{ ...popoverStyle, minWidth: "280px" }}
+        onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+      >
+        {mentionPopoverContent}
+      </ComposerPrimitive.Unstable_TriggerPopover>
+      {inputBox}
+      {slashPopover}
+    </ComposerPrimitive.Unstable_TriggerPopoverRoot>
+  ) : (
+    <>
+      {inputBox}
+      {slashPopover}
+    </>
+  );
+
+  // ComposerPrimitive.Root 渲染为 <form>，放最外层确保 Enter 触发 form.requestSubmit()
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  return (
+    <ComposerPrimitive.Root style={{ padding: "0 16px 16px", position: "relative", width: "100%" }}>
+      <ComposerPrimitive.AttachmentDropzone
+        onDragEnterCapture={() => setIsDraggingOver(true)}
+        onDragLeaveCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDraggingOver(false);
+        }}
+        onDropCapture={() => setIsDraggingOver(false)}
+        style={isDraggingOver ? {
+          outline: "2px dashed #3b82f6",
+          background: "rgba(59, 130, 246, 0.04)",
+          borderRadius: "12px",
+        } : undefined}
+      >
+        {withMention}
+      </ComposerPrimitive.AttachmentDropzone>
+    </ComposerPrimitive.Root>
+  );
+}
+
+// ── AssistantModal 悬浮气泡 toggle 按钮 ──────────────────────────────────────
+const ModalToggleButton = forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { "data-state"?: "open" | "closed" }
+>(({ "data-state": state, ...rest }, ref) => (
+  <button
+    ref={ref}
+    {...rest}
+    style={{
+      width: "52px",
+      height: "52px",
+      borderRadius: "50%",
+      background: "#111827",
+      border: "none",
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+      color: "white",
+      flexShrink: 0,
+      ...rest.style,
+    }}
+  >
+    {state === "open"
+      ? <ChevronDownIcon size={22} />
+      : <BotIcon size={22} />
+    }
+  </button>
+));
+ModalToggleButton.displayName = "ModalToggleButton";
+
+// ── 侧边栏（不含折叠按钮）───────────────────────────────────────────────────
+function ThreadListSidebar() {  return (
+    <div style={{ height: "100%", overflow: "auto", background: "hsl(0, 0%, 98%)" }}>
+      <ThreadListPrimitive.Root className="aui-root aui-thread-list-root">
+        <ThreadList.New />
+        <ThreadList.Items components={{ ThreadListItem: CustomThreadListItem }} />
+      </ThreadListPrimitive.Root>
+    </div>
+  );
+}
+
+// ── 主组件 ──────────────────────────────────────────────────────────────────
+// ── Artifacts 侧面板:展示当前 artifact(markdown/code/html/text)────────────
+function ArtifactPanel({ artifact, onClose }: {
+  artifact: { id: string; title: string; type: string; content: string; lang?: string };
+  onClose: () => void;
+}) {
+  const body = (() => {
+    switch (artifact.type) {
+      case "markdown": return <SimpleMarkdown text={artifact.content} />;
+      case "code":
+        return (
+          <PrismLight language={artifact.lang ?? "text"} style={_codeThemeStyle}
+            customStyle={{ margin: 0, fontSize: "13px", borderRadius: "6px" }}>
+            {artifact.content}
+          </PrismLight>
+        );
+      case "html":
+        return (
+          <iframe className="aui-artifact-html" sandbox="" srcDoc={artifact.content}
+            title={artifact.title}
+            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }} />
+        );
+      default:
+        return <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", margin: 0 }}>{artifact.content}</pre>;
+    }
+  })();
+  return (
+    <div className="aui-artifact-panel" data-artifact-id={artifact.id}
+      style={{
+        display: "flex", flexDirection: "column", height: "100%",
+        borderLeft: "1px solid var(--aui-border, #e5e7eb)",
+        background: "var(--aui-background, #fff)",
+      }}>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "8px 12px", borderBottom: "1px solid var(--aui-border, #e5e7eb)", flexShrink: 0,
+      }}>
+        <span className="aui-artifact-title" style={{ fontWeight: 600, fontSize: "14px", color: "var(--aui-foreground, #111827)" }}>
+          {artifact.title}
+        </span>
+        <button onClick={onClose} title="Close" className="aui-artifact-close"
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--aui-muted-foreground, #6b7280)", fontSize: "18px", lineHeight: 1, padding: "0 4px" }}>
+          ×
+        </button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: artifact.type === "html" ? 0 : "12px" }}>
+        {body}
+      </div>
+    </div>
+  );
+}
+
+interface AssistantUIProps {  inputId: string;
+  config: Record<string, unknown>;
+}
+
+export default function AssistantUI({ inputId, config }: AssistantUIProps) {
+  const {
+    runtime, sendToolApproval, switchToNewThread, sendAction, renameThread, enqueueMessage,
+    artifacts, activeArtifactId, closeArtifact,
+  } = useShinyRuntime(inputId, config);
+  const activeArtifact = artifacts.find((a) => a.id === activeArtifactId) ?? null;
+  const showThreadList = config?.show_thread_list === true;
+  const isModal = config?.modal === true;
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // 语法高亮主题：按 config.code_theme 选择，默认 one-light
+  const MarkdownText = useMemo(() => {
+    const themeName = (config?.code_theme as string) ?? "one-light";
+    const style = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
+    const SyntaxHighlighter = makePrismLightSyntaxHighlighter({ style });
+    return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter }, preprocess: preprocessStreamingMarkdown });
+  }, [config?.code_theme]);
+  _MarkdownText = MarkdownText;
+  _showTimestamps = config?.show_timestamps === true;
+
+  // composer context — tools 和 commands 从 R 的 config 读取
+  const composerCtx = useMemo<ComposerConfigCtx>(() => ({
+    tools:       (config?.tools        as ComposerConfigCtx["tools"])       ?? [],
+    commands:    (config?.commands     as ComposerConfigCtx["commands"])    ?? [],
+    actionItems: (config?.action_items as ComposerConfigCtx["actionItems"]) ?? [],
+    onNewThread: switchToNewThread,
+    onAction:    sendAction,
+    onEnqueue:   enqueueMessage,
+  }), [config, switchToNewThread, sendAction, enqueueMessage]);
+
+  const threadActions = useMemo(() => ({ renameThread }), [renameThread]);
+
+  // starter suggestions — 传给 Thread welcome.suggestions
+  const suggestions = useMemo(() => {
+    const raw = config?.suggestions as Array<{ prompt: string; text?: string }> | undefined;
+    return (raw ?? []).map(s => ({ prompt: s.prompt, text: s.text ?? s.prompt }));
+  }, [config]);
+
+  // 把 sendToolApproval 按 inputId 存入注册表，供 GenericToolCard 定位调用
+  useEffect(() => {
+    registerApprovalHandler(inputId, sendToolApproval);
+    return () => { unregisterApprovalHandler(inputId); };
+  }, [inputId, sendToolApproval]);
+
+  // code_theme 同步到模块级变量，供 ToolResult 代码块渲染使用
+  useEffect(() => {
+    const themeName = (config?.code_theme as string) ?? "one-light";
+    _codeThemeStyle = CODE_THEMES[themeName] ?? CODE_THEMES["one-light"];
+  }, [config?.code_theme]);
+
+  // ── Thread 公共 props（modal 和普通模式共用）──────────────────────────────
+  const threadProps = {
+    tools:           [WeatherToolUI, ThinkingToolUI] as React.ComponentType[],
+    welcome:         { suggestions },
+    components:      { Composer: ShinyComposer, UserMessage: CustomUserMessage, AssistantMessage: CustomAssistantMessage },
+    userMessage:     { allowEdit: true },
+    assistantMessage: {
+      allowSpeak: true,
+      allowFeedbackPositive: true,
+      allowFeedbackNegative: true,
+      components: { ToolFallback: GenericToolCard },
+    },
+    strings:         (config?.strings ?? undefined) as never,
+    assistantAvatar: (config?.assistant_avatar ?? undefined) as never,
+  };
+
+  // ── Modal 模式 ─────────────────────────────────────────────────────────────
+  if (isModal) {
+    return (
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadActionsCtx.Provider value={threadActions}>
+        <ShinyComposerCtx.Provider value={composerCtx}>
+          <AssistantModalPrimitive.Root>
+            <AssistantModalPrimitive.Anchor className="aui-root aui-modal-anchor">
+              <AssistantModalPrimitive.Trigger asChild>
+                <ModalToggleButton />
+              </AssistantModalPrimitive.Trigger>
+            </AssistantModalPrimitive.Anchor>
+            <AssistantModalPrimitive.Content
+              className="aui-root aui-modal-content"
+              sideOffset={16}
+              style={{ height: "650px" }}
+            >
+              <div style={{
+                height: "100%",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+                "--aui-thread-max-width": "420px",
+              } as React.CSSProperties}>
+                <Thread {...threadProps} />
+              </div>
+            </AssistantModalPrimitive.Content>
+          </AssistantModalPrimitive.Root>
+        </ShinyComposerCtx.Provider>
+        </ThreadActionsCtx.Provider>
+      </AssistantRuntimeProvider>
+    );
+  }
+
+  // ── 普通模式 ───────────────────────────────────────────────────────────────
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadActionsCtx.Provider value={threadActions}>
+      <ShinyComposerCtx.Provider value={composerCtx}>
+        <div style={{ display: "flex", height: "100%" }}>
+
+          {/* 侧边栏 */}
+          {showThreadList && (
+            <div style={{
+              width: sidebarOpen ? 220 : 0,
+              minWidth: sidebarOpen ? 220 : 0,
+              overflow: "hidden",
+              flexShrink: 0,
+              transition: "width 0.15s ease, min-width 0.15s ease",
+            }}>
+              {sidebarOpen && <ThreadListSidebar />}
+            </div>
+          )}
+
+          {/* 侧边栏和主栏之间无分隔线，靠背景色差区分（同 shadcn/ui sidebar） */}
+
+          {/* 主聊天区 */}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+
+            {/* 折叠按钮放在主栏顶部 */}
+            {showThreadList && (
+              <div style={{ padding: "6px 8px", flexShrink: 0 }}>
+                <button
+                  onClick={() => setSidebarOpen((v) => !v)}
+                  title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: "4px",
+                    borderRadius: "4px",
+                    color: "var(--aui-muted-foreground, #6b7280)",
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                >
+                  {sidebarOpen
+                    ? <PanelLeftCloseIcon size={16} />
+                    : <PanelLeftOpenIcon size={16} />
+                  }
+                </button>
+              </div>
+            )}
+
+            <div style={{
+              flex: 1,
+              minHeight: 0,
+              "--aui-thread-max-width": "9999px",
+            } as React.CSSProperties}>
+              <Thread {...threadProps} />
+            </div>
+          </div>
+
+          {activeArtifact && (
+            <div style={{ width: "45%", minWidth: 320, flexShrink: 0, minHeight: 0 }}>
+              <ArtifactPanel artifact={activeArtifact} onClose={closeArtifact} />
+            </div>
+          )}
+
+        </div>
+      </ShinyComposerCtx.Provider>
+      </ThreadActionsCtx.Provider>
+    </AssistantRuntimeProvider>
+  );
+}
