@@ -4,6 +4,7 @@
 #'
 #' @param outputId Output variable to read from.
 #' @param width,height Width and height of the widget (CSS values).
+#' @param modal Logical. If `TRUE`, sizes the widget for floating modal use.
 #' @param ... Additional arguments passed to [htmlwidgets::shinyWidgetOutput()].
 #'
 #' @return An HTML output element.
@@ -32,7 +33,6 @@ assistantUIOutput <- function(outputId, width = "100%", height = "600px",
 #' @param config Optional named list of configuration options.
 #' @param outputId The output ID used in [assistantUIOutput()].  The widget
 #'   uses this to derive the Shiny input name that carries user messages.
-#' @param env,quoted Passed to [htmlwidgets::shinyRenderWidget()].
 #'
 #' @return A render function suitable for assigning to `output[[outputId]]`.
 #' @export

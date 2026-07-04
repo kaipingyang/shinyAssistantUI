@@ -1,5 +1,26 @@
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+# 把 text + file 类附件拼成注入用的文本上下文（image 类由各 handler 单独处理）。
+# file 类（PDF/xlsx/二进制等）内容是 base64，无法直接喂文本模型——这里至少把
+# 文件名/类型作为提示注入，让 AI 知道用户上传了文件、能据此回应，而非静默丢弃
+# （否则 UI 显示了附件 chip 但 AI 完全无感知，误导用户）。
+.attachment_text_sections <- function(atts) {
+  text_parts <- vapply(
+    Filter(function(a) identical(a$type, "text"), atts),
+    function(a) a$data %||% "", character(1)
+  )
+  file_parts <- vapply(
+    Filter(function(a) identical(a$type, "file"), atts),
+    function(a) {
+      nm <- a$name %||% "unnamed"
+      ct <- a$contentType %||% "unknown type"
+      sprintf("[Attached file: %s (%s) \u2014 binary content not directly readable]", nm, ct)
+    },
+    character(1)
+  )
+  paste(c(text_parts, file_parts), collapse = "\n")
+}
+
 # ── ellmer turns → ThreadMessageLike（内部辅助）──────────────────────────────
 .ellmer_turns_to_messages <- function(turns) {
   result <- list()
@@ -143,11 +164,7 @@ make_ellmer_handler <- function(chat,
       Filter(function(a) identical(a$type, "image"), atts),
       function(a) ellmer::content_image_url(a$data)
     )
-    text_sections <- paste(
-      vapply(Filter(function(a) identical(a$type, "text"), atts),
-             function(a) a$data, character(1)),
-      collapse = "\n"
-    )
+    text_sections <- .attachment_text_sections(atts)
     full_message <- message
     if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
 
@@ -255,7 +272,10 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
-  # session map 持久化
+  # session map 持久化。
+  # 磁盘是单一真相源：make_claude_session_loader 在用户导入历史 session 时会写盘，
+  # 但它持有独立的内存副本，无法直接同步到本 handler。因此 get_client 在内存
+  # miss 时回读磁盘，确保进程内导入的 session 也能 resume（见 read_session_map）。
   session_map <- if (file.exists(session_map_path))
     tryCatch(readRDS(session_map_path), error = function(e) list())
   else list()
@@ -264,12 +284,27 @@ make_claude_handler <- function(options       = NULL,
     tryCatch(saveRDS(session_map, session_map_path), error = function(e) NULL)
   }
 
+  # 取某线程的 session id：先查内存，miss 则回读磁盘（捕获 loader 的写入）。
+  read_session_id <- function(thread_id) {
+    sid <- session_map[[thread_id]]
+    if (!is.null(sid) && nzchar(sid %||% "")) return(sid)
+    if (!file.exists(session_map_path)) return(NULL)
+    disk <- tryCatch(readRDS(session_map_path), error = function(e) NULL)
+    if (is.null(disk)) return(NULL)
+    disk_sid <- disk[[thread_id]]
+    if (!is.null(disk_sid) && nzchar(disk_sid %||% "")) {
+      session_map[[thread_id]] <<- disk_sid  # 同步进内存缓存
+      return(disk_sid)
+    }
+    NULL
+  }
+
   clients <- list()
 
   get_client <- function(thread_id) {
     if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
 
-    stored_sid <- session_map[[thread_id]]
+    stored_sid <- read_session_id(thread_id)
 
     make_opts <- function(resume_sid = NULL) {
       ClaudeAgentSDK::ClaudeAgentOptions(
@@ -313,11 +348,22 @@ make_claude_handler <- function(options       = NULL,
     save_session_map()
   }
 
-  coro::async(function(
+  # 回收所有 client 子进程（每个 ClaudeSDKClient 持有一个 CLI 子进程）。
+  # 通过 attr 暴露给 assistantUIServer，在 session 结束时调用，防止长生命周期
+  # Shiny session 不断新建线程导致子进程累积泄漏。
+  cleanup <- function() {
+    for (tid in names(clients)) {
+      tryCatch(clients[[tid]]$disconnect(), error = function(e) NULL)
+    }
+    clients <<- list()
+  }
+
+  handler_fn <- coro::async(function(
     message, thread_id, attachments,
     on_chunk, on_done, on_error,
     on_tool_call, on_tool_result, on_thinking,
-    is_cancelled, wait_for_approval
+    is_cancelled, wait_for_approval,
+    on_tool_call_start = NULL, on_tool_call_delta = NULL
   ) {
     client <- tryCatch(
       get_client(thread_id),
@@ -330,11 +376,7 @@ make_claude_handler <- function(options       = NULL,
       Filter(function(a) identical(a$type, "image"), atts),
       function(a) a$data
     )
-    text_sections <- paste(
-      vapply(Filter(function(a) identical(a$type, "text"), atts),
-             function(a) a$data, character(1)),
-      collapse = "\n"
-    )
+    text_sections <- .attachment_text_sections(atts)
     full_message <- message
     if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
 
@@ -358,14 +400,49 @@ make_claude_handler <- function(options       = NULL,
       rm(list = ls(tb), envir = tb)
     }
 
+    # 中断时清理半截 tool block：on_tool_call_start 已在前端建了卡片，但参数未收完、
+    # 未 emit on_tool_call，正常 flush 会跳过它们（emitted=FALSE）导致卡片永久转圈。
+    # 这里对所有未审批的 block 发 "Interrupted" result，与前端 onDone 兜底对齐。
+    # pending_tool_ids 由调用点负责清理（避免 coro async 内 <<- 的不确定性）。
+    interrupt_tool_blocks <- function() {
+      for (key in ls(tb)) {
+        blk <- tb[[key]]
+        if (isTRUE(blk$approval_handled)) next
+        on_tool_result(blk$id, "Interrupted", is_error = TRUE)
+      }
+      rm(list = ls(tb), envir = tb)
+    }
+
+    # drain 兜底：interrupt() 后正常应很快收到 ResultMessage 结束 drain。
+    # 但若 SDK 子进程崩溃/HTTP 异常终止（poll 返回空），或持续吐非-ResultMessage
+    # 垃圾事件（poll 非空但永不收尾），都会导致 repeat 死循环、ExtendedTask 永不
+    # resolve、前端永久 running。用墙钟封顶覆盖两种场景（非"连续空轮询"——后者
+    # 在持续吐垃圾时会被不断重置而失效）。
+    DRAIN_TIMEOUT_SECS <- 10
+    drain_start        <- NULL  # interrupted 时记录起点
+
     repeat {
       if (!interrupted && is_cancelled()) {
         interrupted <- TRUE
+        drain_start <- Sys.time()
         tryCatch(client$interrupt(), error = function(e) NULL)
+        # 立即清理半截工具卡，不等 drain（drain 只认 ResultMessage，会漏掉它们）
+        interrupt_tool_blocks()
+        for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+        pending_tool_ids <- character(0)
+      }
+
+      # 墙钟封顶：无论 poll 空或非空，中断后超时即强制收尾
+      if (interrupted && !is.null(drain_start) &&
+          as.numeric(Sys.time() - drain_start, units = "secs") >= DRAIN_TIMEOUT_SECS) {
+        message("[CLAUDE] drain timeout after interrupt - forcing done")
+        break
       }
 
       msgs <- client$poll_messages()
-      if (length(msgs) == 0) { coro::await(later_promise(0.05)); next }
+      if (length(msgs) == 0) {
+        coro::await(later_promise(0.05)); next
+      }
 
       done <- FALSE; drain_done <- FALSE
 
@@ -389,11 +466,16 @@ make_claude_handler <- function(options       = NULL,
             if (identical(blk[["type"]], "tool_use")) {
               tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]],
                                  args_buf="", emitted=FALSE, approval_handled=FALSE)
+              if (!is.null(on_tool_call_start))
+                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]])
             }
 
           } else if (identical(etype, "content_block_delta") && is.list(delta)) {
-            if (identical(delta[["type"]], "input_json_delta") && nzchar(bidx) && !is.null(tb[[bidx]]))
+            if (identical(delta[["type"]], "input_json_delta") && nzchar(bidx) && !is.null(tb[[bidx]])) {
               tb[[bidx]]$args_buf <- paste0(tb[[bidx]]$args_buf, delta[["partial_json"]] %||% "")
+              if (!is.null(on_tool_call_delta) && nzchar(delta[["partial_json"]] %||% ""))
+                on_tool_call_delta(tool_call_id=tb[[bidx]]$id, delta=delta[["partial_json"]])
+            }
 
             if (identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
               if (length(pending_tool_ids) > 0) {
@@ -440,9 +522,14 @@ make_claude_handler <- function(options       = NULL,
             tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
             tryCatch(client$interrupt(), error = function(e) NULL)
             on_tool_result(msg$request_id, "Interrupted", is_error = TRUE)
+            # 清理其它半截工具卡（parallel tool use 场景）
+            interrupt_tool_blocks()
+            for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+            pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
             sidx <- decision$suggestionIdx
-            if (!is.null(sidx) && is.numeric(sidx)) {
+            if (!is.null(sidx) && is.numeric(sidx) &&
+                sidx >= 0 && sidx < length(msg$suggestions)) {
               sug <- msg$suggestions[[sidx + 1L]]
               if (!is.null(sug)) {
                 if (identical(sug$type, "addRules")) {
@@ -490,6 +577,9 @@ make_claude_handler <- function(options       = NULL,
 
     on_done()
   })
+
+  attr(handler_fn, "cleanup") <- cleanup
+  handler_fn
 }
 
 #' List Claude sessions for sidebar injection
@@ -553,7 +643,6 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
 .claude_msgs_to_thread <- function(msgs) {
-  `%||%` <- function(x, y) if (is.null(x)) y else x
   result <- list()
   for (m in msgs) {
     if (m$type == "user") {

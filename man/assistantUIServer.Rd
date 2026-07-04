@@ -11,9 +11,18 @@ assistantUIServer(
   suggestions = list(),
   commands = list(),
   tools = list(),
+  action_items = list(),
+  on_action = NULL,
+  on_session_load = NULL,
+  on_feedback = NULL,
+  on_rename = NULL,
   code_theme = "one-light",
   strings = NULL,
-  assistant_avatar = list(fallback = "AI")
+  assistant_avatar = list(fallback = "AI"),
+  theme = NULL,
+  dark_mode = FALSE,
+  show_timestamps = FALSE,
+  modal = FALSE
 )
 }
 \arguments{
@@ -28,10 +37,31 @@ multi-turn conversation routing).
 \item \code{on_chunk(text)} — call repeatedly to stream response tokens.
 \item \code{on_done()} — call once when the response is complete.
 \item \code{on_error(msg)} — call to surface an error in the UI.
-\item \code{on_tool_call(tool_call_id, tool_name, args)} — show a tool call card
-(args should be a named list).
+\item \code{on_tool_call(tool_call_id, tool_name, args, annotations)} — show a
+tool call card. \code{args} should be a named list. \code{annotations} is an
+optional named list controlling card appearance and result rendering.
+Recognized keys:
+\itemize{
+\item \code{icon} — lucide icon name (\code{"search"}, \code{"database"}, \code{"code"}, …)
+\item \code{title} — display name shown in the card header
+\item \code{requiresApproval} — \code{TRUE} to show Approve/Deny buttons
+\item \code{resultType} — how to render the result from \code{on_tool_result()}:
+\code{"auto"} (default, JSON/text in \verb{<pre>}), \code{"markdown"},
+\code{"table"}, \code{"code"}, \code{"image"}, \code{"file"}, \code{"html"}
+\item \code{resultLang} — language for \code{resultType = "code"} (e.g. \code{"r"},
+\code{"python"}, \code{"sql"}; default \code{"text"})
+\item \code{resultFilename} — filename for \code{resultType = "file"} download
+button (e.g. \code{"results.csv"}; default \code{"download"})
+}
 \item \code{on_tool_result(tool_call_id, result, is_error = FALSE)} — update the
 tool card with the result.
+\itemize{
+\item \code{resultType = "table"}: pass \code{jsonlite::toJSON(df, auto_unbox = FALSE)}
+\item \code{resultType = "file"}: pass base64 data URL
+(\code{paste0("data:text/csv;base64,", jsonlite::base64_enc(chartr(...)))})
+\item \code{resultType = "html"}: pass HTML string (rendered via
+\code{dangerouslySetInnerHTML}; only use with trusted tool output)
+}
 \item \code{attachments} — list of named lists, one per file the user attached.
 Each element has \code{type} (\code{"image"}, \code{"text"}, or \code{"file"}), \code{name}
 (filename), \code{data} (data-URL string for images, plain text for text
@@ -51,7 +81,7 @@ to implement true server-side cancellation:
 on_done()
 }\if{html}{\out{</div>}}
 
-For \link[=https://github.com/kaipingyang/ClaudeAgentSDK]{ClaudeAgentSDK},
+For \href{https://github.com/kaipingyang/ClaudeAgentSDK}{ClaudeAgentSDK},
 call \code{client$interrupt()} when \code{is_cancelled()} returns \code{TRUE}.
 \item \code{wait_for_approval} — \verb{function(tool_call_id)} that returns a
 \code{promises::promise} which resolves to \code{TRUE} (approved) or \code{FALSE}
@@ -66,6 +96,12 @@ the stream until human approval:
   if (!approved) ellmer::tool_reject("User denied the tool call.")
 \}))
 }\if{html}{\out{</div>}}
+\item \code{register_cancel} — \verb{function(fn)} that stores a cancel callback for
+the current thread. Call once before starting the stream with a function
+that performs true HTTP cancellation (e.g.
+\code{register_cancel(function() ctrl$cancel("Interrupted"))}).  When the
+user clicks Stop, \code{assistantUIServer} calls \code{fn()} immediately so the
+in-flight HTTP request is closed rather than silently drained.
 }
 
 All parameters except \code{message}, \code{on_chunk}, \code{on_done}, and \code{on_error}
@@ -84,12 +120,44 @@ message. Each element is a list with \code{prompt} (required, the text sent on
 click) and optional \code{text} (display label, defaults to \code{prompt}).}
 
 \item{commands}{List of slash-command definitions. Each element is a list
-with \code{name} (e.g. \code{"summarize"}), \code{description}, and \code{prompt} (the message
-sent immediately when the command is selected).}
+with \code{name} (e.g. \code{"summarize"}), \code{description}, \code{prompt} (the message
+sent immediately when the command is selected), and optional \code{category}
+(group label shown as a section header in the popover). Category should be
+one of the 6 fixed sections: \code{"Context"}, \code{"Model"}, \code{"Customize"},
+\code{"Slash Commands"} (default), \code{"Settings"}, \code{"Support"}.}
 
 \item{tools}{List of tool definitions for the \@ mention menu. Each element
 is a list with \code{name} and \code{description}. Typically mirrors the tools
 registered with ellmer.}
+
+\item{action_items}{List of action-type slash-command items. Unlike
+\code{commands}, these do not send a message to the AI — instead, clicking them
+fires \code{on_action(id)} on the R side, allowing arbitrary server logic.
+Each element is a list with \code{section} (one of the 6 fixed section names),
+\code{id} (unique string passed to \code{on_action}), \code{label} (display name), and
+optional \code{description}. Example:
+
+\if{html}{\out{<div class="sourceCode r">}}\preformatted{action_items = list(
+  list(section = "Model",   id = "thinking-on",  label = "Enable thinking"),
+  list(section = "Support", id = "view-docs",    label = "View help docs",
+       description = "Open documentation")
+)
+}\if{html}{\out{</div>}}}
+
+\item{on_action}{\verb{function(id)} called when the user clicks an item from
+\code{action_items}. \code{id} is the string from the item definition. Use this to
+trigger server-side logic (e.g. toggle a setting, open a URL, call
+\code{clear()}). \code{NULL} (default) means no handler is registered.}
+
+\item{on_session_load}{Optional \verb{function(session_id, thread_id, send_thread)}
+called when the frontend requests messages for a historical session thread.}
+
+\item{on_feedback}{Optional \verb{function(message_id, type)} called when the user
+clicks a 👍/👎 feedback button (\code{type} is \code{"positive"} or \code{"negative"}).}
+
+\item{on_rename}{Optional \verb{function(thread_id, title)} called when the user
+renames a thread in the sidebar. The new title is already persisted
+client-side (localStorage); use this to sync server-side session stores.}
 
 \item{code_theme}{Character string selecting the syntax-highlighting theme
 for code blocks. Available light themes: \code{"one-light"} (default),
@@ -119,9 +187,41 @@ set), \code{src} (URL to an image), \code{alt} (alt text). Defaults to
 
 \if{html}{\out{<div class="sourceCode r">}}\preformatted{assistant_avatar = list(src = "https://example.com/logo.png", fallback = "AI")
 }\if{html}{\out{</div>}}}
+
+\item{theme}{Optional named list of theme tokens to recolor the widget, e.g.#'   from \code{\link[=assistant_theme]{assistant_theme()}}. Colors may be hex/named/\code{rgb()} strings and are
+converted to assistant-ui's HSL-component format. Applied as scoped CSS
+variables on this widget only (multiple widgets can have different themes).
+Example: \code{theme = assistant_theme(primary = "#2563eb")}.}
+
+\item{dark_mode}{Dark color scheme control: \code{FALSE} (light, default), \code{TRUE}
+(dark), or \code{"auto"} (follow the OS/browser \code{prefers-color-scheme}). A custom
+\code{theme} overrides individual tokens in either mode.}
+
+\item{show_timestamps}{Logical. If \code{TRUE}, each user/assistant message shows
+its send time (HH:MM), derived from the message id. Defaults to \code{FALSE}.
+\itemize{
+\item \code{on_session_load} — \verb{function(session_id, thread_id, send_thread)} called
+when the frontend requests historical messages for a session thread. Used
+with \code{send_sessions()} (in the return value) to populate the sidebar with
+Claude Code sessions and lazy-load their messages on click.
+\itemize{
+\item \code{session_id} — the Claude session UUID
+\item \code{thread_id} — the UI thread ID (equals \code{session_id} for imported threads)
+\item \code{send_thread(messages)} — call with a list of \code{ThreadMessageLike} objects
+(each a named list with \code{id}, \code{role}, \code{content} fields) to populate the
+thread.
+}
+}}
+
+\item{modal}{Logical. If \code{TRUE}, renders the chat as a floating modal bubble
+instead of an inline panel.}
 }
 \value{
-A list with a \code{clear()} function that creates a new thread in the UI.
+A list with a \code{clear()} function that creates a new thread in the UI,
+\code{send_tool_call()} / \code{send_tool_result()} for manual tool card control, and
+\code{send_sessions(sessions)} for injecting a list of historical session stubs
+into the sidebar (each element: named list with \code{id}, \code{title}, \code{preview},
+\code{createdAt} fields).
 }
 \description{
 Handles the server-side logic for an \code{\link[=assistantUIOutput]{assistantUIOutput()}} widget: receives

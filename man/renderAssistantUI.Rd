@@ -11,8 +11,6 @@ renderAssistantUI(config = list(), outputId = NULL)
 
 \item{outputId}{The output ID used in \code{\link[=assistantUIOutput]{assistantUIOutput()}}.  The widget
 uses this to derive the Shiny input name that carries user messages.}
-
-\item{env, quoted}{Passed to \code{\link[htmlwidgets:htmlwidgets-shiny]{htmlwidgets::shinyRenderWidget()}}.}
 }
 \value{
 A render function suitable for assigning to \code{output[[outputId]]}.

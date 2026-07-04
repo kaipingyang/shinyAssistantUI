@@ -15,13 +15,13 @@ import type {
   FeedbackAdapter,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
-import type { ShinyBridge, AttachmentData, SessionItem } from "./bridge";
+import type { ShinyBridge, SessionItem } from "./bridge";
+import {
+  storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
+  extractAttachments, expandSlashCommands, applyEdit,
+} from "./helpers";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
-
-function storageKey(inputId: string, suffix: string) {
-  return `shinyAssistantUI:${inputId}:${suffix}`;
-}
 
 function loadThreads(inputId: string): ExternalStoreThreadData<"regular">[] {
   try {
@@ -35,7 +35,9 @@ function loadThreads(inputId: string): ExternalStoreThreadData<"regular">[] {
 function saveThreads(inputId: string, threads: ExternalStoreThreadData<"regular">[]) {
   try {
     localStorage.setItem(storageKey(inputId, "threads"), JSON.stringify(threads));
-  } catch {}
+  } catch (e) {
+    console.warn("[shinyAssistantUI] saveThreads failed:", e);
+  }
 }
 
 function loadArchivedThreads(inputId: string): ExternalStoreThreadData<"archived">[] {
@@ -50,8 +52,13 @@ function loadArchivedThreads(inputId: string): ExternalStoreThreadData<"archived
 function saveArchivedThreads(inputId: string, threads: ExternalStoreThreadData<"archived">[]) {
   try {
     localStorage.setItem(storageKey(inputId, "archived"), JSON.stringify(threads));
-  } catch {}
+  } catch (e) {
+    console.warn("[shinyAssistantUI] saveArchivedThreads failed:", e);
+  }
 }
+
+// 把所有未完成（result === undefined）的 tool-call part 标记为中断。
+// markStaleToolCalls 已抽到 ./helpers，此处仅保留 localStorage 读写包装。
 
 function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
   try {
@@ -59,22 +66,21 @@ function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
     if (!raw) return [];
     const msgs = JSON.parse(raw) as ThreadMessageLike[];
     // Any tool-call part without a result is stale (session ended mid-run) — mark as interrupted
-    return msgs.map((m): ThreadMessageLike => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const part = (m.content as any)?.[0] as Record<string, unknown> | undefined;
-      if (part?.type !== "tool-call" || part.result !== undefined) return m;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return { ...m, content: [{ ...part, result: "Session ended", isError: true }] } as any;
-    });
+    return markStaleToolCalls(msgs, "Session ended").messages;
   } catch {
     return [];
   }
 }
 
+// 落盘前剥离附件大体积 base64 data（stripAttachmentData 已抽到 ./helpers）。
 function saveMessages(inputId: string, threadId: string, msgs: ThreadMessageLike[]) {
   try {
-    localStorage.setItem(storageKey(inputId, `msgs:${threadId}`), JSON.stringify(msgs));
-  } catch {}
+    const slim = stripAttachmentData(msgs);
+    localStorage.setItem(storageKey(inputId, `msgs:${threadId}`), JSON.stringify(slim));
+  } catch (e) {
+    // 配额超限等：不再完全静默，至少告警（数据仅当前会话内存可见，刷新丢失）
+    console.warn(`[shinyAssistantUI] saveMessages failed (thread ${threadId}):`, e);
+  }
 }
 
 function deleteMessages(inputId: string, threadId: string) {
@@ -83,9 +89,7 @@ function deleteMessages(inputId: string, threadId: string) {
   } catch {}
 }
 
-function makeThreadId() {
-  return `t_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-}
+// makeThreadId / extractAttachments / expandSlashCommands 已抽到 ./helpers
 
 // ── hook ────────────────────────────────────────────────────────────────────
 
@@ -178,8 +182,47 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   const [isRunning, setIsRunning] = useState(false);
   const [suggestions, setSuggestions] = useState<Array<{prompt: string}>>([]);
+  // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
+  const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
   const streamingIdRef  = useRef<string | null>(null);
+  const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
+  const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deliverTextRef  = useRef<((text: string, threadId: string) => void) | null>(null);
   const hasReasoningRef = useRef(false); // thinking arrived before text chunks
+  // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
+  // ① 多 tab storage 同步时保护正在跑的线程不被磁盘旧值覆盖；
+  const activeRunsRef = useRef<Set<string>>(new Set());
+  // per-thread run 序号，用于 onDone/onError 判断自己是否仍是该线程最新的 run，
+  // 避免 run 重入时旧 run 的收尾逻辑误删新 run 的 callbacks。
+  const runSeqRef = useRef<Record<string, number>>({});
+
+  // 多 tab 同步：监听 storage 事件（仅其它 tab 写同源 localStorage 时触发，本 tab 不触发）。
+  // 避免两个 tab 各持独立 state、last-write-wins 互相覆盖对方新建/删除的线程。
+  // 策略：threads/archived 列表直接 reload 保持侧栏一致；某 thread 的消息仅在它
+  // 不在本 tab 正在 streaming 时才同步（正在跑的线程本地领先磁盘，防覆盖流式中消息）。
+  useEffect(() => {
+    if (isServerMode.current) return; // server 权威模式不用 localStorage
+    const prefix = storageKey(inputId, "");
+    const onStorage = (e: StorageEvent) => {
+      if (isServerMode.current || !e.key || !e.key.startsWith(prefix)) return;
+      const suffix = e.key.slice(prefix.length);
+      if (suffix === "threads") {
+        setThreads(loadThreads(inputId));
+      } else if (suffix === "archived") {
+        setArchivedThreads(loadArchivedThreads(inputId));
+      } else if (suffix.startsWith("msgs:")) {
+        const tid = suffix.slice("msgs:".length);
+        // 正在 streaming 的线程（含后台并发 run）本地领先磁盘，跳过同步防覆盖；
+        // 当前活动线程也跳过（用户正在看/可能将发消息）。
+        if (activeRunsRef.current.has(tid) || tid === currentThreadIdRef.current) return;
+        setMessagesMap((prev) => ({ ...prev, [tid]: loadMessages(inputId, tid) }));
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [inputId]);
 
   // 当前线程消息
   const messages = useMemo(
@@ -337,7 +380,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setSuggestions([]);
       streamingIdRef.current = null;
 
-      bridge.current.setRunCallbacks({
+      // 登记本 run：active 集合用于多 tab 同步保护；run 序号用于 onDone/onError
+      // 判断自己是否仍是该线程最新 run（重入时旧 run 不得误删新 run 的 callbacks）。
+      activeRunsRef.current.add(threadId);
+      const mySeq = (runSeqRef.current[threadId] ?? 0) + 1;
+      runSeqRef.current[threadId] = mySeq;
+      const isLatestRun = () => runSeqRef.current[threadId] === mySeq;
+
+      bridge.current.setRunCallbacks(threadId, {
         onThinking: (thinkingText) => {
           // Reasoning part stored INLINE in the same assistant message as text
           if (!streamingIdRef.current) {
@@ -411,28 +461,99 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
-        onToolCall: (toolCall) => {
+        onToolCallStart: (toolCallId, toolName, annotations) => {
+          // 流式工具参数：先建空壳 tool-call part，后续 onToolCallDelta 逐字追加 argsText
           streamingIdRef.current = null;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
+            if (threadMsgs.find((m) => m.id === `tool-${toolCallId}`)) return prev;
             const updated: ThreadMessageLike[] = [
               ...threadMsgs,
               {
-                id: `tool-${toolCall.toolCallId}`,
+                id: `tool-${toolCallId}`,
                 role: "assistant" as const,
                 content: [
                   {
                     type: "tool-call" as const,
-                    toolCallId: toolCall.toolCallId,
-                    toolName: toolCall.toolName,
+                    toolCallId,
+                    toolName,
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    args: toolCall.args as any,
-                    argsText: toolCall.argsText,
-                    artifact: toolCall.annotations,
+                    args: {} as any,
+                    argsText: "",
+                    artifact: annotations,
                   },
                 ],
               },
             ];
+            // 流式期间不写 localStorage（仿 onChunk），避免半截参数腐败历史
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onToolCallDelta: (toolCallId, delta) => {
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated = threadMsgs.map((m): ThreadMessageLike => {
+              if (m.id !== `tool-${toolCallId}`) return m;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const content = m.content as any[];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const cidx = content.findIndex((p: any) => p.type === "tool-call");
+              if (cidx < 0) return m;
+              const newContent = [...content];
+              newContent[cidx] = { ...content[cidx], argsText: (content[cidx].argsText ?? "") + delta };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return { ...m, content: newContent } as any;
+            });
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onToolCall: (toolCall) => {
+          streamingIdRef.current = null;
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === `tool-${toolCall.toolCallId}`);
+            let updated: ThreadMessageLike[];
+            if (existing) {
+              // 已被 onToolCallStart 创建（Claude 流式路径）：补全解析后的 args + artifact，不重复 push
+              updated = threadMsgs.map((m): ThreadMessageLike => {
+                if (m.id !== `tool-${toolCall.toolCallId}`) return m;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const content = m.content as any[];
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const cidx = content.findIndex((p: any) => p.type === "tool-call");
+                if (cidx < 0) return m;
+                const newContent = [...content];
+                newContent[cidx] = {
+                  ...content[cidx],
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  args: toolCall.args as any,
+                  argsText: toolCall.argsText,
+                  artifact: toolCall.annotations,
+                };
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return { ...m, content: newContent } as any;
+              });
+            } else {
+              // 无 start（ellmer 路径）：整包新建
+              updated = [
+                ...threadMsgs,
+                {
+                  id: `tool-${toolCall.toolCallId}`,
+                  role: "assistant" as const,
+                  content: [
+                    {
+                      type: "tool-call" as const,
+                      toolCallId: toolCall.toolCallId,
+                      toolName: toolCall.toolName,
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      args: toolCall.args as any,
+                      argsText: toolCall.argsText,
+                      artifact: toolCall.annotations,
+                    },
+                  ],
+                },
+              ];
+            }
             if (!isServerMode.current) saveMessages(inputId, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
@@ -441,35 +562,114 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const updated = threadMsgs.map((m): ThreadMessageLike => {
+              // 按 type + toolCallId 定位 part（不假设 content[0]），与
+              // markStaleToolCalls / onToolCallDelta 保持一致，兼容未来多 part 消息。
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const part = (m.content as any)[0] as Record<string, unknown> | undefined;
-              if (part?.type !== "tool-call") return m;
-              if (part.toolCallId !== toolCallId) return m;
+              const content = m.content as any[];
+              if (!Array.isArray(content)) return m;
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              return { ...m, content: [{ ...part, result, isError }] } as any;
+              const cidx = content.findIndex(
+                (p: any) => p?.type === "tool-call" && p.toolCallId === toolCallId,
+              );
+              if (cidx < 0) return m;
+              const newContent = [...content];
+              newContent[cidx] = { ...content[cidx], result, isError };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return { ...m, content: newContent } as any;
             });
             if (!isServerMode.current) saveMessages(inputId, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
+        onSource: (source) => {
+          if (!streamingIdRef.current) streamingIdRef.current = `assistant-${Date.now()}`;
+          const msgId = streamingIdRef.current;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const part: any = {
+            type: "source", sourceType: "url",
+            id: source.id ?? `src-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            url: source.url, title: source.title ?? source.url,
+          };
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
+            const updated = existing
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
+              : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
+            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onImage: (image) => {
+          if (!streamingIdRef.current) streamingIdRef.current = `assistant-${Date.now()}`;
+          const msgId = streamingIdRef.current;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const part: any = { type: "image", image };
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
+            const updated = existing
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
+              : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
+            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onArtifact: (artifact) => {
+          setArtifacts((prev) => {
+            const idx = prev.findIndex((a) => a.id === artifact.id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = artifact;
+              return next;
+            }
+            return [...prev, artifact];
+          });
+          setActiveArtifactId(artifact.id); // 新/更新的 artifact 自动打开面板
+        },
         onDone: (doneSuggestions) => {
           streamingIdRef.current = null;
           hasReasoningRef.current = false;
-          setIsRunning(false);
-          if (doneSuggestions && doneSuggestions.length > 0) setSuggestions(doneSuggestions);
-          bridge.current.setRunCallbacks(null);
-          // 流结束后统一持久化
+          // 只有当前 thread 仍是发起此 run 的 thread 时才清 running 状态
+          // 避免用户切换 thread 后旧 handler 的 onDone 把新 thread 的 running 错误清掉
+          if (currentThreadIdRef.current === threadId) {
+            setIsRunning(false);
+            if (doneSuggestions && doneSuggestions.length > 0) setSuggestions(doneSuggestions);
+          }
+          // 仅当本 run 仍是该线程最新 run 时才注销 callbacks / 清 active 标记。
+          // 避免 run 重入（edit 后立即 reload 等）时旧 run 的 onDone 误删新 run 的 callbacks。
+          if (isLatestRun()) {
+            activeRunsRef.current.delete(threadId);
+            bridge.current.setRunCallbacks(threadId, null);
+            // 消息队列 flush：本 run 结束后若该线程有排队消息,自动发送下一条
+            const q = messageQueueRef.current.get(threadId);
+            if (q && q.length > 0) {
+              const nextText = q.shift()!;
+              setTimeout(() => deliverTextRef.current?.(nextText, threadId), 40);
+            }
+          }
           setMessagesMap((prev) => {
-            const msgs = prev[threadId] ?? [];
+            // 收口：把任何未完成的 tool-call part 标记中断。正常结束时无半截卡
+            // （changed=false，零影响）；中断 drain 时 R 可能漏发 on_tool_result，
+            // 此处兜底避免卡片永久转圈。
+            const { messages: msgs, changed } = markStaleToolCalls(
+              prev[threadId] ?? [],
+              "Interrupted",
+            );
             if (!isServerMode.current) saveMessages(inputId, threadId, msgs);
-            return { ...prev, [threadId]: msgs };
+            return changed ? { ...prev, [threadId]: msgs } : { ...prev, [threadId]: prev[threadId] ?? [] };
           });
         },
         onError: (errMsg) => {
           streamingIdRef.current = null;
           hasReasoningRef.current = false;
-          setIsRunning(false);
-          bridge.current.setRunCallbacks(null);
+          if (currentThreadIdRef.current === threadId) setIsRunning(false);
+          if (isLatestRun()) {
+            activeRunsRef.current.delete(threadId);
+            bridge.current.setRunCallbacks(threadId, null);
+          }
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const updated = [
@@ -502,18 +702,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       // 发给 R 的文本：把 /commandName → cmd.prompt 展开
       // （chip directiveText = "/commandName"，R 需要收到实际 prompt）
-      let sendText = text;
-      for (const cmd of commands) {
-        if (sendText.includes(`/${cmd.name}`)) {
-          sendText = sendText.split(`/${cmd.name}`).join(cmd.prompt);
-        }
-      }
+      const sendText = expandSlashCommands(text, commands);
 
       const threadId = currentThreadId;
 
       // 第一条消息自动命名线程（在任何 updater 外直接读当前 state）
       const isFirstMsg = (messagesMap[threadId] ?? []).length === 0;
-      if (isFirstMsg) {
+      if (isFirstMsg && !manualTitleIds.current.has(threadId)) {
         const title = text.slice(0, 20) + (text.length > 20 ? "…" : "");
         setThreads((ts) => {
           const next = ts.map((t) => (t.id === threadId ? { ...t, title } : t));
@@ -523,22 +718,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
 
       // 提取附件：序列化为结构化数据供 R 端使用
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawAttachments: any[] = (msg as any).attachments ?? [];
-      const attachmentData: AttachmentData[] = rawAttachments.map((att: any) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const content: any[] = att.content ?? [];
-        const imgPart  = content.find((p: any) => p.type === "image");
-        const textPart = content.find((p: any) => p.type === "text");
-        const filePart = content.find((p: any) => p.type === "file");
-        if (imgPart)  return { type: "image", name: att.name, data: imgPart.image,  contentType: att.contentType };
-        if (textPart) return { type: "text",  name: att.name, data: textPart.text,  contentType: att.contentType };
-        if (filePart) return { type: "file",  name: att.name, data: filePart.data,  contentType: att.contentType ?? filePart.mimeType };
-        return { type: att.type ?? "file", name: att.name, data: "", contentType: att.contentType };
-      });
-
-      // 存入消息（strip File 对象，无法 JSON 序列化）
-      const storedAttachments = rawAttachments.map((att: any) => ({ ...att, file: undefined }));
+      const { attachmentData, storedAttachments } = extractAttachments(msg);
 
       // 追加用户消息
       setCurrentMessages((prev) => [
@@ -560,8 +740,38 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, startRun]
   );
 
+  // ── 消息队列:文本-only 投递(队列 flush 用)+ 入队 ─────────────────────────────
+  // deliverText 追加用户气泡到指定线程并 startRun 发送(无附件)。存入 ref 供 onDone
+  // flush 调用(避免 startRun 闭包对后定义函数的时序依赖)。
+  const deliverText = useCallback((text: string, threadId: string) => {
+    if (!text.trim()) return;
+    const sendText = expandSlashCommands(text, commands);
+    setMessagesMap((prev) => {
+      const threadMsgs = prev[threadId] ?? [];
+      const updated: ThreadMessageLike[] = [
+        ...threadMsgs,
+        { id: `user-${Date.now()}`, role: "user" as const, content: [{ type: "text" as const, text }] },
+      ];
+      if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+      return { ...prev, [threadId]: updated };
+    });
+    startRun(threadId, () => bridge.current.sendUserMessage(sendText, threadId));
+  }, [inputId, commands, startRun]);
+  deliverTextRef.current = deliverText;
+
+  // 入队:AI 运行中时把消息排队,当前 run 结束后自动发送(见 onDone flush)。
+  const enqueueMessage = useCallback((text: string) => {
+    if (!text.trim()) return;
+    const tid = currentThreadIdRef.current;
+    const q = messageQueueRef.current.get(tid) ?? [];
+    q.push(text);
+    messageQueueRef.current.set(tid, q);
+  }, []);
+
   // ── onEdit ───────────────────────────────────────────────────────────────
-  // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新发送新文本
+  // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新插入编辑后的
+  // user 消息并重发。必须重新插入——外部存储模式下框架不持有消息，messagesMap 是
+  // 唯一真相源，只截断不插入会导致编辑后的 user 气泡从界面消失。
   const onEdit = useCallback(
     async (message: AppendMessage) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -572,18 +782,35 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (!text.trim()) return;
       const threadId = currentThreadIdRef.current;
       const parentId = message.parentId ?? null;
+      const { attachmentData, storedAttachments } = extractAttachments(message);
+
+      // slash 命令展开（与 onNew 一致）
+      const sendText = expandSlashCommands(text, commands);
+
+      // 标志：parentId 陈旧找不到时跳过本次编辑（连 startRun 一起跳过，
+      // 避免只发消息给 R 却不插 user 气泡，导致孤儿 assistant 回复 + UI/R 发散）。
+      let aborted = false;
+      const newUserMessage: ThreadMessageLike = {
+        id: `user-${Date.now()}`,
+        role: "user" as const,
+        content: [{ type: "text" as const, text }],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
+      };
       setMessagesMap((prev) => {
         const threadMsgs = prev[threadId] ?? [];
-        const cutIdx = parentId
-          ? threadMsgs.findIndex((m) => m.id === parentId) + 1
-          : 0;
-        const updated = threadMsgs.slice(0, cutIdx);
+        const { updated, aborted: ab } = applyEdit(threadMsgs, parentId, newUserMessage);
+        if (ab) { aborted = true; return prev; }
         if (!isServerMode.current) saveMessages(inputId, threadId, updated);
         return { ...prev, [threadId]: updated };
       });
-      startRun(threadId, () => bridge.current.sendUserMessage(text, threadId, []));
+      if (aborted) return; // 不发消息给 R，保持 UI/R 一致
+      startRun(threadId, () => bridge.current.sendUserMessage(
+        sendText, threadId,
+        attachmentData.length > 0 ? attachmentData : undefined,
+      ));
     },
-    [inputId, startRun] // eslint-disable-line react-hooks/exhaustive-deps
+    [inputId, startRun, commands] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // ── onReload ─────────────────────────────────────────────────────────────  // parentId = 触发本次 assistant 回复的 user 消息 ID
@@ -591,7 +818,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     async (parentId: string | null, _config: StartRunConfig) => {
       const threadId = currentThreadId;
       const msgs = messagesMap[threadId] ?? [];
-      console.log("[onReload] parentId=", parentId, "msgs=", msgs.map(m => ({ id: m.id, role: m.role })));
 
       // 找到 parent user 消息的文本
       const parentMsg = parentId ? msgs.find((m) => m.id === parentId) : null;
@@ -646,6 +872,27 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setCurrentThreadId(newId);
     setIsRunning(false);
     streamingIdRef.current = null;
+  }, [inputId]);
+
+  // ── 线程重命名（rename）──────────────────────────────────────────────────────
+  // manualTitleIds：被用户手动改过标题的线程,首条消息自动命名时不再覆盖。
+  const renameThread = useCallback((threadId: string, newTitle: string) => {
+    const title = newTitle.trim();
+    if (!title) return;
+    manualTitleIds.current.add(threadId);
+    setThreads((prev) => {
+      if (!prev.some((t) => t.id === threadId)) return prev;
+      const next = prev.map((t) => (t.id === threadId ? { ...t, title } : t));
+      saveThreads(inputId, next);
+      return next;
+    });
+    setArchivedThreads((prev) => {
+      if (!prev.some((t) => t.id === threadId)) return prev;
+      const next = prev.map((t) => (t.id === threadId ? { ...t, title } : t));
+      saveArchivedThreads(inputId, next);
+      return next;
+    });
+    bridge.current.sendRename(threadId, title);
   }, [inputId]);
 
   // ── threadList adapter ───────────────────────────────────────────────────
@@ -714,8 +961,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   );
 
   const sendToolApproval = useCallback(
-    (toolCallId: string, approved: boolean) => {
-      bridge.current.sendToolApproval(toolCallId, approved);
+    (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => {
+      bridge.current.sendToolApproval(toolCallId, approved, opts);
     },
     [] // eslint-disable-line react-hooks/exhaustive-deps
   );
@@ -743,5 +990,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     },
   });
 
-  return { runtime, sendToolApproval, switchToNewThread, sendAction };
+  return {
+    runtime, sendToolApproval, switchToNewThread, sendAction, renameThread, enqueueMessage,
+    artifacts, activeArtifactId,
+    openArtifact: (id: string) => setActiveArtifactId(id),
+    closeArtifact: () => setActiveArtifactId(null),
+  };
 }

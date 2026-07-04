@@ -101,6 +101,65 @@ handler = function(message, on_chunk, on_done, on_error) {
 }
 ```
 
+### Rich message features
+
+The `handler` receives optional callbacks (declare them as params, or use `...`):
+
+```r
+handler = function(message, on_chunk, on_done,
+                   on_source, on_image, on_artifact, ...) {
+  on_chunk("Based on the sources, the answer is 42. ")
+  on_source("https://en.wikipedia.org/wiki/42", title = "Wikipedia: 42")  # citation footnote
+  on_image("data:image/png;base64,...")                                   # inline image
+  on_artifact(id = "doc-1", title = "Report", type = "markdown",          # side panel
+              content = "# Report\n...")                                  # type: markdown|code|html|text
+  on_done()
+}
+```
+
+`assistantUIServer()` also accepts:
+
+- `show_timestamps = TRUE` — show each message's send time (HH:MM).
+- `on_rename = function(thread_id, title)` — called when a thread is renamed in the sidebar (title is already persisted client-side; use this to sync a server-side store).
+- **Message queue** — while a reply streams, a clock button appears next to Stop; typing + clicking it queues the message, auto-sent when the current reply finishes.
+- **HTML tool results** (`resultType = "html"`) render in a sandboxed iframe by default (no scripts, isolated) — set `annotations$htmlSandbox = FALSE` to opt out for trusted interactive HTML.
+
+See `examples/21_artifacts.R` … `examples/25_message_queue.R`.
+
+### Website styles
+
+`examples/15_style_base.R` … `examples/20_style_perplexity.R` recreate the six
+assistant-ui.com looks (Base, ChatGPT, Claude, Grok, Gemini, Perplexity) using
+`assistant_theme()`.
+
+### Theming
+Recolor the chat to match your app with `theme` and `dark_mode`. Colors accept
+any R format (hex, named, `rgb()`); they are converted to assistant-ui's
+semantic tokens and injected as **scoped** CSS variables (each widget can have
+its own theme).
+
+```r
+library(shinyAssistantUI)
+
+assistantUIServer(
+  "chat",
+  handler   = my_handler,
+  theme     = assistant_theme(
+    primary            = "#2563eb",   # send button, user bubble
+    primary_foreground = "#ffffff",
+    background         = "#f8fafc",
+    accent             = "#dbeafe",
+    radius             = "0.75rem"    # corner radius (CSS length, not a color)
+  ),
+  dark_mode = FALSE                   # FALSE | TRUE | "auto" (follow OS)
+)
+```
+
+`assistant_theme()` tokens: `background`, `foreground`, `primary`,
+`secondary`, `accent`, `muted`, `destructive`, `card`, `popover` (each with a
+`*_foreground` companion), plus `border`, `input`, `ring`, and `radius`.
+See `examples/08_theming.R`.
+
 ## Architecture
 
 ```

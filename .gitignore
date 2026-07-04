@@ -10,3 +10,8 @@ node_modules/
 .Renviron
 .claude_session_map.rds
 assistant-ui-src/
+.ellmer_sessions/
+.claude_session_map_custom.rds
+.sessions/
+test.txt
+test.text

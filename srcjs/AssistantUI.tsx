@@ -50,6 +50,8 @@ import {
 import { useThreadIsRunning } from "@assistant-ui/core/react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import { sessionDates } from "./runtime";
+import { safeUrl, preprocessStreamingMarkdown, detectSlashTrigger, computeToolDepth, formatMessageTime } from "./helpers";
+import { registerApprovalHandler, unregisterApprovalHandler, resolveApprovalHandler } from "./approval-registry";
 import {
   PanelLeftCloseIcon, PanelLeftOpenIcon, ArchiveIcon, Trash2Icon,
   MoreHorizontalIcon, WrenchIcon, ChevronDownIcon, ChevronRightIcon,
@@ -57,7 +59,7 @@ import {
   CloudSunIcon, CalculatorIcon, SearchIcon, DatabaseIcon,
   CodeIcon, GlobeIcon, ZapIcon, TerminalIcon, FlaskConicalIcon,
   MicIcon, SquareIcon, ShieldAlertIcon, LightbulbIcon,
-  DownloadIcon, PencilIcon, BotIcon,
+  DownloadIcon, PencilIcon, BotIcon, LinkIcon, ClockIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -90,23 +92,55 @@ import "@assistant-ui/react-ui/styles/modal.css";
 import "./lexical.css";
 import { useShinyRuntime } from "./runtime";
 
-// ── Tool 审批：模块级变量（避免 React context tree 依赖）────────────────────────
-// ToolFallback 由 @assistant-ui 渲染，位置可能在独立 React 树里，context 不可靠。
-let _toolApprovalHandler: ((id: string, approved: boolean) => void) | null = null;
+// ── Tool 审批：注册表已抽到 ./approval-registry（可单测多 widget 路由隔离）────
 
 // ── Tool result 代码主题（与 AssistantUI 的 code_theme 保持同步）──────────────
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _codeThemeStyle: any = oneLight;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _MarkdownText: React.ComponentType | null = null;
+let _showTimestamps = false; // 由 AssistantUI 从 config.show_timestamps 设置
+
+// ── 消息时间戳（从消息 id 解析,gated by config.show_timestamps）──────────────
+function MessageTimestamp() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const id = useAuiState((s: any) => s.message?.id as string | undefined);
+  if (!_showTimestamps) return null;
+  const t = formatMessageTime(id);
+  if (!t) return null;
+  return (
+    <span className="aui-message-timestamp" data-timestamp={t}
+      style={{ fontSize: "10px", color: "var(--aui-muted-foreground, #9ca3af)", padding: "0 2px" }}>
+      {t}
+    </span>
+  );
+}
+
+// ── Thread 操作上下文（rename 等,由 AssistantUI 注入）─────────────────────────
+const ThreadActionsCtx = createContext<{ renameThread: (id: string, title: string) => void }>({
+  renameThread: () => {},
+});
 
 // ── 自定义 ThreadListItem：hover 时显示三点菜单 ──────────────────────────────
 function CustomThreadListItem() {
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const { renameThread } = useContext(ThreadActionsCtx);
   const menuRef = useRef<HTMLDivElement>(null);
-  const { id } = useThreadListItem();
+  const { id, title } = useThreadListItem();
   const date = sessionDates.get(id);
+
+  const startRename = () => {
+    setDraftTitle(title ?? "");
+    setRenaming(true);
+    setMenuOpen(false);
+  };
+  const commitRename = () => {
+    if (draftTitle.trim()) renameThread(id, draftTitle);
+    setRenaming(false);
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -130,10 +164,32 @@ function CustomThreadListItem() {
         className="aui-thread-list-item-trigger"
         style={{ flex: 1, minWidth: 0 }}
       >
-        <p className="aui-thread-list-item-title" style={{ margin: 0 }}>
-          <ThreadListItemPrimitive.Title fallback="New Chat" />
-        </p>
-        {date && (
+        {renaming ? (
+          <input
+            autoFocus
+            value={draftTitle}
+            onChange={(e) => setDraftTitle(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") commitRename();
+              else if (e.key === "Escape") setRenaming(false);
+            }}
+            onBlur={commitRename}
+            className="aui-thread-rename-input"
+            style={{
+              width: "100%", fontSize: "13px", padding: "2px 6px",
+              border: "1px solid var(--aui-ring, #3b82f6)", borderRadius: "4px",
+              outline: "none", background: "var(--aui-background, #fff)",
+              color: "var(--aui-foreground, #111827)",
+            }}
+          />
+        ) : (
+          <p className="aui-thread-list-item-title" style={{ margin: 0 }}>
+            <ThreadListItemPrimitive.Title fallback="New Chat" />
+          </p>
+        )}
+        {date && !renaming && (
           <p style={{ margin: 0, fontSize: "11px", color: "var(--aui-muted-foreground, #9ca3af)", lineHeight: 1.2 }}>
             {date}
           </p>
@@ -180,6 +236,19 @@ function CustomThreadListItem() {
             minWidth: "140px",
             padding: "4px",
           }}>
+            <button
+              onClick={(e) => { e.stopPropagation(); startRename(); }}
+              className="aui-thread-rename-btn"
+              style={{
+                display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                padding: "6px 10px", background: "none", border: "none",
+                cursor: "pointer", borderRadius: "4px", fontSize: "13px",
+                textAlign: "left", color: "var(--aui-foreground, #111827)",
+              }}
+            >
+              <PencilIcon size={13} />
+              Rename
+            </button>
             <ThreadListItemPrimitive.Archive
               onClick={() => setMenuOpen(false)}
               style={{
@@ -483,8 +552,8 @@ const StepsCollapseCtx = createContext(false);
 function InlineReasoningCard() {
   const collapsed = useContext(StepsCollapseCtx);
   const { text, status } = useMessagePartReasoning();
-  const [open, setOpen] = useState(false);
   const done = (status as { type?: string })?.type === "complete";
+  const [open, setOpen] = useState(true);  // 默认展开，可折叠
 
   if (collapsed) return null;
 
@@ -573,19 +642,42 @@ function CustomAssistantActionBar() {
   );
 }
 
-// ── CustomAssistantMessage：支持 reasoning part 的 assistant message ────────
-// 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
+// ── SourceCite：引用/来源 part 渲染为可点击脚注链接（sandbox 安全 URL）─────────
+function SourceCite(props: { url?: string; title?: string; sourceType?: string }) {
+  const url = props.url ? safeUrl(props.url) : null;
+  const label = props.title || props.url || "source";
+  return (
+    <span className="aui-source-cite" data-source-url={props.url ?? ""}
+      style={{ display: "inline-flex", alignItems: "center", gap: "4px", margin: "2px 4px 2px 0",
+        padding: "1px 8px", fontSize: "11px", borderRadius: "10px",
+        background: "var(--aui-muted, #f0f2f0)", color: "var(--aui-muted-foreground, #4b5563)",
+        border: "1px solid var(--aui-border, #e5e7eb)" }}>
+      <LinkIcon size={11} />
+      {url ? (
+        <a href={url} target="_blank" rel="noopener noreferrer"
+          style={{ color: "inherit", textDecoration: "none" }}>{label}</a>
+      ) : (
+        <span>{label}</span>
+      )}
+    </span>
+  );
+}
+
+// ── CustomAssistantMessage：支持 reasoning part 的 assistant message ────────// 直接使用 AssistantMessage.Content 的 Reasoning 槽，替代 __thinking__ 伪工具方案。
 // ThinkingToolUI 保留作为向后兼容（加载旧 localStorage 数据时）。
 function CustomAssistantMessage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parts = useAuiState((s: any) => s.message.parts as Array<{type: string}>);
+  const reasoningCount = parts.filter(p => p.type === "reasoning").length;
   const stepCount = parts.filter(p => p.type === "reasoning" || p.type === "tool-call").length;
-  const [stepsCollapsed, setStepsCollapsed] = useState(true);
+  // 只有存在 reasoning part 时才允许折叠（纯工具卡消息折叠后内容全消失）
+  const canCollapse = reasoningCount > 0;
+  const [stepsCollapsed, setStepsCollapsed] = useState(false);
 
   return (
     <AssistantMessage.Root>
       <AssistantMessage.Avatar />
-      {stepCount > 0 && (
+      {canCollapse && stepCount > 0 && (
         <button
           onClick={() => setStepsCollapsed(v => !v)}
           style={{
@@ -601,13 +693,19 @@ function CustomAssistantMessage() {
           <span>{stepsCollapsed ? `Show ${stepCount} step${stepCount > 1 ? "s" : ""}` : `Hide steps`}</span>
         </button>
       )}
-      <StepsCollapseCtx.Provider value={stepsCollapsed && stepCount > 0}>
+      <StepsCollapseCtx.Provider value={canCollapse && stepsCollapsed && stepCount > 0}>
         <AssistantMessage.Content
           components={{
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             Text: (_MarkdownText ?? (() => null)) as any,
             Reasoning: InlineReasoningCard,
-            tools: { Fallback: GenericToolCard },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Source: SourceCite as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            Image: (({ image }: { image: string }) => (
+              <img src={image} alt="assistant image" className="aui-message-image"
+                style={{ maxWidth: "100%", borderRadius: "8px", border: "1px solid var(--aui-border, #e5e7eb)", margin: "4px 0" }} />
+            )) as any,
           }}
         />
       </StepsCollapseCtx.Provider>
@@ -643,6 +741,7 @@ function CustomAssistantMessage() {
       </SelectionToolbarPrimitive.Root>
       <CustomAssistantActionBar />
       <BranchPicker />
+      <MessageTimestamp />
     </AssistantMessage.Root>
   );
 }
@@ -650,6 +749,7 @@ function CustomAssistantMessage() {
 // ── Tool result 富文本渲染辅助 ────────────────────────────────────────────────
 
 // inline markdown: **bold**, *italic*, `code`, [link](url)
+// safeUrl 已抽到 ./helpers
 function parseInline(text: string): React.ReactNode[] {
   const pattern = /(\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\n]+)\))/g;
   const nodes: React.ReactNode[] = [];
@@ -664,8 +764,14 @@ function parseInline(text: string): React.ReactNode[] {
       nodes.push(<em key={key++}>{match[3]}</em>);
     else if (match[4] !== undefined)
       nodes.push(<code key={key++} style={{ background: "rgba(0,0,0,0.06)", borderRadius: "3px", padding: "1px 4px", fontSize: "12px", fontFamily: "monospace" }}>{match[4]}</code>);
-    else if (match[5] !== undefined && match[6] !== undefined)
-      nodes.push(<a key={key++} href={match[6]} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>{match[5]}</a>);
+    else if (match[5] !== undefined && match[6] !== undefined) {
+      const href = safeUrl(match[6]);
+      // scheme 不安全：降级为纯文本（保留链接文字，不可点击）
+      if (href === null)
+        nodes.push(<span key={key++}>{match[5]}</span>);
+      else
+        nodes.push(<a key={key++} href={href} target="_blank" rel="noopener noreferrer" style={{ color: "#2563eb" }}>{match[5]}</a>);
+    }
     lastIndex = pattern.lastIndex;
   }
   if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
@@ -850,14 +956,34 @@ function ToolResult({ result, resultType, resultLang, isError, annotations }: To
         </button>
       );
     }
-    case "html":
+    case "html": {
+      // 默认沙箱隔离:iframe sandbox="" 无 allow-scripts/allow-same-origin,
+      // 不可信 HTML(如 WebFetch 抓取内容)无法执行脚本或触达父页面,杜绝 XSS。
+      // annotations.htmlSandbox=false 显式 opt-out(可信内容,如需 Shiny 绑定的交互 HTML)。
+      const sandboxed = annotations?.htmlSandbox !== false;
+      const hRaw = annotations?.resultHeight as string | number | undefined;
+      const height = hRaw == null ? "240px" : (typeof hRaw === "number" ? `${hRaw}px` : hRaw);
+      if (sandboxed) {
+        return (
+          <iframe
+            className="aui-html-sandbox"
+            data-sandboxed="true"
+            sandbox=""
+            srcDoc={display}
+            title="tool result"
+            style={{ width: "100%", height, border: "1px solid #e5e7eb", borderRadius: "4px", background: "#fff" }}
+          />
+        );
+      }
       return (
         <div
+          className="aui-html-trusted"
           style={{ fontSize: "13px", lineHeight: "1.5" }}
-          // result comes from trusted R handler — no external user input reaches here
+          // opt-out:调用方明确声明可信(annotations.htmlSandbox=false)
           dangerouslySetInnerHTML={{ __html: display }}
         />
       );
+    }
     default:
       return (
         <pre style={{ margin: 0, padding: "6px 8px", borderRadius: "4px", background: "rgba(0,0,0,0.04)", fontSize: "12px", overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
@@ -867,24 +993,73 @@ function ToolResult({ result, resultType, resultLang, isError, annotations }: To
   }
 }
 
+// ── Sub-agent 层级注册表（D2）────────────────────────────────────────────────
+// toolCallId → parentToolCallId。GenericToolCard 渲染时登记，computeToolDepth 据此
+// 计算缩进深度。按 inputId 命名空间隔离，避免多 widget 同 toolCallId 串扰。
+const _toolParentRegistry = new Map<string, string | null | undefined>();
+function _regKey(inputId: string | undefined, id: string): string {
+  return `${inputId ?? "_"}::${id}`;
+}
+
 // ── 通用 Tool Call 卡片 ──────────────────────────────────────────────────────
 function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError, artifact }: ToolCallMessagePartProps) {
   const collapsed = useContext(StepsCollapseCtx);
-  const [open, setOpen] = useState(false);
-  const [approvalSent, setApprovalSent] = useState(false);
 
   const pending  = result === undefined;
   const done     = !pending && !isError;
   const errored  = !pending && !!isError;
-  if (collapsed) return null;
 
   // annotations 存在 artifact 字段（由 runtime.ts 从 ToolCallPayload.annotations 写入）
   const annotations = artifact as Record<string, unknown> | undefined;
   const iconName        = annotations?.icon as string | undefined;
-  const toolTitle       = (annotations?.title as string | undefined) ?? toolName;
   const requiresApproval = annotations?.requiresApproval === true;
+
+  // ── Sub-agent 层级（D2）：登记 parentToolCallId 并算缩进深度 ────────────────
+  const inputIdAnno = annotations?.inputId as string | undefined;
+  const parentToolCallId = annotations?.parentToolCallId as string | null | undefined;
+  _toolParentRegistry.set(_regKey(inputIdAnno, toolCallId), parentToolCallId);
+  // 用命名空间化的注册表算深度：把裸 toolCallId 映射为带 inputId 前缀的键
+  const depth = (() => {
+    const scoped = new Map<string, string | null | undefined>();
+    for (const [k, v] of _toolParentRegistry) {
+      if (k.startsWith(`${inputIdAnno ?? "_"}::`)) {
+        const bareId = k.slice((inputIdAnno ?? "_").length + 2);
+        scoped.set(bareId, v);
+      }
+    }
+    return computeToolDepth(toolCallId, scoped);
+  })();
+  const isNested = depth > 0;
+
+  // defaultOpen：annotations.defaultOpen 覆盖 > 默认策略（pending 展开，done 收起）
+  const defaultOpen = annotations?.defaultOpen !== undefined
+    ? Boolean(annotations.defaultOpen)
+    : pending; // 运行中展开，完成后收起
+
+  const [open, setOpen] = useState(defaultOpen);
+  const [approvalSent, setApprovalSent] = useState(false);
+  const [approvalResult, setApprovalResult] = useState<"approved" | "denied" | null>(null);
+  const [customDenyMsg, setCustomDenyMsg] = useState("");
+
+  if (collapsed) return null;
   const resultType      = (annotations?.resultType as string | undefined) ?? "auto";
   const resultLang      = (annotations?.resultLang as string | undefined) ?? "text";
+
+  // title：优先用 annotations.title，否则用 toolName(首个参数值) 格式
+  const toolTitle = (() => {
+    const base = (annotations?.title as string | undefined) ?? toolName;
+    if (annotations?.title) return base;
+    // 从 args 提取第一个值作为摘要，截断超长内容
+    const firstVal = args && typeof args === "object"
+      ? Object.values(args as Record<string, unknown>)[0]
+      : undefined;
+    if (firstVal !== undefined && firstVal !== null) {
+      const snippet = String(firstVal).replace(/\s+/g, " ").trim();
+      const truncated = snippet.length > 60 ? snippet.slice(0, 60) + "…" : snippet;
+      return `${base}(${truncated})`;
+    }
+    return base;
+  })();
 
   // 审批等待状态：待处理 + 需要审批 + 尚未发送决策
   const awaitingApproval = pending && requiresApproval && !approvalSent;
@@ -902,27 +1077,36 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
 
   // 卡片整体背景
   const cardBg = errored        ? "#fef2f2"
-    : awaitingApproval          ? "#fffbeb"
     : done                      ? "hsl(0,0%,97%)"
     : "#ffffff";
-  const cardBorder = errored        ? "#fecaca"
-    : awaitingApproval              ? "#fcd34d"
-    : "#e5e7eb";
+  const cardBorder = errored ? "#fecaca" : "#e5e7eb";
 
   // argsText 防御性 stringify（Shiny 可能把 json class 内联为对象）
   const argsDisplay = typeof argsText === "string"
     ? argsText : JSON.stringify(args ?? argsText, null, 2);
 
-  const handleApprove = () => {
+  // suggestions 来自 artifact（R 端传入的 annotations.suggestions）
+  const suggestions = (annotations?.suggestions as Array<{ type: string; behavior?: string; destination?: string; rules?: unknown[]; directories?: string[] }> | undefined) ?? [];
+
+  const handleApprove = (suggestionIdx?: number) => {
     setApprovalSent(true);
-    _toolApprovalHandler?.(toolCallId, true);
+    setApprovalResult("approved");
+    const handler = resolveApprovalHandler(annotations?.inputId as string | undefined);
+    handler?.(toolCallId, true, suggestionIdx !== undefined ? { suggestionIdx } : undefined);
   };
-  const handleDeny = () => {
+  const handleDeny = (customMessage?: string) => {
     setApprovalSent(true);
-    _toolApprovalHandler?.(toolCallId, false);
+    setApprovalResult("denied");
+    const handler = resolveApprovalHandler(annotations?.inputId as string | undefined);
+    handler?.(toolCallId, false, customMessage ? { customMessage } : undefined);
   };
 
   return (
+    <div style={{
+      marginLeft: isNested ? depth * 20 : 0,
+      borderLeft: isNested ? "2px solid #d1d5db" : "none",
+      paddingLeft: isNested ? 10 : 0,
+    }} data-tool-depth={depth} data-parent-tool-call-id={parentToolCallId ?? undefined}>
     <div style={{
       border: `1px solid ${cardBorder}`,
       borderRadius: "8px",
@@ -953,34 +1137,98 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
                : <ChevronRightIcon size={13} color="#9ca3af" />}
       </button>
 
-      {/* 审批按钮（始终可见，无需展开） */}
-      {awaitingApproval && (
+      {/* 审批区：等待时显示按钮，审批后显示结果 badge */}
+      {(awaitingApproval || approvalResult !== null) && (
         <div style={{
           borderTop: `1px solid ${cardBorder}`,
           padding: "8px 10px",
           display: "flex",
-          gap: "8px",
+          flexDirection: "column",
+          gap: "5px",
         }}>
-          <button
-            onClick={handleApprove}
-            style={{
-              padding: "4px 14px", borderRadius: "5px", fontSize: "12px",
-              fontWeight: 600, cursor: "pointer", border: "none",
-              background: "#16a34a", color: "#fff",
-            }}
-          >
-            Approve
-          </button>
-          <button
-            onClick={handleDeny}
-            style={{
-              padding: "4px 14px", borderRadius: "5px", fontSize: "12px",
-              fontWeight: 600, cursor: "pointer", border: "none",
-              background: "#6b7280", color: "#fff",
-            }}
-          >
-            Deny
-          </button>
+          {awaitingApproval ? (<>
+            {/* 动态选项列表：Yes (once) → suggestions → No — 与 Claude Code 终端顺序一致 */}
+            {[
+              { label: "Yes", action: () => handleApprove(), isAllow: true },
+              ...suggestions.map((sug, idx) => {
+                // 动态 label from suggestion content
+                let label = "";
+                if (sug.type === "addRules") {
+                  const rules = sug.rules as Array<{ toolName?: string; ruleContent?: string }> | undefined;
+                  const content = rules?.[0]?.ruleContent ?? "";
+                  const dest = sug.destination === "userSettings" ? "global" : "project";
+                  label = content
+                    ? `Yes, don't ask again for: ${content.length > 50 ? content.slice(0, 50) + "…" : content} (${dest})`
+                    : `Yes, always allow (${dest})`;
+                } else if (sug.type === "addDirectories") {
+                  const dirs = sug.directories as string[] | undefined;
+                  const dir = dirs?.[0] ?? "";
+                  const dest = sug.destination === "userSettings" ? "global" : "this session";
+                  label = dir
+                    ? `Yes, trust "${dir}" for ${dest}`
+                    : `Yes, trust directory`;
+                } else {
+                  label = `Yes (${sug.type})`;
+                }
+                return { label, action: () => handleApprove(idx), isAllow: true };
+              }),
+              { label: "No", action: () => handleDeny(), isAllow: false },
+            ].map((opt, i) => (
+              <button
+                key={i}
+                onClick={opt.action}
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: "8px",
+                  padding: "5px 10px", borderRadius: "5px", fontSize: "12px",
+                  fontWeight: 500, cursor: "pointer", textAlign: "left",
+                  border: `1px solid ${opt.isAllow ? "#d1fae5" : "#fee2e2"}`,
+                  background: opt.isAllow ? "#f0fdf4" : "#fff5f5",
+                  color: opt.isAllow ? "#166534" : "#dc2626",
+                  width: "100%",
+                }}
+              >
+                <span style={{ fontWeight: 700, flexShrink: 0, minWidth: "16px" }}>{i + 1}.</span>
+                <span>{opt.label}</span>
+              </button>
+            ))}
+            {/* 自定义拒绝原因输入 */}
+            <div style={{ display: "flex", gap: "5px", marginTop: "2px" }}>
+              <input
+                type="text"
+                value={customDenyMsg}
+                onChange={e => setCustomDenyMsg(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && customDenyMsg.trim()) handleDeny(customDenyMsg.trim()); }}
+                placeholder="Custom deny message…"
+                style={{
+                  flex: 1, padding: "3px 8px", fontSize: "11px", borderRadius: "4px",
+                  border: "1px solid #d1d5db", outline: "none", color: "#374151",
+                  background: "#fafafa",
+                }}
+              />
+              {customDenyMsg.trim() && (
+                <button
+                  onClick={() => handleDeny(customDenyMsg.trim())}
+                  style={{
+                    padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                    fontWeight: 500, cursor: "pointer", border: "none",
+                    background: "#6b7280", color: "#fff",
+                  }}
+                >
+                  Send
+                </button>
+              )}
+            </div>
+          </>) : approvalResult === "approved" ? (
+            <span style={{
+              fontSize: "11px", fontWeight: 600, color: "#16a34a",
+              background: "#dcfce7", padding: "2px 10px", borderRadius: "5px", alignSelf: "flex-start",
+            }}>✓ Approved</span>
+          ) : (
+            <span style={{
+              fontSize: "11px", fontWeight: 600, color: "#dc2626",
+              background: "#fee2e2", padding: "2px 10px", borderRadius: "5px", alignSelf: "flex-start",
+            }}>✕ Denied</span>
+          )}
         </div>
       )}
 
@@ -1013,6 +1261,7 @@ function GenericToolCard({ toolCallId, toolName, argsText, args, result, isError
           )}
         </div>
       )}
+    </div>
     </div>
   );
 }
@@ -1089,6 +1338,7 @@ function CustomUserMessage() {
         <UserMessage.Content components={{ Text: UserMessageChipText }} />
       </MessagePrimitive.If>
       <BranchPicker />
+      <MessageTimestamp />
     </UserMessage.Root>
   );
 }
@@ -1122,48 +1372,15 @@ interface ComposerConfigCtx {
   actionItems: Array<ActionItemDef>;
   onNewThread: () => void;
   onAction:    (id: string) => void;
+  onEnqueue:   (text: string) => void;
 }
 const ShinyComposerCtx = createContext<ComposerConfigCtx>({
-  tools: [], commands: [], actionItems: [], onNewThread: () => {}, onAction: () => {},
+  tools: [], commands: [], actionItems: [], onNewThread: () => {}, onAction: () => {}, onEnqueue: () => {},
 });
 
 // remark-gfm 表格需要完整的 separator 行（|---|---|）才能渲染；流式输出时第一行出现时
 // separator 尚未到达，导致 | 字符以原始文本显示。preprocess 补全不完整的表格头。
-function preprocessStreamingMarkdown(text: string): string {
-  const lines = text.split("\n");
-  let tableStart = -1;
-  let hasSep = false;
-  for (let i = 0; i <= lines.length; i++) {
-    const line = i < lines.length ? lines[i].trim() : "";
-    const isTableRow = line.startsWith("|") && line.endsWith("|");
-    const isSep = isTableRow && /^\|[\s|:_-]+\|$/.test(line);
-    if (isTableRow) {
-      if (tableStart === -1) { tableStart = i; hasSep = false; }
-      if (isSep) hasSep = true;
-    } else {
-      if (tableStart !== -1 && !hasSep) {
-        const cols = lines[tableStart].split("|").filter(s => s.trim()).length;
-        lines.splice(tableStart + 1, 0, "|" + Array(cols).fill(" --- ").join("|") + "|");
-        i++;
-      }
-      tableStart = -1; hasSep = false;
-    }
-  }
-  return lines.join("\n");
-}
-
-// 从光标位置向后扫描，遇到空白停止，找到 "/" 即返回触发位置（与库内 detectTrigger 逻辑一致）
-function detectSlashTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
-  const upToCursor = text.slice(0, cursorPos);
-  for (let i = upToCursor.length - 1; i >= 0; i--) {
-    const ch = upToCursor[i];
-    if (/\s/.test(ch)) return null;
-    if (ch === "/" && (i === 0 || /\s/.test(upToCursor[i - 1]))) {
-      return { query: upToCursor.slice(i + 1), offset: i };
-    }
-  }
-  return null;
-}
+// preprocessStreamingMarkdown / detectSlashTrigger 已抽到 ./helpers
 
 function DictationToggle() {
   const aui = useAui();
@@ -1187,7 +1404,7 @@ function DictationToggle() {
 }
 
 function ShinyComposer() {
-  const { tools, commands, actionItems, onNewThread, onAction } = useContext(ShinyComposerCtx);
+  const { tools, commands, actionItems, onNewThread, onAction, onEnqueue } = useContext(ShinyComposerCtx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const isRunning = useThreadIsRunning();
@@ -1638,16 +1855,40 @@ function ShinyComposer() {
             ↑
           </ComposerPrimitive.Send>
         ) : (
-          <ComposerPrimitive.Cancel
-            style={{
-              background: "#374151", border: "none", borderRadius: "50%",
-              width: "30px", height: "30px", cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              color: "white", flexShrink: 0,
-            }}
-          >
-            <SquareIcon size={12} fill="white" stroke="white" />
-          </ComposerPrimitive.Cancel>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
+            <button
+              type="button"
+              title="Queue message (send after current reply)"
+              className="aui-composer-queue-btn"
+              onClick={() => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const t = ((aui as any).composer().getState().text as string) ?? "";
+                if (t.trim()) {
+                  onEnqueue(t);
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  (aui as any).composer().setText("");
+                }
+              }}
+              style={{
+                background: "var(--aui-muted, #e5e7eb)", border: "none", borderRadius: "50%",
+                width: "30px", height: "30px", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "var(--aui-foreground, #374151)",
+              }}
+            >
+              <ClockIcon size={14} />
+            </button>
+            <ComposerPrimitive.Cancel
+              style={{
+                background: "#374151", border: "none", borderRadius: "50%",
+                width: "30px", height: "30px", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "white", flexShrink: 0,
+              }}
+            >
+              <SquareIcon size={12} fill="white" stroke="white" />
+            </ComposerPrimitive.Cancel>
+          </div>
         )}
       </div>
     </div>
@@ -1842,13 +2083,67 @@ function ThreadListSidebar() {  return (
 }
 
 // ── 主组件 ──────────────────────────────────────────────────────────────────
-interface AssistantUIProps {
-  inputId: string;
+// ── Artifacts 侧面板:展示当前 artifact(markdown/code/html/text)────────────
+function ArtifactPanel({ artifact, onClose }: {
+  artifact: { id: string; title: string; type: string; content: string; lang?: string };
+  onClose: () => void;
+}) {
+  const body = (() => {
+    switch (artifact.type) {
+      case "markdown": return <SimpleMarkdown text={artifact.content} />;
+      case "code":
+        return (
+          <PrismLight language={artifact.lang ?? "text"} style={_codeThemeStyle}
+            customStyle={{ margin: 0, fontSize: "13px", borderRadius: "6px" }}>
+            {artifact.content}
+          </PrismLight>
+        );
+      case "html":
+        return (
+          <iframe className="aui-artifact-html" sandbox="" srcDoc={artifact.content}
+            title={artifact.title}
+            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }} />
+        );
+      default:
+        return <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "13px", margin: 0 }}>{artifact.content}</pre>;
+    }
+  })();
+  return (
+    <div className="aui-artifact-panel" data-artifact-id={artifact.id}
+      style={{
+        display: "flex", flexDirection: "column", height: "100%",
+        borderLeft: "1px solid var(--aui-border, #e5e7eb)",
+        background: "var(--aui-background, #fff)",
+      }}>
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "8px 12px", borderBottom: "1px solid var(--aui-border, #e5e7eb)", flexShrink: 0,
+      }}>
+        <span className="aui-artifact-title" style={{ fontWeight: 600, fontSize: "14px", color: "var(--aui-foreground, #111827)" }}>
+          {artifact.title}
+        </span>
+        <button onClick={onClose} title="Close" className="aui-artifact-close"
+          style={{ background: "none", border: "none", cursor: "pointer", color: "var(--aui-muted-foreground, #6b7280)", fontSize: "18px", lineHeight: 1, padding: "0 4px" }}>
+          ×
+        </button>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: artifact.type === "html" ? 0 : "12px" }}>
+        {body}
+      </div>
+    </div>
+  );
+}
+
+interface AssistantUIProps {  inputId: string;
   config: Record<string, unknown>;
 }
 
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
-  const { runtime, sendToolApproval, switchToNewThread, sendAction } = useShinyRuntime(inputId, config);
+  const {
+    runtime, sendToolApproval, switchToNewThread, sendAction, renameThread, enqueueMessage,
+    artifacts, activeArtifactId, closeArtifact,
+  } = useShinyRuntime(inputId, config);
+  const activeArtifact = artifacts.find((a) => a.id === activeArtifactId) ?? null;
   const showThreadList = config?.show_thread_list === true;
   const isModal = config?.modal === true;
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -1861,6 +2156,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     return makeMarkdownText({ components: { CodeHeader, SyntaxHighlighter }, preprocess: preprocessStreamingMarkdown });
   }, [config?.code_theme]);
   _MarkdownText = MarkdownText;
+  _showTimestamps = config?.show_timestamps === true;
 
   // composer context — tools 和 commands 从 R 的 config 读取
   const composerCtx = useMemo<ComposerConfigCtx>(() => ({
@@ -1869,7 +2165,10 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     actionItems: (config?.action_items as ComposerConfigCtx["actionItems"]) ?? [],
     onNewThread: switchToNewThread,
     onAction:    sendAction,
-  }), [config, switchToNewThread, sendAction]);
+    onEnqueue:   enqueueMessage,
+  }), [config, switchToNewThread, sendAction, enqueueMessage]);
+
+  const threadActions = useMemo(() => ({ renameThread }), [renameThread]);
 
   // starter suggestions — 传给 Thread welcome.suggestions
   const suggestions = useMemo(() => {
@@ -1877,11 +2176,11 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     return (raw ?? []).map(s => ({ prompt: s.prompt, text: s.text ?? s.prompt }));
   }, [config]);
 
-  // 把 sendToolApproval 存入模块级变量，供 GenericToolCard 直接调用
+  // 把 sendToolApproval 按 inputId 存入注册表，供 GenericToolCard 定位调用
   useEffect(() => {
-    _toolApprovalHandler = sendToolApproval;
-    return () => { _toolApprovalHandler = null; };
-  }, [sendToolApproval]);
+    registerApprovalHandler(inputId, sendToolApproval);
+    return () => { unregisterApprovalHandler(inputId); };
+  }, [inputId, sendToolApproval]);
 
   // code_theme 同步到模块级变量，供 ToolResult 代码块渲染使用
   useEffect(() => {
@@ -1899,6 +2198,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
       allowSpeak: true,
       allowFeedbackPositive: true,
       allowFeedbackNegative: true,
+      components: { ToolFallback: GenericToolCard },
     },
     strings:         (config?.strings ?? undefined) as never,
     assistantAvatar: (config?.assistant_avatar ?? undefined) as never,
@@ -1908,6 +2208,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   if (isModal) {
     return (
       <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadActionsCtx.Provider value={threadActions}>
         <ShinyComposerCtx.Provider value={composerCtx}>
           <AssistantModalPrimitive.Root>
             <AssistantModalPrimitive.Anchor className="aui-root aui-modal-anchor">
@@ -1918,20 +2219,21 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             <AssistantModalPrimitive.Content
               className="aui-root aui-modal-content"
               sideOffset={16}
-              style={{ height: "580px" }}
+              style={{ height: "650px" }}
             >
               <div style={{
                 height: "100%",
                 display: "flex",
                 flexDirection: "column",
                 overflow: "hidden",
-                "--aui-thread-max-width": "9999px",
+                "--aui-thread-max-width": "420px",
               } as React.CSSProperties}>
                 <Thread {...threadProps} />
               </div>
             </AssistantModalPrimitive.Content>
           </AssistantModalPrimitive.Root>
         </ShinyComposerCtx.Provider>
+        </ThreadActionsCtx.Provider>
       </AssistantRuntimeProvider>
     );
   }
@@ -1939,6 +2241,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   // ── 普通模式 ───────────────────────────────────────────────────────────────
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadActionsCtx.Provider value={threadActions}>
       <ShinyComposerCtx.Provider value={composerCtx}>
         <div style={{ display: "flex", height: "100%" }}>
 
@@ -1994,8 +2297,15 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             </div>
           </div>
 
+          {activeArtifact && (
+            <div style={{ width: "45%", minWidth: 320, flexShrink: 0, minHeight: 0 }}>
+              <ArtifactPanel artifact={activeArtifact} onClose={closeArtifact} />
+            </div>
+          )}
+
         </div>
       </ShinyComposerCtx.Provider>
+      </ThreadActionsCtx.Provider>
     </AssistantRuntimeProvider>
   );
 }

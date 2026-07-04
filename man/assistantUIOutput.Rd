@@ -4,12 +4,20 @@
 \alias{assistantUIOutput}
 \title{AI Assistant Chat UI Output}
 \usage{
-assistantUIOutput(outputId, width = "100\%", height = "600px", ...)
+assistantUIOutput(
+  outputId,
+  width = "100\%",
+  height = "600px",
+  modal = FALSE,
+  ...
+)
 }
 \arguments{
 \item{outputId}{Output variable to read from.}
 
 \item{width, height}{Width and height of the widget (CSS values).}
+
+\item{modal}{Logical. If \code{TRUE}, sizes the widget for floating modal use.}
 
 \item{...}{Additional arguments passed to \code{\link[htmlwidgets:htmlwidgets-shiny]{htmlwidgets::shinyWidgetOutput()}}.}
 }

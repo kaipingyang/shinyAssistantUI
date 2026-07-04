@@ -1,4 +1,24 @@
-/* ── Lexical contenteditable reset ─────────────────────────────────────── */
+/* ── 覆盖 aui-pulse：用更明显的蓝色跳动动画替代半透明渐变 ─────────────────── */
+@keyframes aui-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    color: #3b82f6;
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.75);
+    color: #93c5fd;
+  }
+}
+
+.aui-text-running::after {
+  display: inline-block;
+  color: #3b82f6;
+  animation: aui-pulse 0.9s ease-in-out infinite;
+}
+
+
 .aui-lexical-editor {
   position: relative;
   width: 100%;
@@ -12,6 +32,7 @@
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
+  min-height: 48px;
 }
 
 /* placeholder 绝对定位叠在 contenteditable 上 */
@@ -36,10 +57,23 @@
   background: #f3f4f6;
 }
 
-/* ── Modal: 防止 thread viewport 出现横向滚动条 ──────────────────────────── */
-/* .aui-thread-viewport 只设了 overflow-y:scroll，overflow-x 默认 auto
-   导致宽内容（code block、tool card）溢出时出现横向滚动条 */
+/* ── Modal: 防止出现横向滚动条 ──────────────────────────────────────────── */
+/* modal.css 用 overflow:clip，不创建 BFC，子元素 max-content 尺寸会"逃逸"
+   影响 Radix Popper 的 minWidth:max-content 计算，导致弹框被撑宽并出现横向滚动条。
+   overflow:hidden 同样裁剪内容，但会创建 BFC，封住子元素对外层尺寸的影响。
+   lexical.css 在 modal.css 之后导入，同 specificity 时后者优先，所以此覆盖生效。 */
+.aui-modal-content {
+  overflow: hidden;
+  width: 460px;
+}
+
+/* thread viewport 在 modal 内也确保不出现横向滚动条（overflow-y:scroll 隐式设 overflow-x:auto）*/
 .aui-modal-content .aui-thread-viewport {
+  overflow-x: hidden;
+}
+
+/* thread root 不允许 modal 内横向溢出 */
+.aui-modal-content .aui-thread-root {
   overflow-x: hidden;
 }
 

@@ -52,7 +52,7 @@
 #'     }
 #'     on_done()
 #'     ```
-#'     For [ClaudeAgentSDK][https://github.com/kaipingyang/ClaudeAgentSDK],
+#'     For [ClaudeAgentSDK](https://github.com/kaipingyang/ClaudeAgentSDK),
 #'     call `client$interrupt()` when `is_cancelled()` returns `TRUE`.
 #'   * `wait_for_approval` — `function(tool_call_id)` that returns a
 #'     `promises::promise` which resolves to `TRUE` (approved) or `FALSE`
@@ -140,6 +140,24 @@
 #'   ```r
 #'   assistant_avatar = list(src = "https://example.com/logo.png", fallback = "AI")
 #'   ```
+#' @param on_session_load Optional `function(session_id, thread_id, send_thread)`
+#'   called when the frontend requests messages for a historical session thread.
+#' @param on_feedback Optional `function(message_id, type)` called when the user
+#'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
+#' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
+#'   instead of an inline panel.
+#' @param on_rename Optional `function(thread_id, title)` called when the user
+#'   renames a thread in the sidebar. The new title is already persisted
+#'   client-side (localStorage); use this to sync server-side session stores.
+#' @param theme Optional named list of theme tokens to recolor the widget, e.g.#'   from [assistant_theme()]. Colors may be hex/named/`rgb()` strings and are
+#'   converted to assistant-ui's HSL-component format. Applied as scoped CSS
+#'   variables on this widget only (multiple widgets can have different themes).
+#'   Example: `theme = assistant_theme(primary = "#2563eb")`.
+#' @param dark_mode Dark color scheme control: `FALSE` (light, default), `TRUE`
+#'   (dark), or `"auto"` (follow the OS/browser `prefers-color-scheme`). A custom
+#'   `theme` overrides individual tokens in either mode.
+#' @param show_timestamps Logical. If `TRUE`, each user/assistant message shows
+#'   its send time (HH:MM), derived from the message id. Defaults to `FALSE`.
 #'
 #'   * `on_session_load` — `function(session_id, thread_id, send_thread)` called
 #'     when the frontend requests historical messages for a session thread. Used
@@ -166,16 +184,28 @@ assistantUIServer <- function(id, handler,
                               on_action         = NULL,
                               on_session_load   = NULL,
                               on_feedback       = NULL,
+                              on_rename         = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
+                              theme             = NULL,
+                              dark_mode         = FALSE,
+                              show_timestamps   = FALSE,
                               modal             = FALSE) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(on_feedback); force(modal)
+  force(on_rename)
   force(code_theme); force(strings); force(assistant_avatar)
+  force(theme); force(dark_mode)
+  force(show_timestamps)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
+
+  # dark_mode 归一化:TRUE/FALSE/"auto"
+  if (is.logical(dark_mode)) dark_mode <- isTRUE(dark_mode)
+  else if (!identical(dark_mode, "auto"))
+    stop("`dark_mode` must be TRUE, FALSE, or \"auto\".")
 
   config <- list(
     show_thread_list = show_thread_list,
@@ -184,8 +214,12 @@ assistantUIServer <- function(id, handler,
     tools            = tools,
     action_items     = action_items,
     code_theme       = code_theme,
+    dark_mode        = dark_mode,
+    show_timestamps  = show_timestamps,
     modal            = modal
   )
+  normalized_theme <- .normalize_theme(theme)
+  if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
 
@@ -199,37 +233,81 @@ assistantUIServer <- function(id, handler,
   # 每线程注册的 cancel 函数（handler 注入，cancel 信号到达时立即调用）
   cancel_fns <- new.env(parent = emptyenv())
 
-  # ── 静态回调（整个 session 不变）────────────────────────────────────────────
-  on_chunk <- function(text) {
-    session$sendCustomMessage(paste0(input_id, ":chunk"), list(text = text))
-  }
-  on_done <- function(suggestions = list()) {
-    session$sendCustomMessage(paste0(input_id, ":done"), list(suggestions = suggestions))
-  }
-  on_error_fn <- function(msg) {
-    session$sendCustomMessage(paste0(input_id, ":error"), list(message = msg))
-  }
-  on_tool_call <- function(tool_call_id, tool_name, args = list(),
-                           annotations = list()) {
-    session$sendCustomMessage(
-      paste0(input_id, ":tool-call"),
-      list(
-        toolCallId  = tool_call_id,
-        toolName    = tool_name,
-        args        = args,
-        argsText    = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)),
-        annotations = annotations
-      )
+  # ── 消息回调工厂（按 thread_id 构建，消息携带 threadId 供 JS 路由）──────────
+  # 旧版：静态回调，所有 thread 共用一个 callbacks slot，切 thread 时旧 handler
+  # 的 onDone 会错误清掉新 thread 的 running 状态，旧消息也可能串入新 thread。
+  # 新版：每次 ExtendedTask 启动时动态构建，消息携带 threadId，JS 按 threadId 路由。
+  make_callbacks <- function(thread_id) {
+    list(
+      on_chunk = function(text) {
+        session$sendCustomMessage(paste0(input_id, ":chunk"),
+                                  list(text = text, threadId = thread_id))
+      },
+      on_done = function(suggestions = list()) {
+        session$sendCustomMessage(paste0(input_id, ":done"),
+                                  list(suggestions = suggestions, threadId = thread_id))
+      },
+      on_error_fn = function(msg) {
+        session$sendCustomMessage(paste0(input_id, ":error"),
+                                  list(message = msg, threadId = thread_id))
+      },
+      on_tool_call = function(tool_call_id, tool_name, args = list(), annotations = list()) {
+        # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
+        # （多 widget 同页时模块级单例会串台，靠 inputId 路由隔离）。
+        annotations$inputId <- input_id
+        session$sendCustomMessage(
+          paste0(input_id, ":tool-call"),
+          list(
+            toolCallId  = tool_call_id,
+            toolName    = tool_name,
+            args        = args,
+            argsText    = as.character(jsonlite::toJSON(args, auto_unbox = TRUE, pretty = FALSE)),
+            annotations = annotations,
+            threadId    = thread_id
+          )
+        )
+      },
+      on_tool_call_start = function(tool_call_id, tool_name, annotations = list()) {
+        session$sendCustomMessage(
+          paste0(input_id, ":tool-call-start"),
+          list(
+            toolCallId  = tool_call_id,
+            toolName    = tool_name,
+            annotations = annotations,
+            threadId    = thread_id
+          )
+        )
+      },
+      on_tool_call_delta = function(tool_call_id, delta) {
+        session$sendCustomMessage(
+          paste0(input_id, ":tool-call-delta"),
+          list(toolCallId = tool_call_id, delta = delta, threadId = thread_id)
+        )
+      },
+      on_tool_result = function(tool_call_id, result, is_error = FALSE) {
+        session$sendCustomMessage(
+          paste0(input_id, ":tool-result"),
+          list(toolCallId = tool_call_id, result = result, isError = is_error, threadId = thread_id)
+        )
+      },
+      on_thinking = function(text) {
+        session$sendCustomMessage(paste0(input_id, ":thinking"),
+                                  list(text = text, threadId = thread_id))
+      },
+      on_source = function(url, title = NULL, id = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":source"),
+                                  list(url = url, title = title, id = id, threadId = thread_id))
+      },
+      on_image = function(image) {
+        session$sendCustomMessage(paste0(input_id, ":image"),
+                                  list(image = image, threadId = thread_id))
+      },
+      on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":artifact"),
+                                  list(id = id, title = title, type = type,
+                                       content = content, lang = lang, threadId = thread_id))
+      }
     )
-  }
-  on_tool_result <- function(tool_call_id, result, is_error = FALSE) {
-    session$sendCustomMessage(
-      paste0(input_id, ":tool-result"),
-      list(toolCallId = tool_call_id, result = result, isError = is_error)
-    )
-  }
-  on_thinking <- function(text) {
-    session$sendCustomMessage(paste0(input_id, ":thinking"), list(text = text))
   }
 
   # ── tool 审批 ────────────────────────────────────────────────────────────────
@@ -237,23 +315,28 @@ assistantUIServer <- function(id, handler,
   # 关键：handler 必须通过 ExtendedTask 启动（见下方 stream_task），
   # 只有 ExtendedTask 才允许 Shiny reactive flush 在 coro::await 挂起期间运行；
   # 直接从 observeEvent 里启动 handler 则不会触发 reactive flush，导致审批 observer 死锁。
+  # 每个 resolver 记录所属 thread_id，使 cancel 只否决本线程的挂起审批（多线程隔离）。
   approval_resolvers <- new.env(parent = emptyenv())
 
   shiny::observeEvent(session$input[[paste0(input_id, "_tool_approval")]], {
     msg <- session$input[[paste0(input_id, "_tool_approval")]]
     if (is.null(msg)) return()
     tid <- msg$toolCallId
-    resolver <- get0(tid, envir = approval_resolvers)
-    if (!is.null(resolver)) {
+    entry <- get0(tid, envir = approval_resolvers)
+    if (!is.null(entry)) {
       rm(list = tid, envir = approval_resolvers)
-      resolver(isTRUE(msg$approved))
+      entry$fn(msg)  # 传回完整 msg，handler 自行解析
     }
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  wait_for_approval <- function(tool_call_id) {
-    promises::promise(function(resolve, reject) {
-      assign(tool_call_id, resolve, envir = approval_resolvers)
-    })
+  # 工厂：绑定 thread_id，返回该线程专用的 wait_for_approval。
+  make_wait_for_approval <- function(thread_id) {
+    function(tool_call_id) {
+      promises::promise(function(resolve, reject) {
+        assign(tool_call_id, list(fn = resolve, thread = thread_id),
+               envir = approval_resolvers)
+      })
+    }
   }
 
   # action_items 点击 → 通知 on_action 回调
@@ -274,6 +357,16 @@ assistantUIServer <- function(id, handler,
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
+  # 线程重命名 → on_rename 回调（前端已本地持久化标题;此回调供 server 端
+  # session 存储同步,如更新 SQLite 里的 session title）
+  if (!is.null(on_rename)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_rename")]], {
+      rn <- session$input[[paste0(input_id, "_rename")]]
+      if (is.null(rn)) return()
+      on_rename(rn$threadId, rn$title)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
   # 独立 observer 监听 cancel 信号
   shiny::observeEvent(session$input[[paste0(input_id, "_cancel")]], {
     msg <- session$input[[paste0(input_id, "_cancel")]]
@@ -286,13 +379,14 @@ assistantUIServer <- function(id, handler,
       rm(list = tid, envir = cancel_fns)
       tryCatch(cancel_fn(), error = function(e) NULL)
     }
-    # 自动以 FALSE resolve 所有挂起的 wait_for_approval promise，
+    # 自动以 denied resolve 本线程挂起的 wait_for_approval promise，
     # 避免 handler 在 coro::await(wait_for_approval(...)) 处死锁。
+    # 仅否决属于被取消线程的审批，不影响其它线程（多线程隔离）。
     for (key in ls(approval_resolvers)) {
-      resolver <- get0(key, envir = approval_resolvers)
-      if (!is.null(resolver)) {
+      entry <- get0(key, envir = approval_resolvers)
+      if (!is.null(entry) && identical(entry$thread, tid)) {
         rm(list = key, envir = approval_resolvers)
-        tryCatch(resolver(FALSE), error = function(e) NULL)
+        tryCatch(entry$fn(list(approved = FALSE, toolCallId = key)), error = function(e) NULL)
       }
     }
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
@@ -302,20 +396,25 @@ assistantUIServer <- function(id, handler,
   # 从而 _tool_approval / _cancel 等 observer 可以正常触发。
   stream_task <- shiny::ExtendedTask$new(
     function(msg_text, thread_id, is_reload, attachments) {
+      cbs <- make_callbacks(thread_id)
       is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
-      # register_cancel 供 handler 注册取消函数（如 stream_controller$cancel()）。
-      # cancel observer 收到信号后立即调用，实现真 HTTP 取消。
       register_cancel <- function(fn) assign(thread_id, fn, envir = cancel_fns)
+      wait_for_approval <- make_wait_for_approval(thread_id)
 
       all_args <- list(
         message           = msg_text,
         thread_id         = thread_id,
-        on_chunk          = on_chunk,
-        on_done           = on_done,
-        on_error          = on_error_fn,
-        on_tool_call      = on_tool_call,
-        on_tool_result    = on_tool_result,
-        on_thinking       = on_thinking,
+        on_chunk          = cbs$on_chunk,
+        on_done           = cbs$on_done,
+        on_error          = cbs$on_error_fn,
+        on_tool_call      = cbs$on_tool_call,
+        on_tool_call_start = cbs$on_tool_call_start,
+        on_tool_call_delta = cbs$on_tool_call_delta,
+        on_tool_result    = cbs$on_tool_result,
+        on_thinking       = cbs$on_thinking,
+        on_source         = cbs$on_source,
+        on_image          = cbs$on_image,
+        on_artifact       = cbs$on_artifact,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
@@ -328,11 +427,10 @@ assistantUIServer <- function(id, handler,
 
       result <- tryCatch(
         do.call(handler, call_args),
-        error = function(e) { on_error_fn(conditionMessage(e)); NULL }
+        error = function(e) { cbs$on_error_fn(conditionMessage(e)); NULL }
       )
-      # 返回 promise（如有）让 ExtendedTask 追踪其生命周期
       if (inherits(result, "promise")) {
-        promises::catch(result, function(e) { on_error_fn(conditionMessage(e)); NULL })
+        promises::catch(result, function(e) { cbs$on_error_fn(conditionMessage(e)); NULL })
       } else {
         promises::promise_resolve(NULL)
       }
@@ -383,15 +481,28 @@ assistantUIServer <- function(id, handler,
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
+  # session 结束时回收 handler 持有的资源（如 ClaudeSDKClient 子进程）。
+  # handler 可选通过 attr(handler, "cleanup") 暴露清理函数；ellmer handler 无此 attr 则跳过。
+  handler_cleanup <- attr(handler, "cleanup")
+  if (is.function(handler_cleanup)) {
+    session$onSessionEnded(function() {
+      tryCatch(handler_cleanup(), error = function(e) NULL)
+    })
+  }
+
   invisible(list(
     clear = function() {
       session$sendCustomMessage(paste0(input_id, ":clear"), list())
     },
-    send_tool_call = function(tool_call_id, tool_name, args = list()) {
-      on_tool_call(tool_call_id, tool_name, args)
+    # 注意：thread_id 默认 "default"。若用户已新建/切换线程（id 为随机生成值），
+    # 必须显式传入当前 thread_id，否则消息路由到不存在的 "default" 线程被静默丢弃。
+    send_tool_call = function(tool_call_id, tool_name, args = list(), thread_id = "default") {
+      cbs <- make_callbacks(thread_id)
+      cbs$on_tool_call(tool_call_id, tool_name, args)
     },
-    send_tool_result = function(tool_call_id, result, is_error = FALSE) {
-      on_tool_result(tool_call_id, result, is_error)
+    send_tool_result = function(tool_call_id, result, is_error = FALSE, thread_id = "default") {
+      cbs <- make_callbacks(thread_id)
+      cbs$on_tool_result(tool_call_id, result, is_error)
     },
     send_sessions = function(sessions) {
       pending_sessions <<- sessions
@@ -400,4 +511,8 @@ assistantUIServer <- function(id, handler,
   ))
 }
 
+# NULL-coalescing helper. Intentionally kept separate from the copy in
+# handlers.R: the backend layer (handlers.R + ellmer_store.R) is designed to be
+# extractable into a standalone package (see .claude/plans/runtime-extraction.md),
+# so the widget layer keeps its own copy to stay self-sufficient post-split.
 `%||%` <- function(x, y) if (is.null(x)) y else x
