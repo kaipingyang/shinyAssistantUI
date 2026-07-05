@@ -1,7 +1,7 @@
 "use client";
 import { safeUrl as shinySafeUrl } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
-import { formatMessageTime } from "@/helpers";
+import { formatMessageTime, detectSlashTrigger } from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -59,6 +59,7 @@ import {
 import {
   createContext,
   useContext,
+  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -237,14 +238,17 @@ const Composer: FC = () => {
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerAttachments />
-          <ComposerPrimitive.Input
-            placeholder="Send a message..."
-            className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
-            rows={1}
-            autoFocus
-            enterKeyHint="send"
-            aria-label="Message input"
-          />
+          <div className="relative">
+            <ShinySlashCommands />
+            <ComposerPrimitive.Input
+              placeholder="Send a message..."
+              className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
+              rows={1}
+              autoFocus
+              enterKeyHint="send"
+              aria-label="Message input"
+            />
+          </div>
           <ComposerAction />
         </div>
       </ComposerPrimitive.AttachmentDropzone>
@@ -252,8 +256,64 @@ const Composer: FC = () => {
   );
 };
 
-const ComposerQueue: FC = () => {
+// Slash 命令发现弹窗:检测 composer 文本里的 /trigger(光标取输入框 selectionStart,
+// 回退到文末),按 name 前缀过滤 config.commands,点击/回车插入 `/name `(runtime onNew
+// 的 expandSlashCommands 在发送时展开为 prompt)。键盘 ↑↓ 选择、Enter 确认、Esc 关闭。
+const ShinySlashCommands: FC = () => {
+  const { commands } = useShinyConfig();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aui = useAui() as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const text = useAuiState((s: any) => (s.composer?.text as string) ?? "");
+  const [idx, setIdx] = useState(0);
+
+  const ta = typeof document !== "undefined"
+    ? (document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null)
+    : null;
+  const cursor = text.length;
+  const trig = commands.length ? detectSlashTrigger(text, cursor) : null;
+  if (!trig) return null;
+  const q = trig.query.toLowerCase();
+  const matches = commands.filter((c) => c.name.toLowerCase().startsWith(q));
+  if (matches.length === 0) return null;
+  const sel = Math.min(idx, matches.length - 1);
+
+  const choose = (name: string) => {
+    const before = text.slice(0, trig.offset);
+    const after = text.slice(cursor);
+    aui.composer().setText(`${before}/${name} ${after}`);
+    setIdx(0);
+    ta?.focus();
+  };
+
+  return (
+    <div
+      className="aui-slash-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-60 w-72 overflow-auto rounded-lg border p-1 shadow-lg"
+      onKeyDownCapture={(e) => {
+        if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => (i + 1) % matches.length); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => (i - 1 + matches.length) % matches.length); }
+      }}
+    >
+      {matches.map((c, i) => (
+        <button
+          key={c.name}
+          type="button"
+          data-slash-cmd={c.name}
+          onMouseDown={(e) => { e.preventDefault(); choose(c.name); }}
+          className={
+            "aui-slash-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
+            (i === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
+          }
+        >
+          <span className="font-medium">/{c.name}</span>
+          {c.description && <span className="text-muted-foreground text-xs">{c.description}</span>}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const ComposerQueue: FC = () => {  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const { onEnqueue } = useShinyConfig();
   return (
