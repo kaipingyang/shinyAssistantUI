@@ -225,10 +225,11 @@ export function computeToolDepth(
   return depth;
 }
 
-// ── Theme customization（CSS 变量注入）───────────────────────────────────────
-// 把 R 端传来的 theme 对象（token → 值）转成 [cssVar, value] 对，供注入到 widget
-// 根元素的 inline style。token 名下划线转连字符并加 --aui- 前缀（primary_foreground
-// → --aui-primary-foreground）。跳过 null/undefined/空值。纯函数,便于单测。
+// ── Theme customization（Tailwind v4 token 注入）─────────────────────────────
+// 把 R 端 theme 对象（token → 任意 CSS 颜色）转成 [cssVar, value] 对,注入到 widget
+// 根元素 inline style,覆盖 globals.css 的 :root token。token 名下划线转连字符,加
+// `--` 前缀(primary_foreground → --primary-foreground;radius → --radius),对应
+// globals.css 里 @theme inline 映射的 --primary/--background/... 变量。
 export function themeToCssVars(
   theme: Record<string, unknown> | null | undefined,
 ): Array<[string, string]> {
@@ -236,7 +237,7 @@ export function themeToCssVars(
   const out: Array<[string, string]> = [];
   for (const [key, value] of Object.entries(theme)) {
     if (value == null || value === "") continue;
-    const cssVar = `--aui-${String(key).replace(/_/g, "-")}`;
+    const cssVar = `--${String(key).replace(/_/g, "-")}`;
     out.push([cssVar, String(value)]);
   }
   return out;

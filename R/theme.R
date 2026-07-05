@@ -66,36 +66,22 @@ assistant_theme <- function(background = NULL, foreground = NULL,
   .normalize_theme(raw)
 }
 
-# 把单个颜色转成 assistant-ui 需要的 HSL 分量字符串 "H S% L%"。
-# - 已是 HSL 分量（"217 91% 60%"）→ 原样返回（幂等，支持用户直接传分量）。
-# - 其余交给 grDevices::col2rgb 解析（hex / 命名色 / rgb() 均可），再 RGB→HSL。
-.color_to_hsl_components <- function(color) {
+# 把单个颜色规整成一个 CSS 可用的颜色值(供注入 --primary 等 Tailwind v4 token)。
+# - 已是 CSS 颜色函数/hex(#、rgb、hsl、oklch、oklab、var())→ 原样返回(幂等)。
+# - 其余(R 命名色等)交给 grDevices::col2rgb 解析后转为 #rrggbb。
+.color_to_css <- function(color) {
   if (!is.character(color) || length(color) != 1L || is.na(color)) {
     stop("theme color must be a single non-NA string.")
   }
-  # 已是 HSL 分量:两个百分比 + 前导数字
-  if (grepl("^\\s*[0-9.]+\\s+[0-9.]+%\\s+[0-9.]+%\\s*$", color)) {
+  if (grepl("^\\s*(#|rgb|rgba|hsl|hsla|oklch|oklab|lab|lch|color|var\\()",
+            color, ignore.case = TRUE)) {
     return(trimws(color))
   }
-  rgb <- grDevices::col2rgb(color)[, 1] / 255
-  r <- rgb[[1]]; g <- rgb[[2]]; b <- rgb[[3]]
-  mx <- max(r, g, b); mn <- min(r, g, b)
-  l <- (mx + mn) / 2
-  if (mx == mn) {
-    h <- 0; s <- 0                       # 灰阶:无色相无饱和
-  } else {
-    d <- mx - mn
-    s <- if (l > 0.5) d / (2 - mx - mn) else d / (mx + mn)
-    h <- if (mx == r)      ((g - b) / d) %% 6
-         else if (mx == g) ((b - r) / d) + 2
-         else              ((r - g) / d) + 4
-    h <- h * 60
-    if (h < 0) h <- h + 360
-  }
-  sprintf("%.0f %.1f%% %.1f%%", h, s * 100, l * 100)
+  rgb <- grDevices::col2rgb(color)[, 1]
+  sprintf("#%02x%02x%02x", rgb[[1]], rgb[[2]], rgb[[3]])
 }
 
-# 归一化整个 theme 列表:去 NULL,radius 透传,其余颜色转 HSL 分量。
+# 归一化整个 theme 列表:去 NULL,radius 透传,其余颜色规整为 CSS 颜色。
 # 幂等:重复调用不改变结果。接受 assistant_theme() 输出或用户手写的命名列表。
 .normalize_theme <- function(theme) {
   if (is.null(theme) || length(theme) == 0L) return(NULL)
@@ -107,7 +93,7 @@ assistant_theme <- function(background = NULL, foreground = NULL,
   out <- lapply(names(theme), function(k) {
     v <- theme[[k]]
     if (identical(k, "radius")) return(as.character(v))  # 长度值,非颜色
-    .color_to_hsl_components(as.character(v))
+    .color_to_css(as.character(v))
   })
   names(out) <- names(theme)
   out

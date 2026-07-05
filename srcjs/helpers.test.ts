@@ -311,21 +311,21 @@ describe("themeToCssVars", () => {
 
   it("token 加 --aui- 前缀,下划线转连字符", () => {
     const out = themeToCssVars({ primary: "217 91% 60%", primary_foreground: "0 0% 100%" });
-    expect(out).toContainEqual(["--aui-primary", "217 91% 60%"]);
-    expect(out).toContainEqual(["--aui-primary-foreground", "0 0% 100%"]);
+    expect(out).toContainEqual(["--primary", "217 91% 60%"]);
+    expect(out).toContainEqual(["--primary-foreground", "0 0% 100%"]);
   });
 
   it("radius 也走前缀映射", () => {
-    expect(themeToCssVars({ radius: "0.75rem" })).toEqual([["--aui-radius", "0.75rem"]]);
+    expect(themeToCssVars({ radius: "0.75rem" })).toEqual([["--radius", "0.75rem"]]);
   });
 
   it("跳过 null/空字符串值", () => {
     const out = themeToCssVars({ primary: "1 2% 3%", accent: null, muted: "" } as Record<string, unknown>);
-    expect(out).toEqual([["--aui-primary", "1 2% 3%"]]);
+    expect(out).toEqual([["--primary", "1 2% 3%"]]);
   });
 
   it("数值转字符串", () => {
-    expect(themeToCssVars({ foo: 42 } as Record<string, unknown>)).toEqual([["--aui-foo", "42"]]);
+    expect(themeToCssVars({ foo: 42 } as Record<string, unknown>)).toEqual([["--foo", "42"]]);
   });
 });
 
