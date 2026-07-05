@@ -95,6 +95,28 @@ npm run dev     # watch mode
 
 Commit the compiled `inst/www/` files — end users must not need npm.
 
+### ⚠️ 改完 R 或 JS 必须 `R CMD INSTALL .` 再测(否则测的是旧包)
+
+示例 app 和验证脚本都用 `library(shinyAssistantUI)` 启动 —— 它加载**已安装**的包
+(`~/R/.../library/shinyAssistantUI`,字节码 .rdb),**不是**开发树源码。所以:
+
+- 改 **R**(`R/*.R`)后:`npm run build` 不够,必须重装。
+- 改 **JS**(`srcjs/*`)后:`npm run build` 只更新**开发树** `inst/www/`,已安装包的 `www/`
+  仍是旧的 —— htmlwidget 经 `system.file("www", package=...)` 从**已安装**位置取 JS,
+  所以浏览器拿到的还是旧 bundle。也必须重装。
+
+```bash
+npm run build                                        # 先编 JS 到 inst/www/
+R CMD INSTALL --no-multiarch --with-keep.source .    # 再把 R + inst/www/ 一起装进库
+```
+
+顺序:**先 build 再 install**(install 会把 `inst/www/` 拷进已安装包)。
+`devtools::load_all(".")` 只对**当前** R 进程生效,对 `callr::r_bg` 起的示例 app **无效**
+(那是独立进程,走 `library()` 读已安装包)。
+
+血泪教训:曾因忘记重装,连续多轮验证跑的都是昨天的旧包,`get_server_info`/`on_task`
+等新代码"没生效"排查半天。改完即装。
+
 ## 测试
 
 纯逻辑抽到独立模块（无 React/DOM 强耦合）：`srcjs/helpers.ts`（纯函数）、`srcjs/error-boundary.tsx`（ErrorBoundary class）。bridge.ts 用全局 `Shiny`，mock 即可测。
