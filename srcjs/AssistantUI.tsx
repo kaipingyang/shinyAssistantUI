@@ -45,6 +45,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     commands: (config?.commands as { name: string; description?: string; prompt: string }[]) ?? [],
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,
+    onRename: rt.renameThread,
   };
 
   const threadEl = (

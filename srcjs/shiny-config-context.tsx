@@ -8,6 +8,7 @@ export interface ShinyConfigCtx {
   commands: ShinyCommand[];
   showTimestamps: boolean;
   onEnqueue: (text: string) => void;
+  onRename: (threadId: string, title: string) => void;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({
@@ -15,6 +16,7 @@ export const ShinyConfigContext = createContext<ShinyConfigCtx>({
   commands: [],
   showTimestamps: false,
   onEnqueue: () => {},
+  onRename: () => {},
 });
 
 export const useShinyConfig = () => useContext(ShinyConfigContext);
