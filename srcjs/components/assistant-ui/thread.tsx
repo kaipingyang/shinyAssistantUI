@@ -1,4 +1,5 @@
 "use client";
+import { safeUrl as shinySafeUrl } from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -409,6 +410,20 @@ const AssistantMessage: FC = () => {
                     {"●"}
                   </span>
                 );
+              case "source": {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const p = part as any;
+                const href = p.url ? shinySafeUrl(p.url) : null;
+                const label = p.title || p.url || "source";
+                return (
+                  <span className="aui-source-cite bg-muted text-muted-foreground me-1 mb-1 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs" data-source-url={p.url ?? ""}>
+                    {href ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-inherit no-underline">{label}</a> : <span>{label}</span>}
+                  </span>
+                );
+              }
+              case "image":
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return <img src={(part as any).image} alt="assistant image" className="aui-message-image my-1 max-w-full rounded-lg border" />;
               default:
                 return null;
             }
