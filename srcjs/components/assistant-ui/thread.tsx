@@ -157,7 +157,9 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             )}
           >
             <ThreadScrollToBottom />
+            <ShinyStatusPanels />
             <Composer />
+            <ShinyUsageFooter />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -264,6 +266,73 @@ type SlashEntry =
   | { kind: "prompt"; key: string; label: string; desc?: string; section: string }
   | { kind: "action"; key: string; label: string; desc?: string; section: string;
       item: { id: string; label?: string; section?: string } };
+
+// ── ClaudeAgentSDK 能力对齐 UI ────────────────────────────────────────────────
+// #3 限流 banner + #2 子agent/Task 进度卡 + #4 系统状态行 + #7 stop_task 按钮
+const ShinyStatusPanels: FC = () => {
+  const { rateLimit, tasks, statusText, stopTask } = useShinyConfig();
+  const activeTasks = (tasks ?? []).filter(
+    (t) => t.kind !== "notification" || !/^(completed|done|stopped|failed)$/i.test(t.status ?? ""),
+  );
+  const hasAny = rateLimit || activeTasks.length > 0 || statusText;
+  if (!hasAny) return null;
+  return (
+    <div className="aui-sdk-panels flex flex-col gap-2">
+      {rateLimit && (
+        <div className="aui-rate-limit-banner flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+             data-slot="aui_rate_limit">
+          <span>⚠️ Rate limited{rateLimit.type ? ` (${rateLimit.type})` : ""}</span>
+          {typeof rateLimit.utilization === "number" && <span>· {Math.round(rateLimit.utilization)}% used</span>}
+          {rateLimit.resetsAt && <span>· resets {rateLimit.resetsAt}</span>}
+        </div>
+      )}
+      {activeTasks.map((t) => (
+        <div key={t.taskId}
+             data-slot="aui_task_card" data-task-id={t.taskId}
+             className="aui-task-card flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+          <span className="animate-pulse">⚙️</span>
+          <span className="flex-1 truncate">
+            {t.description || t.summary || `Subagent ${t.taskId.slice(0, 6)}`}
+            {t.toolName ? <span className="text-muted-foreground"> · {t.toolName}</span> : null}
+            {t.status ? <span className="text-muted-foreground"> · {t.status}</span> : null}
+          </span>
+          {stopTask && (
+            <button
+              type="button"
+              data-slot="aui_task_stop" data-stop-task={t.taskId}
+              onClick={() => stopTask(t.taskId)}
+              className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+            >Stop</button>
+          )}
+        </div>
+      ))}
+      {statusText && (
+        <div className="aui-status-line flex items-center gap-2 px-1 text-xs text-muted-foreground"
+             data-slot="aui_status_line">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+          <span>{statusText}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// #1 成本/用量页脚
+const ShinyUsageFooter: FC = () => {
+  const { usage } = useShinyConfig();
+  if (!usage || (usage.costUsd == null && usage.tokens == null)) return null;
+  const parts: string[] = [];
+  if (usage.costUsd != null) parts.push(`$${usage.costUsd.toFixed(4)}`);
+  if (usage.tokens != null) parts.push(`${usage.tokens.toLocaleString()} tokens`);
+  if (usage.turns != null) parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
+  if (usage.durationMs != null) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
+  return (
+    <div className="aui-usage-footer flex items-center justify-end gap-2 px-1 text-xs text-muted-foreground"
+         data-slot="aui_usage_footer" data-cost-usd={usage.costUsd ?? ""}>
+      <span>{parts.join(" · ")}</span>
+    </div>
+  );
+};
 
 const ShinySlashCommands: FC = () => {
   const { commands, actionItems, onInvokeAction } = useShinyConfig();

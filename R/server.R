@@ -312,6 +312,41 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":artifact"),
                                   list(id = id, title = title, type = type,
                                        content = content, lang = lang, threadId = thread_id))
+      },
+      # ── ClaudeAgentSDK 能力对齐 ────────────────────────────────────────────
+      # #1 成本/用量:ResultMessage 的 total_cost_usd / tokens / turns / duration。
+      on_usage = function(cost_usd = NULL, tokens = NULL, turns = NULL,
+                          duration_ms = NULL, model = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":usage"),
+                                  list(costUsd = cost_usd, tokens = tokens, turns = turns,
+                                       durationMs = duration_ms, model = model,
+                                       threadId = thread_id))
+      },
+      # #2 子agent/Task 进度:kind = "started" | "progress" | "notification"。
+      on_task = function(task_id, kind, description = NULL, status = NULL,
+                         tool_name = NULL, summary = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":task"),
+                                  list(taskId = task_id, kind = kind, description = description,
+                                       status = status, toolName = tool_name, summary = summary,
+                                       threadId = thread_id))
+      },
+      # #3 限流告警。
+      on_rate_limit = function(status = NULL, resets_at = NULL, utilization = NULL, type = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":rate-limit"),
+                                  list(status = status, resetsAt = resets_at,
+                                       utilization = utilization, type = type,
+                                       threadId = thread_id))
+      },
+      # #4 系统状态行:subtype = status/thinking_tokens/init 等。
+      on_status = function(status, text = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":status"),
+                                  list(status = status, text = text, threadId = thread_id))
+      },
+      # #5 命令自动发现:get_server_info() 拉到的 CLI slash 命令 + output styles。
+      on_commands = function(commands = list(), output_styles = list()) {
+        session$sendCustomMessage(paste0(input_id, ":server-commands"),
+                                  list(commands = commands, outputStyles = output_styles,
+                                       threadId = thread_id))
       }
     )
   }
@@ -430,6 +465,11 @@ assistantUIServer <- function(id, handler,
         on_source         = cbs$on_source,
         on_image          = cbs$on_image,
         on_artifact       = cbs$on_artifact,
+        on_usage          = cbs$on_usage,
+        on_task           = cbs$on_task,
+        on_rate_limit     = cbs$on_rate_limit,
+        on_status         = cbs$on_status,
+        on_commands       = cbs$on_commands,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,

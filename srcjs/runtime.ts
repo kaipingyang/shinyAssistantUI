@@ -185,6 +185,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
   const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+
+  // ── ClaudeAgentSDK 能力对齐状态 ────────────────────────────────────────────
+  type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  type TaskInfo = { taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string };
+  const [usageMap, setUsageMap] = useState<Record<string, UsageInfo>>({});          // #1 每线程最新用量
+  const [tasksMap, setTasksMap] = useState<Record<string, Record<string, TaskInfo>>>({}); // #2 每线程 taskId→info
+  const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
+  const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
+  const [serverCommands, setServerCommands] = useState<Array<{ name: string; description?: string }>>([]); // #5
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
@@ -308,6 +317,55 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         );
         if (!isServerMode.current) saveMessages(inputId, tid, updated);
         return { ...prev, [tid]: updated };
+      });
+    });
+
+    // ── #1 用量/成本 ─────────────────────────────────────────────────────────
+    bridge.current.onUsage((d) => {
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      setUsageMap((prev) => ({ ...prev, [tid]: {
+        costUsd: d.costUsd, tokens: d.tokens, turns: d.turns, durationMs: d.durationMs, model: d.model,
+      } }));
+    });
+    // ── #2 子agent/Task 进度 ──────────────────────────────────────────────────
+    bridge.current.onTask((d) => {
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      setTasksMap((prev) => {
+        const forThread = { ...(prev[tid] ?? {}) };
+        // notification 且 status 为终态 → 保留但标记;其余 upsert
+        forThread[d.taskId] = {
+          ...(forThread[d.taskId] ?? { taskId: d.taskId }),
+          taskId: d.taskId, kind: d.kind,
+          description: d.description ?? forThread[d.taskId]?.description,
+          status: d.status ?? forThread[d.taskId]?.status,
+          toolName: d.toolName ?? forThread[d.taskId]?.toolName,
+          summary: d.summary ?? forThread[d.taskId]?.summary,
+        };
+        return { ...prev, [tid]: forThread };
+      });
+    });
+    // ── #3 限流告警 ───────────────────────────────────────────────────────────
+    bridge.current.onRateLimit((d) => {
+      // status 正常(allowed/ok)时清除 banner;受限时显示
+      const limited = d.status && !/^(allowed|ok|none)$/i.test(d.status);
+      setRateLimit(limited ? { status: d.status, resetsAt: d.resetsAt, utilization: d.utilization, type: d.type } : null);
+    });
+    // ── #4 系统状态行 ─────────────────────────────────────────────────────────
+    bridge.current.onStatus((d) => {
+      const label = d.text || (d.status === "thinking_tokens" ? "Thinking\u2026"
+        : d.status === "init" ? "Initializing\u2026" : d.status);
+      setStatusText(label ?? null);
+    });
+    // ── #5 命令自动发现 ───────────────────────────────────────────────────────
+    bridge.current.onServerCommands((d) => {
+      const cmds = (d.commands ?? []) as Array<Record<string, unknown>>;
+      const mapped = cmds.map((c) => ({
+        name: String(c.name ?? c.command ?? ""),
+        description: (c.description ?? c.summary) as string | undefined,
+      })).filter((c) => c.name);
+      if (mapped.length) setServerCommands((prev) => {
+        const seen = new Set(prev.map((p) => p.name));
+        return [...prev, ...mapped.filter((m) => !seen.has(m.name))];
       });
     });
 
@@ -658,6 +716,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           // 避免用户切换 thread 后旧 handler 的 onDone 把新 thread 的 running 错误清掉
           if (currentThreadIdRef.current === threadId) {
             setIsRunning(false);
+            setStatusText(null);  // #4 run 结束清状态行
             if (doneSuggestions && doneSuggestions.length > 0) setSuggestions(doneSuggestions);
           }
           // 仅当本 run 仍是该线程最新 run 时才注销 callbacks / 清 active 标记。
@@ -1043,5 +1102,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     artifacts, activeArtifactId,
     openArtifact: (id: string) => setActiveArtifactId(id),
     closeArtifact: () => setActiveArtifactId(null),
+    // ── ClaudeAgentSDK 能力对齐(当前线程视图)────────────────────────────────
+    usage: usageMap[currentThreadId],                                    // #1
+    tasks: Object.values(tasksMap[currentThreadId] ?? {}),               // #2
+    rateLimit,                                                           // #3
+    statusText,                                                          // #4
+    serverCommands,                                                      // #5
+    stopTask: (taskId: string) => invokeAction({ id: `stoptask:${taskId}`, label: `Stop task` }), // #7
+    forkThread: () => invokeAction({ id: "fork", label: "Fork conversation" }),                    // #6
   };
 }

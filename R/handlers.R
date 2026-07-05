@@ -300,6 +300,7 @@ make_claude_handler <- function(options       = NULL,
   }
 
   clients <- list()
+  commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
 
   get_client <- function(thread_id) {
     if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
@@ -437,6 +438,29 @@ make_claude_handler <- function(options       = NULL,
           cl$rewind_files(target)
           ok(paste0("Rewound files to ", substr(target, 1, 8)))
         }
+      } else if (identical(id, "fork") || grepl("^fork:", id)) {
+        # #6 fork/branch:从当前 session 分叉出一个新 session(不改原始)。
+        sid <- read_session_id(thread_id)
+        if (is.null(sid) || !nzchar(sid %||% "")) { ok("No session to fork yet"); return(invisible()) }
+        title <- if (grepl("^fork:", id)) sub("^fork:", "", id) else NULL
+        res <- ClaudeAgentSDK::fork_session(sid, title = title)
+        new_sid <- tryCatch(res$session_id %||% res$new_session_id %||% res$forked_session_id,
+                            error = function(e) NULL)
+        ok(if (!is.null(new_sid)) paste0("Forked to new session ", substr(new_sid, 1, 8))
+           else "Session forked")
+      } else if (grepl("^stoptask:", id)) {
+        # #7 stop_task 按 id:停单个运行中的子agent任务。
+        task_id <- sub("^stoptask:", "", id)
+        if (is.null(cl)) { ok("No active session"); return(invisible()) }
+        cl$stop_task(task_id)
+        ok(paste0("Stopped task ", substr(task_id, 1, 8)))
+      } else if (grepl("^tag:", id)) {
+        # #8 tag session:给当前会话打标签。
+        sid <- read_session_id(thread_id)
+        if (is.null(sid) || !nzchar(sid %||% "")) { ok("No session to tag yet"); return(invisible()) }
+        tag <- sub("^tag:", "", id)
+        ClaudeAgentSDK::tag_session(sid, tag = tag)
+        ok(paste0("Tagged session: ", tag))
       } else {
         err(paste0("Unknown action: ", id))
       }
@@ -459,13 +483,27 @@ make_claude_handler <- function(options       = NULL,
     on_chunk, on_done, on_error,
     on_tool_call, on_tool_result, on_thinking,
     is_cancelled, wait_for_approval,
-    on_tool_call_start = NULL, on_tool_call_delta = NULL
+    on_tool_call_start = NULL, on_tool_call_delta = NULL,
+    on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
+    on_commands = NULL
   ) {
     client <- tryCatch(
       get_client(thread_id),
       error = function(e) { on_error(conditionMessage(e)); NULL }
     )
     if (is.null(client)) return(invisible(NULL))
+
+    # #5 命令自动发现:每个 client 首次连接后拉一次 get_server_info(),把 CLI 真实
+    # slash 命令 + output styles 推给 UI 填充 slash 面板(每线程只发一次)。
+    if (!is.null(on_commands) && !isTRUE(commands_discovered[[thread_id]])) {
+      commands_discovered[[thread_id]] <<- TRUE
+      tryCatch({
+        info <- client$get_server_info()
+        cmds <- info$commands %||% list()
+        styles <- info$output_styles %||% info$outputStyles %||% list()
+        if (length(cmds) > 0 || length(styles) > 0) on_commands(cmds, styles)
+      }, error = function(e) NULL)
+    }
 
     atts <- attachments %||% list()
     img_parts <- lapply(
@@ -663,7 +701,45 @@ make_claude_handler <- function(options       = NULL,
           pending_tool_ids <- character(0)
           flush_tool_blocks(mark_completed = TRUE)
           persist_session(thread_id, msg$session_id)
+          # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
+          if (!is.null(on_usage)) {
+            u <- msg$usage
+            tokens <- tryCatch(
+              (u[["input_tokens"]] %||% 0) + (u[["output_tokens"]] %||% 0) +
+                (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
+              error = function(e) NULL)
+            on_usage(cost_usd = msg$total_cost_usd, tokens = tokens,
+                     turns = msg$num_turns, duration_ms = msg$duration_ms)
+          }
           done <- TRUE; break
+
+        # #2 子agent/Task 进度(system 子类型消息)。
+        } else if (inherits(msg, "TaskStartedMessage")) {
+          if (!is.null(on_task)) on_task(msg$task_id, "started",
+                                         description = msg$description, tool_name = msg$task_type)
+        } else if (inherits(msg, "TaskProgressMessage")) {
+          if (!is.null(on_task)) on_task(msg$task_id, "progress",
+                                         description = msg$description, tool_name = msg$last_tool_name)
+        } else if (inherits(msg, "TaskNotificationMessage")) {
+          if (!is.null(on_task)) on_task(msg$task_id, "notification",
+                                         status = msg$status, summary = msg$summary)
+
+        # #3 限流告警。
+        } else if (inherits(msg, "RateLimitEvent")) {
+          if (!is.null(on_rate_limit)) {
+            info <- msg$rate_limit_info
+            on_rate_limit(status = info$status, resets_at = info$resets_at,
+                          utilization = info$utilization, type = info$rate_limit_type)
+          }
+
+        # #4 系统状态行:subtype = status / thinking_tokens / init 等(TaskXxx 已在上面拦截)。
+        } else if (inherits(msg, "SystemMessage")) {
+          if (!is.null(on_status)) {
+            d <- msg$data
+            txt <- tryCatch(d[["status"]] %||% d[["message"]] %||% d[["text"]] %||% NULL,
+                            error = function(e) NULL)
+            on_status(msg$subtype, text = if (is.character(txt)) txt else NULL)
+          }
         }
       }
 

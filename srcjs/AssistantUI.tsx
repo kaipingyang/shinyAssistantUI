@@ -42,12 +42,24 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
 
   const cfgValue = {
     tools: (config?.tools as { name: string; description?: string }[]) ?? [],
-    commands: (config?.commands as { name: string; description?: string; prompt: string }[]) ?? [],
+    commands: [
+      ...((config?.commands as { name: string; description?: string; prompt: string }[]) ?? []),
+      // #5 CLI 自动发现的 slash 命令(去重合并;插入为 /name)
+      ...rt.serverCommands
+        .filter((c) => !((config?.commands as { name: string }[]) ?? []).some((x) => x.name === c.name))
+        .map((c) => ({ name: c.name, description: c.description, prompt: `/${c.name}` })),
+    ],
     actionItems: (config?.action_items as { section?: string; id: string; label?: string; description?: string }[]) ?? [],
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
+    usage: rt.usage,
+    tasks: rt.tasks,
+    rateLimit: rt.rateLimit,
+    statusText: rt.statusText,
+    stopTask: rt.stopTask,
+    forkThread: rt.forkThread,
   };
 
   const threadEl = (

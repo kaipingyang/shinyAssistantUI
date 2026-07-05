@@ -14,6 +14,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
+  GitBranchIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
@@ -247,6 +248,7 @@ export const ThreadListItem: FC = () => {
 };
 
 const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
+  const { forkThread } = useShinyConfig();
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
@@ -275,6 +277,17 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
           <PencilIcon className="size-4" />
           Rename
         </ThreadListItemMorePrimitive.Item>
+        {forkThread && (
+          <ThreadListItemMorePrimitive.Item
+            data-slot="aui_thread-list-item-more-item"
+            data-fork-thread
+            onClick={() => forkThread()}
+            className="aui-thread-fork-btn hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
+          >
+            <GitBranchIcon className="size-4" />
+            Fork
+          </ThreadListItemMorePrimitive.Item>
+        )}
         <ThreadListItemPrimitive.Archive asChild>
           <ThreadListItemMorePrimitive.Item
             data-slot="aui_thread-list-item-more-item"

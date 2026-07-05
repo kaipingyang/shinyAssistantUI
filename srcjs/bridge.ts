@@ -57,6 +57,11 @@ export interface ShinyBridge {
   onActionResult: (handler: (data: { threadId?: string; message?: string; status?: string }) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onLoadThread: (handler: (data: { threadId: string; messages: unknown[] }) => void) => void;
+  onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
+  onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
+  onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
+  onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
+  onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
 }
 
 export function createShinyBridge(inputId: string): ShinyBridge {
@@ -237,6 +242,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.addCustomMessageHandler(`${inputId}:action-result`, (data) => {
         handler(data as { threadId?: string; message?: string; status?: string });
       });
+    },
+
+    onUsage(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:usage`, (data) => handler(data as never));
+    },
+    onTask(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:task`, (data) => handler(data as never));
+    },
+    onRateLimit(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:rate-limit`, (data) => handler(data as never));
+    },
+    onStatus(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:status`, (data) => handler(data as never));
+    },
+    onServerCommands(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
     },
 
     onSessions(handler) {
