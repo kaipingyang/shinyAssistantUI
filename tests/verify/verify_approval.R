@@ -29,12 +29,12 @@ Sys.sleep(3)
 # 1) 审批卡片出现(awaiting approval)
 txt1 <- ev("document.body.innerText")
 chk("approval_card_shown", grepl("awaiting approval|delete_file", txt1), "")
-# 审批按钮"Yes"存在
-yes_exists <- ev("Array.from(document.querySelectorAll('button')).some(b=>/^\\s*1\\.?\\s*Yes\\s*$/.test(b.innerText)||/\\bYes\\b/.test(b.innerText))")
+# 审批按钮"Approve"存在(registry 迁移后为 Approve/Deny,非旧 Yes/No)
+yes_exists <- ev("Array.from(document.querySelectorAll('button')).some(b=>/^\\s*Approve\\s*$/.test(b.innerText))")
 chk("approve_button_present", yes_exists, "")
 
-# 2) 点击 Yes 批准
-clicked <- ev("(function(){var bs=Array.from(document.querySelectorAll('button'));var t=bs.find(b=>/\\bYes\\b/.test(b.innerText));if(t){t.click();return true}return false})()")
+# 2) 点击 Approve 批准
+clicked <- ev("(function(){var bs=Array.from(document.querySelectorAll('button'));var t=bs.find(b=>/^\\s*Approve\\s*$/.test(b.innerText));if(t){t.click();return true}return false})()")
 chk("approve_clicked", clicked, "")
 Sys.sleep(3)
 

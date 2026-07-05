@@ -14,14 +14,30 @@ Sys.sleep(4)
 ev <- function(js) tryCatch(b$Runtime$evaluate(js)$result$value, error=function(e) NA)
 chk <- function(n,c,d="") cat(sprintf("[%s] %-26s %s\n", if(isTRUE(c))"PASS" else "FAIL", n, d))
 
-# 侧边栏至少一个线程项
-n_items <- ev("document.querySelectorAll('.aui-thread-list-item').length")
+# 先发一条消息,确保侧边栏有一个有内容的线程
+ev("(function(){var t=document.querySelector('textarea');if(t)t.focus();return !!t})()")
+Sys.sleep(0.4)
+b$Input$insertText(text = "hello")
+Sys.sleep(0.3)
+b$Input$dispatchKeyEvent(type="keyDown",key="Enter",code="Enter",windowsVirtualKeyCode=13L)
+b$Input$dispatchKeyEvent(type="keyUp",key="Enter",code="Enter",windowsVirtualKeyCode=13L)
+Sys.sleep(3)
+
+# 侧边栏至少一个线程项(vendored 组件用 data-slot,非 class)
+n_items <- ev("document.querySelectorAll('[data-slot=aui_thread-list-item]').length")
 chk("sidebar_thread_present", as.integer(n_items) >= 1, sprintf("(items=%s)", n_items))
-title0 <- ev("(function(){var t=document.querySelector('.aui-thread-list-item-title');return t?t.innerText:'(none)'})()")
+title0 <- ev("(function(){var t=document.querySelector('[data-slot=aui_thread-list-item-title]');return t?t.innerText:'(none)'})()")
 cat("initial title:", title0, "\n")
 
-# 点开第一个线程项的 More 菜单(视觉 hidden 但 DOM 可点)
-ev("(function(){var it=document.querySelector('.aui-thread-list-item');var btns=it.querySelectorAll('button');for(var b of btns){if(b.title==='More options'){b.click();return true}}return false})()")
+# 点开第一个线程项的 More 菜单。⚠ base-ui 菜单靠**真实指针事件**开(JS .click() 不行),
+# 用 CDP dispatchMouseEvent(先 mouseMoved 触发 hover 让按钮可见)。
+mrect <- ev("(function(){var m=document.querySelector('[data-slot=aui_thread-list-item-more]');if(!m)return null;var r=m.getBoundingClientRect();return JSON.stringify({x:r.x+r.width/2,y:r.y+r.height/2})})()")
+if (!is.na(mrect) && !is.null(mrect)) {
+  xy <- jsonlite::fromJSON(mrect)
+  b$Input$dispatchMouseEvent(type="mouseMoved", x=xy$x, y=xy$y); Sys.sleep(0.3)
+  b$Input$dispatchMouseEvent(type="mousePressed",  x=xy$x, y=xy$y, button="left", clickCount=1)
+  b$Input$dispatchMouseEvent(type="mouseReleased", x=xy$x, y=xy$y, button="left", clickCount=1)
+}
 Sys.sleep(0.8)
 # 点 Rename
 clicked <- ev("(function(){var b=Array.from(document.querySelectorAll('.aui-thread-rename-btn'));if(b.length){b[0].click();return true}return false})()")
@@ -34,7 +50,7 @@ chk("rename_input_shown", isTRUE(has_input), "")
 ev("(function(){var inp=document.querySelector('.aui-thread-rename-input');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'Renamed Project X');inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));return true})()")
 Sys.sleep(1.5)
 # 验证标题更新
-title1 <- ev("(function(){var t=document.querySelector('.aui-thread-list-item-title');return t?t.innerText:'(none)'})()")
+title1 <- ev("(function(){var t=document.querySelector('[data-slot=aui_thread-list-item-title]');return t?t.innerText:'(none)'})()")
 cat("new title:", title1, "\n")
 chk("title_updated", identical(title1, "Renamed Project X"), title1)
 # 验证 R 端收到 on_rename
