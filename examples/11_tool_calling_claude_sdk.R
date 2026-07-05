@@ -39,6 +39,12 @@ server <- function(input, output, session) {
            description = "Ask before each action"),
       list(section = "Context", id = "context", label = "Show context usage",
            description = "Display current token usage"),
+      list(section = "Context", id = "compact", label = "Compact conversation",
+           description = "Summarize history to free context (slow)"),
+      list(section = "Tools", id = "mcp", label = "MCP server status",
+           description = "List connected MCP servers"),
+      list(section = "Session", id = "resume", label = "Resume session",
+           description = "Resume the persisted session"),
       list(section = "Session", id = "clear", label = "Clear conversation",
            description = "Clear context and start fresh")
     ),

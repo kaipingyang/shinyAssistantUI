@@ -295,7 +295,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const tid = threadId ?? target?.threadId ?? currentThreadIdRef.current;
       const ackId = target?.ackId;
       if (!ackId || !message) return;
-      const prefix = status === "error" ? "\u26a0\ufe0f " : "\u2713 ";
+      const prefix = status === "error" ? "\u26a0\ufe0f "
+        : status === "progress" ? "\u23f3 "
+        : "\u2713 ";
       setMessagesMap((prev) => {
         const msgs = prev[tid] ?? [];
         const updated = msgs.map((m): ThreadMessageLike =>

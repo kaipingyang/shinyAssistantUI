@@ -370,9 +370,16 @@ make_claude_handler <- function(options       = NULL,
       } else if (identical(id, "context")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
         usage <- cl$get_context_usage()
-        # 尽力提取 token 数;字段未知时给通用信息
-        tot <- tryCatch(usage$total_tokens %||% usage$used_tokens %||% NULL, error = function(e) NULL)
-        ok(if (!is.null(tot)) paste0("Context: ~", tot, " tokens used") else "Context usage retrieved")
+        # ContextUsageResponse 用 camelCase:totalTokens / maxTokens / percentage / model
+        tot <- tryCatch(usage$totalTokens %||% usage$total_tokens %||% NULL, error = function(e) NULL)
+        pct <- tryCatch(usage$percentage %||% NULL, error = function(e) NULL)
+        mx  <- tryCatch(usage$maxTokens %||% NULL, error = function(e) NULL)
+        if (!is.null(tot)) {
+          txt <- paste0("Context: ", format(tot, big.mark = ","), " tokens")
+          if (!is.null(mx))  txt <- paste0(txt, " / ", format(mx, big.mark = ","))
+          if (!is.null(pct)) txt <- paste0(txt, " (", round(pct, 1), "%)")
+          ok(txt)
+        } else ok("Context usage retrieved")
       } else if (identical(id, "interrupt")) {
         if (!is.null(cl)) cl$interrupt()
         ok("Interrupted")
@@ -383,6 +390,53 @@ make_claude_handler <- function(options       = NULL,
         session_map[[thread_id]] <<- NULL
         save_session_map()
         ok("Conversation cleared")
+      } else if (identical(id, "compact")) {
+        # /compact 无直接 SDK 方法 —— 经输入流发 "/compact",由 CLI 解析压缩上下文。
+        # 慢操作:先报 progress(转圈),用 later 非阻塞轮询 drain,收到 ResultMessage 报成功。
+        if (is.null(cl)) { ok("No active session to compact"); return(invisible()) }
+        send_action_result("Compacting conversation\u2026", "progress")
+        cl$send("/compact")
+        t0 <- Sys.time()
+        poll <- function() {
+          done <- FALSE
+          msgs <- tryCatch(cl$poll_messages(), error = function(e) NULL)
+          for (m in (msgs %||% list())) if (inherits(m, "ResultMessage")) done <- TRUE
+          if (isTRUE(done)) {
+            ok("Conversation compacted")
+          } else if (as.numeric(Sys.time() - t0) > 180) {
+            err("Compact timed out")
+          } else {
+            later::later(poll, 0.25)
+          }
+        }
+        later::later(poll, 0.25)
+      } else if (identical(id, "mcp")) {
+        if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
+        status <- cl$get_mcp_status()
+        servers <- tryCatch(status$mcpServers %||% status$mcp_servers %||% list(), error = function(e) list())
+        if (length(servers) == 0) {
+          ok("No MCP servers configured")
+        } else {
+          parts <- vapply(servers, function(s) paste0(s$name %||% "?", " (", s$status %||% "?", ")"),
+                          character(1))
+          ok(paste0("MCP servers: ", paste(parts, collapse = ", ")))
+        }
+      } else if (identical(id, "resume")) {
+        if (is.null(cl)) cl <- get_client(thread_id)
+        cl$resume()
+        ok("Session resumed")
+      } else if (grepl("^rewind", id)) {
+        # /rewind[:<user_message_id>] —— 回滚追踪文件到某用户消息的检查点。
+        # 需要 enable_file_checkpointing=TRUE + extra_args replay-user-messages;
+        # 否则 SDK 会报错,这里把要求诚实回传给用户。
+        if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
+        target <- sub("^rewind:?", "", id)
+        if (!nzchar(target)) {
+          err("Rewind needs a target message id (enable file checkpointing first)")
+        } else {
+          cl$rewind_files(target)
+          ok(paste0("Rewound files to ", substr(target, 1, 8)))
+        }
       } else {
         err(paste0("Unknown action: ", id))
       }
