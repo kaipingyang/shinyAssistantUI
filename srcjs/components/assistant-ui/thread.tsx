@@ -256,59 +256,95 @@ const Composer: FC = () => {
     </ComposerPrimitive.Root>
   );
 };
+// Slash 命令面板(Claude Code 风格):合并 config.commands(→ AI 的 prompt/skill)与
+// config.action_items(→ 客户端动作,如 /model /clear,不发给 AI)。检测 /trigger 前缀过滤,
+// 按 section 分组。选中:prompt 命令插入 `/name `(发送时 expandSlashCommands 展开);
+// action 直接 onInvokeAction(执行操作 + 记录气泡,不触发 AI)。↑↓ 选择、Enter/点击确认。
+type SlashEntry =
+  | { kind: "prompt"; key: string; label: string; desc?: string; section: string }
+  | { kind: "action"; key: string; label: string; desc?: string; section: string;
+      item: { id: string; label?: string; section?: string } };
 
-// Slash 命令发现弹窗:检测 composer 文本里的 /trigger(光标取输入框 selectionStart,
-// 回退到文末),按 name 前缀过滤 config.commands,点击/回车插入 `/name `(runtime onNew
-// 的 expandSlashCommands 在发送时展开为 prompt)。键盘 ↑↓ 选择、Enter 确认、Esc 关闭。
 const ShinySlashCommands: FC = () => {
-  const { commands } = useShinyConfig();
+  const { commands, actionItems, onInvokeAction } = useShinyConfig();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const text = useAuiState((s: any) => (s.composer?.text as string) ?? "");
   const [idx, setIdx] = useState(0);
 
-  const ta = typeof document !== "undefined"
-    ? (document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null)
-    : null;
+  const total = commands.length + actionItems.length;
   const cursor = text.length;
-  const trig = commands.length ? detectSlashTrigger(text, cursor) : null;
+  const trig = total ? detectSlashTrigger(text, cursor) : null;
   if (!trig) return null;
   const q = trig.query.toLowerCase();
-  const matches = commands.filter((c) => c.name.toLowerCase().startsWith(q));
-  if (matches.length === 0) return null;
-  const sel = Math.min(idx, matches.length - 1);
 
-  const choose = (name: string) => {
+  const entries: SlashEntry[] = [
+    ...actionItems
+      .filter((a) => a.id.toLowerCase().startsWith(q) || (a.label ?? "").toLowerCase().includes(q))
+      .map((a): SlashEntry => ({ kind: "action", key: `a-${a.id}`, label: a.label ?? a.id, desc: a.description, section: a.section ?? "Actions", item: a })),
+    ...commands
+      .filter((c) => c.name.toLowerCase().startsWith(q))
+      .map((c): SlashEntry => ({ kind: "prompt", key: `c-${c.name}`, label: c.name, desc: c.description, section: "Commands" })),
+  ];
+  if (entries.length === 0) return null;
+  const sel = Math.min(idx, entries.length - 1);
+
+  const chooseCommand = (name: string) => {
     const before = text.slice(0, trig.offset);
     const after = text.slice(cursor);
     aui.composer().setText(`${before}/${name} ${after}`);
     setIdx(0);
-    ta?.focus();
+    (document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null)?.focus();
   };
+  const chooseAction = (item: { id: string; label?: string; section?: string }) => {
+    // 清掉输入框里的 /trigger,再执行动作(不发给 AI)
+    const before = text.slice(0, trig.offset);
+    const after = text.slice(cursor);
+    aui.composer().setText(`${before}${after}`);
+    setIdx(0);
+    onInvokeAction(item);
+  };
+  const pick = (e: SlashEntry) => (e.kind === "action" ? chooseAction(e.item) : chooseCommand(e.label));
+
+  // 按 section 分组(保持插入顺序)
+  const sections: { name: string; items: { e: SlashEntry; gi: number }[] }[] = [];
+  entries.forEach((e, gi) => {
+    let s = sections.find((x) => x.name === e.section);
+    if (!s) { s = { name: e.section, items: [] }; sections.push(s); }
+    s.items.push({ e, gi });
+  });
 
   return (
     <div
-      className="aui-slash-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-60 w-72 overflow-auto rounded-lg border p-1 shadow-lg"
-      onKeyDownCapture={(e) => {
-        if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => (i + 1) % matches.length); }
-        else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => (i - 1 + matches.length) % matches.length); }
+      className="aui-slash-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-lg"
+      onKeyDownCapture={(ev) => {
+        if (ev.key === "ArrowDown") { ev.preventDefault(); setIdx((i) => (i + 1) % entries.length); }
+        else if (ev.key === "ArrowUp") { ev.preventDefault(); setIdx((i) => (i - 1 + entries.length) % entries.length); }
+        else if (ev.key === "Enter") { ev.preventDefault(); pick(entries[sel]); }
+        else if (ev.key === "Escape") { ev.preventDefault(); setIdx(0); }
       }}
     >
-      {matches.map((c, i) => (
-        <button
-          key={c.name}
-          type="button"
-          data-slash-cmd={c.name}
-          onMouseDown={(e) => { e.preventDefault(); choose(c.name); }}
-          className={
-            "aui-slash-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
-            (i === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
-          }
-        >
-          <span className="font-medium">/{c.name}</span>
-          {c.description && <span className="text-muted-foreground text-xs">{c.description}</span>}
-        </button>
+      {sections.map((s) => (
+        <div key={s.name}>
+          <div className="text-muted-foreground px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide">{s.name}</div>
+          {s.items.map(({ e, gi }) => (
+            <button
+              key={e.key}
+              type="button"
+              data-slash-cmd={e.kind === "prompt" ? e.label : undefined}
+              data-slash-action={e.kind === "action" ? e.item.id : undefined}
+              onMouseDown={(ev) => { ev.preventDefault(); pick(e); }}
+              className={
+                "aui-slash-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
+                (gi === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
+              }
+            >
+              <span className="font-medium">{e.kind === "action" ? `\u2699\ufe0f ${e.label}` : `/${e.label}`}</span>
+              {e.desc && <span className="text-muted-foreground text-xs">{e.desc}</span>}
+            </button>
+          ))}
+        </div>
       ))}
     </div>
   );

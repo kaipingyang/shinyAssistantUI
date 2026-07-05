@@ -43,9 +43,11 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const cfgValue = {
     tools: (config?.tools as { name: string; description?: string }[]) ?? [],
     commands: (config?.commands as { name: string; description?: string; prompt: string }[]) ?? [],
+    actionItems: (config?.action_items as { section?: string; id: string; label?: string; description?: string }[]) ?? [],
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,
     onRename: rt.renameThread,
+    onInvokeAction: rt.invokeAction,
   };
 
   const threadEl = (

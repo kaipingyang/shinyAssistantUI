@@ -768,6 +768,29 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     messageQueueRef.current.set(tid, q);
   }, []);
 
+  // ── invokeAction:客户端动作(如 /model /clear),不发给 AI ────────────────────
+  // 在对话里记录一条"用户操作"气泡 + 一条系统确认(ack)气泡,并把 action id 发给 R
+  // (on_action 执行真实操作,如切模型 / 清历史)。绝不触发 AI run。
+  const invokeAction = useCallback((item: { id: string; label?: string; section?: string }) => {
+    const threadId = currentThreadIdRef.current;
+    const label = item.label ?? item.id;
+    setMessagesMap((prev) => {
+      const msgs = prev[threadId] ?? [];
+      const updated: ThreadMessageLike[] = [
+        ...msgs,
+        { id: `user-${Date.now()}`, role: "user" as const,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          content: [{ type: "text" as const, text: `/${item.id}` }], metadata: { custom: { shinyAction: true } } as any },
+        { id: `action-${Date.now()}`, role: "assistant" as const,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}` }], metadata: { custom: { shinyActionAck: true } } as any },
+      ];
+      if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+      return { ...prev, [threadId]: updated };
+    });
+    bridge.current.sendAction(item.id);
+  }, [inputId]);
+
   // ── onEdit ───────────────────────────────────────────────────────────────
   // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新插入编辑后的
   // user 消息并重发。必须重新插入——外部存储模式下框架不持有消息，messagesMap 是
@@ -992,6 +1015,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   return {
     runtime, sendToolApproval, switchToNewThread, sendAction, renameThread, enqueueMessage,
+    invokeAction,
     artifacts, activeArtifactId,
     openArtifact: (id: string) => setActiveArtifactId(id),
     closeArtifact: () => setActiveArtifactId(null),
