@@ -1,5 +1,7 @@
 "use client";
 import { safeUrl as shinySafeUrl } from "@/helpers";
+import { useShinyConfig } from "@/shiny-config-context";
+import { formatMessageTime } from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -37,6 +39,7 @@ import {
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
   useAuiState,
+  useAui,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -47,6 +50,7 @@ import {
   CopyIcon,
   DownloadIcon,
   MicIcon,
+  ClockIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -248,6 +252,47 @@ const Composer: FC = () => {
   );
 };
 
+const ComposerQueue: FC = () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aui = useAui() as any;
+  const { onEnqueue } = useShinyConfig();
+  return (
+    <TooltipIconButton
+      tooltip="Queue message (send after current reply)"
+      side="bottom"
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="aui-composer-queue-btn size-7 rounded-full"
+      aria-label="Queue message"
+      onClick={() => {
+        const t = (aui.composer().getState().text as string) ?? "";
+        if (t.trim()) {
+          onEnqueue(t);
+          aui.composer().setText("");
+        }
+      }}
+    >
+      <ClockIcon className="size-4" />
+    </TooltipIconButton>
+  );
+};
+
+// 消息时间戳(从 message id 尾部 epoch 解析),gated by config.show_timestamps
+const ShinyTimestamp: FC = () => {
+  const { showTimestamps } = useShinyConfig();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const id = useAuiState((s: any) => s.message?.id as string | undefined);
+  if (!showTimestamps) return null;
+  const t = formatMessageTime(id);
+  if (!t) return null;
+  return (
+    <span className="aui-message-timestamp text-muted-foreground px-1 text-[10px]" data-timestamp={t}>
+      {t}
+    </span>
+  );
+};
+
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
@@ -301,6 +346,7 @@ const ComposerAction: FC = () => {
           </ComposerPrimitive.Send>
         </AuiIf>
         <AuiIf condition={(s) => s.thread.isRunning}>
+          <ComposerQueue />
           <ComposerPrimitive.Cancel asChild>
             <Button
               type="button"
@@ -438,6 +484,7 @@ const AssistantMessage: FC = () => {
       >
         <BranchPicker />
         <AssistantActionBar />
+        <ShinyTimestamp />
       </div>
     </MessagePrimitive.Root>
   );
@@ -508,6 +555,7 @@ const UserMessage: FC = () => {
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
           <UserActionBar />
         </div>
+        <ShinyTimestamp />
       </div>
 
       <BranchPicker

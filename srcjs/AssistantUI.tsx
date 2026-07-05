@@ -5,6 +5,7 @@ import { useShinyRuntime } from "./runtime";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { ArtifactPanel } from "./artifact-panel";
 import { registerApprovalHandler, unregisterApprovalHandler } from "./approval-registry";
+import { ShinyConfigContext } from "./shiny-config-context";
 
 interface AssistantUIProps {
   inputId: string;
@@ -26,8 +27,16 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const activeArtifact =
     rt.artifacts.find((a) => a.id === rt.activeArtifactId) ?? null;
 
+  const cfgValue = {
+    tools: (config?.tools as { name: string; description?: string }[]) ?? [],
+    commands: (config?.commands as { name: string; description?: string; prompt: string }[]) ?? [],
+    showTimestamps: config?.show_timestamps === true,
+    onEnqueue: rt.enqueueMessage,
+  };
+
   return (
     <AssistantRuntimeProvider runtime={rt.runtime}>
+      <ShinyConfigContext.Provider value={cfgValue}>
       <div className="aui-root flex h-full min-h-0">
         <div className="min-w-0 flex-1">
           <Thread
@@ -46,6 +55,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
           </div>
         )}
       </div>
+      </ShinyConfigContext.Provider>
     </AssistantRuntimeProvider>
   );
 }
