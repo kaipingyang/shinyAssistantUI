@@ -348,6 +348,48 @@ make_claude_handler <- function(options       = NULL,
     save_session_map()
   }
 
+  # ── 客户端动作分发器(供 assistantUIServer 的 on_action 委派)──────────────
+  # 把 action id 映射到 ClaudeSDKClient 的控制方法(真实操作,不发给 AI)。
+  # id 约定:"model:<name>" / "permissions:<mode>" / "context" / "interrupt" / "clear"
+  # send_action_result(message, status) 把结果回传 UI(更新动作气泡)。
+  claude_action <- function(id, thread_id, send_action_result = function(...) {}) {
+    cl <- clients[[thread_id]]
+    ok <- function(msg) send_action_result(msg, "ok")
+    err <- function(msg) send_action_result(msg, "error")
+    tryCatch({
+      if (grepl("^model:", id)) {
+        model <- sub("^model:", "", id)
+        if (is.null(cl)) cl <- get_client(thread_id)
+        cl$set_model(model)
+        ok(paste0("Switched model to ", model))
+      } else if (grepl("^permissions:", id)) {
+        mode <- sub("^permissions:", "", id)
+        if (is.null(cl)) cl <- get_client(thread_id)
+        cl$set_permission_mode(mode)
+        ok(paste0("Permission mode: ", mode))
+      } else if (identical(id, "context")) {
+        if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
+        usage <- cl$get_context_usage()
+        # 尽力提取 token 数;字段未知时给通用信息
+        tot <- tryCatch(usage$total_tokens %||% usage$used_tokens %||% NULL, error = function(e) NULL)
+        ok(if (!is.null(tot)) paste0("Context: ~", tot, " tokens used") else "Context usage retrieved")
+      } else if (identical(id, "interrupt")) {
+        if (!is.null(cl)) cl$interrupt()
+        ok("Interrupted")
+      } else if (identical(id, "clear")) {
+        # 清当前线程:断开 client + 清 session 映射,下条消息重新开
+        if (!is.null(cl)) tryCatch(cl$disconnect(), error = function(e) NULL)
+        clients[[thread_id]] <<- NULL
+        session_map[[thread_id]] <<- NULL
+        save_session_map()
+        ok("Conversation cleared")
+      } else {
+        err(paste0("Unknown action: ", id))
+      }
+    }, error = function(e) err(paste0("Action failed: ", conditionMessage(e))))
+    invisible(NULL)
+  }
+
   # 回收所有 client 子进程（每个 ClaudeSDKClient 持有一个 CLI 子进程）。
   # 通过 attr 暴露给 assistantUIServer，在 session 结束时调用，防止长生命周期
   # Shiny session 不断新建线程导致子进程累积泄漏。
@@ -579,6 +621,7 @@ make_claude_handler <- function(options       = NULL,
   })
 
   attr(handler_fn, "cleanup") <- cleanup
+  attr(handler_fn, "action_handler") <- claude_action
   handler_fn
 }
 

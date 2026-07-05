@@ -47,13 +47,14 @@ export interface ShinyBridge {
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => void;
-  sendAction: (actionId: string) => void;
+  sendAction: (actionId: string, threadId: string) => void;
   sendRename: (threadId: string, title: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
+  onActionResult: (handler: (data: { threadId?: string; message?: string; status?: string }) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onLoadThread: (handler: (data: { threadId: string; messages: unknown[] }) => void) => void;
 }
@@ -180,10 +181,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendAction(actionId) {
+    sendAction(actionId, threadId) {
       Shiny.setInputValue(
         `${inputId}_action`,
-        { id: actionId, ts: Date.now() },
+        { id: actionId, threadId, ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -230,6 +231,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
 
     onClear(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:clear`, (_data) => handler());
+    },
+
+    onActionResult(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:action-result`, (data) => {
+        handler(data as { threadId?: string; message?: string; status?: string });
+      });
     },
 
     onSessions(handler) {

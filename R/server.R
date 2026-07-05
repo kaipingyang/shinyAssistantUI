@@ -196,6 +196,12 @@ assistantUIServer <- function(id, handler,
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(on_feedback); force(modal)
   force(on_rename)
+  # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
+  # 且用户未自定义 on_action,则自动接线,使 /model、/clear 等客户端动作开箱即用。
+  if (is.null(on_action)) {
+    .action_handler <- attr(handler, "action_handler")
+    if (!is.null(.action_handler)) on_action <- .action_handler
+  }
   force(code_theme); force(strings); force(assistant_avatar)
   force(theme); force(dark_mode)
   force(show_timestamps)
@@ -344,7 +350,16 @@ assistantUIServer <- function(id, handler,
     shiny::observeEvent(session$input[[paste0(input_id, "_action")]], {
       msg <- session$input[[paste0(input_id, "_action")]]
       if (is.null(msg)) return()
-      on_action(msg$id)
+      tid <- msg$threadId
+      # 向 UI 回传动作结果(更新 ack 气泡):send_action_result(message, status="ok"|"error")
+      send_action_result <- function(message, status = "ok") {
+        session$sendCustomMessage(paste0(input_id, ":action-result"),
+                                  list(threadId = tid, message = message, status = status))
+      }
+      all_args <- list(id = msg$id, thread_id = tid, send_action_result = send_action_result)
+      pars <- names(formals(on_action))
+      call_args <- if ("..." %in% pars) all_args else all_args[names(all_args) %in% pars]
+      do.call(on_action, call_args)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

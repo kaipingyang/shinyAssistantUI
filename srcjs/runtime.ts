@@ -188,7 +188,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lastActionAckRef = useRef<{ threadId: string; ackId: string } | null>(null);  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deliverTextRef  = useRef<((text: string, threadId: string) => void) | null>(null);
   const hasReasoningRef = useRef(false); // thinking arrived before text chunks
   // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
@@ -287,6 +287,26 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setCurrentThreadId(newId);
       setIsRunning(false);
       streamingIdRef.current = null;
+    });
+
+    // ── 注册 :action-result（客户端动作结果 → 更新 ack 气泡文本/状态）──────────
+    bridge.current.onActionResult(({ threadId, message, status }) => {
+      const target = lastActionAckRef.current;
+      const tid = threadId ?? target?.threadId ?? currentThreadIdRef.current;
+      const ackId = target?.ackId;
+      if (!ackId || !message) return;
+      const prefix = status === "error" ? "\u26a0\ufe0f " : "\u2713 ";
+      setMessagesMap((prev) => {
+        const msgs = prev[tid] ?? [];
+        const updated = msgs.map((m): ThreadMessageLike =>
+          m.id === ackId
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ? ({ ...m, content: [{ type: "text" as const, text: prefix + message }] } as any)
+            : m,
+        );
+        if (!isServerMode.current) saveMessages(inputId, tid, updated);
+        return { ...prev, [tid]: updated };
+      });
     });
 
     // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
@@ -774,6 +794,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const invokeAction = useCallback((item: { id: string; label?: string; section?: string }) => {
     const threadId = currentThreadIdRef.current;
     const label = item.label ?? item.id;
+    const ackId = `action-${Date.now()}`;
     setMessagesMap((prev) => {
       const msgs = prev[threadId] ?? [];
       const updated: ThreadMessageLike[] = [
@@ -781,14 +802,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         { id: `user-${Date.now()}`, role: "user" as const,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           content: [{ type: "text" as const, text: `/${item.id}` }], metadata: { custom: { shinyAction: true } } as any },
-        { id: `action-${Date.now()}`, role: "assistant" as const,
+        { id: ackId, role: "assistant" as const,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}` }], metadata: { custom: { shinyActionAck: true } } as any },
+          content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}\u2026` }], metadata: { custom: { shinyActionAck: true } } as any },
       ];
       if (!isServerMode.current) saveMessages(inputId, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
-    bridge.current.sendAction(item.id);
+    lastActionAckRef.current = { threadId, ackId };
+    bridge.current.sendAction(item.id, threadId);
   }, [inputId]);
 
   // ── onEdit ───────────────────────────────────────────────────────────────
