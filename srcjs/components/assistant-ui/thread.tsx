@@ -1,7 +1,7 @@
 "use client";
 import { safeUrl as shinySafeUrl } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
-import { formatMessageTime, detectSlashTrigger } from "@/helpers";
+import { formatMessageTime, detectSlashTrigger, detectMentionTrigger } from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -240,6 +240,7 @@ const Composer: FC = () => {
           <ComposerAttachments />
           <div className="relative">
             <ShinySlashCommands />
+            <ShinyMentions />
             <ComposerPrimitive.Input
               placeholder="Send a message..."
               className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
@@ -313,7 +314,61 @@ const ShinySlashCommands: FC = () => {
   );
 };
 
-const ComposerQueue: FC = () => {  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+// @mention 工具发现弹窗:检测 @trigger,按名过滤 config.tools,插入 `@name `。
+const ShinyMentions: FC = () => {
+  const { tools } = useShinyConfig();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const aui = useAui() as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const text = useAuiState((s: any) => (s.composer?.text as string) ?? "");
+  const [idx, setIdx] = useState(0);
+
+  const cursor = text.length;
+  const trig = tools.length ? detectMentionTrigger(text, cursor) : null;
+  if (!trig) return null;
+  const q = trig.query.toLowerCase();
+  const matches = tools.filter((t) => t.name.toLowerCase().startsWith(q));
+  if (matches.length === 0) return null;
+  const sel = Math.min(idx, matches.length - 1);
+
+  const choose = (name: string) => {
+    const before = text.slice(0, trig.offset);
+    const after = text.slice(cursor);
+    aui.composer().setText(`${before}@${name} ${after}`);
+    setIdx(0);
+    const ta = document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null;
+    ta?.focus();
+  };
+
+  return (
+    <div
+      className="aui-mention-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-60 w-72 overflow-auto rounded-lg border p-1 shadow-lg"
+      onKeyDownCapture={(e) => {
+        if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => (i + 1) % matches.length); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => (i - 1 + matches.length) % matches.length); }
+      }}
+    >
+      {matches.map((t, i) => (
+        <button
+          key={t.name}
+          type="button"
+          data-mention-tool={t.name}
+          onMouseDown={(e) => { e.preventDefault(); choose(t.name); }}
+          className={
+            "aui-mention-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
+            (i === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
+          }
+        >
+          <span className="font-medium">@{t.name}</span>
+          {t.description && <span className="text-muted-foreground text-xs">{t.description}</span>}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const ComposerQueue: FC = () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   const { onEnqueue } = useShinyConfig();
   return (

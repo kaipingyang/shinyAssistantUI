@@ -3,7 +3,7 @@ import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
   extractAttachments, expandSlashCommands, safeUrl,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
-  computeToolDepth, themeToCssVars, formatMessageTime,
+  computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -345,5 +345,16 @@ describe("formatMessageTime", () => {
   it("null/undefined 返回 null", () => {
     expect(formatMessageTime(null)).toBeNull();
     expect(formatMessageTime(undefined)).toBeNull();
+  });
+});
+
+describe("detectMentionTrigger", () => {
+  it("检测 @ 触发词", () => {
+    expect(detectMentionTrigger("@calc", 5)).toEqual({ query: "calc", offset: 0 });
+    expect(detectMentionTrigger("use @get", 8)).toEqual({ query: "get", offset: 4 });
+  });
+  it("无 @ 或 @ 前非空白返回 null", () => {
+    expect(detectMentionTrigger("hello", 5)).toBeNull();
+    expect(detectMentionTrigger("a@b", 3)).toBeNull();
   });
 });

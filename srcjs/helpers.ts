@@ -165,6 +165,19 @@ export function detectSlashTrigger(text: string, cursorPos: number): { query: st
   return null;
 }
 
+// 与 detectSlashTrigger 同理,检测光标前的 @mention 触发词(行首或空白后的 @)。
+export function detectMentionTrigger(text: string, cursorPos: number): { query: string; offset: number } | null {
+  const upToCursor = text.slice(0, cursorPos);
+  for (let i = upToCursor.length - 1; i >= 0; i--) {
+    const ch = upToCursor[i];
+    if (/\s/.test(ch)) return null;
+    if (ch === "@" && (i === 0 || /\s/.test(upToCursor[i - 1]))) {
+      return { query: upToCursor.slice(i + 1), offset: i };
+    }
+  }
+  return null;
+}
+
 // 监听 el 从 DOM 被移除（modal 反复开关、renderUI/removeUI、navset 切换），触发 onRemove。
 // 监听 el.parentNode 的 childList（非 body 全子树）——只关心 el 是否被移除，避免 widget
 // 自身流式渲染的高频 DOM 变动持续自触发回调。返回 disconnect 函数。
