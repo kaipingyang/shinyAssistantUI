@@ -9,7 +9,7 @@ handler <- coro::async(function(message, on_chunk, on_done, on_tool_call, on_too
   if (grepl("search", message, ignore.case = TRUE)) {
     # 服务端工具契约:serverTool=TRUE
     on_tool_call("st1", "web_search", args = list(query = "R shiny htmlwidget"),
-                 annotations = list(serverTool = TRUE))
+                 annotations = list(serverTool = TRUE, icon = "globe"))
     on_tool_result("st1", "Found 3 results about R Shiny htmlwidgets.", is_error = FALSE)
     on_chunk("Based on the web search, here is the answer.")
     on_done()

@@ -594,22 +594,24 @@ make_claude_handler <- function(options       = NULL,
           etype <- evt[["type"]]
           delta <- evt[["delta"]]
           bidx  <- as.character(evt[["index"]] %||% "")
+          parent <- msg[["parent_tool_use_id"]]  # 子agent工具的父 Task 调用 id(用于嵌套缩进)
 
           if (identical(etype, "content_block_start")) {
             blk <- evt[["content_block"]]
             if (identical(blk[["type"]], "tool_use")) {
-              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]],
+              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
                                  args_buf="", emitted=FALSE, approval_handled=FALSE)
               if (!is.null(on_tool_call_start))
-                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]])
+                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
+                                   annotations=list(parentToolCallId=parent))
             } else if (identical(blk[["type"]], "server_tool_use")) {
               # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
               # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
-              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]],
+              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
                                  args_buf="", emitted=FALSE, approval_handled=FALSE, server=TRUE)
               if (!is.null(on_tool_call_start))
                 on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
-                                   annotations=list(serverTool=TRUE))
+                                   annotations=list(serverTool=TRUE, parentToolCallId=parent))
             } else if (identical(blk[["type"]], "advisor_tool_result")) {
               # 服务端工具结果块(wire 名 advisor_tool_result,非 server_tool_result):
               # 直接作为对应工具的结果发出(无 is_error 字段)。
@@ -644,7 +646,10 @@ make_claude_handler <- function(options       = NULL,
               )
               on_tool_call(tool_call_id=blk$id, tool_name=blk$name,
                            args=args_parsed,
-                           annotations=if (isTRUE(blk$server)) list(serverTool=TRUE) else list())
+                           annotations=c(
+                             if (isTRUE(blk$server)) list(serverTool=TRUE) else list(),
+                             list(parentToolCallId=blk$parent)
+                           ))
               tb[[bidx]]$emitted <- TRUE
             }
           }

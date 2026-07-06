@@ -22,6 +22,8 @@ send("please search the web")
 ok <- FALSE; for (i in 1:12) { Sys.sleep(1); if (isTRUE(ev("!!document.querySelector('[data-server-tool]')"))) { ok<-TRUE; break } }
 chk("server_tool_badge", ok, ev("(function(){var e=document.querySelector('[data-server-tool]');return e?e.innerText:'(none)'})()"))
 chk("server_tool_name_shown", grepl("web_search", ev("document.body.innerText")))
+chk("tool_icon_rendered", isTRUE(ev("!!document.querySelector('[data-tool-icon=globe]')")))
+chk("arg_summary_title", ev("Array.from(document.querySelectorAll('[data-slot=tool-fallback-trigger-label]')).some(e=>/web_search\\(R shiny/.test(e.innerText))"))
 
 # 2) 审批字段(新会话)
 Sys.sleep(1); send("delete the file")
