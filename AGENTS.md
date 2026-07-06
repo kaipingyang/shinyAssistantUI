@@ -81,6 +81,17 @@ devtools::load_all("."); testthat::test_dir("tests/testthat")   # R helpers
   `/context`, `/compact`, `/mcp`, `/resume`, `/clear`, fork/tag/stoptask — dispatched by
   `make_claude_handler`'s `action_handler`, auto-wired by `assistantUIServer`.
 - Aligned SDK→UI signals: cost/usage footer, subagent/Task progress cards (+ Stop → `stop_task`),
-  rate-limit banner, status line, command auto-discovery (`get_server_info`).
-- SDK parser gap (see `../ClaudeAgentSDK/.claude/plans/`): no `server_tool_use`/`task_updated`
-  parsing yet — needs a targeted R SDK 0.2.1 bump for web-search / full task-updated support.
+  rate-limit banner, status line, command auto-discovery (`get_server_info`), server-tool badge,
+  approval card title/displayName/description, `task_updated` terminal state, hook-event status.
+- SDK now at **v0.2.1** (installed): parses `server_tool_use`/`advisor_tool_result`/`task_updated`/
+  `HookEventMessage`; `PermissionRequestMessage` has title/display_name/description;
+  `ResultMessage` has api_error_status/deferred_tool_use; options add
+  include_hook_events/strict_mcp_config/skills.
+- **Real-machine data-shape finding (copilot-api :4141 + claude CLI, 2026-07-06)**: a web-search
+  prompt yields content blocks `thinking/tool_use/text` only — **`server_tool_use` does NOT
+  appear**; WebSearch arrives as a **client `tool_use` (name `WebSearch`)** and renders as a
+  normal tool card. So the 🌐 server-tool badge path is **correct but dormant** on this backend
+  (fixture-verified, ready if a backend emits `server_tool_use`/`advisor_tool_result`).
+  `HookEventMessage` **is emitted by default** here (no `include_hook_events` needed) and does
+  not disrupt rendering. Re-confirm server-tool shape if you switch to a backend that runs
+  Anthropic server-side tools (advisor/web_search server variants).
