@@ -34,9 +34,10 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
           🌐 server tool
         </span>
       )}
-      <ToolFallback.Root defaultOpen={ann?.defaultOpen !== undefined ? Boolean(ann.defaultOpen) : pending}>
+      <ToolFallback.Root defaultOpen={ann?.defaultOpen !== undefined ? Boolean(ann.defaultOpen) : true}>
       <ToolFallback.Trigger toolName={toolName} status={status} />
       <ToolFallback.Content>
+        <ToolFallback.Args argsText={argsText} />
 
         {pending && needsApproval && decision === null && (
           <div className="aui-shiny-approval flex flex-col gap-2 pt-1">
