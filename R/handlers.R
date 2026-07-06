@@ -602,6 +602,18 @@ make_claude_handler <- function(options       = NULL,
                                  args_buf="", emitted=FALSE, approval_handled=FALSE)
               if (!is.null(on_tool_call_start))
                 on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]])
+            } else if (identical(blk[["type"]], "server_tool_use")) {
+              # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
+              # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
+              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]],
+                                 args_buf="", emitted=FALSE, approval_handled=FALSE, server=TRUE)
+              if (!is.null(on_tool_call_start))
+                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
+                                   annotations=list(serverTool=TRUE))
+            } else if (identical(blk[["type"]], "advisor_tool_result")) {
+              # 服务端工具结果块(wire 名 advisor_tool_result,非 server_tool_result):
+              # 直接作为对应工具的结果发出(无 is_error 字段)。
+              on_tool_result(blk[["tool_use_id"]], blk[["content"]], is_error = FALSE)
             }
 
           } else if (identical(etype, "content_block_delta") && is.list(delta)) {
@@ -631,7 +643,8 @@ make_claude_handler <- function(options       = NULL,
                 error = function(e) list()
               )
               on_tool_call(tool_call_id=blk$id, tool_name=blk$name,
-                           args=args_parsed, annotations=list())
+                           args=args_parsed,
+                           annotations=if (isTRUE(blk$server)) list(serverTool=TRUE) else list())
               tb[[bidx]]$emitted <- TRUE
             }
           }
@@ -646,7 +659,14 @@ make_claude_handler <- function(options       = NULL,
             tool_call_id = msg$request_id,
             tool_name    = msg$tool_name,
             args         = msg$tool_input,
-            annotations  = list(requiresApproval=TRUE, suggestions=msg$suggestions %||% list())
+            annotations  = list(
+              requiresApproval = TRUE,
+              suggestions      = msg$suggestions %||% list(),
+              # v0.2.1:审批卡片主文案/按钮标签/副标题
+              title        = msg$title,
+              displayName  = msg$display_name,
+              description  = msg$description
+            )
           )
 
           decision <- coro::await(wait_for_approval(msg$request_id))
@@ -723,6 +743,15 @@ make_claude_handler <- function(options       = NULL,
         } else if (inherits(msg, "TaskNotificationMessage")) {
           if (!is.null(on_task)) on_task(msg$task_id, "notification",
                                          status = msg$status, summary = msg$summary)
+        } else if (inherits(msg, "TaskUpdatedMessage")) {
+          # 部分子agent的终态只经 task_updated 的 patch 到达(无单独 notification)。
+          # patch 里可能带 status/description,尽力提取,收尾进度卡。
+          if (!is.null(on_task)) {
+            patch <- msg$patch %||% list()
+            on_task(msg$task_id, "updated",
+                    status = msg$status %||% patch$status,
+                    description = patch$description %||% patch$prompt)
+          }
 
         # #3 限流告警。
         } else if (inherits(msg, "RateLimitEvent")) {
@@ -731,6 +760,12 @@ make_claude_handler <- function(options       = NULL,
             on_rate_limit(status = info$status, resets_at = info$resets_at,
                           utilization = info$utilization, type = info$rate_limit_type)
           }
+
+        # hook 事件流(需 ClaudeAgentOptions include_hook_events=TRUE 才会吐)→ 状态行。
+        } else if (inherits(msg, "HookEventMessage")) {
+          if (!is.null(on_status))
+            on_status(paste0("hook:", msg$subtype),
+                      text = paste0("Hook: ", msg$hook_event_name %||% msg$subtype))
 
         # #4 系统状态行:subtype = status / thinking_tokens / init 等(TaskXxx 已在上面拦截)。
         } else if (inherits(msg, "SystemMessage")) {

@@ -15,6 +15,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   const needsApproval = ann?.requiresApproval === true;
   const resultType = (ann?.resultType as string | undefined) ?? "auto";
   const resultLang = (ann?.resultLang as string | undefined) ?? "text";
+  const isServerTool = ann?.serverTool === true;
   const isError = (status?.type === "incomplete") || ann?.isError === true;
   const [decision, setDecision] = useState<null | "approved" | "denied">(null);
 
@@ -24,15 +25,44 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   };
 
   return (
-    <ToolFallback.Root defaultOpen={ann?.defaultOpen !== undefined ? Boolean(ann.defaultOpen) : pending}>
+    <div className="aui-shiny-tool">
+      {isServerTool && (
+        <span
+          data-server-tool
+          className="aui-server-tool-badge mb-1 inline-flex w-fit items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+        >
+          🌐 server tool
+        </span>
+      )}
+      <ToolFallback.Root defaultOpen={ann?.defaultOpen !== undefined ? Boolean(ann.defaultOpen) : pending}>
       <ToolFallback.Trigger toolName={toolName} status={status} />
       <ToolFallback.Content>
-        <ToolFallback.Args argsText={argsText} />
 
         {pending && needsApproval && decision === null && (
-          <div className="aui-shiny-approval flex flex-wrap items-center gap-2 pt-1">
-            <Button size="sm" onClick={() => decide(true)}>Approve</Button>
-            <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
+          <div className="aui-shiny-approval flex flex-col gap-2 pt-1">
+            {(ann?.title || ann?.description || ann?.displayName) && (
+              <div className="aui-approval-meta flex flex-col gap-0.5">
+                {ann?.title != null && String(ann.title) !== "" && (
+                  <p data-approval-title className="text-sm font-medium text-foreground">
+                    {String(ann.title)}
+                  </p>
+                )}
+                {ann?.displayName != null && String(ann.displayName) !== "" && (
+                  <p data-approval-displayname className="text-xs font-medium text-muted-foreground">
+                    {String(ann.displayName)}
+                  </p>
+                )}
+                {ann?.description != null && String(ann.description) !== "" && (
+                  <p data-approval-description className="text-xs text-muted-foreground">
+                    {String(ann.description)}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => decide(true)}>Approve</Button>
+              <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
+            </div>
           </div>
         )}
         {decision && (
@@ -54,5 +84,6 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
         )}
       </ToolFallback.Content>
     </ToolFallback.Root>
+    </div>
   );
 };

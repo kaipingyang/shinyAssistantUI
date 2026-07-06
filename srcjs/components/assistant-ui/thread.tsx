@@ -272,7 +272,7 @@ type SlashEntry =
 const ShinyStatusPanels: FC = () => {
   const { rateLimit, tasks, statusText, stopTask } = useShinyConfig();
   const activeTasks = (tasks ?? []).filter(
-    (t) => t.kind !== "notification" || !/^(completed|done|stopped|failed)$/i.test(t.status ?? ""),
+    (t) => !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(t.status ?? ""),
   );
   const hasAny = rateLimit || activeTasks.length > 0 || statusText;
   if (!hasAny) return null;
