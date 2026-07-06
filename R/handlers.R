@@ -883,7 +883,10 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               toolCallId = blk[["id"]] %||% paste0("h-tool-", length(parts)),
               toolName   = blk[["name"]] %||% "unknown",
               args       = args_val,
-              argsText   = tryCatch(jsonlite::toJSON(args_val, auto_unbox=TRUE), error=function(e) "{}"),
+              # 必须 as.character():jsonlite::toJSON 返回 "json" 类对象,直接放进
+              # sendCustomMessage 会被 Shiny 当【原样 JSON】序列化 → 浏览器收到的是
+              # 对象而非字符串 → ToolFallback.Args 渲染 {argsText} 触发 React #31。
+              argsText   = tryCatch(as.character(jsonlite::toJSON(args_val, auto_unbox=TRUE)), error=function(e) "{}"),
               result     = "Session ended",
               isError    = FALSE
             )
