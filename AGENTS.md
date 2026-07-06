@@ -25,6 +25,30 @@ R CMD INSTALL --no-multiarch --with-keep.source .   # R + inst/www/ → installe
 If you skip this, your verification runs against **stale code** and "new features don't work"
 — a real trap that has cost multiple debugging rounds.
 
+## 🔴 Rule #1b — `jsonlite::toJSON()` result must be `as.character()`'d before `sendCustomMessage`
+
+`jsonlite::toJSON(x)` returns a **`json`-classed** value. Shiny's `sendCustomMessage`
+serializer runs with `json_verbatim=TRUE`, so a `json`-classed field is emitted as **raw JSON
+(unquoted)** → the browser receives an **object**, not a string. If the JS side expects a
+string (e.g. a tool part's `argsText`, which `ToolFallback.Args` renders as `{argsText}`),
+an object there throws **React #31 "objects are not valid as a React child"** and crashes the
+whole widget on render. Always: `argsText = as.character(jsonlite::toJSON(x, auto_unbox=TRUE))`.
+(Bit us in the session-load path `.claude_msgs_to_thread`; the live `on_tool_call` path already
+did this.)
+
+## 🔴 Rule #1c — Browser verification MUST capture console errors + test the history path
+
+Selector-based checks (`querySelector('.aui-root')`, `.click()` by selector) are **position-
+and crash-blind**: they pass even when a component renders **off-screen** (radix popper mis-
+anchor) or when React throws inside an **error boundary**. Every chromote check should also:
+- **Capture console errors / exceptions** (`Runtime.consoleAPICalled` + `Runtime.exceptionThrown`)
+  and assert none look like `Minified React error` / `not valid as a React child`.
+- Exercise the **session-load / restore-from-history path** (not just live streaming) — several
+  bugs only surface when historical messages (esp. tool calls with `file_path` etc.) are
+  re-rendered on open. See `tests/verify/verify_session_load.R`.
+- For popovers/menus, assert the opened element is **in the viewport** (getBoundingClientRect),
+  not merely present in the DOM.
+
 ## 🔴 Rule #2 — Never `pkill -f <pattern>` from your own shell
 
 `pkill -9 -f chrome` (or any `-f <str>`) matches the pkill command's **own** argv, which
