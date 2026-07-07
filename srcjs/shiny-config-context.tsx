@@ -17,6 +17,7 @@ export interface ShinyConfigCtx {
   tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
+  warming?: boolean;
   stopTask?: (taskId: string) => void;
   forkThread?: () => void;
 }

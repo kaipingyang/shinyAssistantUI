@@ -61,6 +61,7 @@ export interface ShinyBridge {
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
+  onWarming: (handler: (data: { threadId?: string; active?: boolean }) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
 }
 
@@ -255,6 +256,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     onStatus(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:status`, (data) => handler(data as never));
+    },
+    onWarming(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:warming`, (data) => handler(data as never));
     },
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));

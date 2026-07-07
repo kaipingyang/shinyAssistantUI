@@ -193,6 +193,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [tasksMap, setTasksMap] = useState<Record<string, Record<string, TaskInfo>>>({}); // #2 每线程 taskId→info
   const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
   const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
+  const [warmingThreads, setWarmingThreads] = useState<Set<string>>(new Set());      // 每线程冷启动中
   const [serverCommands, setServerCommands] = useState<Array<{ name: string; description?: string }>>([]); // #5
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
@@ -355,6 +356,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const label = d.text || (d.status === "thinking_tokens" ? "Thinking\u2026"
         : d.status === "init" ? "Initializing\u2026" : d.status);
       setStatusText(label ?? null);
+    });
+    // ── 每线程冷启动指示 ──────────────────────────────────────────────────────
+    bridge.current.onWarming((d) => {
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      setWarmingThreads((prev) => {
+        const next = new Set(prev);
+        if (d.active) next.add(tid); else next.delete(tid);
+        return next;
+      });
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     bridge.current.onServerCommands((d) => {
@@ -1108,6 +1118,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     rateLimit,                                                           // #3
     statusText,                                                          // #4
     serverCommands,                                                      // #5
+    warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
     stopTask: (taskId: string) => invokeAction({ id: `stoptask:${taskId}`, label: `Stop task` }), // #7
     forkThread: () => invokeAction({ id: "fork", label: "Fork conversation" }),                    // #6
   };

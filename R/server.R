@@ -347,6 +347,11 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":server-commands"),
                                   list(commands = commands, outputStyles = output_styles,
                                        threadId = thread_id))
+      },
+      # 每线程冷启动指示:client 首次连接(spawn CLI 子进程)期间 active=TRUE。
+      on_warming = function(active) {
+        session$sendCustomMessage(paste0(input_id, ":warming"),
+                                  list(active = isTRUE(active), threadId = thread_id))
       }
     )
   }
@@ -469,6 +474,7 @@ assistantUIServer <- function(id, handler,
         on_task           = cbs$on_task,
         on_rate_limit     = cbs$on_rate_limit,
         on_status         = cbs$on_status,
+        on_warming        = cbs$on_warming,
         on_commands       = cbs$on_commands,
         attachments       = attachments,
         is_reload         = is_reload,

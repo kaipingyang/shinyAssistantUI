@@ -485,12 +485,21 @@ make_claude_handler <- function(options       = NULL,
     is_cancelled, wait_for_approval,
     on_tool_call_start = NULL, on_tool_call_delta = NULL,
     on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
-    on_commands = NULL
+    on_commands = NULL, on_warming = NULL
   ) {
+    # 每线程冷启动:该线程尚无 client → connect() 要 spawn CLI 子进程 + initialize,
+    # 首条消息慢。先发"冷启动中"信号,并【让出事件循环】使指示器在阻塞 connect 之前
+    # 就渲染出来(否则 sendCustomMessage 会排到 connect 之后才 flush,指示器出现太晚)。
+    cold <- is.null(clients[[thread_id]])
+    if (cold && !is.null(on_warming)) {
+      on_warming(TRUE)
+      coro::await(later_promise(0.05))
+    }
     client <- tryCatch(
       get_client(thread_id),
       error = function(e) { on_error(conditionMessage(e)); NULL }
     )
+    if (cold && !is.null(on_warming)) on_warming(FALSE)  # 连上(或失败)即清除指示器
     if (is.null(client)) return(invisible(NULL))
 
     # #5 命令自动发现:每个 client 首次连接后拉一次 get_server_info(),把 CLI 真实

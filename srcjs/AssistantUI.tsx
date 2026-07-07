@@ -58,6 +58,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     tasks: rt.tasks,
     rateLimit: rt.rateLimit,
     statusText: rt.statusText,
+    warming: rt.warming,
     stopTask: rt.stopTask,
     forkThread: rt.forkThread,
   };

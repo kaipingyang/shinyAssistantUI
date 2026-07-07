@@ -147,6 +147,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
+            <ShinyWarmingIndicator />
           </div>
 
           <ThreadPrimitive.ViewportFooter
@@ -266,6 +267,22 @@ type SlashEntry =
   | { kind: "prompt"; key: string; label: string; desc?: string; section: string }
   | { kind: "action"; key: string; label: string; desc?: string; section: string;
       item: { id: string; label?: string; section?: string } };
+
+// ── 每线程冷启动指示器:该线程 client 首次连接(spawn CLI 子进程)期间显示 ──────
+// 出现在对话流最后一条消息(用户消息)之后,连上后消失、正常回复接管。
+const ShinyWarmingIndicator: FC = () => {
+  const { warming } = useShinyConfig();
+  if (!warming) return null;
+  return (
+    <div
+      data-slot="aui_warming"
+      className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+    >
+      <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <span>❄️ Claude Code 正在冷启动这个对话线程…(首次连接较慢,后续会快)</span>
+    </div>
+  );
+};
 
 // ── ClaudeAgentSDK 能力对齐 UI ────────────────────────────────────────────────
 // #3 限流 banner + #2 子agent/Task 进度卡 + #4 系统状态行 + #7 stop_task 按钮
