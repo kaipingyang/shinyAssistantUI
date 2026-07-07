@@ -655,13 +655,17 @@ make_claude_handler <- function(options       = NULL,
           }
 
         } else if (inherits(msg, "PermissionRequestMessage")) {
+          # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
+          # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
+          # approve_tool/deny_tool 仍用 request_id。
+          tuid <- msg$tool_use_id %||% msg$request_id
           for (bidx in ls(tb)) {
-            if (identical(tb[[bidx]]$id, msg$request_id)) {
+            if (identical(tb[[bidx]]$id, tuid)) {
               tb[[bidx]]$approval_handled <- TRUE; break
             }
           }
           on_tool_call(
-            tool_call_id = msg$request_id,
+            tool_call_id = tuid,
             tool_name    = msg$tool_name,
             args         = msg$tool_input,
             annotations  = list(
@@ -674,13 +678,13 @@ make_claude_handler <- function(options       = NULL,
             )
           )
 
-          decision <- coro::await(wait_for_approval(msg$request_id))
+          decision <- coro::await(wait_for_approval(tuid))
 
           if (!interrupted && is_cancelled()) {
             interrupted <- TRUE
             tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
             tryCatch(client$interrupt(), error = function(e) NULL)
-            on_tool_result(msg$request_id, "Interrupted", is_error = TRUE)
+            on_tool_result(tuid, "Interrupted", is_error = TRUE)
             # 清理其它半截工具卡（parallel tool use 场景）
             interrupt_tool_blocks()
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
@@ -714,11 +718,11 @@ make_claude_handler <- function(options       = NULL,
                 }
               } else { client$approve_tool(msg$request_id) }
             } else { client$approve_tool(msg$request_id) }
-            pending_tool_ids <- c(pending_tool_ids, msg$request_id)
+            pending_tool_ids <- c(pending_tool_ids, tuid)
           } else {
             deny_msg <- decision$customMessage %||% "Denied by user"
             client$deny_tool(msg$request_id, deny_msg)
-            on_tool_result(msg$request_id, deny_msg, is_error = TRUE)
+            on_tool_result(tuid, deny_msg, is_error = TRUE)
           }
 
         } else if (inherits(msg, "ResultMessage")) {
