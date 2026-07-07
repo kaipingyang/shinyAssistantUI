@@ -52,6 +52,7 @@ export interface ShinyBridge {
   sendLoadSession: (sessionId: string, threadId: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
+  sendWarmup: (threadId: string) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: { threadId?: string; message?: string; status?: string }) => void) => void;
@@ -223,6 +224,13 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         `${inputId}_sessions_ready`,
         { ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+    sendWarmup(threadId) {
+      Shiny.setInputValue(
+        `${inputId}_warmup`,
+        { threadId, ts: Date.now() },
         { priority: "event" }
       );
     },

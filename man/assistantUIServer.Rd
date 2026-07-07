@@ -22,7 +22,8 @@ assistantUIServer(
   theme = NULL,
   dark_mode = FALSE,
   show_timestamps = FALSE,
-  modal = FALSE
+  modal = FALSE,
+  prewarm = TRUE
 )
 }
 \arguments{
@@ -215,6 +216,14 @@ thread.
 
 \item{modal}{Logical. If \code{TRUE}, renders the chat as a floating modal bubble
 instead of an inline panel.}
+
+\item{prewarm}{Logical (default \code{TRUE}). If the \code{handler} exposes a \code{warmup}
+attribute (e.g. \code{\link[=make_claude_handler]{make_claude_handler()}}), pre-connect the initial thread's
+client on mount so the \strong{first} message on that thread isn't slowed by the
+cold start (ClaudeSDKClient spawning the \code{claude} CLI subprocess). A brief
+cold-start indicator is shown while connecting. New threads / loaded sessions
+still cold-start on their first message (indicator shown). Set \code{FALSE} to
+avoid eagerly spawning a subprocess (e.g. resource-sensitive multi-user apps).}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

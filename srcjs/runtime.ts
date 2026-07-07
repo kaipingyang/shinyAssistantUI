@@ -461,6 +461,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
     // :sessions handler 已注册，通知 R 可以补发 sessions（解决 React 18 异步 render 时序问题）
     bridge.current.sendReady();
+    // 预热当前(初始)线程:让 R 后台连接该线程的 client,使首条消息不再冷启动。
+    // R 侧仅在 prewarm=TRUE 且 handler 暴露 warmup 时响应(ellmer 等无 warmup → no-op)。
+    bridge.current.sendWarmup(currentThreadIdRef.current);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 启动一次 streaming run（onNew 和 onReload 共用）────────────────────────

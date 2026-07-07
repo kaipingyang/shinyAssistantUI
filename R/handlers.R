@@ -805,6 +805,10 @@ make_claude_handler <- function(options       = NULL,
 
   attr(handler_fn, "cleanup") <- cleanup
   attr(handler_fn, "action_handler") <- claude_action
+  # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
+  attr(handler_fn, "warmup") <- function(thread_id) {
+    tryCatch(get_client(thread_id), error = function(e) NULL); invisible(NULL)
+  }
   handler_fn
 }
 

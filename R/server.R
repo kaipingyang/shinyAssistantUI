@@ -146,6 +146,13 @@
 #'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
 #' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
 #'   instead of an inline panel.
+#' @param prewarm Logical (default `TRUE`). If the `handler` exposes a `warmup`
+#'   attribute (e.g. [make_claude_handler()]), pre-connect the initial thread's
+#'   client on mount so the **first** message on that thread isn't slowed by the
+#'   cold start (ClaudeSDKClient spawning the `claude` CLI subprocess). A brief
+#'   cold-start indicator is shown while connecting. New threads / loaded sessions
+#'   still cold-start on their first message (indicator shown). Set `FALSE` to
+#'   avoid eagerly spawning a subprocess (e.g. resource-sensitive multi-user apps).
 #' @param on_rename Optional `function(thread_id, title)` called when the user
 #'   renames a thread in the sidebar. The new title is already persisted
 #'   client-side (localStorage); use this to sync server-side session stores.
@@ -191,7 +198,8 @@ assistantUIServer <- function(id, handler,
                               theme             = NULL,
                               dark_mode         = FALSE,
                               show_timestamps   = FALSE,
-                              modal             = FALSE) {
+                              modal             = FALSE,
+                              prewarm           = TRUE) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(on_feedback); force(modal)
@@ -541,6 +549,26 @@ assistantUIServer <- function(id, handler,
       msg$attachments %||% list()
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  # 预热:prewarm=TRUE 且 handler 暴露 warmup(如 make_claude_handler)时,JS 挂载会发来
+  # 当前 threadId → 后台连接该线程的 client,使【首条消息】不再冷启动。复用冷启动指示器:
+  # 嵌套 later 让 on_warming(TRUE) 先 flush(指示器渲染)再跑阻塞式 connect。仅初始线程一次。
+  .warmup_fn <- attr(handler, "warmup")
+  if (isTRUE(prewarm) && is.function(.warmup_fn)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_warmup")]], {
+      msg <- session$input[[paste0(input_id, "_warmup")]]
+      tid <- if (is.list(msg)) msg$threadId else NULL
+      if (is.null(tid) || !nzchar(tid %||% "")) return()
+      cbs <- make_callbacks(tid)
+      later::later(function() {
+        cbs$on_warming(TRUE)
+        later::later(function() {
+          tryCatch(.warmup_fn(tid), error = function(e) NULL)
+          cbs$on_warming(FALSE)
+        }, 0.05)
+      }, 0.1)
+    }, once = TRUE, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
 
   # session 结束时回收 handler 持有的资源（如 ClaudeSDKClient 子进程）。
   # handler 可选通过 attr(handler, "cleanup") 暴露清理函数；ellmer handler 无此 attr 则跳过。
