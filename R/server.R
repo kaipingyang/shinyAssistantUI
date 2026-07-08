@@ -146,13 +146,16 @@
 #'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
 #' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
 #'   instead of an inline panel.
-#' @param prewarm Logical (default `TRUE`). If the `handler` exposes a `warmup`
-#'   attribute (e.g. [make_claude_handler()]), pre-connect the initial thread's
-#'   client on mount so the **first** message on that thread isn't slowed by the
-#'   cold start (ClaudeSDKClient spawning the `claude` CLI subprocess). A brief
-#'   cold-start indicator is shown while connecting. New threads / loaded sessions
-#'   still cold-start on their first message (indicator shown). Set `FALSE` to
-#'   avoid eagerly spawning a subprocess (e.g. resource-sensitive multi-user apps).
+#' @param prewarm Logical (default `FALSE`). If `TRUE` and the `handler` exposes a
+#'   `warmup` attribute (e.g. [make_claude_handler()]), pre-connect the initial
+#'   thread's client on mount so the **first** message on that thread isn't slowed
+#'   by the cold start (ClaudeSDKClient spawning the `claude` CLI subprocess). A
+#'   brief cold-start indicator is shown while connecting. New threads / loaded
+#'   sessions still cold-start on their first message (indicator shown).
+#'   **Left `FALSE` by default on purpose**: enabling it makes app startup attempt
+#'   a backend connection at mount, so a slow/unreachable backend would stall the
+#'   open (the default lazy connect only happens on the first message). Turn on
+#'   only when the backend is reliably available at load.
 #' @param on_rename Optional `function(thread_id, title)` called when the user
 #'   renames a thread in the sidebar. The new title is already persisted
 #'   client-side (localStorage); use this to sync server-side session stores.
@@ -199,7 +202,7 @@ assistantUIServer <- function(id, handler,
                               dark_mode         = FALSE,
                               show_timestamps   = FALSE,
                               modal             = FALSE,
-                              prewarm           = TRUE) {
+                              prewarm           = FALSE) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(on_feedback); force(modal)

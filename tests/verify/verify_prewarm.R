@@ -10,7 +10,7 @@ ev <- function(b,js) tryCatch(b$Runtime$evaluate(js)$result$value, error=functio
 send <- function(b,txt){ev(b,"(function(){var t=document.querySelector('textarea');if(t)t.focus();return !!t})()");Sys.sleep(0.4);b$Input$insertText(text=txt);Sys.sleep(0.3);b$Input$dispatchKeyEvent(type='keyDown',key='Enter',code='Enter',windowsVirtualKeyCode=13L);b$Input$dispatchKeyEvent(type='keyUp',key='Enter',code='Enter',windowsVirtualKeyCode=13L)}
 chk<-function(n,c,d="")cat(sprintf("[%s] %-34s %s\n",if(isTRUE(c))"PASS" else "FAIL",n,d))
 
-pA <- run_app("examples/11_tool_calling_claude_sdk.R", 9173); Sys.sleep(12)
+pA <- run_app("tests/verify/prewarm_on_app.R", 9173); Sys.sleep(12)
 if(!pA$is_alive()){cat("BOOT FAIL A\n")} else {
   bA<-chromote::ChromoteSession$new(); bA$Page$navigate("http://127.0.0.1:9173/"); bA$Page$loadEventFired(); Sys.sleep(3)
   ev(bA,"(function(){window.__mw=false;window.__r=setInterval(function(){if(document.querySelector('[data-slot=aui_warming]'))window.__mw=true},20);return true})()")
