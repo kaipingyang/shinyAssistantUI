@@ -17,6 +17,14 @@ feature parity.
 
 ## New ClaudeAgentSDK-aligned features
 
+- **RStudio addin (`claude_addin()`)** — an "Claude Code Chat" addin (Addins menu, or call
+  `claude_addin()`) opens the chat in the RStudio Viewer/dialog, rooted at the current project
+  so Claude's agentic tools (Read/Edit/Bash/Grep) act on your files. The active editor file +
+  selection are injected as context via `SystemPromptPreset(append=)` (appended to Claude
+  Code's preset, not overriding it), so you can just ask "explain this" / "refactor the
+  selection". Edits/shell commands are approval-gated (`permission_mode = "default"`). Degrades
+  to the browser when run outside RStudio.
+
 - **Slash control actions** (client-side, not sent to the AI), dispatched by
   `make_claude_handler`'s auto-wired `action_handler`: `/model` (set_model),
   `/permissions` (set_permission_mode), `/context` (get_context_usage), `/compact`

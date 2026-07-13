@@ -11,5 +11,10 @@ Wraps the '@assistant-ui/react' JavaScript library as a Shiny htmlwidget, provid
 \author{
 \strong{Maintainer}: Kaiping Yang \email{1260146556@qq.com}
 
+Authors:
+\itemize{
+  \item Kaiping Yang \email{1260146556@qq.com}
+}
+
 }
 \keyword{internal}

@@ -82,6 +82,25 @@ page_sidebar(
 )
 ```
 
+### In RStudio (Claude Code addin)
+
+Bring an agentic Claude Code chat into the IDE instead of the terminal CLI. Install the
+package, then use the **Addins → "Claude Code Chat"** menu (or call it directly):
+
+```r
+shinyAssistantUI::claude_addin()               # dialog, rooted at the active project
+shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
+```
+
+- **Project-rooted & agentic**: launches at the active RStudio project (`cwd`), so Claude's
+  `Read`/`Edit`/`Bash`/`Grep` tools operate on your real files.
+- **Context-aware**: the active editor file + selection are appended to Claude Code's system
+  prompt, so you can ask "explain this" / "refactor the selection" without pasting code.
+- **Safe by default**: file edits and shell commands are gated by the in-app approval card
+  (`permission_mode = "default"`).
+- Requires the [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) package and a
+  working `claude` CLI. Runs in the browser if called outside RStudio.
+
 ## API
 
 ### `assistantUIOutput(outputId, width, height, ...)`

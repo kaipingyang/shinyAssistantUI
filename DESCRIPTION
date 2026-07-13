@@ -11,7 +11,6 @@ Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 Imports:
     grDevices,
     htmlwidgets,
@@ -28,5 +27,7 @@ Suggests:
     later,
     ellmer,
     ClaudeAgentSDK,
-    here
+    here,
+    rstudioapi
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0

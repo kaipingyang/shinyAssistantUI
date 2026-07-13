@@ -19,7 +19,7 @@ assistantUIOutput(
 
 \item{modal}{Logical. If \code{TRUE}, sizes the widget for floating modal use.}
 
-\item{...}{Additional arguments passed to \code{\link[htmlwidgets:htmlwidgets-shiny]{htmlwidgets::shinyWidgetOutput()}}.}
+\item{...}{Additional arguments passed to \code{\link[htmlwidgets:shinyWidgetOutput]{htmlwidgets::shinyWidgetOutput()}}.}
 }
 \value{
 An HTML output element.

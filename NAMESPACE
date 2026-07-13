@@ -3,6 +3,7 @@
 export(assistantUIOutput)
 export(assistantUIServer)
 export(assistant_theme)
+export(claude_addin)
 export(ellmer_session_store)
 export(list_claude_sessions)
 export(load_claude_skills)
