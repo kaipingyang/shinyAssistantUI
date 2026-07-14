@@ -6,7 +6,8 @@
 \usage{
 claude_addin(
   project = NULL,
-  viewer = c("dialog", "pane", "browser"),
+  viewer = c("pane", "dialog", "browser"),
+  permission_mode = c("default", "acceptEdits", "bypassPermissions"),
   prewarm = FALSE,
   options = NULL
 )
@@ -15,33 +16,43 @@ claude_addin(
 \item{project}{Project root (Claude's working directory). Defaults to the active RStudio
 project, else \code{\link[=getwd]{getwd()}}.}
 
-\item{viewer}{Where to show the gadget: \code{"dialog"} (default), \code{"pane"} (Viewer pane), or
+\item{viewer}{Where to show the gadget: \code{"pane"} (Viewer pane, default), \code{"dialog"}, or
 \code{"browser"}. Forced to \code{"browser"} when not running in RStudio.}
 
-\item{prewarm}{Logical (default \code{FALSE}). If \code{TRUE}, pre-connect the client at launch so the
-first message isn't slowed by the cold start (see \code{\link[=assistantUIServer]{assistantUIServer()}}).}
+\item{permission_mode}{Claude tool-use permission policy:
+\describe{
+\item{\code{"default"}}{File edits and shell commands require per-action approval via the
+in-chat approval card (safest — recommended for shared/production projects).}
+\item{\code{"acceptEdits"}}{File edits are auto-approved; shell commands still prompt.}
+\item{\code{"bypassPermissions"}}{All tool calls run without prompts (fastest, use with care).}
+}
+Ignored when \code{options} is supplied directly.}
 
-\item{options}{Optional \link[ClaudeAgentSDK:ClaudeAgentOptions]{ClaudeAgentSDK::ClaudeAgentOptions} to fully override the default
-(project-rooted, context-appended) options.}
+\item{prewarm}{Logical (default \code{FALSE}). If \code{TRUE}, pre-connect the Claude CLI at launch so
+the first message isn't slowed by the cold start (see \code{\link[=assistantUIServer]{assistantUIServer()}}).}
+
+\item{options}{Optional \link[ClaudeAgentSDK:ClaudeAgentOptions]{ClaudeAgentSDK::ClaudeAgentOptions} to fully override all defaults.}
 }
 \value{
 Invisibly, the result of \code{\link[shiny:runGadget]{shiny::runGadget()}}.
 }
 \description{
-Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer or a
+Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer pane or a
 dialog, rooted at the current project so Claude's agentic tools (Read/Edit/Bash/Grep) act on
 your project files. The active editor file and any selection are injected as context (appended
 to Claude Code's system prompt), so you can just ask "explain this" / "refactor the selection".
-File edits and shell commands are gated by the in-app approval card (\code{permission_mode} is
-\code{"default"}).
 }
 \details{
+Thread history is stored in \verb{~/.claude_addin_session_map.rds} (user home, not the project),
+so conversations persist across project switches and RStudio restarts.
+
 Registered as the RStudio addin \strong{"Claude Code Chat"}; also callable programmatically.
 }
 \examples{
 \dontrun{
   # From the RStudio Addins menu: "Claude Code Chat", or:
   claude_addin()
-  claude_addin(viewer = "pane")
+  claude_addin(permission_mode = "acceptEdits")   # auto-approve file edits
+  claude_addin(viewer = "dialog")                 # floating dialog instead of pane
 }
 }

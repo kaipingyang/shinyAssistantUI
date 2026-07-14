@@ -42,6 +42,6 @@ test_that(".addin_editor_context returns NULL when not in RStudio", {
 test_that(".claude_chat_app builds a shiny app (no connection at build time)", {
   skip_if_not_installed("ClaudeAgentSDK")
   skip_if_not_installed("coro")
-  app <- .claude_chat_app(tempdir(), ctx = NULL, prewarm = FALSE)
+  app <- .claude_chat_app(tempdir(), ctx = NULL, permission_mode = "default", prewarm = FALSE)
   expect_s3_class(app, "shiny.appobj")
 })

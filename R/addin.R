@@ -75,11 +75,15 @@
 #' @param ctx Optional editor context from [.addin_editor_context()].
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions]; a project-rooted default with
 #'   the context appended to the Claude Code preset system prompt is built when `NULL`.
+#' @param permission_mode Claude permission mode: `"default"` (approval cards),
+#'   `"acceptEdits"` (auto-approve file edits, prompt shell), or
+#'   `"bypassPermissions"` (no prompts). Ignored when `options` is supplied.
 #' @param prewarm Passed to [assistantUIServer()] (default `FALSE`).
 #' @return A [shiny::shinyApp] object.
 #' @keywords internal
 #' @noRd
-.claude_chat_app <- function(project, ctx = NULL, options = NULL, prewarm = FALSE) {
+.claude_chat_app <- function(project, ctx = NULL, options = NULL,
+                              permission_mode = "default", prewarm = FALSE) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
     stop("The Claude Code addin needs the 'ClaudeAgentSDK' package. Install it first.",
          call. = FALSE)
@@ -88,28 +92,29 @@
       cwd                         = project,
       system_prompt               = ClaudeAgentSDK::SystemPromptPreset(
         append = .addin_context_text(ctx, project)),
-      permission_mode             = "default",   # 写/执行工具经审批卡门控
+      permission_mode             = permission_mode,
       permission_prompt_tool_name = "stdio",
       include_partial_messages    = TRUE
     )
   }
+  # session_map stored in user home to survive project switches
+  session_map_path <- file.path(
+    Sys.getenv("HOME", unset = "~"), ".claude_addin_session_map.rds")
   handler <- make_claude_handler(
-    options = options,
-    session_map_path = file.path(project, ".claude_session_map.rds")
+    options          = options,
+    session_map_path = session_map_path
   )
   skills <- tryCatch(load_claude_skills(project_dir = project), error = function(e) list())
 
-  ui <- shiny::fluidPage(
-    shiny::tags$head(shiny::tags$style(shiny::HTML(
-      "html,body{height:100%;margin:0;padding:0;overflow:hidden;}"))),
-    assistantUIOutput("chat", height = "100vh")
+  ui <- bslib::page_fillable(
+    padding = 0,
+    assistantUIOutput("chat", height = "100%")
   )
   server <- function(input, output, session) {
     assistantUIServer(
       "chat", handler = handler,
       show_thread_list = TRUE,
-      on_session_load  = make_claude_session_loader(
-        session_map_path = file.path(project, ".claude_session_map.rds")),
+      on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       prewarm          = prewarm
     )
@@ -119,46 +124,58 @@
 
 #' Open a Claude Code chat inside RStudio
 #'
-#' Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer or a
+#' Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer pane or a
 #' dialog, rooted at the current project so Claude's agentic tools (Read/Edit/Bash/Grep) act on
 #' your project files. The active editor file and any selection are injected as context (appended
 #' to Claude Code's system prompt), so you can just ask "explain this" / "refactor the selection".
-#' File edits and shell commands are gated by the in-app approval card (`permission_mode` is
-#' `"default"`).
+#'
+#' Thread history is stored in `~/.claude_addin_session_map.rds` (user home, not the project),
+#' so conversations persist across project switches and RStudio restarts.
 #'
 #' Registered as the RStudio addin **"Claude Code Chat"**; also callable programmatically.
 #'
 #' @param project Project root (Claude's working directory). Defaults to the active RStudio
 #'   project, else [getwd()].
-#' @param viewer Where to show the gadget: `"dialog"` (default), `"pane"` (Viewer pane), or
+#' @param viewer Where to show the gadget: `"pane"` (Viewer pane, default), `"dialog"`, or
 #'   `"browser"`. Forced to `"browser"` when not running in RStudio.
-#' @param prewarm Logical (default `FALSE`). If `TRUE`, pre-connect the client at launch so the
-#'   first message isn't slowed by the cold start (see [assistantUIServer()]).
-#' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions] to fully override the default
-#'   (project-rooted, context-appended) options.
+#' @param permission_mode Claude tool-use permission policy:
+#'   \describe{
+#'     \item{`"default"`}{File edits and shell commands require per-action approval via the
+#'       in-chat approval card (safest — recommended for shared/production projects).}
+#'     \item{`"acceptEdits"`}{File edits are auto-approved; shell commands still prompt.}
+#'     \item{`"bypassPermissions"`}{All tool calls run without prompts (fastest, use with care).}
+#'   }
+#'   Ignored when `options` is supplied directly.
+#' @param prewarm Logical (default `FALSE`). If `TRUE`, pre-connect the Claude CLI at launch so
+#'   the first message isn't slowed by the cold start (see [assistantUIServer()]).
+#' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions] to fully override all defaults.
 #' @return Invisibly, the result of [shiny::runGadget()].
 #' @export
 #' @examples
 #' \dontrun{
 #'   # From the RStudio Addins menu: "Claude Code Chat", or:
 #'   claude_addin()
-#'   claude_addin(viewer = "pane")
+#'   claude_addin(permission_mode = "acceptEdits")   # auto-approve file edits
+#'   claude_addin(viewer = "dialog")                 # floating dialog instead of pane
 #' }
-claude_addin <- function(project = NULL,
-                         viewer  = c("dialog", "pane", "browser"),
-                         prewarm = FALSE,
-                         options = NULL) {
-  viewer <- match.arg(viewer)
+claude_addin <- function(project         = NULL,
+                         viewer          = c("pane", "dialog", "browser"),
+                         permission_mode = c("default", "acceptEdits", "bypassPermissions"),
+                         prewarm         = FALSE,
+                         options         = NULL) {
+  viewer          <- match.arg(viewer)
+  permission_mode <- match.arg(permission_mode)
   project <- project %||% .addin_project()
   ctx <- .addin_editor_context(project)
-  app <- .claude_chat_app(project, ctx = ctx, options = options, prewarm = prewarm)
+  app <- .claude_chat_app(project, ctx = ctx, options = options,
+                          permission_mode = permission_mode, prewarm = prewarm)
 
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))
   vw <- if (!in_rstudio) shiny::browserViewer()
         else switch(viewer,
-                    dialog  = shiny::dialogViewer("Claude Code", width = 1000, height = 800),
                     pane    = shiny::paneViewer(minHeight = 600),
+                    dialog  = shiny::dialogViewer("Claude Code", width = 1000, height = 800),
                     browser = shiny::browserViewer())
   invisible(shiny::runGadget(app, viewer = vw))
 }
