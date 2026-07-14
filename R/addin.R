@@ -106,8 +106,11 @@
   )
   skills <- tryCatch(load_claude_skills(project_dir = project), error = function(e) list())
 
-  ui <- bslib::page_fillable(
-    padding = 0,
+  # shiny::fillPage sets html/body height:100% without Bootstrap's .grid class,
+  # which would otherwise override Tailwind's arbitrary grid-cols and break user bubbles.
+  ui <- shiny::fillPage(
+    shiny::tags$style(shiny::HTML(
+      ".shiny-html-output{height:100%!important;overflow:hidden;}")),
     assistantUIOutput("chat", height = "100%")
   )
   server <- function(input, output, session) {

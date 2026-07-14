@@ -105,3 +105,11 @@
     @apply border-border outline-ring/50;
   }
 }
+
+/* Bootstrap 5 defines .grid { grid-template-columns: repeat(12, 1fr) } which overrides
+   Tailwind's arbitrary grid-cols-[...] inside .aui-root. Reset it so Tailwind wins. */
+.aui-root .grid {
+  grid-template-columns: revert-layer;
+  --bs-columns: revert-layer;
+  --bs-gap: revert-layer;
+}
