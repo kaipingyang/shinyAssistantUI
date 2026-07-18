@@ -165,3 +165,28 @@ describe("bridge 出站消息", () => {
     expect(v.suggestionIdx).toBe(2);
   });
 });
+
+
+describe("bridge action correlation", () => {
+  it("sendAction sends requestId and silent metadata", () => {
+    const b = createShinyBridge("chat");
+    b.sendAction("permissions:plan", "t1", { requestId: "req-1", silent: true });
+    expect(inputValues[0].id).toBe("chat_action");
+    expect(inputValues[0].value).toMatchObject({
+      id: "permissions:plan", threadId: "t1", requestId: "req-1", silent: true,
+    });
+  });
+
+  it("action-result preserves correlation and canonical value", () => {
+    const b = createShinyBridge("chat");
+    const received: unknown[] = [];
+    b.onActionResult((d) => received.push(d));
+    handlers["chat:action-result"]({
+      threadId: "t1", requestId: "req-1", actionId: "permissions:plan",
+      status: "ok", message: "submitted", value: "plan",
+    });
+    expect(received).toEqual([expect.objectContaining({
+      requestId: "req-1", actionId: "permissions:plan", value: "plan",
+    })]);
+  });
+});

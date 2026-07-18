@@ -17,8 +17,9 @@ remotes::install_github("kaipingyang/shinyAssistantUI")
 library(shiny)
 library(shinyAssistantUI)
 
-ui <- fluidPage(
-  assistantUIOutput("chat", height = "80vh")
+ui <- assistantUIPage(
+  assistantUIOutput("chat", height = "100%"),
+  title = "AI Assistant"
 )
 
 server <- function(input, output, session) {
@@ -41,8 +42,9 @@ library(shiny)
 library(shinyAssistantUI)
 library(ClaudeAgentSDK)
 
-ui <- fluidPage(
-  assistantUIOutput("chat", height = "80vh")
+ui <- assistantUIPage(
+  assistantUIOutput("chat", height = "100%"),
+  title = "Claude Assistant"
 )
 
 server <- function(input, output, session) {
@@ -101,7 +103,40 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
 - Requires the [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) package and a
   working `claude` CLI. Runs in the browser if called outside RStudio.
 
+### Claude Code slash commands and skills
+
+The Claude addin shows deterministic controls such as `/compact`, `/context`, `/clear`, and
+`/mcp` separately from prompt-based skills. Selecting one of these controls—or submitting its
+exact command directly—routes to the local Claude action handler and does not send a normal AI
+message. Commands with arguments, such as `/compact focus on tests`, remain literal so Claude
+Code can apply its own argument semantics.
+
+`load_claude_skills()` discovers direct personal and project entries from
+`~/.claude/skills/<name>/SKILL.md`, `~/.claude/commands/*.md`, and the corresponding `.claude/`
+folders in the project. The menu labels their source as **Personal Skills**, **Project Skills**,
+etc. Matching Claude Code, a skill beats a legacy command in the same scope, and a personal
+entry beats a project entry with the same command name. `user-invocable: false` and
+`skillOverrides: {"name":"off"}` hide entries. Marketplace caches are not recursively scanned;
+active plugin, bundled, nested-project, and other live commands are supplied by the connected
+Claude Code process with their proper names.
+
 ## API
+
+### `assistantUIPage(..., title = NULL, padding = 0, suppress_bootstrap = TRUE)`
+
+Creates a full-height standalone page for `assistantUIOutput()`. By default it suppresses
+Bootstrap dependencies, matching the widget's scoped design system; set
+`suppress_bootstrap = FALSE` only when descendants intentionally require Bootstrap. For
+embedding inside an existing bslib app, keep using the host page layout instead.
+
+### Permission mode controls
+
+Handlers that advertise permission capabilities (including `make_claude_handler()`) show the
+same per-thread permission mode in two places: a compact selector below the composer and a
+**Settings** panel at the bottom of the thread sidebar. Dynamic choices are **Manual**
+(`default`), **Plan** (`plan`), **Auto-edit** (`acceptEdits`), and **Bypass**
+(`bypassPermissions`). Bypass runs all tools without permission prompts and should only be used
+in trusted environments. Permission changes are submitted silently and do not add chat bubbles.
 
 ### `assistantUIOutput(outputId, width, height, ...)`
 

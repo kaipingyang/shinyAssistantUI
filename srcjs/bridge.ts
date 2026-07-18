@@ -42,12 +42,26 @@ export type RunCallbacks = {
   onError: (message: string) => void;
 };
 
+export type ActionRequestOptions = {
+  requestId?: string;
+  silent?: boolean;
+};
+
+export type ActionResult = {
+  threadId?: string;
+  requestId?: string;
+  actionId?: string;
+  message?: string;
+  status?: string;
+  value?: unknown;
+};
+
 export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[]) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => void;
-  sendAction: (actionId: string, threadId: string) => void;
+  sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
@@ -55,7 +69,7 @@ export interface ShinyBridge {
   sendWarmup: (threadId: string) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
-  onActionResult: (handler: (data: { threadId?: string; message?: string; status?: string }) => void) => void;
+  onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onLoadThread: (handler: (data: { threadId: string; messages: unknown[] }) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
@@ -188,10 +202,16 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendAction(actionId, threadId) {
+    sendAction(actionId, threadId, options = {}) {
       Shiny.setInputValue(
         `${inputId}_action`,
-        { id: actionId, threadId, ts: Date.now() },
+        {
+          id: actionId,
+          threadId,
+          requestId: options.requestId,
+          silent: options.silent ?? false,
+          ts: Date.now(),
+        },
         { priority: "event" }
       );
     },
@@ -249,7 +269,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
 
     onActionResult(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:action-result`, (data) => {
-        handler(data as { threadId?: string; message?: string; status?: string });
+        handler(data as ActionResult);
       });
     },
 

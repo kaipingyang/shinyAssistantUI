@@ -45,3 +45,66 @@ test_that(".claude_chat_app builds a shiny app (no connection at build time)", {
   app <- .claude_chat_app(tempdir(), ctx = NULL, permission_mode = "default", prewarm = FALSE)
   expect_s3_class(app, "shiny.appobj")
 })
+
+test_that(".claude_chat_app injects project sessions into the sidebar", {
+  skip_if_not_installed("ClaudeAgentSDK")
+
+  project <- normalizePath(tempdir(), mustWork = TRUE)
+  listed_directory <- NULL
+  sent_sessions <- list()
+  server_args <- NULL
+  normal_stop_calls <- 0L
+  expected <- list(
+    list(id = "11111111-1111-1111-1111-111111111111",
+         title = "Historical session", preview = "Hello", createdAt = 1)
+  )
+
+  local_mocked_bindings(
+    make_claude_handler = function(options, session_map_path) function(...) NULL,
+    load_claude_skills = function(project_dir) list(),
+    make_claude_session_loader = function(session_map_path) function(...) NULL,
+    .stop_claude_gadget_normally = function() {
+      normal_stop_calls <<- normal_stop_calls + 1L
+      invisible(NULL)
+    },
+    list_claude_sessions = function(directory, limit = 100L) {
+      listed_directory <<- directory
+      expected
+    },
+    assistantUIServer = function(...) {
+      server_args <<- list(...)
+      list(send_sessions = function(sessions) {
+        sent_sessions[[length(sent_sessions) + 1L]] <<- sessions
+      })
+    }
+  )
+
+  app <- .claude_chat_app(project, options = list(), prewarm = FALSE)
+  shiny::testServer(app$serverFuncSource(), {
+    session$flushReact()
+    session$setInputs(cancel = 1L)
+    session$flushReact()
+  })
+
+  expect_identical(normal_stop_calls, 1L)
+  expect_identical(listed_directory, project)
+  expect_length(sent_sessions, 1L)
+  expect_identical(sent_sessions[[1L]], list(sessions = expected))
+  action_commands <- vapply(server_args$action_items, `[[`, character(1), "command")
+  expect_setequal(action_commands, c("context", "compact", "clear", "mcp"))
+})
+
+test_that(".claude_chat_ui fills the page without Bootstrap", {
+  ui <- .claude_chat_ui()
+  dependencies <- htmltools::findDependencies(ui)
+  dependency_names <- vapply(dependencies, `[[`, character(1), "name")
+  rendered <- htmltools::renderTags(ui)$html
+
+  bootstrap <- Filter(function(x) identical(x$name, "bootstrap"), dependencies)
+  expect_length(bootstrap, 1L)
+  expect_identical(bootstrap[[1L]]$version, "9999")
+  expect_true("htmltools-fill" %in% dependency_names)
+  expect_match(rendered, 'id="chat"', fixed = TRUE)
+  expect_match(rendered, "height:100%", fixed = TRUE)
+  expect_false(grepl(".shiny-html-output", rendered, fixed = TRUE))
+})

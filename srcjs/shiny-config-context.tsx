@@ -1,8 +1,21 @@
 import { createContext, useContext } from "react";
 
-export interface ShinyCommand { name: string; description?: string; prompt: string; }
+export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
-export interface ShinyActionItem { section?: string; id: string; label?: string; description?: string; }
+export interface ShinyActionItem { section?: string; id: string; command?: string; label?: string; description?: string; }
+export interface PermissionModeOption {
+  value: string;
+  label: string;
+  description?: string;
+  disabled?: boolean;
+}
+export interface PermissionModeState {
+  value: string;
+  options: PermissionModeOption[];
+  pending: boolean;
+  error: string | null;
+  setValue: (value: string) => void;
+}
 
 export interface ShinyConfigCtx {
   tools: ShinyToolItem[];
@@ -12,6 +25,7 @@ export interface ShinyConfigCtx {
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
+  permissionMode?: PermissionModeState;
   // ── ClaudeAgentSDK 能力对齐 ──
   usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
   tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;

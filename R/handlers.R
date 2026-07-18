@@ -232,6 +232,65 @@ make_ellmer_session_loader <- function(store) {
 
 # ── ClaudeAgentSDK handler ────────────────────────────────────────────────────
 
+# Disconnect one SDK client without allowing an interruptible processx wait to
+# abort the rest of the cleanup. A second attempt handles an interrupt that
+# landed before the SDK could clear its transport reference.
+.disconnect_claude_client_safely <- function(client, attempts = 2L) {
+  if (is.null(client)) return(invisible(NULL))
+  attempts <- max(1L, as.integer(attempts))
+  for (attempt in seq_len(attempts)) {
+    completed <- FALSE
+    tryCatch(
+      suspendInterrupts({
+        client$disconnect()
+        completed <- TRUE
+      }),
+      interrupt = function(e) NULL,
+      error = function(e) NULL
+    )
+    if (completed) break
+  }
+  invisible(NULL)
+}
+
+# Snapshot and clear the registry before touching subprocesses. This makes
+# cleanup idempotent and prevents an interrupt in one client from hiding the
+# remaining clients from a later cleanup attempt.
+.cleanup_claude_client_registry <- function(get_clients, clear_clients) {
+  tryCatch(
+    suspendInterrupts({
+      clients <- get_clients()
+      clear_clients()
+      for (client in clients) .disconnect_claude_client_safely(client)
+    }),
+    interrupt = function(e) NULL,
+    error = function(e) NULL
+  )
+  invisible(NULL)
+}
+
+# Register before connect() starts so Viewer Stop during CLI initialization can
+# still find and reclaim the partially connected subprocess.
+.connect_registered_claude_client <- function(client, register, unregister) {
+  register(client)
+  tryCatch(
+    {
+      client$connect()
+      client
+    },
+    interrupt = function(e) {
+      unregister(client)
+      .disconnect_claude_client_safely(client)
+      stop(e)
+    },
+    error = function(e) {
+      unregister(client)
+      .disconnect_claude_client_safely(client)
+      stop(e)
+    }
+  )
+}
+
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
 #' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
@@ -272,6 +331,28 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
+  # UI 暴露 Claude Code 支持的四种 permission mode。bypassPermissions 会
+  # 跳过所有工具确认，因此描述中明确标示其风险。
+  available_permission_modes <- c(
+    "default", "plan", "acceptEdits", "bypassPermissions"
+  )
+  initial_permission_mode <- options$permission_mode %||% "default"
+  permission_modes <- new.env(parent = emptyenv())
+  permission_mode_for <- function(thread_id) {
+    get0(thread_id, envir = permission_modes,
+         ifnotfound = initial_permission_mode, inherits = FALSE)
+  }
+  permission_options <- list(
+    list(value = "default", label = "Manual",
+         description = "Ask before edits and risky commands"),
+    list(value = "plan", label = "Plan",
+         description = "Read-only analysis and planning"),
+    list(value = "acceptEdits", label = "Auto-edit",
+         description = "Automatically accept file edits"),
+    list(value = "bypassPermissions", label = "Bypass",
+         description = "Run all tools without permission prompts (use with care)")
+  )
+
   # session map 持久化。
   # 磁盘是单一真相源：make_claude_session_loader 在用户导入历史 session 时会写盘，
   # 但它持有独立的内存副本，无法直接同步到本 handler。因此 get_client 在内存
@@ -309,31 +390,39 @@ make_claude_handler <- function(options       = NULL,
 
     make_opts <- function(resume_sid = NULL) {
       ClaudeAgentSDK::ClaudeAgentOptions(
-        permission_mode             = options$permission_mode %||% "default",
+        permission_mode             = permission_mode_for(thread_id),
         permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
         include_partial_messages    = options$include_partial_messages %||% TRUE,
         resume                      = resume_sid
       )
     }
 
-    client <- if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
-      c <- ClaudeAgentSDK::ClaudeSDKClient$new(make_opts(stored_sid))
-      result <- tryCatch({ c$connect(); c }, error = function(e) {
-        message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
-        session_map[[thread_id]] <<- NULL
-        save_session_map()
-        NULL
-      })
-      if (!is.null(result)) result else {
-        c2 <- ClaudeAgentSDK::ClaudeSDKClient$new(make_opts())
-        c2$connect(); c2
-      }
-    } else {
-      c <- ClaudeAgentSDK::ClaudeSDKClient$new(make_opts())
-      c$connect(); c
+    connect_new_client <- function(client_options) {
+      client <- ClaudeAgentSDK::ClaudeSDKClient$new(client_options)
+      .connect_registered_claude_client(
+        client,
+        register = function(x) clients[[thread_id]] <<- x,
+        unregister = function(x) {
+          if (identical(clients[[thread_id]], x)) clients[[thread_id]] <<- NULL
+        }
+      )
     }
 
-    clients[[thread_id]] <<- client
+    client <- if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
+      result <- tryCatch(
+        connect_new_client(make_opts(stored_sid)),
+        error = function(e) {
+          message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
+          session_map[[thread_id]] <<- NULL
+          save_session_map()
+          NULL
+        }
+      )
+      if (!is.null(result)) result else connect_new_client(make_opts())
+    } else {
+      connect_new_client(make_opts())
+    }
+
     client
   }
 
@@ -355,7 +444,7 @@ make_claude_handler <- function(options       = NULL,
   # send_action_result(message, status) 把结果回传 UI(更新动作气泡)。
   claude_action <- function(id, thread_id, send_action_result = function(...) {}) {
     cl <- clients[[thread_id]]
-    ok <- function(msg) send_action_result(msg, "ok")
+    ok <- function(msg, value = NULL) send_action_result(msg, "ok", value = value)
     err <- function(msg) send_action_result(msg, "error")
     tryCatch({
       if (grepl("^model:", id)) {
@@ -365,9 +454,15 @@ make_claude_handler <- function(options       = NULL,
         ok(paste0("Switched model to ", model))
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)
-        if (is.null(cl)) cl <- get_client(thread_id)
-        cl$set_permission_mode(mode)
-        ok(paste0("Permission mode: ", mode))
+        if (!mode %in% available_permission_modes) {
+          err(paste0("Permission mode is not available for dynamic selection: ", mode))
+          return(invisible(NULL))
+        }
+        # 尚未连接时只记录 intended mode；首条消息创建 client 时应用，避免设置 UI
+        # 本身触发 CLI 冷启动。已有 client 则提交 control request 后更新 intended mode。
+        if (!is.null(cl)) cl$set_permission_mode(mode)
+        assign(thread_id, mode, envir = permission_modes)
+        ok(paste0("Permission mode submitted: ", mode), value = mode)
       } else if (identical(id, "context")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
         usage <- cl$get_context_usage()
@@ -385,12 +480,9 @@ make_claude_handler <- function(options       = NULL,
         if (!is.null(cl)) cl$interrupt()
         ok("Interrupted")
       } else if (identical(id, "clear")) {
-        # 清当前线程:断开 client + 清 session 映射,下条消息重新开
-        if (!is.null(cl)) tryCatch(cl$disconnect(), error = function(e) NULL)
-        clients[[thread_id]] <<- NULL
-        session_map[[thread_id]] <<- NULL
-        save_session_map()
-        ok("Conversation cleared")
+        # 与 Claude Code /clear 一致：保留旧会话可恢复，并在后端成功确认后
+        # 请求前端创建一个全新的空线程。新线程首次发言时才会创建 client。
+        ok("Starting new conversation", value = list(effect = "new-thread"))
       } else if (identical(id, "compact")) {
         # /compact 无直接 SDK 方法 —— 经输入流发 "/compact",由 CLI 解析压缩上下文。
         # 慢操作:先报 progress(转圈),用 later 非阻塞轮询 drain,收到 ResultMessage 报成功。
@@ -472,10 +564,10 @@ make_claude_handler <- function(options       = NULL,
   # 通过 attr 暴露给 assistantUIServer，在 session 结束时调用，防止长生命周期
   # Shiny session 不断新建线程导致子进程累积泄漏。
   cleanup <- function() {
-    for (tid in names(clients)) {
-      tryCatch(clients[[tid]]$disconnect(), error = function(e) NULL)
-    }
-    clients <<- list()
+    .cleanup_claude_client_registry(
+      get_clients = function() clients,
+      clear_clients = function() clients <<- list()
+    )
   }
 
   handler_fn <- coro::async(function(
@@ -805,6 +897,12 @@ make_claude_handler <- function(options       = NULL,
 
   attr(handler_fn, "cleanup") <- cleanup
   attr(handler_fn, "action_handler") <- claude_action
+  attr(handler_fn, "ui_capabilities") <- list(
+    permission_mode = list(
+      value = initial_permission_mode,
+      options = permission_options
+    )
+  )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
   attr(handler_fn, "warmup") <- function(thread_id) {
     tryCatch(get_client(thread_id), error = function(e) NULL); invisible(NULL)

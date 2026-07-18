@@ -17,6 +17,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { PermissionModeControl } from "@/components/assistant-ui/settings-controls";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -265,8 +266,8 @@ const Composer: FC = () => {
 // action 直接 onInvokeAction(执行操作 + 记录气泡,不触发 AI)。↑↓ 选择、Enter/点击确认。
 type SlashEntry =
   | { kind: "prompt"; key: string; label: string; desc?: string; section: string }
-  | { kind: "action"; key: string; label: string; desc?: string; section: string;
-      item: { id: string; label?: string; section?: string } };
+  | { kind: "action"; key: string; label: string; command: string; desc?: string; section: string;
+      item: { id: string; command?: string; label?: string; description?: string; section?: string } };
 
 // ── 每线程冷启动指示器:该线程 client 首次连接(spawn CLI 子进程)期间显示 ──────
 // 出现在对话流最后一条消息(用户消息)之后,连上后消失、正常回复接管。
@@ -367,11 +368,11 @@ const ShinySlashCommands: FC = () => {
 
   const entries: SlashEntry[] = [
     ...actionItems
-      .filter((a) => a.id.toLowerCase().startsWith(q) || (a.label ?? "").toLowerCase().includes(q))
-      .map((a): SlashEntry => ({ kind: "action", key: `a-${a.id}`, label: a.label ?? a.id, desc: a.description, section: a.section ?? "Actions", item: a })),
+      .filter((a) => (a.command ?? a.id).toLowerCase().startsWith(q) || a.id.toLowerCase().startsWith(q) || (a.label ?? "").toLowerCase().includes(q))
+      .map((a): SlashEntry => ({ kind: "action", key: `a-${a.id}`, label: a.label ?? a.id, command: a.command ?? a.id, desc: a.description, section: a.section ?? "Actions", item: a })),
     ...commands
       .filter((c) => c.name.toLowerCase().startsWith(q))
-      .map((c): SlashEntry => ({ kind: "prompt", key: `c-${c.name}`, label: c.name, desc: c.description, section: "Commands" })),
+      .map((c): SlashEntry => ({ kind: "prompt", key: `c-${c.name}`, label: c.name, desc: c.description, section: c.category ?? "Commands" })),
   ];
   if (entries.length === 0) return null;
   const sel = Math.min(idx, entries.length - 1);
@@ -383,7 +384,7 @@ const ShinySlashCommands: FC = () => {
     setIdx(0);
     (document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null)?.focus();
   };
-  const chooseAction = (item: { id: string; label?: string; section?: string }) => {
+  const chooseAction = (item: { id: string; command?: string; label?: string; description?: string; section?: string }) => {
     // 清掉输入框里的 /trigger,再执行动作(不发给 AI)
     const before = text.slice(0, trig.offset);
     const after = text.slice(cursor);
@@ -426,7 +427,8 @@ const ShinySlashCommands: FC = () => {
                 (gi === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
               }
             >
-              <span className="font-medium">{e.kind === "action" ? `\u2699\ufe0f ${e.label}` : `/${e.label}`}</span>
+              <span className="font-medium">{e.kind === "action" ? `⚙️ /${e.command}` : `/${e.label}`}</span>
+              {e.kind === "action" && e.label !== e.command && <span className="text-muted-foreground text-xs">{e.label}</span>}
               {e.desc && <span className="text-muted-foreground text-xs">{e.desc}</span>}
             </button>
           ))}
@@ -533,7 +535,10 @@ const ShinyTimestamp: FC = () => {
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
+      <div className="flex min-w-0 items-center gap-1.5">
+        <ComposerAddAttachment />
+        <PermissionModeControl compact />
+      </div>
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>
           <AuiIf condition={(s) => s.composer.dictation == null}>

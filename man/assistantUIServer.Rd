@@ -122,10 +122,8 @@ click) and optional \code{text} (display label, defaults to \code{prompt}).}
 
 \item{commands}{List of slash-command definitions. Each element is a list
 with \code{name} (e.g. \code{"summarize"}), \code{description}, \code{prompt} (the message
-sent immediately when the command is selected), and optional \code{category}
-(group label shown as a section header in the popover). Category should be
-one of the 6 fixed sections: \code{"Context"}, \code{"Model"}, \code{"Customize"},
-\code{"Slash Commands"} (default), \code{"Settings"}, \code{"Support"}.}
+sent when the command is submitted), and optional \code{category} (group label
+shown as a section header, such as \code{"Personal Skills"} or \code{"Project Skills"}).}
 
 \item{tools}{List of tool definitions for the \@ mention menu. Each element
 is a list with \code{name} and \code{description}. Typically mirrors the tools
@@ -134,9 +132,10 @@ registered with ellmer.}
 \item{action_items}{List of action-type slash-command items. Unlike
 \code{commands}, these do not send a message to the AI — instead, clicking them
 fires \code{on_action(id)} on the R side, allowing arbitrary server logic.
-Each element is a list with \code{section} (one of the 6 fixed section names),
-\code{id} (unique string passed to \code{on_action}), \code{label} (display name), and
-optional \code{description}. Example:
+Each element is a list with \code{section} (group label), \code{id} (unique string
+passed to \code{on_action}), optional \code{command} (the slash name shown and matched
+for exact direct input; defaults to \code{id}), \code{label}, and optional
+\code{description}. Example:
 
 \if{html}{\out{<div class="sourceCode r">}}\preformatted{action_items = list(
   list(section = "Model",   id = "thinking-on",  label = "Enable thinking"),

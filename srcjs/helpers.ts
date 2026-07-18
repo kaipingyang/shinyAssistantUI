@@ -112,6 +112,74 @@ export function expandSlashCommands(
 
 // 仅允许安全 scheme 的 URL，阻断 javascript:/data:/vbscript: 等 XSS 向量。
 // 工具结果 markdown 可能来自不可信源（如抓取的网页内容），必须过滤。
+
+
+export interface SlashActionLike {
+  id: string;
+  command?: string;
+  label?: string;
+  section?: string;
+  description?: string;
+}
+
+export interface SlashCommandLike {
+  name: string;
+  description?: string;
+  prompt: string;
+  category?: string;
+  source?: string;
+  kind?: string;
+}
+
+// Local actions are deterministic controls, not prompts. Only intercept an exact,
+// standalone command so `/compact focus on tests` can still reach Claude Code,
+// which owns argument parsing for built-in commands.
+export function matchSlashAction(
+  text: string,
+  actions: SlashActionLike[],
+): SlashActionLike | undefined {
+  const match = text.trim().match(/^\/([^\s]+)$/);
+  if (!match) return undefined;
+  const command = match[1].toLowerCase();
+  return actions.find((action) =>
+    (action.command ?? action.id).toLowerCase() === command,
+  );
+}
+
+// Configured commands (including locally discovered skills) retain their source
+// metadata. Live Agent SDK commands fill the remaining names, while deterministic
+// local actions win collisions such as /compact and /context.
+export function mergeSlashCommands(
+  configured: SlashCommandLike[],
+  serverCommands: Array<{ name: string; description?: string }>,
+  actions: SlashActionLike[],
+): SlashCommandLike[] {
+  const blocked = new Set(actions.map((action) =>
+    (action.command ?? action.id).toLowerCase(),
+  ));
+  const dedupedConfigured: SlashCommandLike[] = [];
+  const seen = new Set<string>();
+  for (const command of configured) {
+    const name = command.name.toLowerCase();
+    if (!name || blocked.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    dedupedConfigured.push(command);
+  }
+  const live = serverCommands
+    .filter((command) => {
+      const name = command.name.toLowerCase();
+      if (!name || seen.has(name) || blocked.has(name)) return false;
+      seen.add(name);
+      return true;
+    })
+    .map((command) => ({
+      name: command.name,
+      description: command.description,
+      prompt: `/${command.name}`,
+      category: "Claude Code",
+    }));
+  return [...dedupedConfigured, ...live];
+}
 export function safeUrl(url: string): string | null {
   const trimmed = url.trim();
   // 相对路径 / 锚点 / 协议相对：安全

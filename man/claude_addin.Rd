@@ -7,7 +7,7 @@
 claude_addin(
   project = NULL,
   viewer = c("pane", "dialog", "browser"),
-  permission_mode = c("default", "acceptEdits", "bypassPermissions"),
+  permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
   prewarm = FALSE,
   options = NULL
 )
@@ -23,6 +23,7 @@ project, else \code{\link[=getwd]{getwd()}}.}
 \describe{
 \item{\code{"default"}}{File edits and shell commands require per-action approval via the
 in-chat approval card (safest — recommended for shared/production projects).}
+\item{\code{"plan"}}{Read-only analysis and planning; edits are not permitted.}
 \item{\code{"acceptEdits"}}{File edits are auto-approved; shell commands still prompt.}
 \item{\code{"bypassPermissions"}}{All tool calls run without prompts (fastest, use with care).}
 }

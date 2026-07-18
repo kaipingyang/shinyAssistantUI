@@ -69,6 +69,14 @@
   paste(lines, collapse = "\n")
 }
 
+# Addin 专用全屏 UI：fillPage 建立 html/body 的 100% 高度链，但不加载
+# Bootstrap，避免其全局样式覆盖 widget 内的 Tailwind/shadcn 组件。
+.claude_chat_ui <- function() {
+  assistantUIPage(
+    assistantUIOutput("chat", height = "100%")
+  )
+}
+
 #' Build the Claude Code chat app (internal, RStudio-free so it is unit/browser testable)
 #'
 #' @param project Project root used as Claude's working directory.
@@ -76,12 +84,26 @@
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions]; a project-rooted default with
 #'   the context appended to the Claude Code preset system prompt is built when `NULL`.
 #' @param permission_mode Claude permission mode: `"default"` (approval cards),
-#'   `"acceptEdits"` (auto-approve file edits, prompt shell), or
-#'   `"bypassPermissions"` (no prompts). Ignored when `options` is supplied.
+#'   `"plan"` (read-only planning), `"acceptEdits"` (auto-approve file edits,
+#'   prompt shell), or `"bypassPermissions"` (no prompts). Ignored when
+#'   `options` is supplied.
 #' @param prewarm Passed to [assistantUIServer()] (default `FALSE`).
 #' @return A [shiny::shinyApp] object.
 #' @keywords internal
 #' @noRd
+.claude_action_items <- function() {
+  list(
+    list(section = "Context", id = "context", command = "context",
+         label = "Context usage", description = "Show current context-window usage"),
+    list(section = "Context", id = "compact", command = "compact",
+         label = "Compact conversation", description = "Summarize this conversation to free context"),
+    list(section = "Context", id = "clear", command = "clear",
+         label = "New conversation", description = "Clear this conversation and start fresh"),
+    list(section = "Customize", id = "mcp", command = "mcp",
+         label = "MCP status", description = "Show connected MCP servers")
+  )
+}
+
 .claude_chat_app <- function(project, ctx = NULL, options = NULL,
                               permission_mode = "default", prewarm = FALSE) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
@@ -106,23 +128,58 @@
   )
   skills <- tryCatch(load_claude_skills(project_dir = project), error = function(e) list())
 
-  # shiny::fillPage sets html/body height:100% without Bootstrap's .grid class,
-  # which would otherwise override Tailwind's arbitrary grid-cols and break user bubbles.
-  ui <- shiny::fillPage(
-    shiny::tags$style(shiny::HTML(
-      ".shiny-html-output{height:100%!important;overflow:hidden;}")),
-    assistantUIOutput("chat", height = "100%")
-  )
+  ui <- .claude_chat_ui()
   server <- function(input, output, session) {
-    assistantUIServer(
+    # runGadget(stopOnCancel = TRUE) implements cancellation by deliberately
+    # raising "User cancel". Shiny invokes options(shiny.error) before an outer
+    # tryCatch can catch that error, which opens RStudio's debugger. Handle the
+    # same input as a normal stopApp return instead.
+    shiny::observeEvent(input$cancel, {
+      .stop_claude_gadget_normally()
+    }, ignoreInit = TRUE)
+
+    ctrl <- assistantUIServer(
       "chat", handler = handler,
       show_thread_list = TRUE,
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
+      action_items     = .claude_action_items(),
       prewarm          = prewarm
     )
+
+    # on_session_load 只负责用户点击后加载消息；侧栏列表必须另行注入。
+    # assistantUIServer 会缓存首次发送，并在前端 :sessions handler ready 后补发，
+    # 因而这里可在初始 reactive flush 中安全发送。
+    shiny::observe({
+      ctrl$send_sessions(list(
+        sessions = list_claude_sessions(directory = project)
+      ))
+    })
   }
   shiny::shinyApp(ui, server)
+}
+
+# Stop the gadget with a normal NULL return. This is deliberately separate so
+# the input$cancel path is testable without mutating Shiny's global run state.
+.stop_claude_gadget_normally <- function() {
+  shiny::stopApp()
+}
+
+# Run an addin gadget while treating IDE-driven cancellation as normal shutdown.
+# stopOnCancel = FALSE is essential: Shiny's default creates stop("User cancel")
+# inside a calling handler, which reaches options(shiny.error) (and therefore the
+# RStudio debugger) before this outer tryCatch can see it.
+.run_claude_gadget <- function(app, viewer, run_gadget = shiny::runGadget) {
+  tryCatch(
+    run_gadget(app, viewer = viewer, stopOnCancel = FALSE),
+    interrupt = function(e) NULL,
+    error = function(e) {
+      # Retain compatibility with injected/older runners that may still return
+      # the historical cancellation condition.
+      if (identical(conditionMessage(e), "User cancel")) return(NULL)
+      stop(e)
+    }
+  )
 }
 
 #' Open a Claude Code chat inside RStudio
@@ -145,6 +202,7 @@
 #'   \describe{
 #'     \item{`"default"`}{File edits and shell commands require per-action approval via the
 #'       in-chat approval card (safest — recommended for shared/production projects).}
+#'     \item{`"plan"`}{Read-only analysis and planning; edits are not permitted.}
 #'     \item{`"acceptEdits"`}{File edits are auto-approved; shell commands still prompt.}
 #'     \item{`"bypassPermissions"`}{All tool calls run without prompts (fastest, use with care).}
 #'   }
@@ -163,7 +221,7 @@
 #' }
 claude_addin <- function(project         = NULL,
                          viewer          = c("pane", "dialog", "browser"),
-                         permission_mode = c("default", "acceptEdits", "bypassPermissions"),
+                         permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
                          prewarm         = FALSE,
                          options         = NULL) {
   viewer          <- match.arg(viewer)
@@ -180,5 +238,5 @@ claude_addin <- function(project         = NULL,
                     pane    = shiny::paneViewer(minHeight = 600),
                     dialog  = shiny::dialogViewer("Claude Code", width = 1000, height = 800),
                     browser = shiny::browserViewer())
-  invisible(shiny::runGadget(app, viewer = vw))
+  invisible(.run_claude_gadget(app, vw))
 }

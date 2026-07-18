@@ -16,9 +16,10 @@ import type {
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
 import type { ShinyBridge, SessionItem } from "./bridge";
+import type { PermissionModeOption, PermissionModeState } from "./shiny-config-context";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
-  extractAttachments, expandSlashCommands, applyEdit,
+  extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
 } from "./helpers";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
@@ -93,7 +94,11 @@ function deleteMessages(inputId: string, threadId: string) {
 
 // ── hook ────────────────────────────────────────────────────────────────────
 
-type CommandDef = { name: string; description: string; prompt: string };
+type CommandDef = { name: string; description: string; prompt: string; category?: string };
+type ActionItemDef = { id: string; command?: string; label?: string; section?: string; description?: string };
+const AVAILABLE_PERMISSION_MODES = new Set([
+  "default", "plan", "acceptEdits", "bypassPermissions",
+]);
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
   // 从 config 提取 commands，用于 /commandName → cmd.prompt 展开（useMemo 稳定引用）
@@ -101,6 +106,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => (config?.commands as CommandDef[] | undefined) ?? [],
     [config],
   );
+  const actionItems = useMemo(
+    () => (config?.action_items as ActionItemDef[] | undefined) ?? [],
+    [config],
+  );
+  const permissionCapability = useMemo(() => {
+    const capabilities = config?.ui_capabilities as Record<string, unknown> | undefined;
+    const raw = capabilities?.permission_mode as
+      | { value?: unknown; options?: unknown }
+      | undefined;
+    if (typeof raw?.value !== "string" || !Array.isArray(raw.options)) return undefined;
+    const options = raw.options.filter((option): option is PermissionModeOption => {
+      if (!option || typeof option !== "object") return false;
+      const candidate = option as Record<string, unknown>;
+      return typeof candidate.value === "string" && typeof candidate.label === "string";
+    });
+    return { value: raw.value, options };
+  }, [config]);
   // 懒初始化：避免每次 render 都调用 createShinyBridge（会重复注册 Shiny handler
   // 覆盖旧的，但 useRef 还是返回第一个 bridge，导致 handler 和 callbacks 对应的闭包不一致）
   const bridge = useRef<ShinyBridge>(null!);
@@ -198,7 +220,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
-  const lastActionAckRef = useRef<{ threadId: string; ackId: string } | null>(null);  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actionAckRefs = useRef(new Map<string, { threadId: string; ackId: string }>());
+  const invokeActionRef = useRef<((item: ActionItemDef) => void) | null>(null);
+  const actionRequestSeq = useRef(0);
+  type PermissionPending = { requestId: string; requested: string };
+  const [permissionValues, setPermissionValues] = useState<Record<string, string>>({});
+  const [permissionPending, setPermissionPending] = useState<Record<string, PermissionPending>>({});
+  const [permissionErrors, setPermissionErrors] = useState<Record<string, string | null>>({});
+  const permissionPendingRef = useRef<Record<string, PermissionPending>>({});
+  const permissionRequestsRef = useRef(new Map<string, { threadId: string; requested: string }>());
+  const makeActionRequestId = () => `action-${Date.now()}-${++actionRequestSeq.current}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deliverTextRef  = useRef<((text: string, threadId: string) => void) | null>(null);
   const hasReasoningRef = useRef(false); // thinking arrived before text chunks
   // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
@@ -299,26 +331,65 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       streamingIdRef.current = null;
     });
 
-    // ── 注册 :action-result（客户端动作结果 → 更新 ack 气泡文本/状态）──────────
-    bridge.current.onActionResult(({ threadId, message, status }) => {
-      const target = lastActionAckRef.current;
-      const tid = threadId ?? target?.threadId ?? currentThreadIdRef.current;
-      const ackId = target?.ackId;
-      if (!ackId || !message) return;
-      const prefix = status === "error" ? "\u26a0\ufe0f "
-        : status === "progress" ? "\u23f3 "
+    // ── 注册 :action-result（permission 静默状态 / 普通动作 ack）───────────────
+    bridge.current.onActionResult((result) => {
+      const requestId = result.requestId;
+      const permissionRequest = requestId
+        ? permissionRequestsRef.current.get(requestId)
+        : undefined;
+      if (permissionRequest) {
+        const { threadId: tid, requested } = permissionRequest;
+        const latest = permissionPendingRef.current[tid];
+        if (!latest || latest.requestId !== requestId) {
+          permissionRequestsRef.current.delete(requestId!);
+          return;
+        }
+        if (result.status === "progress") return;
+        permissionRequestsRef.current.delete(requestId!);
+
+        if (result.status === "error") {
+          setPermissionErrors((prev) => ({
+            ...prev,
+            [tid]: result.message || "Permission mode request failed",
+          }));
+        } else if (result.status !== "progress") {
+          const canonical = typeof result.value === "string" ? result.value : requested;
+          setPermissionValues((prev) => ({ ...prev, [tid]: canonical }));
+          setPermissionErrors((prev) => ({ ...prev, [tid]: null }));
+        } else {
+          return;
+        }
+        const nextPending = { ...permissionPendingRef.current };
+        delete nextPending[tid];
+        permissionPendingRef.current = nextPending;
+        setPermissionPending(nextPending);
+        return;
+      }
+
+      const target = requestId ? actionAckRefs.current.get(requestId) : undefined;
+      if (!target || !result.message) return;
+      const prefix = result.status === "error" ? "\u26a0\ufe0f "
+        : result.status === "progress" ? "\u23f3 "
         : "\u2713 ";
       setMessagesMap((prev) => {
-        const msgs = prev[tid] ?? [];
+        const msgs = prev[target.threadId] ?? [];
         const updated = msgs.map((m): ThreadMessageLike =>
-          m.id === ackId
+          m.id === target.ackId
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ? ({ ...m, content: [{ type: "text" as const, text: prefix + message }] } as any)
+            ? ({ ...m, content: [{ type: "text" as const, text: prefix + result.message }] } as any)
             : m,
         );
-        if (!isServerMode.current) saveMessages(inputId, tid, updated);
-        return { ...prev, [tid]: updated };
+        if (!isServerMode.current) saveMessages(inputId, target.threadId, updated);
+        return { ...prev, [target.threadId]: updated };
       });
+      if (result.status !== "progress") actionAckRefs.current.delete(requestId!);
+      const effect = result.value && typeof result.value === "object"
+        ? (result.value as { effect?: unknown }).effect
+        : undefined;
+      if (result.status !== "error" && result.status !== "progress" &&
+          effect === "new-thread" && target.threadId === currentThreadIdRef.current) {
+        switchToNewThread();
+      }
     });
 
     // ── #1 用量/成本 ─────────────────────────────────────────────────────────
@@ -794,6 +865,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         .map((c) => c.text)
         .join("");
 
+      const slashAction = matchSlashAction(text, actionItems);
+      if (slashAction) {
+        invokeActionRef.current?.(slashAction);
+        return;
+      }
+
       // 发给 R 的文本：把 /commandName → cmd.prompt 展开
       // （chip directiveText = "/commandName"，R 需要收到实际 prompt）
       const sendText = expandSlashCommands(text, commands);
@@ -831,7 +908,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         attachmentData.length > 0 ? attachmentData : undefined,
       ));
     },
-    [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, startRun]
+    [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, actionItems, startRun]
   );
 
   // ── 消息队列:文本-only 投递(队列 flush 用)+ 入队 ─────────────────────────────
@@ -839,6 +916,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // flush 调用(避免 startRun 闭包对后定义函数的时序依赖)。
   const deliverText = useCallback((text: string, threadId: string) => {
     if (!text.trim()) return;
+    const slashAction = matchSlashAction(text, actionItems);
+    if (slashAction) {
+      invokeActionRef.current?.(slashAction);
+      return;
+    }
     const sendText = expandSlashCommands(text, commands);
     setMessagesMap((prev) => {
       const threadMsgs = prev[threadId] ?? [];
@@ -850,7 +932,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       return { ...prev, [threadId]: updated };
     });
     startRun(threadId, () => bridge.current.sendUserMessage(sendText, threadId));
-  }, [inputId, commands, startRun]);
+  }, [inputId, commands, actionItems, startRun]);
   deliverTextRef.current = deliverText;
 
   // 入队:AI 运行中时把消息排队,当前 run 结束后自动发送(见 onDone flush)。
@@ -865,17 +947,19 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── invokeAction:客户端动作(如 /model /clear),不发给 AI ────────────────────
   // 在对话里记录一条"用户操作"气泡 + 一条系统确认(ack)气泡,并把 action id 发给 R
   // (on_action 执行真实操作,如切模型 / 清历史)。绝不触发 AI run。
-  const invokeAction = useCallback((item: { id: string; label?: string; section?: string }) => {
+  const invokeAction = useCallback((item: ActionItemDef) => {
     const threadId = currentThreadIdRef.current;
     const label = item.label ?? item.id;
-    const ackId = `action-${Date.now()}`;
+    const command = item.command ?? item.id;
+    const requestId = makeActionRequestId();
+    const ackId = `ack-${requestId}`;
     setMessagesMap((prev) => {
       const msgs = prev[threadId] ?? [];
       const updated: ThreadMessageLike[] = [
         ...msgs,
-        { id: `user-${Date.now()}`, role: "user" as const,
+        { id: `user-${requestId}`, role: "user" as const,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          content: [{ type: "text" as const, text: `/${item.id}` }], metadata: { custom: { shinyAction: true } } as any },
+          content: [{ type: "text" as const, text: `/${command}` }], metadata: { custom: { shinyAction: true } } as any },
         { id: ackId, role: "assistant" as const,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}\u2026` }], metadata: { custom: { shinyActionAck: true } } as any },
@@ -883,9 +967,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (!isServerMode.current) saveMessages(inputId, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
-    lastActionAckRef.current = { threadId, ackId };
-    bridge.current.sendAction(item.id, threadId);
+    actionAckRefs.current.set(requestId, { threadId, ackId });
+    bridge.current.sendAction(item.id, threadId, { requestId });
   }, [inputId]);
+  invokeActionRef.current = invokeAction;
 
   // ── onEdit ───────────────────────────────────────────────────────────────
   // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新插入编辑后的
@@ -1086,10 +1171,39 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const sendAction = useCallback(
-    (actionId: string) => { bridge.current.sendAction(actionId); },
-    [] // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  const setPermissionMode = useCallback((nextValue: string) => {
+    if (!permissionCapability || !AVAILABLE_PERMISSION_MODES.has(nextValue)) return;
+    const threadId = currentThreadIdRef.current;
+    const option = permissionCapability.options.find((item) => item.value === nextValue);
+    if (!option || option.disabled) return;
+
+    const requestId = makeActionRequestId();
+    const pending = { requestId, requested: nextValue };
+    permissionPendingRef.current = {
+      ...permissionPendingRef.current,
+      [threadId]: pending,
+    };
+    permissionRequestsRef.current.set(requestId, { threadId, requested: nextValue });
+    setPermissionPending(permissionPendingRef.current);
+    setPermissionErrors((prev) => ({ ...prev, [threadId]: null }));
+    bridge.current.sendAction(`permissions:${nextValue}`, threadId, {
+      requestId,
+      silent: true,
+    });
+  }, [permissionCapability]);
+
+  const currentPermissionPending = permissionPending[currentThreadId];
+  const permissionMode: PermissionModeState | undefined = permissionCapability
+    ? {
+        value: currentPermissionPending?.requested
+          ?? permissionValues[currentThreadId]
+          ?? permissionCapability.value,
+        options: permissionCapability.options,
+        pending: Boolean(currentPermissionPending),
+        error: permissionErrors[currentThreadId] ?? null,
+        setValue: setPermissionMode,
+      }
+    : undefined;
 
   const runtime = useExternalStoreRuntime({
     messages,
@@ -1110,8 +1224,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   return {
-    runtime, sendToolApproval, switchToNewThread, sendAction, renameThread, enqueueMessage,
-    invokeAction,
+    runtime, sendToolApproval, switchToNewThread, renameThread, enqueueMessage,
+    invokeAction, permissionMode,
     artifacts, activeArtifactId,
     openArtifact: (id: string) => setActiveArtifactId(id),
     closeArtifact: () => setActiveArtifactId(null),

@@ -4,6 +4,7 @@ import {
   extractAttachments, expandSlashCommands, safeUrl,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
+  matchSlashAction, mergeSlashCommands,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -356,5 +357,44 @@ describe("detectMentionTrigger", () => {
   it("无 @ 或 @ 前非空白返回 null", () => {
     expect(detectMentionTrigger("hello", 5)).toBeNull();
     expect(detectMentionTrigger("a@b", 3)).toBeNull();
+  });
+});
+
+
+describe("matchSlashAction", () => {
+  const actions = [
+    { id: "compact", command: "compact", label: "Compact conversation" },
+    { id: "context", command: "context", label: "Context usage" },
+  ];
+
+  it("matches only an exact standalone slash action", () => {
+    expect(matchSlashAction("/compact", actions)?.id).toBe("compact");
+    expect(matchSlashAction("  /context  ", actions)?.id).toBe("context");
+    expect(matchSlashAction("/compact focus on tests", actions)).toBeUndefined();
+    expect(matchSlashAction("prefix /compact", actions)).toBeUndefined();
+    expect(matchSlashAction("/unknown", actions)).toBeUndefined();
+  });
+});
+
+describe("mergeSlashCommands", () => {
+  it("keeps configured skill metadata, deduplicates server entries, and lets actions win", () => {
+    const merged = mergeSlashCommands(
+      [
+        { name: "github", description: "Personal skill", prompt: "/github", category: "Personal Skills" },
+        { name: "compact", description: "Conflicting skill", prompt: "/compact", category: "Personal Skills" },
+        { name: "GitHub", description: "Case duplicate", prompt: "/GitHub", category: "Project Skills" },
+      ],
+      [
+        { name: "github", description: "Duplicate" },
+        { name: "compact", description: "CLI compact" },
+        { name: "doctor", description: "Bundled skill" },
+      ],
+      [{ id: "compact", command: "compact", label: "Compact conversation" }],
+    );
+
+    expect(merged).toEqual([
+      { name: "github", description: "Personal skill", prompt: "/github", category: "Personal Skills" },
+      { name: "doctor", description: "Bundled skill", prompt: "/doctor", category: "Claude Code" },
+    ]);
   });
 });

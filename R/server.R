@@ -89,16 +89,16 @@
 #'   click) and optional `text` (display label, defaults to `prompt`).
 #' @param commands List of slash-command definitions. Each element is a list
 #'   with `name` (e.g. `"summarize"`), `description`, `prompt` (the message
-#'   sent immediately when the command is selected), and optional `category`
-#'   (group label shown as a section header in the popover). Category should be
-#'   one of the 6 fixed sections: `"Context"`, `"Model"`, `"Customize"`,
-#'   `"Slash Commands"` (default), `"Settings"`, `"Support"`.
+#'   sent when the command is submitted), and optional `category` (group label
+#'   shown as a section header, such as `"Personal Skills"` or `"Project
+#'   Skills"`).
 #' @param action_items List of action-type slash-command items. Unlike
 #'   `commands`, these do not send a message to the AI — instead, clicking them
 #'   fires `on_action(id)` on the R side, allowing arbitrary server logic.
-#'   Each element is a list with `section` (one of the 6 fixed section names),
-#'   `id` (unique string passed to `on_action`), `label` (display name), and
-#'   optional `description`. Example:
+#'   Each element is a list with `section` (group label), `id` (unique string
+#'   passed to `on_action`), optional `command` (the slash name shown and matched
+#'   for exact direct input; defaults to `id`), `label`, and optional
+#'   `description`. Example:
 #'   ```r
 #'   action_items = list(
 #'     list(section = "Model",   id = "thinking-on",  label = "Enable thinking"),
@@ -209,10 +209,13 @@ assistantUIServer <- function(id, handler,
   force(on_rename)
   # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
   # 且用户未自定义 on_action,则自动接线,使 /model、/clear 等客户端动作开箱即用。
-  if (is.null(on_action)) {
-    .action_handler <- attr(handler, "action_handler")
-    if (!is.null(.action_handler)) on_action <- .action_handler
-  }
+  # 只有该 dispatcher 实际生效时才发布配套 capability；否则 UI 会把 permission
+  # action 发送给不相关的自定义回调并永久 pending。
+  .handler_action <- attr(handler, "action_handler")
+  .uses_handler_action <- !is.null(.handler_action) &&
+    (is.null(on_action) || identical(on_action, .handler_action))
+  if (is.null(on_action) && !is.null(.handler_action)) on_action <- .handler_action
+  .ui_capabilities <- if (.uses_handler_action) attr(handler, "ui_capabilities") else NULL
   force(code_theme); force(strings); force(assistant_avatar)
   force(theme); force(dark_mode)
   force(show_timestamps)
@@ -239,6 +242,7 @@ assistantUIServer <- function(id, handler,
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
+  if (!is.null(.ui_capabilities)) config$ui_capabilities  <- .ui_capabilities
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
@@ -402,10 +406,13 @@ assistantUIServer <- function(id, handler,
       msg <- session$input[[paste0(input_id, "_action")]]
       if (is.null(msg)) return()
       tid <- msg$threadId
-      # 向 UI 回传动作结果(更新 ack 气泡):send_action_result(message, status="ok"|"error")
-      send_action_result <- function(message, status = "ok") {
-        session$sendCustomMessage(paste0(input_id, ":action-result"),
-                                  list(threadId = tid, message = message, status = status))
+      # 向 UI 回传动作结果。requestId/actionId 用于并发关联；value 为可选 canonical 状态。
+      send_action_result <- function(message, status = "ok", value = NULL) {
+        session$sendCustomMessage(
+          paste0(input_id, ":action-result"),
+          list(threadId = tid, requestId = msg$requestId, actionId = msg$id,
+               message = message, status = status, value = value)
+        )
       }
       all_args <- list(id = msg$id, thread_id = tid, send_action_result = send_action_result)
       pars <- names(formals(on_action))
@@ -578,7 +585,7 @@ assistantUIServer <- function(id, handler,
   handler_cleanup <- attr(handler, "cleanup")
   if (is.function(handler_cleanup)) {
     session$onSessionEnded(function() {
-      tryCatch(handler_cleanup(), error = function(e) NULL)
+      .run_handler_cleanup(handler_cleanup)
     })
   }
 
@@ -601,6 +608,19 @@ assistantUIServer <- function(id, handler,
       session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
     }
   ))
+}
+
+# Run backend cleanup to completion even when RStudio's Viewer Stop has already
+# queued a user interrupt. processx::process$wait() is interruptible, so merely
+# catching `error` is insufficient (`interrupt` does not inherit from `error`).
+.run_handler_cleanup <- function(cleanup) {
+  if (!is.function(cleanup)) return(invisible(NULL))
+  tryCatch(
+    suspendInterrupts(cleanup()),
+    interrupt = function(e) NULL,
+    error = function(e) NULL
+  )
+  invisible(NULL)
 }
 
 # NULL-coalescing helper. Intentionally kept separate from the copy in

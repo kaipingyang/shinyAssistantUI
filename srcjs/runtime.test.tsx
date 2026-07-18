@@ -31,8 +31,8 @@ async function fireR(type: string, data: unknown) {
   });
 }
 
-function setup() {
-  return renderHook(() => useShinyRuntime("test", {}));
+function setup(config: Record<string, unknown> = {}) {
+  return renderHook(() => useShinyRuntime("test", config));
 }
 
 // 当前线程消息
@@ -313,3 +313,278 @@ describe("useShinyRuntime — 跨线程 run 收尾隔离", () => {
 
 
 
+
+
+describe("useShinyRuntime — permission mode capability", () => {
+  const permissionConfig = {
+    ui_capabilities: {
+      permission_mode: {
+        value: "plan",
+        options: [
+          { value: "default", label: "Manual" },
+          { value: "plan", label: "Plan" },
+          { value: "acceptEdits", label: "Auto-edit" },
+          { value: "bypassPermissions", label: "Bypass" },
+        ],
+      },
+    },
+  };
+
+  it("capability absent keeps permission UI disabled", () => {
+    const { result } = setup();
+    expect(result.current.permissionMode).toBeUndefined();
+  });
+
+  it("exposes the capability initial mode and options", () => {
+    const { result } = setup(permissionConfig);
+    expect(result.current.permissionMode?.value).toBe("plan");
+    expect(result.current.permissionMode?.options.map((x) => x.value)).toEqual([
+      "default", "plan", "acceptEdits", "bypassPermissions",
+    ]);
+  });
+
+  it("submits a silent action without chat bubbles and accepts matching canonical value", async () => {
+    const { result } = setup(permissionConfig);
+    const before = messages(result).length;
+    await act(async () => { result.current.permissionMode?.setValue("acceptEdits"); });
+
+    expect(messages(result)).toHaveLength(before);
+    const sent = inputs.find((x) => x.id === "test_action")!;
+    expect(sent.value).toMatchObject({
+      id: "permissions:acceptEdits", silent: true,
+    });
+    expect(sent.value.requestId).toBeTruthy();
+    expect(result.current.permissionMode).toMatchObject({ value: "acceptEdits", pending: true });
+
+    await fireR("action-result", {
+      threadId: sent.value.threadId, requestId: sent.value.requestId,
+      actionId: sent.value.id, status: "ok", value: "acceptEdits",
+    });
+    expect(result.current.permissionMode).toMatchObject({
+      value: "acceptEdits", pending: false, error: null,
+    });
+  });
+
+  it("submits bypassPermissions as a silent permission action", async () => {
+    const { result } = setup(permissionConfig);
+    await act(async () => {
+      result.current.permissionMode?.setValue("bypassPermissions");
+    });
+    const sent = inputs.find((item) => item.id === "test_action");
+    expect(sent?.value).toMatchObject({
+      id: "permissions:bypassPermissions",
+      silent: true,
+    });
+    expect(messages(result)).toHaveLength(0);
+  });
+
+  it("reverts to the previous value on error and ignores stale results", async () => {
+    const { result } = setup(permissionConfig);
+    await act(async () => { result.current.permissionMode?.setValue("acceptEdits"); });
+    const first = inputs.find((x) => x.id === "test_action")!.value;
+    await act(async () => { result.current.permissionMode?.setValue("default"); });
+    const second = inputs.filter((x) => x.id === "test_action")[1].value;
+
+    await fireR("action-result", {
+      threadId: first.threadId, requestId: first.requestId,
+      actionId: first.id, status: "ok", value: "acceptEdits",
+    });
+    expect(result.current.permissionMode).toMatchObject({ value: "default", pending: true });
+
+    await fireR("action-result", {
+      threadId: second.threadId, requestId: second.requestId,
+      actionId: second.id, status: "error", message: "rejected",
+    });
+    expect(result.current.permissionMode).toMatchObject({
+      value: "plan", pending: false, error: "rejected",
+    });
+  });
+
+  it("isolates canonical and pending modes by thread", async () => {
+    const { result } = setup(permissionConfig);
+    const firstThread = currentThreadId(result);
+    await act(async () => { result.current.permissionMode?.setValue("acceptEdits"); });
+    const request = inputs.find((x) => x.id === "test_action")!.value;
+
+    await act(async () => { result.current.switchToNewThread(); });
+    expect(currentThreadId(result)).not.toBe(firstThread);
+    expect(result.current.permissionMode).toMatchObject({ value: "plan", pending: false });
+
+    await fireR("action-result", {
+      threadId: firstThread, requestId: request.requestId,
+      actionId: request.id, status: "ok", value: "acceptEdits",
+    });
+    expect(result.current.permissionMode?.value).toBe("plan");
+
+    await act(async () => { result.current.runtime.threads.switchToThread(firstThread); });
+    expect(result.current.permissionMode).toMatchObject({ value: "acceptEdits", pending: false });
+  });
+});
+
+
+describe("useShinyRuntime — ordinary action correlation", () => {
+  it("keeps user/ack bubbles and updates concurrent actions by requestId", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.invokeAction({ id: "first", label: "First action" });
+      result.current.invokeAction({ id: "second", label: "Second action" });
+    });
+    expect(messages(result)).toHaveLength(4);
+    const requests = inputs.filter((item) => item.id === "test_action").map((item) => item.value);
+    expect(requests).toHaveLength(2);
+    expect(requests[0].requestId).not.toBe(requests[1].requestId);
+
+    await fireR("action-result", {
+      threadId: requests[1].threadId,
+      requestId: requests[1].requestId,
+      actionId: "second",
+      status: "ok",
+      message: "Second completed",
+    });
+    const actionText = messages(result).map((message) =>
+      (message.content as any[]).map((part) => part.text ?? "").join(""),
+    );
+    expect(actionText.some((text) => text.includes("Second completed"))).toBe(true);
+    expect(actionText.some((text) => text.includes("First action"))).toBe(true);
+  });
+});
+
+
+describe("useShinyRuntime — permission progress correlation", () => {
+  const config = {
+    ui_capabilities: {
+      permission_mode: {
+        value: "default",
+        options: [
+          { value: "default", label: "Manual" },
+          { value: "plan", label: "Plan" },
+        ],
+      },
+    },
+  };
+
+  it.each([
+    ["ok", "plan", null],
+    ["error", undefined, "denied"],
+  ] as const)("keeps request correlation across progress then %s", async (status, value, error) => {
+    const { result } = setup(config);
+    await act(async () => { result.current.permissionMode?.setValue("plan"); });
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId: request.threadId, requestId: request.requestId,
+      actionId: request.id, status: "progress", message: "Submitting",
+    });
+    expect(result.current.permissionMode).toMatchObject({ value: "plan", pending: true });
+
+    await fireR("action-result", {
+      threadId: request.threadId, requestId: request.requestId,
+      actionId: request.id, status, value, message: error ?? "submitted",
+    });
+    expect(result.current.permissionMode?.pending).toBe(false);
+    if (status === "ok") {
+      expect(result.current.permissionMode).toMatchObject({ value: "plan", error: null });
+    } else {
+      expect(result.current.permissionMode).toMatchObject({ value: "default", error: "denied" });
+    }
+  });
+});
+
+
+describe("useShinyRuntime — direct slash actions", () => {
+  const config = {
+    action_items: [
+      { id: "compact", command: "compact", label: "Compact conversation", section: "Context" },
+      { id: "context", command: "context", label: "Context usage", section: "Context" },
+    ],
+  };
+
+  it.each(["compact", "context"])("direct /%s invokes an action and never starts an AI run", async (name) => {
+    const { result } = setup(config);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText(`/${name}`);
+      await result.current.runtime.thread.composer.send();
+    });
+
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+    const action = inputs.find((item) => item.id === "test_action")?.value;
+    expect(action).toMatchObject({ id: name });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    const text = messages(result).map((message) =>
+      (message.content as any[]).map((part) => part.text ?? "").join(""),
+    );
+    expect(text).toContain(`/${name}`);
+  });
+
+  it("unknown slash text remains a normal AI message", async () => {
+    const { result } = setup(config);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("/unknown arg");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.find((item) => item.id === "test")?.value.text).toBe("/unknown arg");
+    expect(inputs.filter((item) => item.id === "test_action")).toHaveLength(0);
+  });
+
+  it("a skill invocation remains literal for Claude Code to resolve", async () => {
+    const { result } = setup({
+      ...config,
+      commands: [{ name: "github", description: "GitHub skill", prompt: "/github", category: "Personal Skills" }],
+    });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("/github issue 42");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.find((item) => item.id === "test")?.value.text).toBe("/github issue 42");
+  });
+});
+
+
+describe("useShinyRuntime — clear action effect", () => {
+  const config = {
+    action_items: [
+      { id: "clear", command: "clear", label: "New conversation", section: "Context" },
+    ],
+  };
+
+  it("switches to an empty new thread only after a successful backend result", async () => {
+    const { result } = setup(config);
+    const oldThread = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("/clear");
+      await result.current.runtime.thread.composer.send();
+    });
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    expect(currentThreadId(result)).toBe(oldThread);
+
+    await fireR("action-result", {
+      threadId: oldThread,
+      requestId: request.requestId,
+      actionId: "clear",
+      status: "ok",
+      message: "Starting new conversation",
+      value: { effect: "new-thread" },
+    });
+
+    expect(currentThreadId(result)).not.toBe(oldThread);
+    expect(messages(result)).toHaveLength(0);
+  });
+
+  it("keeps the current thread when clear fails", async () => {
+    const { result } = setup(config);
+    const oldThread = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("/clear");
+      await result.current.runtime.thread.composer.send();
+    });
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId: oldThread,
+      requestId: request.requestId,
+      actionId: "clear",
+      status: "error",
+      message: "Clear failed",
+      value: { effect: "new-thread" },
+    });
+    expect(currentThreadId(result)).toBe(oldThread);
+  });
+});

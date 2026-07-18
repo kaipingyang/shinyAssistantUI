@@ -2,48 +2,48 @@
 % Please edit documentation in R/skills.R
 \name{load_claude_skills}
 \alias{load_claude_skills}
-\title{Load Claude Code skill files as slash commands}
+\title{Load Claude Code skills as slash commands}
 \usage{
 load_claude_skills(project_dir = getwd(), include_plugins = TRUE)
 }
 \arguments{
 \item{project_dir}{Path to the project root. Defaults to \code{\link[=getwd]{getwd()}}.}
 
-\item{include_plugins}{Logical. If \code{TRUE} (default), also scan plugin
-marketplace directories under \verb{~/.claude/plugins/}.}
+\item{include_plugins}{Retained for API compatibility. Plugin marketplace
+caches are never scanned directly; active plugin commands come from the
+connected Claude Code process.}
 }
 \value{
-A list of command definitions, each a named list with \code{name},
-\code{description}, and \code{prompt} fields, ready to pass to \code{assistantUIServer}.
+A list of command definitions with \code{name}, \code{description}, \code{prompt},
+\code{category}, \code{source}, and \code{kind} fields.
 }
 \description{
-Scans \verb{.claude/commands/} directories for skill \code{.md} files and returns
-a list suitable for the \code{commands} parameter of \code{\link[=assistantUIServer]{assistantUIServer()}}.
+Discovers user-invocable Claude Code skills and legacy custom commands for
+the slash menu. The loader intentionally scans only direct entries in the
+personal and project configuration roots:
 }
 \details{
-Skill files are loaded from three locations in ascending priority order
-(higher-priority sources override lower-priority ones with the same name):
-\enumerate{
-\item Plugin marketplace skills:
-\verb{~/.claude/plugins/marketplaces/*/plugins/*/commands/*.md}
-\item User-global skills: \verb{~/.claude/commands/*.md}
-\item Project skills: \verb{<project_dir>/.claude/commands/*.md}
+\itemize{
+\item \verb{~/.claude/skills/<skill-name>/SKILL.md}
+\item \verb{~/.claude/commands/<command-name>.md}
+\item \verb{<project_dir>/.claude/skills/<skill-name>/SKILL.md}
+\item \verb{<project_dir>/.claude/commands/<command-name>.md}
 }
 
-Each \code{.md} file may use YAML frontmatter:
+This mirrors Claude Code's base-session discovery without recursively
+flattening repositories or plugin copies embedded inside a skill directory.
+Claude Code discovers nested project \verb{.claude/skills/} directories on demand
+and advertises those (with directory-qualified names) through Agent SDK
+server info.
 
-\if{html}{\out{<div class="sourceCode">}}\preformatted{---
-description: One-line description
----
-Prompt content here…
-}\if{html}{\out{</div>}}
+Official precedence is applied: within one scope, a skill overrides a legacy
+command of the same name; personal entries override project entries. Plugin
+skills are not read from the marketplace cache because that cache includes
+disabled and duplicate plugins and requires namespacing. Active plugin and
+bundled skills are supplied by Claude Code through Agent SDK server info.
 
-Or a simpler format where the first non-empty line is the description and
-the rest is the prompt.
-}
-\note{
-Built-in Claude Code CLI commands (\verb{/model}, \verb{/resume}, \verb{/clear}, etc.)
-are compiled into the Claude Code binary and cannot be loaded this way.
-Only skill files stored as \code{.md} in \verb{.claude/commands/} directories are
-surfaced here.
+\code{user-invocable: false} and \code{skillOverrides: {name: "off"}} entries are
+omitted. Returned prompts preserve the literal \verb{/name} invocation so Claude
+Code, rather than this package, performs argument substitution, dynamic
+context injection, permission grants, and forked-skill execution.
 }

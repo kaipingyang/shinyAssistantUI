@@ -3,7 +3,9 @@ import { AssistantRuntimeProvider, AssistantModalPrimitive } from "@assistant-ui
 import { BotIcon } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
+import { SidebarSettings } from "@/components/assistant-ui/settings-controls";
 import { useShinyRuntime } from "./runtime";
+import { mergeSlashCommands } from "./helpers";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { ArtifactPanel } from "./artifact-panel";
 import { registerApprovalHandler, unregisterApprovalHandler } from "./approval-registry";
@@ -40,20 +42,22 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const showThreadList = config?.show_thread_list === true;
   const isModal = config?.modal === true;
 
+  const configuredCommands = (config?.commands as {
+    name: string; description?: string; prompt: string; category?: string;
+    source?: string; kind?: string;
+  }[]) ?? [];
+  const actionItems = (config?.action_items as {
+    section?: string; id: string; command?: string; label?: string; description?: string;
+  }[]) ?? [];
   const cfgValue = {
     tools: (config?.tools as { name: string; description?: string }[]) ?? [],
-    commands: [
-      ...((config?.commands as { name: string; description?: string; prompt: string }[]) ?? []),
-      // #5 CLI 自动发现的 slash 命令(去重合并;插入为 /name)
-      ...rt.serverCommands
-        .filter((c) => !((config?.commands as { name: string }[]) ?? []).some((x) => x.name === c.name))
-        .map((c) => ({ name: c.name, description: c.description, prompt: `/${c.name}` })),
-    ],
-    actionItems: (config?.action_items as { section?: string; id: string; label?: string; description?: string }[]) ?? [],
+    commands: mergeSlashCommands(configuredCommands, rt.serverCommands, actionItems),
+    actionItems,
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
+    permissionMode: rt.permissionMode,
     usage: rt.usage,
     tasks: rt.tasks,
     rateLimit: rt.rateLimit,
@@ -101,8 +105,11 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
       <ShinyConfigContext.Provider value={cfgValue}>
         <div className="aui-root flex h-full min-h-0">
           {showThreadList && (
-            <div className="aui-thread-list-sidebar w-56 shrink-0 overflow-y-auto border-r p-2">
-              <ThreadList />
+            <div className="aui-thread-list-sidebar relative flex w-56 shrink-0 flex-col overflow-hidden border-r p-2">
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ThreadList />
+              </div>
+              <SidebarSettings />
             </div>
           )}
           <div className="min-w-0 flex-1">{threadEl}</div>
