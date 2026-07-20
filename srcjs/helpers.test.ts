@@ -4,7 +4,7 @@ import {
   extractAttachments, expandSlashCommands, safeUrl,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
-  matchSlashAction, mergeSlashCommands,
+  matchSlashAction, mergeSlashCommands, rankMentionItems, mentionInsertText,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -396,5 +396,29 @@ describe("mergeSlashCommands", () => {
       { name: "github", description: "Personal skill", prompt: "/github", category: "Personal Skills" },
       { name: "doctor", description: "Bundled skill", prompt: "/doctor", category: "Claude Code" },
     ]);
+  });
+});
+
+
+describe("workspace mention ranking and literals", () => {
+  const items = [
+    { kind: "file" as const, path: "src/components/AssistantUI.tsx" },
+    { kind: "file" as const, path: "R/assistant_utils.R" },
+    { kind: "folder" as const, path: "src/components/" },
+  ];
+
+  it("uses deterministic fuzzy ranking", () => {
+    expect(rankMentionItems(items, "aui").map((x) => x.path)).toEqual([
+      "R/assistant_utils.R", "src/components/AssistantUI.tsx",
+    ]);
+    expect(rankMentionItems(items, "components")[0].kind).toBe("folder");
+  });
+
+  it("inserts literal file/folder and active selection line ranges", () => {
+    expect(mentionInsertText({ kind: "file", path: "R/app.R" })).toBe("@R/app.R");
+    expect(mentionInsertText({ kind: "folder", path: "R/" })).toBe("@R/");
+    expect(mentionInsertText({ kind: "file", path: "R/app.R" }, { startLine: 5, endLine: 10 }))
+      .toBe("@R/app.R#L5-L10");
+    expect(mentionInsertText({ kind: "file", path: "dir/my file.R" })).toBe('@"dir/my file.R"');
   });
 });

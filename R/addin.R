@@ -25,6 +25,7 @@
 }
 
 # 活动编辑器上下文:list(path, rel, selection, first_line, last_line) 或 NULL。全程 guard。
+# 只采样第一段 selection，确保文本与行范围属于同一个选区。
 .addin_editor_context <- function(project = NULL) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
       !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(NULL)
@@ -35,15 +36,133 @@
   ranges <- tryCatch(ctx$selection, error = function(e) NULL)
   sel <- ""; a <- NULL; b <- NULL
   if (length(ranges)) {
-    texts <- vapply(ranges, function(r) tryCatch(r$text %||% "", error = function(e) ""), character(1))
-    sel <- paste(texts[nzchar(texts)], collapse = "\n")
-    rg <- tryCatch(ranges[[1]]$range, error = function(e) NULL)
+    first <- ranges[[1L]]
+    sel <- tryCatch(first$text %||% "", error = function(e) "")
+    rg <- tryCatch(first$range, error = function(e) NULL)
     if (!is.null(rg)) { a <- tryCatch(rg$start[[1]], error = function(e) NULL)
                         b <- tryCatch(rg$end[[1]],   error = function(e) NULL) }
   }
   if (is.null(path) && !nzchar(sel)) return(NULL)
   list(path = path, rel = if (!is.null(path)) .rel_path(path, project) else NULL,
        selection = if (nzchar(sel)) sel else NULL, first_line = a, last_line = b)
+}
+
+# git ls-files -z 的 NUL-safe 解码。system2(stdout=TRUE) 按行读取会破坏含换行的
+# 合法文件名，因此先写 raw 临时文件再按 NUL 切分。
+.read_nul_paths <- function(path) {
+  size <- file.info(path)$size
+  if (is.na(size) || size <= 0) return(character(0))
+  raw <- readBin(path, what = "raw", n = size)
+  ends <- which(raw == as.raw(0L))
+  if (!length(ends)) return(character(0))
+  starts <- c(1L, head(ends, -1L) + 1L)
+  keep <- ends > starts
+  vapply(which(keep), function(i) rawToChar(raw[starts[[i]]:(ends[[i]] - 1L)]), character(1))
+}
+
+# 构建 tracked + untracked、遵守 gitignore/global excludes 的 workspace index。
+# 非 Git 项目诚实返回空列表，不用 list.files() 冒充 ignore-aware 结果。
+.addin_workspace_index <- function(project, max_files = 10000L) {
+  if (Sys.which("git") == "" || is.null(project) || !dir.exists(project)) return(list())
+  project <- normalizePath(project, mustWork = TRUE)
+  out <- tempfile("claude-workspace-", fileext = ".nul")
+  err <- tempfile("claude-workspace-", fileext = ".err")
+  on.exit(unlink(c(out, err)), add = TRUE)
+  status <- suppressWarnings(tryCatch(
+    system2(
+      "git",
+      c("-C", shQuote(project), "ls-files", "-z", "--cached", "--others", "--exclude-standard"),
+      stdout = out, stderr = err
+    ),
+    error = function(e) 1L
+  ))
+  if (!identical(as.integer(status), 0L)) return(list())
+
+  files <- .read_nul_paths(out)
+  files <- gsub("\\\\", "/", files)
+  files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
+  files <- head(sort(unique(files)), max(0L, as.integer(max_files)))
+
+  folders <- character(0)
+  for (file in files) {
+    parent <- dirname(file)
+    while (!identical(parent, ".") && nzchar(parent)) {
+      folders <- c(folders, paste0(parent, "/"))
+      next_parent <- dirname(parent)
+      if (identical(next_parent, parent)) break
+      parent <- next_parent
+    }
+  }
+  folders <- sort(unique(folders))
+  c(
+    lapply(folders, function(path) list(kind = "folder", path = path)),
+    lapply(files, function(path) list(kind = "file", path = path))
+  )
+}
+
+.addin_fuzzy_match <- function(needle, haystack) {
+  if (!nzchar(needle)) return(TRUE)
+  chars <- strsplit(needle, "", fixed = TRUE)[[1L]]
+  text <- strsplit(haystack, "", fixed = TRUE)[[1L]]
+  pos <- 1L
+  for (ch in chars) {
+    if (pos > length(text)) return(FALSE)
+    found <- which(text[seq.int(pos, length(text))] == ch)
+    if (!length(found)) return(FALSE)
+    pos <- pos + found[[1L]]
+  }
+  TRUE
+}
+
+.addin_mention_insert_text <- function(path) {
+  if (grepl("[[:space:]]", path)) paste0('@"', gsub('"', '\\"', path, fixed = TRUE), '"')
+  else paste0("@", path)
+}
+
+# 确定性 fuzzy 排序：basename prefix/substring > path prefix/substring >
+# subsequence；同分时浅层路径、folder、短路径、字典序优先。
+.addin_workspace_search <- function(index, query = "", kinds = c("file", "folder"), limit = 50L) {
+  query <- tolower(trimws(query %||% ""))
+  kinds <- intersect(as.character(kinds %||% c("file", "folder")), c("file", "folder"))
+  if (!length(kinds)) return(list())
+  candidates <- Filter(function(x) is.list(x) && x$kind %in% kinds && nzchar(x$path %||% ""), index)
+  scored <- lapply(candidates, function(item) {
+    path <- tolower(item$path)
+    base <- tolower(basename(sub("/$", "", item$path)))
+    score <- if (!nzchar(query)) 0L
+      else if (startsWith(base, query)) 0L
+      else if (grepl(query, base, fixed = TRUE)) 1L
+      else if (startsWith(path, query)) 2L
+      else if (grepl(query, path, fixed = TRUE)) 3L
+      else if (.addin_fuzzy_match(query, base)) 4L
+      else if (.addin_fuzzy_match(query, path)) 5L
+      else Inf
+    if (!is.finite(score)) return(NULL)
+    depth <- lengths(regmatches(item$path, gregexpr("/", item$path, fixed = TRUE)))
+    c(item, list(
+      label = basename(sub("/$", "", item$path)),
+      insertText = .addin_mention_insert_text(item$path),
+      .score = score, .depth = depth
+    ))
+  })
+  scored <- Filter(Negate(is.null), scored)
+  if (!length(scored)) return(list())
+  ord <- order(
+    vapply(scored, `[[`, numeric(1), ".score"),
+    vapply(scored, `[[`, integer(1), ".depth"),
+    vapply(scored, function(x) if (identical(x$kind, "folder")) 0L else 1L, integer(1)),
+    vapply(scored, function(x) nchar(x$path), integer(1)),
+    vapply(scored, `[[`, character(1), "path")
+  )
+  result <- head(scored[ord], max(1L, min(100L, as.integer(limit %||% 50L))))
+  lapply(result, function(x) x[setdiff(names(x), c(".score", ".depth"))])
+}
+
+.make_addin_workspace_search_provider <- function(project) {
+  index <- .addin_workspace_index(project)
+  function(query = "", kinds = c("file", "folder"), limit = 50L) {
+    .addin_workspace_search(index, query = query, kinds = kinds, limit = limit)
+  }
 }
 
 # 纯函数:把编辑器上下文拼成要 append 到 Claude Code 预设提示词的文本。
@@ -80,7 +199,8 @@
 #' Build the Claude Code chat app (internal, RStudio-free so it is unit/browser testable)
 #'
 #' @param project Project root used as Claude's working directory.
-#' @param ctx Optional editor context from [.addin_editor_context()].
+#' @param ctx Deprecated startup context retained for internal compatibility.
+#'   Live context is sampled by `ide_context_provider` for each new submission.
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions]; a project-rooted default with
 #'   the context appended to the Claude Code preset system prompt is built when `NULL`.
 #' @param permission_mode Claude permission mode: `"default"` (approval cards),
@@ -113,7 +233,7 @@
     options <- ClaudeAgentSDK::ClaudeAgentOptions(
       cwd                         = project,
       system_prompt               = ClaudeAgentSDK::SystemPromptPreset(
-        append = .addin_context_text(ctx, project)),
+        append = .addin_context_text(NULL, project)),
       permission_mode             = permission_mode,
       permission_prompt_tool_name = "stdio",
       include_partial_messages    = TRUE
@@ -127,6 +247,7 @@
     session_map_path = session_map_path
   )
   skills <- tryCatch(load_claude_skills(project_dir = project), error = function(e) list())
+  workspace_search <- .make_addin_workspace_search_provider(project)
 
   ui <- .claude_chat_ui()
   server <- function(input, output, session) {
@@ -144,6 +265,8 @@
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
+      ide_context_provider = function() .addin_editor_context(project),
+      workspace_search_provider = workspace_search,
       prewarm          = prewarm
     )
 
@@ -186,8 +309,9 @@
 #'
 #' Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer pane or a
 #' dialog, rooted at the current project so Claude's agentic tools (Read/Edit/Bash/Grep) act on
-#' your project files. The active editor file and any selection are injected as context (appended
-#' to Claude Code's system prompt), so you can just ask "explain this" / "refactor the selection".
+#' your project files. The active editor file and any selection are sampled again for each new
+#' prompt (rather than frozen at startup); the composer can hide selection text while keeping the
+#' active-file reference, so you can ask "explain this" / "refactor the selection".
 #'
 #' Thread history is stored in `~/.claude_addin_session_map.rds` (user home, not the project),
 #' so conversations persist across project switches and RStudio restarts.
@@ -227,8 +351,7 @@ claude_addin <- function(project         = NULL,
   viewer          <- match.arg(viewer)
   permission_mode <- match.arg(permission_mode)
   project <- project %||% .addin_project()
-  ctx <- .addin_editor_context(project)
-  app <- .claude_chat_app(project, ctx = ctx, options = options,
+  app <- .claude_chat_app(project, options = options,
                           permission_mode = permission_mode, prewarm = prewarm)
 
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&

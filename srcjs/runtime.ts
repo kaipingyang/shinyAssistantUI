@@ -15,7 +15,7 @@ import type {
   FeedbackAdapter,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
-import type { ShinyBridge, SessionItem } from "./bridge";
+import type { ShinyBridge, SessionItem, IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 import type { PermissionModeOption, PermissionModeState } from "./shiny-config-context";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
@@ -123,6 +123,16 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
     return { value: raw.value, options };
   }, [config]);
+  const capabilityContract = useMemo(() => {
+    const caps = config?.ui_capabilities as Record<string, unknown> | undefined;
+    if (caps?.contract_version !== 1) return { ide: false, workspace: false };
+    const ide = caps.ide_context as Record<string, unknown> | undefined;
+    const workspace = caps.workspace_mentions as Record<string, unknown> | undefined;
+    return {
+      ide: ide?.submit === true && ide?.preview === true,
+      workspace: workspace?.search === true,
+    };
+  }, [config]);
   // 懒初始化：避免每次 render 都调用 createShinyBridge（会重复注册 Shiny handler
   // 覆盖旧的，但 useRef 还是返回第一个 bridge，导致 handler 和 callbacks 对应的闭包不一致）
   const bridge = useRef<ShinyBridge>(null!);
@@ -140,6 +150,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const thisSessionThreadIds = useRef(new Set<string>());
   // server 端调用 send_sessions 后置为 true：消息不再写 localStorage，server 为唯一 truth
   const isServerMode = useRef(false);
+
+  const [ideContext, setIdeContext] = useState<IdeContextMeta | undefined>(undefined);
+  const [selectionVisible, setSelectionVisibleState] = useState(true);
+  const [workspaceMentions, setWorkspaceMentions] = useState<{
+    enabled: boolean; query: string; items: WorkspaceMentionItem[]; loading: boolean;
+  }>({ enabled: capabilityContract.workspace, query: "", items: [], loading: false });
+  const ideRequestSeq = useRef(0);
+  const workspaceRequestSeq = useRef(0);
+  const latestIdeRequest = useRef<string | null>(null);
+  const latestWorkspaceRequest = useRef<string | null>(null);
+  const selectionVisibleRef = useRef(true);
 
   // 反馈适配器（稳定引用，通过 bridge 发送到 R 端）
   const feedbackAdapter = useRef<FeedbackAdapter>({
@@ -177,6 +198,32 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
   // 每次 render 更新 ref，让注册一次的回调（onSessions 等）始终读到最新值
   currentThreadIdRef.current = currentThreadId;
+  selectionVisibleRef.current = selectionVisible;
+
+  const requestIdeContextFor = useCallback((threadId: string) => {
+    if (!capabilityContract.ide) return;
+    const requestId = `ide-${Date.now()}-${++ideRequestSeq.current}`;
+    latestIdeRequest.current = requestId;
+    bridge.current.requestIdeContext(requestId, threadId);
+  }, [capabilityContract.ide]);
+
+  const refreshIdeContext = useCallback(() => {
+    requestIdeContextFor(currentThreadIdRef.current);
+  }, [requestIdeContextFor]);
+
+  const setSelectionVisible = useCallback((visible: boolean) => {
+    selectionVisibleRef.current = visible;
+    setSelectionVisibleState(visible);
+  }, []);
+
+  const searchWorkspace = useCallback((query: string) => {
+    if (!capabilityContract.workspace) return;
+    const threadId = currentThreadIdRef.current;
+    const requestId = `workspace-${Date.now()}-${++workspaceRequestSeq.current}`;
+    latestWorkspaceRequest.current = requestId;
+    setWorkspaceMentions((prev) => ({ ...prev, enabled: true, query, loading: true }));
+    bridge.current.searchWorkspace(requestId, threadId, query, ["file", "folder"], 50);
+  }, [capabilityContract.workspace]);
 
   // 确保初始线程在列表里
   useEffect(() => {
@@ -449,6 +496,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return [...prev, ...mapped.filter((m) => !seen.has(m.name))];
       });
     });
+    bridge.current.onIdeContext((data) => {
+      if (!data.requestId || data.requestId !== latestIdeRequest.current) return;
+      if (data.threadId && data.threadId !== currentThreadIdRef.current) return;
+      setIdeContext(data);
+    });
+    bridge.current.onWorkspaceResults((data) => {
+      if (!data.requestId || data.requestId !== latestWorkspaceRequest.current) return;
+      if (data.threadId && data.threadId !== currentThreadIdRef.current) return;
+      setWorkspaceMentions((prev) => ({
+        ...prev, items: Array.isArray(data.items) ? data.items : [], loading: false,
+      }));
+    });
 
     // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
     // 策略：server 列表到达时【替换】localStorage 线程，而非追加。
@@ -536,6 +595,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // R 侧仅在 prewarm=TRUE 且 handler 暴露 warmup 时响应(ellmer 等无 warmup → no-op)。
     bridge.current.sendWarmup(currentThreadIdRef.current);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    requestIdeContextFor(currentThreadId);
+  }, [currentThreadId, requestIdeContextFor]);
 
   // ── 启动一次 streaming run（onNew 和 onReload 共用）────────────────────────
   const startRun = useCallback(
@@ -903,10 +966,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
       ]);
 
-      startRun(threadId, () => bridge.current.sendUserMessage(
-        sendText, threadId,
-        attachmentData.length > 0 ? attachmentData : undefined,
-      ));
+      startRun(threadId, () => {
+        requestIdeContextFor(threadId);
+        bridge.current.sendUserMessage(
+          sendText, threadId,
+          attachmentData.length > 0 ? attachmentData : undefined,
+          capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+        );
+      });
     },
     [inputId, currentThreadId, setCurrentMessages, messagesMap, commands, actionItems, startRun]
   );
@@ -931,7 +998,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (!isServerMode.current) saveMessages(inputId, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
-    startRun(threadId, () => bridge.current.sendUserMessage(sendText, threadId));
+    startRun(threadId, () => {
+      requestIdeContextFor(threadId);
+      bridge.current.sendUserMessage(
+        sendText, threadId, undefined,
+        capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+      );
+    });
   }, [inputId, commands, actionItems, startRun]);
   deliverTextRef.current = deliverText;
 
@@ -1009,10 +1082,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return { ...prev, [threadId]: updated };
       });
       if (aborted) return; // 不发消息给 R，保持 UI/R 一致
-      startRun(threadId, () => bridge.current.sendUserMessage(
-        sendText, threadId,
-        attachmentData.length > 0 ? attachmentData : undefined,
-      ));
+      startRun(threadId, () => {
+        requestIdeContextFor(threadId);
+        bridge.current.sendUserMessage(
+          sendText, threadId,
+          attachmentData.length > 0 ? attachmentData : undefined,
+          capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+        );
+      });
     },
     [inputId, startRun, commands] // eslint-disable-line react-hooks/exhaustive-deps
   );
@@ -1226,6 +1303,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   return {
     runtime, sendToolApproval, switchToNewThread, renameThread, enqueueMessage,
     invokeAction, permissionMode,
+    ideContext: capabilityContract.ide ? ideContext : undefined,
+    selectionVisible,
+    setSelectionVisible,
+    refreshIdeContext,
+    workspaceMentions,
+    searchWorkspace,
     artifacts, activeArtifactId,
     openArtifact: (id: string) => setActiveArtifactId(id),
     closeArtifact: () => setActiveArtifactId(null),

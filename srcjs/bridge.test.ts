@@ -190,3 +190,38 @@ describe("bridge action correlation", () => {
     })]);
   });
 });
+
+
+describe("bridge IDE context and workspace search", () => {
+  it("sendUserMessage carries only selection visibility policy", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage("explain", "t1", undefined, { selectionVisible: false });
+    expect(inputValues[0]).toMatchObject({ id: "chat" });
+    expect(inputValues[0].value).toMatchObject({
+      text: "explain", threadId: "t1", ideContext: { selectionVisible: false },
+    });
+    expect(JSON.stringify(inputValues[0].value)).not.toContain("selectionText");
+  });
+
+  it("refresh and search remain inputId/request/thread correlated", () => {
+    const b = createShinyBridge("chat");
+    const contexts: unknown[] = [];
+    const results: unknown[] = [];
+    b.onIdeContext((value) => contexts.push(value));
+    b.onWorkspaceResults((value) => results.push(value));
+    b.requestIdeContext("ctx-1", "t1");
+    b.searchWorkspace("ws-1", "t1", "app", ["file", "folder"], 20);
+
+    expect(inputValues[0]).toMatchObject({ id: "chat_ide_context_refresh" });
+    expect(inputValues[0].value).toMatchObject({ requestId: "ctx-1", threadId: "t1" });
+    expect(inputValues[1]).toMatchObject({ id: "chat_workspace_search" });
+    expect(inputValues[1].value).toMatchObject({
+      requestId: "ws-1", threadId: "t1", query: "app", kinds: ["file", "folder"], limit: 20,
+    });
+
+    handlers["chat:ide-context"]({ requestId: "ctx-1", threadId: "t1", relativePath: "R/app.R" });
+    handlers["chat:workspace-results"]({ requestId: "ws-1", threadId: "t1", items: [] });
+    expect(contexts).toHaveLength(1);
+    expect(results).toHaveLength(1);
+  });
+});

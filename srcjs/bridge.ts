@@ -13,6 +13,32 @@ export type AttachmentData = {
   contentType?: string;
 };
 
+
+export type IdeContextPolicy = { selectionVisible: boolean };
+export type IdeContextMeta = {
+  requestId?: string;
+  threadId?: string;
+  activeFile?: string;
+  relativePath?: string;
+  startLine?: number;
+  endLine?: number;
+  hasSelection?: boolean;
+  selectionChars?: number;
+  selectionVisible?: boolean;
+  documentVersion?: string | number;
+};
+export type WorkspaceMentionItem = {
+  kind: "file" | "folder";
+  path: string;
+  label?: string;
+  insertText?: string;
+};
+export type WorkspaceResults = {
+  requestId?: string;
+  threadId?: string;
+  items: WorkspaceMentionItem[];
+};
+
 export type ToolCallPayload = {
   toolCallId: string;
   toolName: string;
@@ -57,7 +83,7 @@ export type ActionResult = {
 };
 
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[]) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => void;
@@ -67,6 +93,8 @@ export interface ShinyBridge {
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
   sendWarmup: (threadId: string) => void;
+  requestIdeContext: (requestId: string, threadId: string) => void;
+  searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
@@ -78,6 +106,8 @@ export interface ShinyBridge {
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
   onWarming: (handler: (data: { threadId?: string; active?: boolean }) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
+  onIdeContext: (handler: (data: IdeContextMeta) => void) => void;
+  onWorkspaceResults: (handler: (data: WorkspaceResults) => void) => void;
 }
 
 export function createShinyBridge(inputId: string): ShinyBridge {
@@ -170,10 +200,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   return {
-    sendUserMessage(text, threadId, attachments) {
+    sendUserMessage(text, threadId, attachments, ideContext) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments: attachments ?? [], ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -255,6 +285,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
+    requestIdeContext(requestId, threadId) {
+      Shiny.setInputValue(
+        `${inputId}_ide_context_refresh`,
+        { requestId, threadId, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
+    searchWorkspace(requestId, threadId, query, kinds = ["file", "folder"], limit = 50) {
+      Shiny.setInputValue(
+        `${inputId}_workspace_search`,
+        { requestId, threadId, query, kinds, limit, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
     setRunCallbacks(threadId, callbacks) {
       if (callbacks === null) {
         callbacksMap.delete(threadId);
@@ -290,6 +336,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
+    },
+    onIdeContext(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:ide-context`, (data) => handler(data as IdeContextMeta));
+    },
+    onWorkspaceResults(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:workspace-results`, (data) => handler(data as WorkspaceResults));
     },
 
     onSessions(handler) {

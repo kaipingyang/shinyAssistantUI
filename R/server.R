@@ -113,6 +113,12 @@
 #' @param tools List of tool definitions for the \@ mention menu. Each element
 #'   is a list with `name` and `description`. Typically mirrors the tools
 #'   registered with ellmer.
+#' @param ide_context_provider Optional zero-argument function sampled for every
+#'   new user submission. It may return active file/selection metadata; selection
+#'   text remains on the R side and is never sent to the browser.
+#' @param workspace_search_provider Optional function accepting `query`, `kinds`,
+#'   and `limit`, returning literal file/folder mention entries. Supplying it
+#'   advertises the workspace mention capability.
 #' @param code_theme Character string selecting the syntax-highlighting theme
 #'   for code blocks. Available light themes: `"one-light"` (default),
 #'   `"ghcolors"`, `"vs"`, `"solarized-light"`. Available dark themes:
@@ -191,6 +197,8 @@ assistantUIServer <- function(id, handler,
                               commands          = list(),
                               tools             = list(),
                               action_items      = list(),
+                              ide_context_provider = NULL,
+                              workspace_search_provider = NULL,
                               on_action         = NULL,
                               on_session_load   = NULL,
                               on_feedback       = NULL,
@@ -205,6 +213,7 @@ assistantUIServer <- function(id, handler,
                               prewarm           = FALSE) {
   force(show_thread_list); force(suggestions); force(commands)
   force(tools); force(action_items); force(on_action); force(on_session_load)
+  force(ide_context_provider); force(workspace_search_provider)
   force(on_feedback); force(modal)
   force(on_rename)
   # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
@@ -216,6 +225,21 @@ assistantUIServer <- function(id, handler,
     (is.null(on_action) || identical(on_action, .handler_action))
   if (is.null(on_action) && !is.null(.handler_action)) on_action <- .handler_action
   .ui_capabilities <- if (.uses_handler_action) attr(handler, "ui_capabilities") else NULL
+  if (is.null(.ui_capabilities)) .ui_capabilities <- list()
+  if (is.function(ide_context_provider) || is.function(workspace_search_provider)) {
+    .ui_capabilities$contract_version <- 1L
+  }
+  if (is.function(ide_context_provider)) {
+    .ui_capabilities$ide_context <- list(
+      submit = TRUE, preview = TRUE, selection_visibility = TRUE
+    )
+  }
+  if (is.function(workspace_search_provider)) {
+    .ui_capabilities$workspace_mentions <- list(
+      search = TRUE, kinds = c("file", "folder"), line_ranges = TRUE, literal = TRUE
+    )
+  }
+  if (!length(.ui_capabilities)) .ui_capabilities <- NULL
   force(code_theme); force(strings); force(assistant_avatar)
   force(theme); force(dark_mode)
   force(show_timestamps)
@@ -371,6 +395,42 @@ assistantUIServer <- function(id, handler,
     )
   }
 
+  # ── IDE context / workspace mention RPC ─────────────────────────────────────
+  # Preview responses contain metadata only. The selection body is sampled again
+  # at submit time and is never round-tripped through the browser.
+  if (is.function(ide_context_provider)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_ide_context_refresh")]], {
+      msg <- session$input[[paste0(input_id, "_ide_context_refresh")]]
+      if (is.null(msg)) return()
+      context <- .read_ide_context(ide_context_provider, selection_visible = TRUE)
+      payload <- .ide_context_metadata(context) %||% list()
+      payload$requestId <- msg$requestId
+      payload$threadId <- msg$threadId
+      session$sendCustomMessage(paste0(input_id, ":ide-context"), payload)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  if (is.function(workspace_search_provider)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_workspace_search")]], {
+      msg <- session$input[[paste0(input_id, "_workspace_search")]]
+      if (is.null(msg)) return()
+      limit <- suppressWarnings(as.integer(msg$limit %||% 50L))
+      if (is.na(limit)) limit <- 50L
+      args <- list(
+        query = as.character(msg$query %||% ""),
+        kinds = as.character(msg$kinds %||% c("file", "folder")),
+        limit = max(1L, min(100L, limit))
+      )
+      params <- names(formals(workspace_search_provider))
+      call_args <- if ("..." %in% params) args else args[names(args) %in% params]
+      items <- tryCatch(do.call(workspace_search_provider, call_args), error = function(e) list())
+      session$sendCustomMessage(
+        paste0(input_id, ":workspace-results"),
+        list(requestId = msg$requestId, threadId = msg$threadId, items = items %||% list())
+      )
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
   # ── tool 审批 ────────────────────────────────────────────────────────────────
   # wait_for_approval 用 observeEvent 驱动。
   # 关键：handler 必须通过 ExtendedTask 启动（见下方 stream_task），
@@ -468,7 +528,7 @@ assistantUIServer <- function(id, handler,
   # ExtendedTask 让 Shiny 知道有长时任务在运行，允许 reactive flush 在 await 期间发生，
   # 从而 _tool_approval / _cancel 等 observer 可以正常触发。
   stream_task <- shiny::ExtendedTask$new(
-    function(msg_text, thread_id, is_reload, attachments) {
+    function(msg_text, thread_id, is_reload, attachments, ide_context) {
       cbs <- make_callbacks(thread_id)
       is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
       register_cancel <- function(fn) assign(thread_id, fn, envir = cancel_fns)
@@ -498,7 +558,8 @@ assistantUIServer <- function(id, handler,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
         wait_for_approval = wait_for_approval,
-        register_cancel   = register_cancel
+        register_cancel   = register_cancel,
+        ide_context       = ide_context
       )
       handler_params <- names(formals(handler))
       call_args <- if ("..." %in% handler_params) all_args
@@ -547,6 +608,12 @@ assistantUIServer <- function(id, handler,
 
     thread_id <- msg$threadId %||% "default"
     is_reload <- identical(msg$type, "reload")
+    selection_visible <- !identical(msg$ideContext$selectionVisible, FALSE)
+    # Reload 重跑历史 prompt，不附加任意旧/当前 selection；普通新提交则在
+    # observer 收到消息的同一时刻采样 provider，形成该 run 的不可变快照。
+    ide_context <- if (!is_reload && is.function(ide_context_provider))
+      .read_ide_context(ide_context_provider, selection_visible)
+    else NULL
 
     # 新 run 开始前重置 cancel 标志和 cancel fn
     assign(thread_id, FALSE, envir = cancel_flags)
@@ -556,7 +623,8 @@ assistantUIServer <- function(id, handler,
       msg$text,
       thread_id,
       is_reload,
-      msg$attachments %||% list()
+      msg$attachments %||% list(),
+      ide_context
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
@@ -610,6 +678,58 @@ assistantUIServer <- function(id, handler,
   ))
 }
 
+# Normalize old addin field names and the versioned provider contract into a
+# single server-side shape. Browser policy may hide selection text, while active
+# file metadata remains available.
+.normalize_ide_context <- function(context, selection_visible = TRUE) {
+  if (is.null(context) || !is.list(context)) return(NULL)
+  scalar_chr <- function(x) {
+    if (is.null(x) || !length(x) || is.na(x[[1L]]) || !nzchar(as.character(x[[1L]]))) NULL
+    else as.character(x[[1L]])
+  }
+  scalar_int <- function(x) {
+    value <- suppressWarnings(as.integer(x %||% NA_integer_))
+    if (!length(value) || is.na(value[[1L]])) NULL else value[[1L]]
+  }
+  active_file <- scalar_chr(context$active_file %||% context$activeFile %||% context$path)
+  relative_path <- scalar_chr(context$relative_path %||% context$relativePath %||% context$rel)
+  selection_text <- scalar_chr(context$selection_text %||% context$selectionText %||% context$selection)
+  if (!isTRUE(selection_visible)) selection_text <- NULL
+  normalized <- list(
+    active_file = active_file,
+    relative_path = relative_path,
+    selection_text = selection_text,
+    start_line = scalar_int(context$start_line %||% context$startLine %||% context$first_line),
+    end_line = scalar_int(context$end_line %||% context$endLine %||% context$last_line),
+    selection_visible = isTRUE(selection_visible),
+    document_version = context$document_version %||% context$documentVersion
+  )
+  if (all(vapply(normalized[c("active_file", "relative_path", "selection_text")], is.null, logical(1))))
+    return(NULL)
+  normalized
+}
+
+.read_ide_context <- function(provider, selection_visible = TRUE) {
+  if (!is.function(provider)) return(NULL)
+  raw <- tryCatch(provider(), error = function(e) NULL)
+  .normalize_ide_context(raw, selection_visible = selection_visible)
+}
+
+.ide_context_metadata <- function(context) {
+  if (is.null(context)) return(NULL)
+  text <- context$selection_text
+  list(
+    activeFile = context$active_file,
+    relativePath = context$relative_path,
+    startLine = context$start_line,
+    endLine = context$end_line,
+    hasSelection = !is.null(text) && nzchar(text),
+    selectionChars = if (is.null(text)) 0L else nchar(text),
+    selectionVisible = isTRUE(context$selection_visible),
+    documentVersion = context$document_version
+  )
+}
+
 # Run backend cleanup to completion even when RStudio's Viewer Stop has already
 # queued a user interrupt. processx::process$wait() is interruptible, so merely
 # catching `error` is insufficient (`interrupt` does not inherit from `error`).
@@ -625,6 +745,6 @@ assistantUIServer <- function(id, handler,
 
 # NULL-coalescing helper. Intentionally kept separate from the copy in
 # handlers.R: the backend layer (handlers.R + ellmer_store.R) is designed to be
-# extractable into a standalone package (see .claude/plans/runtime-extraction.md),
+# extractable into a standalone package (see .claude/plans/02-runtime-extraction.md),
 # so the widget layer keeps its own copy to stay self-sufficient post-split.
 `%||%` <- function(x, y) if (is.null(x)) y else x

@@ -1,7 +1,10 @@
 "use client";
 import { safeUrl as shinySafeUrl } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
-import { formatMessageTime, detectSlashTrigger, detectMentionTrigger } from "@/helpers";
+import {
+  formatMessageTime, detectSlashTrigger, detectMentionTrigger,
+  rankMentionItems, mentionInsertText,
+} from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -50,6 +53,11 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FileTextIcon,
+  FolderIcon,
+  WrenchIcon,
   MicIcon,
   ClockIcon,
   MoreHorizontalIcon,
@@ -60,6 +68,8 @@ import {
 import {
   createContext,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ComponentType,
   type FC,
@@ -233,7 +243,45 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
+const IdeContextIndicator: FC = () => {
+  const { ideContext, selectionVisible, setSelectionVisible } = useShinyConfig();
+  if (!ideContext?.relativePath && !ideContext?.activeFile) return null;
+  const file = ideContext.relativePath ?? ideContext.activeFile;
+  const hasLines = ideContext.hasSelection && ideContext.startLine != null;
+  const lineText = hasLines
+    ? ideContext.endLine && ideContext.endLine !== ideContext.startLine
+      ? `lines ${ideContext.startLine}-${ideContext.endLine}`
+      : `line ${ideContext.startLine}`
+    : null;
+  return (
+    <div
+      data-slot="aui_ide_context"
+      data-context-file={file}
+      data-selection-visible={selectionVisible ? "true" : "false"}
+      className="aui-ide-context text-muted-foreground flex min-w-0 items-center gap-1.5 px-2 text-xs"
+    >
+      <FileTextIcon className="size-3.5 shrink-0" />
+      <span className="truncate">{file}</span>
+      {lineText && <span className="shrink-0">· {lineText}</span>}
+      {ideContext.hasSelection && (
+        <button
+          type="button"
+          data-slot="aui_selection_visibility"
+          aria-label={selectionVisible ? "Hide selection from prompt" : "Include selection in prompt"}
+          title={selectionVisible ? "Hide selection from prompt" : "Include selection in prompt"}
+          onClick={() => setSelectionVisible(!selectionVisible)}
+          className="hover:bg-accent ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5"
+        >
+          {selectionVisible ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
+          <span>{selectionVisible ? "Selection included" : "Selection hidden"}</span>
+        </button>
+      )}
+    </div>
+  );
+};
+
 const Composer: FC = () => {
+  const { refreshIdeContext } = useShinyConfig();
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone asChild>
@@ -242,6 +290,7 @@ const Composer: FC = () => {
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerAttachments />
+          <IdeContextIndicator />
           <div className="relative">
             <ShinySlashCommands />
             <ShinyMentions />
@@ -252,6 +301,7 @@ const Composer: FC = () => {
               autoFocus
               enterKeyHint="send"
               aria-label="Message input"
+              onFocus={refreshIdeContext}
             />
           </div>
           <ComposerAction />
@@ -438,54 +488,160 @@ const ShinySlashCommands: FC = () => {
   );
 };
 
-// @mention 工具发现弹窗:检测 @trigger,按名过滤 config.tools,插入 `@name `。
+// @mention discovery: tools plus capability-backed workspace files/folders.
+// File content is never expanded in the browser; choosing an item inserts only a
+// literal @path (or @path#Lx-Ly for the current IDE selection).
+type MentionEntry = {
+  key: string;
+  section: "Selection" | "Files" | "Folders" | "Tools";
+  label: string;
+  description?: string;
+  insertText: string;
+  kind: "selection" | "file" | "folder" | "tool";
+};
+
 const ShinyMentions: FC = () => {
-  const { tools } = useShinyConfig();
+  const {
+    tools, ideContext, selectionVisible,
+    workspaceMentions, searchWorkspace,
+  } = useShinyConfig();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aui = useAui() as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const text = useAuiState((s: any) => (s.composer?.text as string) ?? "");
+  const text = useAuiState((state: any) => (state.composer?.text as string) ?? "");
   const [idx, setIdx] = useState(0);
+  const popoverRef = useRef<HTMLDivElement>(null);
 
   const cursor = text.length;
-  const trig = tools.length ? detectMentionTrigger(text, cursor) : null;
-  if (!trig) return null;
-  const q = trig.query.toLowerCase();
-  const matches = tools.filter((t) => t.name.toLowerCase().startsWith(q));
-  if (matches.length === 0) return null;
-  const sel = Math.min(idx, matches.length - 1);
+  const enabled = tools.length > 0 || workspaceMentions.enabled || Boolean(ideContext?.hasSelection);
+  const trig = enabled ? detectMentionTrigger(text, cursor) : null;
+  const query = trig?.query ?? "";
 
-  const choose = (name: string) => {
+  useEffect(() => {
+    if (!trig || !workspaceMentions.enabled) return;
+    const timer = window.setTimeout(() => searchWorkspace(query), 80);
+    return () => window.clearTimeout(timer);
+  }, [query, Boolean(trig), workspaceMentions.enabled, searchWorkspace]);
+
+  const q = query.toLowerCase();
+  const workspace = rankMentionItems(workspaceMentions.items, query);
+  const entries: MentionEntry[] = [];
+  const activePath = ideContext?.relativePath;
+  if (
+    selectionVisible && ideContext?.hasSelection && activePath &&
+    (!q || activePath.toLowerCase().includes(q))
+  ) {
+    entries.push({
+      key: `selection-${activePath}`,
+      section: "Selection",
+      label: mentionInsertText(
+        { kind: "file", path: activePath },
+        { startLine: ideContext.startLine, endLine: ideContext.endLine },
+      ),
+      description: "Current IDE selection",
+      insertText: mentionInsertText(
+        { kind: "file", path: activePath },
+        { startLine: ideContext.startLine, endLine: ideContext.endLine },
+      ),
+      kind: "selection",
+    });
+  }
+  for (const item of workspace) {
+    entries.push({
+      key: `${item.kind}-${item.path}`,
+      section: item.kind === "file" ? "Files" : "Folders",
+      label: item.insertText ?? mentionInsertText(item),
+      description: item.path,
+      insertText: item.insertText ?? mentionInsertText(item),
+      kind: item.kind,
+    });
+  }
+  for (const tool of tools.filter((item) =>
+    item.name.toLowerCase().startsWith(q) || (item.description ?? "").toLowerCase().includes(q),
+  )) {
+    entries.push({
+      key: `tool-${tool.name}`, section: "Tools", label: `@${tool.name}`,
+      description: tool.description, insertText: `@${tool.name}`, kind: "tool",
+    });
+  }
+
+  const selected = Math.min(idx, Math.max(0, entries.length - 1));
+  const choose = (entry: MentionEntry) => {
+    if (!trig) return;
     const before = text.slice(0, trig.offset);
     const after = text.slice(cursor);
-    aui.composer().setText(`${before}@${name} ${after}`);
+    aui.composer().setText(`${before}${entry.insertText} ${after}`);
     setIdx(0);
-    const ta = document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null;
-    ta?.focus();
   };
+
+  // The popover is a sibling of the textarea, so key events from the focused
+  // composer never bubble through the popover itself. Listen in document capture
+  // while this widget's own textarea is active; this preserves multi-widget
+  // isolation and prevents Enter from submitting the raw @query.
+  useEffect(() => {
+    if (!trig || !entries.length) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const input = popoverRef.current?.parentElement?.querySelector("textarea.aui-composer-input");
+      if (!input || document.activeElement !== input) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault(); event.stopPropagation();
+        setIdx((value) => (value + 1) % entries.length);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault(); event.stopPropagation();
+        setIdx((value) => (value - 1 + entries.length) % entries.length);
+      } else if (event.key === "Enter") {
+        event.preventDefault(); event.stopPropagation();
+        choose(entries[selected]);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [trig?.offset, text, cursor, entries, selected]);
+
+  if (!trig || (entries.length === 0 && !workspaceMentions.loading)) return null;
+  const sections = (["Selection", "Files", "Folders", "Tools"] as const)
+    .map((name) => ({ name, items: entries.filter((entry) => entry.section === name) }))
+    .filter((section) => section.items.length > 0);
 
   return (
     <div
-      className="aui-mention-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-60 w-72 overflow-auto rounded-lg border p-1 shadow-lg"
-      onKeyDownCapture={(e) => {
-        if (e.key === "ArrowDown") { e.preventDefault(); setIdx((i) => (i + 1) % matches.length); }
-        else if (e.key === "ArrowUp") { e.preventDefault(); setIdx((i) => (i - 1 + matches.length) % matches.length); }
-      }}
+      ref={popoverRef}
+      className="aui-mention-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-lg"
+      data-slot="aui_mention_popover"
     >
-      {matches.map((t, i) => (
-        <button
-          key={t.name}
-          type="button"
-          data-mention-tool={t.name}
-          onMouseDown={(e) => { e.preventDefault(); choose(t.name); }}
-          className={
-            "aui-mention-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
-            (i === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
-          }
-        >
-          <span className="font-medium">@{t.name}</span>
-          {t.description && <span className="text-muted-foreground text-xs">{t.description}</span>}
-        </button>
+      {workspaceMentions.loading && entries.length === 0 && (
+        <div className="text-muted-foreground px-2.5 py-2 text-xs">Searching workspace…</div>
+      )}
+      {sections.map((section) => (
+        <div key={section.name} data-mention-section={section.name.toLowerCase()}>
+          <div className="text-muted-foreground px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide">
+            {section.name}
+          </div>
+          {section.items.map((entry) => {
+            const globalIndex = entries.indexOf(entry);
+            const Icon = entry.kind === "folder" ? FolderIcon
+              : entry.kind === "tool" ? WrenchIcon : FileTextIcon;
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                data-mention-kind={entry.kind}
+                data-mention-path={entry.kind === "tool" ? undefined : entry.description}
+                onMouseDown={(event) => { event.preventDefault(); choose(entry); }}
+                className={
+                  "aui-mention-item flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-start text-sm " +
+                  (globalIndex === selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
+                }
+              >
+                <Icon className="mt-0.5 size-4 shrink-0" />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{entry.label}</span>
+                  {entry.description && <span className="text-muted-foreground block truncate text-xs">{entry.description}</span>}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       ))}
     </div>
   );

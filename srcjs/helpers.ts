@@ -339,3 +339,67 @@ export function formatMessageTime(id: string | null | undefined): string | null 
   const mm = String(d.getMinutes()).padStart(2, "0");
   return `${hh}:${mm}`;
 }
+
+
+export type WorkspaceMentionItem = {
+  kind: "file" | "folder";
+  path: string;
+  label?: string;
+  insertText?: string;
+};
+
+function isSubsequence(needle: string, haystack: string): boolean {
+  if (!needle) return true;
+  let at = 0;
+  for (const char of haystack) {
+    if (char === needle[at]) at += 1;
+    if (at === needle.length) return true;
+  }
+  return false;
+}
+
+/** Deterministic file/folder fuzzy ranking shared by tests and mention UI. */
+export function rankMentionItems(
+  items: WorkspaceMentionItem[],
+  query: string,
+  limit = 50,
+): WorkspaceMentionItem[] {
+  const q = query.trim().toLowerCase().replace(/#l\d+(?:-l?\d*)?$/i, "");
+  return items
+    .map((item) => {
+      const path = item.path.toLowerCase();
+      const base = item.path.replace(/\/$/, "").split("/").pop()?.toLowerCase() ?? path;
+      const score = !q ? 0
+        : base.startsWith(q) ? 0
+        : base.includes(q) ? 1
+        : path.startsWith(q) ? 2
+        : path.includes(q) ? 3
+        : isSubsequence(q, base) ? 4
+        : isSubsequence(q, path) ? 5
+        : Number.POSITIVE_INFINITY;
+      return { item, score, depth: (item.path.match(/\//g) ?? []).length };
+    })
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((a, b) =>
+      a.score - b.score ||
+      a.depth - b.depth ||
+      Number(a.item.kind === "file") - Number(b.item.kind === "file") ||
+      a.item.path.length - b.item.path.length ||
+      a.item.path.localeCompare(b.item.path),
+    )
+    .slice(0, Math.max(1, limit))
+    .map((entry) => entry.item);
+}
+
+/** Format a literal Claude Code file/folder mention without reading file content. */
+export function mentionInsertText(
+  item: WorkspaceMentionItem,
+  lines?: { startLine?: number; endLine?: number },
+): string {
+  const escaped = item.path.replace(/"/g, '\\"');
+  const base = /\s/.test(item.path) ? `@"${escaped}"` : `@${item.path}`;
+  if (item.kind === "folder" || !lines?.startLine) return base;
+  const start = Math.max(1, Math.trunc(lines.startLine));
+  const end = lines.endLine ? Math.max(start, Math.trunc(lines.endLine)) : start;
+  return `${base}#L${start}${end === start ? "" : `-L${end}`}`;
+}

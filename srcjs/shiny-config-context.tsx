@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 
 export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
@@ -16,6 +17,12 @@ export interface PermissionModeState {
   error: string | null;
   setValue: (value: string) => void;
 }
+export interface WorkspaceMentionState {
+  enabled: boolean;
+  query: string;
+  items: WorkspaceMentionItem[];
+  loading: boolean;
+}
 
 export interface ShinyConfigCtx {
   tools: ShinyToolItem[];
@@ -26,6 +33,12 @@ export interface ShinyConfigCtx {
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
   permissionMode?: PermissionModeState;
+  ideContext?: IdeContextMeta;
+  selectionVisible: boolean;
+  setSelectionVisible: (visible: boolean) => void;
+  refreshIdeContext: () => void;
+  workspaceMentions: WorkspaceMentionState;
+  searchWorkspace: (query: string) => void;
   // ── ClaudeAgentSDK 能力对齐 ──
   usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
   tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
@@ -44,6 +57,11 @@ export const ShinyConfigContext = createContext<ShinyConfigCtx>({
   onEnqueue: () => {},
   onRename: () => {},
   onInvokeAction: () => {},
+  selectionVisible: true,
+  setSelectionVisible: () => {},
+  refreshIdeContext: () => {},
+  workspaceMentions: { enabled: false, query: "", items: [], loading: false },
+  searchWorkspace: () => {},
 });
 
 export const useShinyConfig = () => useContext(ShinyConfigContext);

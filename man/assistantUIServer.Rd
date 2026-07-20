@@ -12,6 +12,8 @@ assistantUIServer(
   commands = list(),
   tools = list(),
   action_items = list(),
+  ide_context_provider = NULL,
+  workspace_search_provider = NULL,
   on_action = NULL,
   on_session_load = NULL,
   on_feedback = NULL,
@@ -128,6 +130,14 @@ shown as a section header, such as \code{"Personal Skills"} or \code{"Project Sk
 \item{tools}{List of tool definitions for the \@ mention menu. Each element
 is a list with \code{name} and \code{description}. Typically mirrors the tools
 registered with ellmer.}
+
+\item{ide_context_provider}{Optional zero-argument function sampled for every
+new user submission. It may return active file/selection metadata; selection
+text remains on the R side and is never sent to the browser.}
+
+\item{workspace_search_provider}{Optional function accepting \code{query}, \code{kinds},
+and \code{limit}, returning literal file/folder mention entries. Supplying it
+advertises the workspace mention capability.}
 
 \item{action_items}{List of action-type slash-command items. Unlike
 \code{commands}, these do not send a message to the AI — instead, clicking them

@@ -96,8 +96,12 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
 
 - **Project-rooted & agentic**: launches at the active RStudio project (`cwd`), so Claude's
   `Read`/`Edit`/`Bash`/`Grep` tools operate on your real files.
-- **Context-aware**: the active editor file + selection are appended to Claude Code's system
-  prompt, so you can ask "explain this" / "refactor the selection" without pasting code.
+- **Context-aware**: the active editor file + selection are sampled again for every new
+  prompt (not frozen at addin startup). The composer shows the current file/line range and lets
+  you hide selection text while still keeping the active-file reference.
+- **Workspace mentions**: type `@` to fuzzy-search git-visible files and folders. Entries stay
+  literal (`@R/app.R`, `@R/app.R#L5-L10`, `@R/`) and respect Git ignore rules; the browser does
+  not expand file contents.
 - **Safe by default**: file edits and shell commands are gated by the in-app approval card
   (`permission_mode = "default"`).
 - Requires the [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) package and a

@@ -40,8 +40,9 @@ Invisibly, the result of \code{\link[shiny:runGadget]{shiny::runGadget()}}.
 \description{
 Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer pane or a
 dialog, rooted at the current project so Claude's agentic tools (Read/Edit/Bash/Grep) act on
-your project files. The active editor file and any selection are injected as context (appended
-to Claude Code's system prompt), so you can just ask "explain this" / "refactor the selection".
+your project files. The active editor file and any selection are sampled again for each new
+prompt (rather than frozen at startup); the composer can hide selection text while keeping the
+active-file reference, so you can ask "explain this" / "refactor the selection".
 }
 \details{
 Thread history is stored in \verb{~/.claude_addin_session_map.rds} (user home, not the project),

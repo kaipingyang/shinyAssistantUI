@@ -588,3 +588,72 @@ describe("useShinyRuntime — clear action effect", () => {
     expect(currentThreadId(result)).toBe(oldThread);
   });
 });
+
+
+describe("useShinyRuntime — live IDE context capability", () => {
+  const config = {
+    ui_capabilities: {
+      contract_version: 1,
+      ide_context: { submit: true, preview: true, selection_visibility: true },
+      workspace_mentions: { search: true, kinds: ["file", "folder"], line_ranges: true, literal: true },
+    },
+  };
+
+  it("refreshes metadata and sends visibility without browser-side selection text", async () => {
+    const { result } = setup(config);
+    const refresh = inputs.find((x) => x.id === "test_ide_context_refresh")!;
+    expect(refresh.value.threadId).toBe(currentThreadId(result));
+    await fireR("ide-context", {
+      requestId: refresh.value.requestId, threadId: refresh.value.threadId,
+      relativePath: "R/app.R", startLine: 4, endLine: 6, hasSelection: true,
+    });
+    expect(result.current.ideContext).toMatchObject({ relativePath: "R/app.R", startLine: 4, endLine: 6 });
+
+    await act(async () => { result.current.setSelectionVisible(false); });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("explain");
+      await result.current.runtime.thread.composer.send();
+    });
+    const sent = inputs.find((x) => x.id === "test")!.value;
+    expect(sent.ideContext).toEqual({ selectionVisible: false });
+    expect(JSON.stringify(sent)).not.toContain("selectionText");
+  });
+
+  it("drops stale workspace results and accepts the latest correlated query", async () => {
+    const { result } = setup(config);
+    await act(async () => { result.current.searchWorkspace("old"); });
+    const first = inputs.filter((x) => x.id === "test_workspace_search").at(-1)!.value;
+    await act(async () => { result.current.searchWorkspace("app"); });
+    const second = inputs.filter((x) => x.id === "test_workspace_search").at(-1)!.value;
+
+    await fireR("workspace-results", {
+      requestId: first.requestId, threadId: first.threadId,
+      items: [{ kind: "file", path: "old.txt", insertText: "@old.txt" }],
+    });
+    expect(result.current.workspaceMentions.items).toEqual([]);
+    await fireR("workspace-results", {
+      requestId: second.requestId, threadId: second.threadId,
+      items: [{ kind: "file", path: "R/app.R", insertText: "@R/app.R" }],
+    });
+    expect(result.current.workspaceMentions.items[0].path).toBe("R/app.R");
+  });
+
+  it("reload never sends an IDE context policy", async () => {
+    const { result } = setup(config);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("first");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("chunk", { text: "answer", threadId: tid });
+    await fireR("done", { threadId: tid });
+    const assistant = messages(result).find((message) => message.role === "assistant")!;
+    expect(assistant).toBeDefined();
+    await act(async () => {
+      result.current.runtime.thread.getMessageById(assistant.id).reload();
+    });
+    const reload = inputs.find((item) => item.id === "test" && item.value.type === "reload");
+    expect(reload).toBeDefined();
+    expect(reload!.value.ideContext).toBeUndefined();
+  });
+});
