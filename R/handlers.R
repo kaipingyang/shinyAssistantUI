@@ -740,6 +740,26 @@ make_claude_handler <- function(options       = NULL,
          description = "Run all tools without permission prompts (use with care)")
   )
 
+  # 思考强度（thinking）：连接时 option，改后经 reset_clients 重连生效（Plan 14 B3）。
+  # "default" = 不覆盖（用 CLI 默认 / options$thinking）；其余映射为 list(type=...)。
+  thinking_options <- list(
+    list(value = "default",  label = "Default",  description = "Use Claude Code's default thinking"),
+    list(value = "adaptive", label = "Adaptive", description = "Model decides how much to think"),
+    list(value = "enabled",  label = "Extended", description = "Always think before responding"),
+    list(value = "disabled", label = "Off",      description = "No extended thinking (fastest)")
+  )
+  initial_thinking <- if (is.list(options$thinking) && !is.null(options$thinking$type))
+    as.character(options$thinking$type) else "default"
+  if (!initial_thinking %in% vapply(thinking_options, `[[`, character(1), "value"))
+    initial_thinking <- "default"
+  thinking_state <- new.env(parent = emptyenv())
+  thinking_state$value <- initial_thinking
+  # 内部思考配置：default → NULL（不覆盖）；否则 list(type=value)。
+  internal_thinking <- function() {
+    v <- thinking_state$value
+    if (is.null(v) || identical(v, "default")) NULL else list(type = v)
+  }
+
   # Disk is the source of truth because the historical loader and handler own
   # independent closures. Every mutation re-reads and atomically replaces the
   # map so one closure cannot publish a stale snapshot over another's entries.
@@ -774,8 +794,8 @@ make_claude_handler <- function(options       = NULL,
         # 之前漏传 → CLI 只继承 R 进程 getwd()（Plan 16/18）。
         cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
         system_prompt               = options$system_prompt,
-        # thinking（思考强度）为连接时 options；动态 provider 优先，切换后经 reset_clients 重连生效。
-        thinking                    = (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
+        # thinking（思考强度）为连接时 options；内部选择器 > 外部 provider > options$thinking。
+        thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
         resume                      = resume_sid
       )
     }
@@ -880,6 +900,14 @@ make_claude_handler <- function(options       = NULL,
         if (!is.null(cl)) cl$set_permission_mode(mode)
         assign(thread_id, mode, envir = permission_modes)
         ok(paste0("Permission mode submitted: ", mode), value = mode)
+      } else if (grepl("^thinking:", id)) {
+        tv <- sub("^thinking:", "", id)
+        if (!tv %in% vapply(thinking_options, `[[`, character(1), "value")) {
+          err(paste0("Unknown thinking level: ", tv)); return(invisible(NULL))
+        }
+        thinking_state$value <- tv
+        reset_clients()   # thinking 是连接时 option → 断开重连（下条消息 resume 原 session 并应用新强度）
+        ok(paste0("Thinking level submitted: ", tv), value = tv)
       } else if (identical(id, "context")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
         usage <- cl$get_context_usage()
@@ -1313,6 +1341,10 @@ make_claude_handler <- function(options       = NULL,
     permission_mode = list(
       value = initial_permission_mode,
       options = permission_options
+    ),
+    thinking = list(
+      value = thinking_state$value,
+      options = thinking_options
     )
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。

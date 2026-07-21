@@ -24,6 +24,40 @@ test_that("thinking_provider 覆盖 options$thinking 且随之变化", {
   expect_identical(received$thinking$type, "enabled")
 })
 
+test_that("thinking action 切换强度、ui_capabilities 暴露、重连后生效", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  received <- NULL
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL); client$disconnect <- function() invisible(NULL)
+  testthat::local_mocked_bindings(.new_claude_client = function(options) { received <<- options; client })
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", permission_prompt_tool_name = "stdio",
+                   include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  cap <- attr(handler, "ui_capabilities")$thinking
+  expect_identical(cap$value, "default")
+  expect_true("enabled" %in% vapply(cap$options, `[[`, character(1), "value"))
+
+  attr(handler, "warmup")("t1")
+  expect_null(received$thinking)                    # default → 不覆盖
+
+  res <- NULL
+  attr(handler, "action_handler")("thinking:enabled", "t1",
+    function(message, status = "ok", value = NULL) res <<- list(status = status, value = value))
+  expect_identical(res$status, "ok")
+  expect_identical(res$value, "enabled")
+
+  attr(handler, "warmup")("t1")                     # reset_clients 后重连
+  expect_identical(received$thinking$type, "enabled")
+
+  # 未知强度 → error
+  res2 <- NULL
+  attr(handler, "action_handler")("thinking:bogus", "t1",
+    function(message, status = "ok", value = NULL) res2 <<- status)
+  expect_identical(res2, "error")
+})
+
 test_that("thinking_provider=NULL 回退 options$thinking", {
   skip_if_not_installed("ClaudeAgentSDK")
   received <- NULL
