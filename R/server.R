@@ -871,13 +871,18 @@ assistantUIServer <- function(id, handler,
   active_file <- scalar_chr(context$active_file %||% context$activeFile %||% context$path)
   relative_path <- scalar_chr(context$relative_path %||% context$relativePath %||% context$rel)
   selection_text <- scalar_chr(context$selection_text %||% context$selectionText %||% context$selection)
-  if (!isTRUE(selection_visible)) selection_text <- NULL
+  cursor_text <- scalar_chr(context$cursor_text %||% context$cursorText)
+  if (!isTRUE(selection_visible)) { selection_text <- NULL; cursor_text <- NULL }  # 眼睛关 → 一并不发
   normalized <- list(
     active_file = active_file,
     relative_path = relative_path,
     selection_text = selection_text,
     start_line = scalar_int(context$start_line %||% context$startLine %||% context$first_line),
     end_line = scalar_int(context$end_line %||% context$endLine %||% context$last_line),
+    cursor_text = cursor_text,
+    cursor_line = scalar_int(context$cursor_line %||% context$cursorLine),
+    cursor_start = scalar_int(context$cursor_start %||% context$cursorStart),
+    cursor_end = scalar_int(context$cursor_end %||% context$cursorEnd),
     selection_visible = isTRUE(selection_visible),
     document_version = context$document_version %||% context$documentVersion
   )

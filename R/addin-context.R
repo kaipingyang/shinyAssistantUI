@@ -63,6 +63,19 @@
   invisible(NULL)
 }
 
+# 无选区时的光标上下文：取 contents 中光标行 ±radius 的窗口。纯函数，便于单测。
+.addin_cursor_window <- function(contents, row, radius = 10L) {
+  if (!length(contents)) return(NULL)
+  row <- suppressWarnings(as.integer(row))
+  if (length(row) != 1L || is.na(row)) return(NULL)
+  n <- length(contents)
+  row <- max(1L, min(row, n))
+  lo <- max(1L, row - as.integer(radius))
+  hi <- min(n, row + as.integer(radius))
+  list(start_line = lo, end_line = hi, cursor_line = row,
+       text = paste(contents[lo:hi], collapse = "\n"))
+}
+
 # 只采样第一段 selection，确保文本与行范围属于同一个选区。
 .addin_editor_context <- function(project = NULL) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
@@ -81,8 +94,18 @@
                         b <- tryCatch(rg$end[[1]],   error = function(e) NULL) }
   }
   if (is.null(path) && !nzchar(sel)) return(NULL)
+  # 无选区时补光标位置 + 周围窗口，让"这里是啥/解释一下"在未选中时也有定位。
+  cursor <- NULL
+  if (!nzchar(sel) && !is.null(a)) {
+    contents <- tryCatch(ctx$contents, error = function(e) NULL)
+    if (length(contents)) cursor <- .addin_cursor_window(contents, a, radius = 10L)
+  }
   list(path = path, rel = if (!is.null(path)) .rel_path(path, project) else NULL,
-       selection = if (nzchar(sel)) sel else NULL, first_line = a, last_line = b)
+       selection = if (nzchar(sel)) sel else NULL, first_line = a, last_line = b,
+       cursor_line = if (!is.null(cursor)) cursor$cursor_line else NULL,
+       cursor_text = if (!is.null(cursor)) cursor$text else NULL,
+       cursor_start = if (!is.null(cursor)) cursor$start_line else NULL,
+       cursor_end = if (!is.null(cursor)) cursor$end_line else NULL)
 }
 
 # 纯函数:把编辑器上下文拼成要 append 到 Claude Code 预设提示词的文本。

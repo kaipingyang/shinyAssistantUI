@@ -32,3 +32,25 @@ test_that("无 selection_visible 字段(非 addin 后端)保持旧行为：注�
   expect_true(grepl("Active file: `R/app.R`", out, fixed = TRUE))
   expect_false(grepl("x <- 1", out, fixed = TRUE))
 })
+
+test_that("无选区时注入光标窗口（A4）；有选区则选区优先；眼睛关则都不注入", {
+  # 无选区 + 有光标窗口 + 眼睛开 → 注入光标窗口
+  ctx <- list(relative_path = "R/app.R", selection_visible = TRUE,
+              cursor_text = "f <- function() 1", cursor_line = 7L)
+  out <- shinyAssistantUI:::.append_ide_context("hi", ctx)
+  expect_true(grepl("cursor at line 7", out, fixed = TRUE))
+  expect_true(grepl("f <- function() 1", out, fixed = TRUE))
+
+  # 有选区 → 选区优先，不注入光标
+  ctx2 <- list(relative_path = "R/app.R", selection_visible = TRUE,
+               selection_text = "sel code", start_line = 2L, end_line = 3L,
+               cursor_text = "cursor code", cursor_line = 7L)
+  out2 <- shinyAssistantUI:::.append_ide_context("hi", ctx2)
+  expect_true(grepl("sel code", out2, fixed = TRUE))
+  expect_false(grepl("cursor code", out2, fixed = TRUE))
+
+  # 眼睛关 → 整段不注入（含光标）
+  ctx3 <- list(relative_path = "R/app.R", selection_visible = FALSE,
+               cursor_text = "cursor code", cursor_line = 7L)
+  expect_identical(shinyAssistantUI:::.append_ide_context("hi", ctx3), "hi")
+})

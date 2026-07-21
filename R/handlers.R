@@ -1455,6 +1455,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
   if (identical(context$selection_visible, FALSE)) return(message)
   path <- context$relative_path %||% context$active_file
   selection <- if (isTRUE(context$selection_visible)) context$selection_text else NULL
+  cursor <- if (isTRUE(context$selection_visible)) context$cursor_text else NULL
   if (is.null(path) && is.null(selection)) return(message)
   lines <- c(
     "The following IDE context was supplied by shinyAssistantUI for this prompt only.",
@@ -1471,6 +1472,12 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
       else paste0("lines ", start, "-", end)
     } else "selected text"
     lines <- c(lines, paste0("Selection (", location, "):\n```\n", selection, "\n```"))
+  } else if (!is.null(cursor) && nzchar(cursor)) {
+    # 无选区 → 注入光标位置 + 周围窗口（A4），便于"这里是啥/解释一下"在未选中时定位。
+    if (nchar(cursor) > 4000L) cursor <- paste0(substr(cursor, 1L, 4000L), "\n... (truncated)")
+    cl <- context$cursor_line
+    loc <- if (!is.null(cl)) paste0("cursor at line ", cl) else "cursor position"
+    lines <- c(lines, paste0("Around the ", loc, ":\n```\n", cursor, "\n```"))
   }
   paste0(message, .IDE_CONTEXT_MARKER, "\n", paste(lines, collapse = "\n"), "\n</ide_context>")
 }
