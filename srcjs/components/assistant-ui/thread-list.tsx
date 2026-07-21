@@ -361,17 +361,17 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
           data-slot="aui_delete_confirm"
           className="bg-popover text-popover-foreground fixed left-1/2 top-1/2 z-50 w-[min(24rem,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border p-5 shadow-lg data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
         >
-          <AlertDialog.Title className="text-base font-semibold">永久删除此对话？</AlertDialog.Title>
+          <AlertDialog.Title className="text-base font-semibold">Delete this conversation permanently?</AlertDialog.Title>
           <AlertDialog.Description className="text-muted-foreground mt-1.5 text-sm">
-            将从磁盘删除该会话记录，此操作不可恢复。若只想隐藏，请改用 Archive。
+            This removes the session transcript from disk and cannot be undone. To just hide it, use Archive instead.
           </AlertDialog.Description>
           <div className="mt-4 flex justify-end gap-2">
             <AlertDialog.Cancel asChild>
-              <Button variant="outline" size="sm" data-cancel-delete>取消</Button>
+              <Button variant="outline" size="sm" data-cancel-delete>Cancel</Button>
             </AlertDialog.Cancel>
             <ThreadListItemPrimitive.Delete asChild>
               <AlertDialog.Action asChild>
-                <Button variant="destructive" size="sm" data-confirm-delete>永久删除</Button>
+                <Button variant="destructive" size="sm" data-confirm-delete>Delete permanently</Button>
               </AlertDialog.Action>
             </ThreadListItemPrimitive.Delete>
           </div>

@@ -4,7 +4,7 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9193L
+port <- 9233L
 failures <- character()
 unlink(c("/tmp/aui-da.out", "/tmp/aui-da.err"))
 
@@ -107,11 +107,9 @@ click_sel("[data-slot=aui_sidebar_toggle]")
 check("sidebar collapsed", wait_for("!document.querySelector('[data-slot=aui_thread_sidebar]')", 4))
 browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
 browser$Page$loadEventFired()
-check("sidebar stays collapsed after reload (persisted)",
-      wait_for("!!document.querySelector('.aui-root') && !document.querySelector('[data-slot=aui_thread_sidebar]')", 10))
-# 展开回来以便后续操作会话
-click_sel("[data-slot=aui_sidebar_toggle]")
-check("sidebar re-expanded", wait_for("document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'", 6))
+# 折叠改为“仅本会话、不持久化”（default 展开，方便选历史）→ 重载后回到展开态。
+check("sidebar reopens expanded after reload (collapse is session-only, not persisted)",
+      wait_for("!!document.querySelector('.aui-root') && document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'", 10))
 check("sessions still listed after reload", wait_for("document.body.innerText.includes('sess-arch')", 8))
 
 # ── Archive 软隐藏（持久化，可恢复）─────────────────────────────────────────
