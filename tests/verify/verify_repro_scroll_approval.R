@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9219L
+port <- 9221L
 unlink(c("/tmp/aui-repro.out", "/tmp/aui-repro.err"))
 report <- function(name, detail) cat(sprintf("[OBSERVE] %-42s %s\n", name, detail))
 failures <- character()
@@ -97,6 +97,15 @@ pending2 <- as.integer(value("[...document.querySelectorAll('button')].filter(b=
 chk("still only one approval pending at a time (B)", pending2 <= 1L, sprintf("pending=%d", pending2))
 value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
 chk("task completes after serial approvals", wait_for("document.body.innerText.includes('done')", 8))
+
+# ── 无语言标签代码块：本 R addin 应按 R 显示（标签 r）并高亮，而非 "unknown" ──────
+type_text("show me a codeblock"); key("Enter", "Enter", 13L)
+chk("code header renders", wait_for("!!document.querySelector('.aui-code-header-language')", 8))
+chk("unlabeled code block is labelled r (not unknown)",
+    isTRUE(value("(document.querySelector('.aui-code-header-language')?.textContent||'').trim().toLowerCase()==='r'")),
+    value("(document.querySelector('.aui-code-header-language')?.textContent||'').trim()"))
+chk("unlabeled code block is syntax-highlighted (token spans)",
+    isTRUE(value("!!document.querySelector('.aui-md pre code span, pre code span')")))
 
 # ── 残留任务卡：run 结束后带 Stop 的任务卡应被清理 ─────────────────────────────
 type_text("stucktask please"); key("Enter", "Enter", 13L)

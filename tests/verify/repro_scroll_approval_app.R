@@ -24,6 +24,12 @@ repro_handler <- function(message, thread_id, on_chunk, on_done,
     })
     return(invisible(NULL))
   }
+  if (grepl("codeblock", message, fixed = TRUE)) {
+    # 裸 ``` 代码块（无语言标签）→ assistant-ui 记为 "unknown" → 期望本 addin 按 R 处理
+    on_chunk("Here is some code:\n\n```\nx <- 1\nprint(x)\n```\n")
+    on_done()
+    return(invisible(NULL))
+  }
   if (grepl("scroll", message, fixed = TRUE)) {
     # 问题1：流式一段远超视口高度的长回复（逐块，模拟 token 流）
     for (i in 1:120) on_chunk(sprintf("Line %03d: the quick brown fox jumps over the lazy dog and keeps typing.\n", i))

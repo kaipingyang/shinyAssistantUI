@@ -1,25 +1,39 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
-import { SyntaxHighlighter } from "./syntax-highlighter";
+import { SyntaxHighlighter, resolveCodeLanguage } from "./syntax-highlighter";
 
 const noComponents = { Pre: () => null, Code: () => null } as never;
+
+describe("resolveCodeLanguage", () => {
+  it("defaults unlabeled / unknown code blocks to R (this is an R addin)", () => {
+    expect(resolveCodeLanguage("")).toBe("r");
+    expect(resolveCodeLanguage(undefined)).toBe("r");
+    expect(resolveCodeLanguage("unknown")).toBe("r");
+    expect(resolveCodeLanguage("UNKNOWN")).toBe("r");
+  });
+  it("keeps an explicit language untouched", () => {
+    expect(resolveCodeLanguage("python")).toBe("python");
+    expect(resolveCodeLanguage("bash")).toBe("bash");
+    expect(resolveCodeLanguage("json")).toBe("json");
+  });
+});
 
 describe("markdown SyntaxHighlighter", () => {
   it("renders highlighted tokens for an R code block", () => {
     const { container } = render(
       <SyntaxHighlighter language="r" code={'x <- 1\nprint(x)'} components={noComponents} />,
     );
-    // Prism 生成的 token span（语法高亮已生效，而非纯文本）
     const tokens = container.querySelectorAll("code span");
     expect(tokens.length).toBeGreaterThan(0);
     expect(container.textContent).toContain("print");
   });
 
-  it("falls back to text for unknown language without crashing", () => {
+  it("treats an unknown/unlabeled block as R and highlights it (no crash)", () => {
     const { container } = render(
-      <SyntaxHighlighter language="" code={"plain text"} components={noComponents} />,
+      <SyntaxHighlighter language="unknown" code={'y <- 2\nprint(y)'} components={noComponents} />,
     );
-    expect(container.textContent).toContain("plain text");
+    expect(container.querySelectorAll("code span").length).toBeGreaterThan(0);
+    expect(container.textContent).toContain("print");
   });
 });

@@ -41,10 +41,18 @@ PrismLight.registerLanguage("ts", typescript);
 PrismLight.registerLanguage("tsx", tsx);
 PrismLight.registerLanguage("jsx", tsx);
 
+// R 优先：assistant-ui 对无语言标签的代码围栏会传 "unknown"（空亦然）。本 addin 面向 R，
+// 把这类未标注代码块按 R 处理——既给出合理的语言标签，也用 R 语法高亮（R 项目里绝大多数
+// 无标签代码块就是 R）。显式指定的语言（python/bash/json…）原样保留。
+export function resolveCodeLanguage(language?: string): string {
+  const lang = (language ?? "").trim();
+  return !lang || lang.toLowerCase() === "unknown" ? "r" : lang;
+}
+
 export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }) => {
   return (
     <PrismLight
-      language={language || "text"}
+      language={resolveCodeLanguage(language)}
       style={oneLight}
       data-syntax-highlighter="prism"
       customStyle={{
