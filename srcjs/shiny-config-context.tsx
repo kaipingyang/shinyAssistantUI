@@ -61,6 +61,9 @@ export interface ShinyConfigCtx {
   nativePicker?: boolean;
   pickWorkingDir?: () => void;
   setWorkingDir?: (path: string) => void;
+  projects?: string[];
+  saveProject?: () => void;
+  removeProject?: (path: string) => void;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({

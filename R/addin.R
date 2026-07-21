@@ -88,6 +88,15 @@
     }
     on_set_wd <- function(path) apply_working_dir(path)
 
+    # 收藏夹（持久化 home）。保存当前目录 / 删除，改后回推列表。apply/ctrl 惰性引用。
+    projects_path <- file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_projects.rds")
+    on_save_project <- function() {
+      ctrl$send_projects(.add_saved_project(projects_path, dir_state$cwd))
+    }
+    on_remove_project <- function(path) {
+      ctrl$send_projects(.remove_saved_project(projects_path, path))
+    }
+
     ctrl <- assistantUIServer(
       "chat", handler = handler,
       show_thread_list = TRUE,
@@ -96,6 +105,9 @@
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
       on_set_working_dir  = on_set_wd,
+      projects          = .read_saved_projects(file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_projects.rds")),
+      on_save_project   = on_save_project,
+      on_remove_project = on_remove_project,
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
@@ -187,6 +199,25 @@
     tryCatch(on_reappear(), error = function(e) NULL)
   }
   invisible(ok)
+}
+
+# ── 工作目录收藏夹（persistent，跨会话）：字符向量，最近保存在前、去重。─────────────
+.read_saved_projects <- function(path) {
+  if (!file.exists(path)) return(character(0))
+  v <- tryCatch(readRDS(path), error = function(e) character(0))
+  if (is.character(v)) v else character(0)
+}
+.add_saved_project <- function(path, dir) {
+  if (is.null(dir) || !nzchar(dir)) return(invisible(.read_saved_projects(path)))
+  cur <- .read_saved_projects(path)
+  next_ids <- unique(c(as.character(dir), cur))   # 前插 + 去重
+  tryCatch(.atomic_save_rds(next_ids, path), error = function(e) NULL)
+  invisible(next_ids)
+}
+.remove_saved_project <- function(path, dir) {
+  next_ids <- setdiff(.read_saved_projects(path), as.character(dir))
+  tryCatch(.atomic_save_rds(next_ids, path), error = function(e) NULL)
+  invisible(next_ids)
 }
 
 # Stop the gadget with a normal NULL return. This is deliberately separate so

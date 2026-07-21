@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9243L
+port <- 9247L
 unlink(c("/tmp/aui-wd.out", "/tmp/aui-wd.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -51,6 +51,23 @@ key_enter()
 
 chk("working-dir bar updates to dir-B", wait_for("(document.querySelector('[data-slot=aui_working_dir]')?.getAttribute('data-working-dir')||'').includes('dir-B')", 8))
 chk("dir-B sessions replace dir-A", wait_for("document.body.innerText.includes('B session') && !document.body.innerText.includes('A session')", 8))
+
+# ── 收藏夹：保存当前(dir-B) → Favorites 出现 → 切到 dir-A → 点收藏跳回 dir-B → 删除 ──
+click_sel("[data-slot=aui_working_dir_save]")
+chk("favorite saved (dir-B appears in Favorites)", wait_for("!!document.querySelector('[data-slot=aui_project_item][data-project*=dir-B]')", 6))
+# 切到 dir-A
+click_sel("[data-slot=aui_working_dir_change]")
+wait_for("!!document.querySelector('[data-slot=aui_working_dir_input]')", 4)
+value("(function(){const i=document.querySelector('[data-slot=aui_working_dir_input]');i.focus();i.value='/tmp/wd/dir-A';return true})()")
+key_enter()
+chk("switched to dir-A via input", wait_for("(document.querySelector('[data-slot=aui_working_dir]')?.getAttribute('data-working-dir')||'').includes('dir-A')", 8))
+# 点收藏的 dir-B → 跳回
+click_sel("[data-slot=aui_project_item][data-project*=dir-B] [data-slot=aui_project_jump]")
+chk("clicking a favorite jumps to that folder (dir-B)", wait_for("(document.querySelector('[data-slot=aui_working_dir]')?.getAttribute('data-working-dir')||'').includes('dir-B') && document.body.innerText.includes('B session')", 8))
+# 删除收藏
+click_sel("[data-slot=aui_project_item][data-project*=dir-B] [data-slot=aui_project_remove]")
+chk("removing a favorite drops it from the list", wait_for("!document.querySelector('[data-slot=aui_project_item][data-project*=dir-B]')", 6))
+
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)

@@ -224,6 +224,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   );
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const nativePicker = config?.native_picker === true;
+  const [projects, setProjects] = useState<string[]>(
+    () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
+  );
   const workspaceRequestSeq = useRef(0);
   const latestIdeRequest = useRef<string | null>(null);
   const latestWorkspaceRequest = useRef<string | null>(null);
@@ -627,6 +630,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (Array.isArray(d?.recent)) setRecentDirs(d.recent as string[]);
       // 切目录 → 丢弃旧目录的本地新建线程，避免与新目录 sessions 混显。
       thisSessionThreadIds.current.clear();
+    });
+    bridge.current.onProjects((d) => {
+      if (Array.isArray(d?.projects)) setProjects(d.projects as string[]);
     });
     // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
     // 策略：server 列表到达时【替换】localStorage 线程，而非追加。
@@ -1536,6 +1542,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     nativePicker,
     pickWorkingDir: () => bridge.current.sendPickWorkingDir(),
     setWorkingDir: (path: string) => bridge.current.sendSetWorkingDir(path),
+    projects,
+    saveProject: () => bridge.current.sendSaveProject(),
+    removeProject: (path: string) => bridge.current.sendRemoveProject(path),
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
     historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,
     historyCursor: historyPageStates[currentThreadId]?.cursor ?? null,

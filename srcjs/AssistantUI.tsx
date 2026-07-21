@@ -91,6 +91,9 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     nativePicker: rt.nativePicker,
     pickWorkingDir: rt.pickWorkingDir,
     setWorkingDir: rt.setWorkingDir,
+    projects: rt.projects,
+    saveProject: rt.saveProject,
+    removeProject: rt.removeProject,
   };
 
   const threadEl = (

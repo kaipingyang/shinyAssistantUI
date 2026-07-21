@@ -16,6 +16,7 @@ export type AttachmentData = {
 
 export type IdeContextPolicy = { selectionVisible: boolean };
 export type WorkingDirPayload = { dir?: string; recent?: string[] };
+export type ProjectsPayload = { projects?: string[] };
 export type IdeContextMeta = {
   requestId?: string;
   threadId?: string;
@@ -104,6 +105,8 @@ export interface ShinyBridge {
   sendDeleteSession: (sessionId: string) => void;
   sendPickWorkingDir: () => void;
   sendSetWorkingDir: (path: string) => void;
+  sendSaveProject: () => void;
+  sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
   sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
@@ -116,6 +119,7 @@ export interface ShinyBridge {
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
+  onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
@@ -138,6 +142,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   // 工作目录（addin 工作目录选择器）：同 :sessions，可能早到 → 缓冲回放。
   let workingDirHandler: ((data: WorkingDirPayload) => void) | null = null;
   let bufferedWorkingDir: WorkingDirPayload | null = null;
+  let projectsHandler: ((data: ProjectsPayload) => void) | null = null;
+  let bufferedProjects: ProjectsPayload | null = null;
 
   // 按 threadId 取回调。缺 threadId 时：单线程场景回退到唯一回调；多线程则告警 + 放弃
   // （静默路由到"第一个"会在并发时投递到错误线程）。R 端所有消息都应带 threadId。
@@ -223,6 +229,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     const d = data as WorkingDirPayload;
     if (workingDirHandler) workingDirHandler(d);
     else bufferedWorkingDir = d;
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:projects`, (data) => {
+    const d = data as ProjectsPayload;
+    if (projectsHandler) projectsHandler(d);
+    else bufferedProjects = d;
   });
 
   return {
@@ -419,6 +431,16 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendSetWorkingDir(path) {
       Shiny.setInputValue(`${inputId}_set_working_dir`, { path, ts: Date.now() }, { priority: "event" });
+    },
+    onProjects(handler) {
+      projectsHandler = handler;
+      if (bufferedProjects) { handler(bufferedProjects); bufferedProjects = null; }
+    },
+    sendSaveProject() {
+      Shiny.setInputValue(`${inputId}_save_project`, { ts: Date.now() }, { priority: "event" });
+    },
+    sendRemoveProject(path) {
+      Shiny.setInputValue(`${inputId}_remove_project`, { path, ts: Date.now() }, { priority: "event" });
     },
 
     onLoadThread(handler) {

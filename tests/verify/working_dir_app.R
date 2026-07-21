@@ -20,6 +20,8 @@ ui <- page_fluid(
 server <- function(input, output, session) {
   dir_state <- new.env(parent = emptyenv())
   dir_state$cwd <- "/tmp/wd/dir-A"
+  proj_state <- new.env(parent = emptyenv())
+  proj_state$saved <- character(0)
   ctrl <- assistantUIServer(
     "chat", handler = handler, show_thread_list = TRUE, persistence = "server",
     working_dir = dir_state$cwd, native_picker = FALSE,
@@ -28,6 +30,15 @@ server <- function(input, output, session) {
       dir_state$cwd <- path
       ctrl$send_working_dir(path, list(dir_state$cwd))   # 先发工作目录
       ctrl$send_sessions(list(sessions = sessions_for(path)))  # 再重推该目录 sessions（替换）
+    },
+    projects = proj_state$saved,
+    on_save_project = function() {
+      proj_state$saved <- unique(c(dir_state$cwd, proj_state$saved))
+      ctrl$send_projects(proj_state$saved)
+    },
+    on_remove_project = function(path) {
+      proj_state$saved <- setdiff(proj_state$saved, path)
+      ctrl$send_projects(proj_state$saved)
     }
   )
   shiny::observe({ ctrl$send_sessions(list(sessions = sessions_for(dir_state$cwd))) })

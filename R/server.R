@@ -232,6 +232,9 @@ assistantUIServer <- function(id, handler,
                               native_picker     = FALSE,
                               on_pick_working_dir = NULL,
                               on_set_working_dir  = NULL,
+                              projects          = NULL,
+                              on_save_project   = NULL,
+                              on_remove_project = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -312,6 +315,8 @@ assistantUIServer <- function(id, handler,
     config$working_dir   <- as.character(working_dir)[[1L]]
     config$native_picker <- isTRUE(native_picker)
   }
+  # 工作目录收藏夹初始列表（addin）。
+  if (!is.null(projects)) config$projects <- as.list(as.character(projects))
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
@@ -478,6 +483,20 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       path <- if (is.list(msg)) msg$path else msg
       tryCatch(on_set_working_dir(as.character(path %||% "")), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  # 收藏夹：保存当前目录 / 删除某收藏（addin 持久化 + 回推列表）。
+  if (is.function(on_save_project)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_save_project")]], {
+      tryCatch(on_save_project(), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_remove_project)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_remove_project")]], {
+      msg <- session$input[[paste0(input_id, "_remove_project")]]
+      if (is.null(msg)) return()
+      path <- if (is.list(msg)) msg$path else msg
+      tryCatch(on_remove_project(as.character(path %||% "")), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -827,6 +846,11 @@ assistantUIServer <- function(id, handler,
     send_working_dir = function(dir, recent = list()) {
       session$sendCustomMessage(paste0(input_id, ":working-dir"),
                                 list(dir = dir, recent = recent))
+    },
+    # 推送工作目录收藏夹列表给 UI。
+    send_projects = function(projects) {
+      session$sendCustomMessage(paste0(input_id, ":projects"),
+                                list(projects = as.list(as.character(projects))))
     }
   ))
 }

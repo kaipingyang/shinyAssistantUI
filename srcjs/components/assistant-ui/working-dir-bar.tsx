@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FC } from "react";
-import { FolderIcon, ChevronDownIcon } from "lucide-react";
+import { FolderIcon, ChevronDownIcon, StarIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "@/shiny-config-context";
 
 /**
@@ -10,12 +10,15 @@ import { useShinyConfig } from "@/shiny-config-context";
  * 仅当 config 带 workingDir（addin 模式）时渲染。
  */
 export const WorkingDirBar: FC = () => {
-  const { workingDir, recentDirs, nativePicker, pickWorkingDir, setWorkingDir } =
-    useShinyConfig();
+  const {
+    workingDir, recentDirs, nativePicker, pickWorkingDir, setWorkingDir,
+    projects, saveProject, removeProject,
+  } = useShinyConfig();
   const [editing, setEditing] = useState(false);
   if (!workingDir) return null;
 
   const base = workingDir.replace(/\/+$/, "").split("/").pop() || workingDir;
+  const dirBase = (d: string) => d.replace(/\/+$/, "").split("/").pop() || d;
   const change = () => {
     if (nativePicker && pickWorkingDir) {
       pickWorkingDir();
@@ -28,6 +31,8 @@ export const WorkingDirBar: FC = () => {
     if (p && setWorkingDir) setWorkingDir(p);
     setEditing(false);
   };
+  const saved = projects ?? [];
+  const isSaved = saved.includes(workingDir);
 
   return (
     <div
@@ -35,17 +40,31 @@ export const WorkingDirBar: FC = () => {
       data-working-dir={workingDir}
       className="mb-1 flex flex-col gap-1 border-b pb-1.5"
     >
-      <button
-        type="button"
-        data-slot="aui_working_dir_change"
-        onClick={change}
-        title={workingDir}
-        className="hover:bg-accent text-muted-foreground flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors"
-      >
-        <FolderIcon className="size-3.5 shrink-0" />
-        <span className="text-foreground min-w-0 flex-1 truncate text-start font-medium">{base}</span>
-        <ChevronDownIcon className="size-3 shrink-0 opacity-60" />
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          data-slot="aui_working_dir_change"
+          onClick={change}
+          title={workingDir}
+          className="hover:bg-accent text-muted-foreground flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors"
+        >
+          <FolderIcon className="size-3.5 shrink-0" />
+          <span className="text-foreground min-w-0 flex-1 truncate text-start font-medium">{base}</span>
+          <ChevronDownIcon className="size-3 shrink-0 opacity-60" />
+        </button>
+        {saveProject && (
+          <button
+            type="button"
+            data-slot="aui_working_dir_save"
+            onClick={() => saveProject()}
+            aria-label="Save current folder to favorites"
+            title={isSaved ? "Saved to favorites" : "Save current folder to favorites"}
+            className="hover:bg-accent flex size-7 shrink-0 items-center justify-center rounded-md"
+          >
+            <StarIcon className={"size-3.5 " + (isSaved ? "fill-yellow-400 text-yellow-500" : "text-muted-foreground")} />
+          </button>
+        )}
+      </div>
       {editing && !nativePicker && (
         <div className="flex flex-col gap-1 px-1">
           <input
@@ -75,6 +94,43 @@ export const WorkingDirBar: FC = () => {
               ))}
             </div>
           )}
+        </div>
+      )}
+      {saved.length > 0 && (
+        <div data-slot="aui_projects" className="flex flex-col">
+          <div className="text-muted-foreground px-2 pt-0.5 text-[10px] font-semibold tracking-wide uppercase">
+            Favorites
+          </div>
+          {saved.map((d) => (
+            <div
+              key={d}
+              data-slot="aui_project_item"
+              data-project={d}
+              className="group hover:bg-accent flex items-center gap-1 rounded-md pe-1"
+            >
+              <button
+                type="button"
+                data-slot="aui_project_jump"
+                onClick={() => setWorkingDir?.(d)}
+                title={d}
+                className="text-muted-foreground min-w-0 flex-1 truncate px-2 py-1 text-start text-xs"
+              >
+                {dirBase(d)}
+              </button>
+              {removeProject && (
+                <button
+                  type="button"
+                  data-slot="aui_project_remove"
+                  onClick={() => removeProject(d)}
+                  aria-label="Remove from favorites"
+                  title="Remove from favorites"
+                  className="hover:bg-destructive/10 hover:text-destructive text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded opacity-0 group-hover:opacity-100"
+                >
+                  <XIcon className="size-3" />
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
