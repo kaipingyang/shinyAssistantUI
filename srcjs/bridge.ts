@@ -15,6 +15,7 @@ export type AttachmentData = {
 
 
 export type IdeContextPolicy = { selectionVisible: boolean };
+export type WorkingDirPayload = { dir?: string; recent?: string[] };
 export type IdeContextMeta = {
   requestId?: string;
   threadId?: string;
@@ -101,6 +102,8 @@ export interface ShinyBridge {
   sendOpenFile: (path: string, line?: number) => void;
   sendArchiveSession: (sessionId: string, archived: boolean) => void;
   sendDeleteSession: (sessionId: string) => void;
+  sendPickWorkingDir: () => void;
+  sendSetWorkingDir: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
   sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
@@ -112,6 +115,7 @@ export interface ShinyBridge {
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
+  onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
@@ -131,6 +135,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
   let bufferedSessions: { sessions: SessionItem[] } | null = null;
+  // 工作目录（addin 工作目录选择器）：同 :sessions，可能早到 → 缓冲回放。
+  let workingDirHandler: ((data: WorkingDirPayload) => void) | null = null;
+  let bufferedWorkingDir: WorkingDirPayload | null = null;
 
   // 按 threadId 取回调。缺 threadId 时：单线程场景回退到唯一回调；多线程则告警 + 放弃
   // （静默路由到"第一个"会在并发时投递到错误线程）。R 端所有消息都应带 threadId。
@@ -210,6 +217,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
 
   Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
     loadThreadHandler?.(data as HistoryLoadPayload);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:working-dir`, (data) => {
+    const d = data as WorkingDirPayload;
+    if (workingDirHandler) workingDirHandler(d);
+    else bufferedWorkingDir = d;
   });
 
   return {
@@ -395,6 +408,17 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         handler(bufferedSessions);
         bufferedSessions = null;
       }
+    },
+
+    onWorkingDir(handler) {
+      workingDirHandler = handler;
+      if (bufferedWorkingDir) { handler(bufferedWorkingDir); bufferedWorkingDir = null; }
+    },
+    sendPickWorkingDir() {
+      Shiny.setInputValue(`${inputId}_pick_working_dir`, { ts: Date.now() }, { priority: "event" });
+    },
+    sendSetWorkingDir(path) {
+      Shiny.setInputValue(`${inputId}_set_working_dir`, { path, ts: Date.now() }, { priority: "event" });
     },
 
     onLoadThread(handler) {

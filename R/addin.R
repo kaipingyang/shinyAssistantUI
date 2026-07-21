@@ -76,10 +76,26 @@
       .stop_claude_gadget_normally()
     }, ignoreInit = TRUE)
 
+    # 工作目录选择器：RStudio 有原生目录弹窗；apply_working_dir 由下方定义（惰性引用 ctrl/push_sessions）。
+    native_picker <- requireNamespace("rstudioapi", quietly = TRUE) &&
+      isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))
+    on_pick_wd <- function() {
+      if (!native_picker) return(invisible(NULL))
+      d <- tryCatch(rstudioapi::selectDirectory(caption = "Select working directory",
+                                                path = dir_state$cwd),
+                    error = function(e) NULL)
+      if (!is.null(d) && nzchar(d)) apply_working_dir(d)
+    }
+    on_set_wd <- function(path) apply_working_dir(path)
+
     ctrl <- assistantUIServer(
       "chat", handler = handler,
       show_thread_list = TRUE,
       persistence      = "server",
+      working_dir      = cur_dir(),
+      native_picker    = native_picker,
+      on_pick_working_dir = on_pick_wd,
+      on_set_working_dir  = on_set_wd,
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
@@ -120,6 +136,34 @@
     shiny::observe({
       push_sessions()
     })
+
+    # 最近工作目录（存 home，跨会话保留；最近在前，上限 8）。
+    recent_path <- file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_recent_dirs.rds")
+    read_recent <- function() {
+      if (!file.exists(recent_path)) return(character(0))
+      v <- tryCatch(readRDS(recent_path), error = function(e) character(0))
+      if (is.character(v)) v else character(0)
+    }
+    add_recent <- function(d) {
+      r <- utils::head(unique(c(d, read_recent())), 8L)
+      tryCatch(.atomic_save_rds(r, recent_path), error = function(e) NULL)
+      r
+    }
+
+    # 切换工作目录：校验 → 改 cwd → 断开所有 client（换目录=全部重连）→ 先发 :working-dir
+    # （前端据此清本次实例本地线程）→ 再重推该目录 sessions（替换列表）。无效/未变则 no-op。
+    apply_working_dir <- function(new_dir) {
+      if (is.null(new_dir) || !nzchar(new_dir)) return(invisible(NULL))
+      nd <- tryCatch(normalizePath(new_dir, winslash = "/", mustWork = FALSE),
+                     error = function(e) new_dir)
+      if (!dir.exists(nd) || identical(nd, dir_state$cwd)) return(invisible(NULL))
+      dir_state$cwd <- nd
+      tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
+      recent <- add_recent(nd)
+      ctrl$send_working_dir(nd, as.list(recent))
+      push_sessions()
+      invisible(nd)
+    }
   }
   shiny::shinyApp(ui, server)
 }

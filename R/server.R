@@ -228,6 +228,10 @@ assistantUIServer <- function(id, handler,
                               on_open_file      = NULL,
                               on_archive_session = NULL,
                               on_delete_session = NULL,
+                              working_dir       = NULL,
+                              native_picker     = FALSE,
+                              on_pick_working_dir = NULL,
+                              on_set_working_dir  = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -303,6 +307,11 @@ assistantUIServer <- function(id, handler,
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
   if (!is.null(.ui_capabilities)) config$ui_capabilities  <- .ui_capabilities
+  # 工作目录选择器（addin）：初始目录 + 是否有原生目录选择弹窗（RStudio）。
+  if (!is.null(working_dir)) {
+    config$working_dir   <- as.character(working_dir)[[1L]]
+    config$native_picker <- isTRUE(native_picker)
+  }
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
@@ -454,6 +463,21 @@ assistantUIServer <- function(id, handler,
       payload$requestId <- msg$requestId
       payload$threadId <- msg$threadId
       session$sendCustomMessage(paste0(input_id, ":ide-context"), payload)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # 工作目录选择器：UI 请求原生弹窗 / 手输路径 → 交回调（addin 负责切目录+重连+重推）。
+  if (is.function(on_pick_working_dir)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_pick_working_dir")]], {
+      tryCatch(on_pick_working_dir(), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_set_working_dir)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_set_working_dir")]], {
+      msg <- session$input[[paste0(input_id, "_set_working_dir")]]
+      if (is.null(msg)) return()
+      path <- if (is.list(msg)) msg$path else msg
+      tryCatch(on_set_working_dir(as.character(path %||% "")), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -798,6 +822,11 @@ assistantUIServer <- function(id, handler,
     send_sessions = function(sessions) {
       pending_sessions <<- sessions
       session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
+    },
+    # 推送当前工作目录 + 最近目录列表给 UI（切目录时先发这个，再重推 sessions）。
+    send_working_dir = function(dir, recent = list()) {
+      session$sendCustomMessage(paste0(input_id, ":working-dir"),
+                                list(dir = dir, recent = recent))
     }
   ))
 }

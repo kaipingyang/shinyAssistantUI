@@ -5,6 +5,7 @@ import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
 import { ThreadSidebar, SidebarToggleButton, useSidebarCollapse } from "@/components/assistant-ui/thread-sidebar";
 import { SidebarSettings } from "@/components/assistant-ui/settings-controls";
+import { WorkingDirBar } from "@/components/assistant-ui/working-dir-bar";
 import { useShinyRuntime } from "./runtime";
 import { mergeSlashCommands } from "./helpers";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
@@ -84,6 +85,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     forkThread: rt.forkThread,
     // 折叠时主面板左上角浮着展开按钮 → 让"当前提问"框左侧留白，二者并排不重叠
     sidebarCollapsed: showThreadList && sidebar.collapsed,
+    // 工作目录选择器（addin）
+    workingDir: rt.workingDir,
+    recentDirs: rt.recentDirs,
+    nativePicker: rt.nativePicker,
+    pickWorkingDir: rt.pickWorkingDir,
+    setWorkingDir: rt.setWorkingDir,
   };
 
   const threadEl = (
@@ -125,6 +132,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
         <div className="aui-root flex h-full min-h-0">
           {showThreadList && (
             <ThreadSidebar collapsed={sidebar.collapsed} onToggle={sidebar.toggle}>
+              <WorkingDirBar />
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <ThreadList />
               </div>

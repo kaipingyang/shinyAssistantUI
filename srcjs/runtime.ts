@@ -218,6 +218,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     enabled: boolean; query: string; items: WorkspaceMentionItem[]; loading: boolean;
   }>({ enabled: capabilityContract.workspace, query: "", items: [], loading: false });
   const ideRequestSeq = useRef(0);
+  // 工作目录选择器（addin）：初始值来自 config；切换后由 :working-dir 消息更新。
+  const [workingDir, setWorkingDirState] = useState<string>(
+    () => (typeof config?.working_dir === "string" ? config.working_dir : ""),
+  );
+  const [recentDirs, setRecentDirs] = useState<string[]>([]);
+  const nativePicker = config?.native_picker === true;
   const workspaceRequestSeq = useRef(0);
   const latestIdeRequest = useRef<string | null>(null);
   const latestWorkspaceRequest = useRef<string | null>(null);
@@ -307,7 +313,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setThreads((prev) => {
       if (prev.some((t) => t.id === currentThreadId)) return prev;
       const next = [
-        { id: currentThreadId, status: "regular" as const, title: "新对话" },
+        { id: currentThreadId, status: "regular" as const, title: "New chat" },
         ...prev,
       ];
       saveThreads(inputId, usesClientPersistence, next);
@@ -440,7 +446,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         const newThread: ExternalStoreThreadData<"regular"> = {
           id: newId,
           status: "regular",
-          title: "新对话",
+          title: "New chat",
         };
         setThreads((prev) => {
           const next = [newThread, ...prev.filter((t) => t.id !== removedId)];
@@ -463,7 +469,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const newThread: ExternalStoreThreadData<"regular"> = {
         id: newId,
         status: "regular",
-        title: "新对话",
+        title: "New chat",
       };
       setThreads((prev) => {
         const next = [newThread, ...prev];
@@ -614,6 +620,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }));
     });
 
+    // ── 注册 :working-dir（工作目录切换：更新显示 + 清本次实例的本地线程，
+    //    随后到达的 :sessions 会用新目录的会话替换整份列表）──────────────────
+    bridge.current.onWorkingDir((d) => {
+      if (typeof d?.dir === "string") setWorkingDirState(d.dir);
+      if (Array.isArray(d?.recent)) setRecentDirs(d.recent as string[]);
+      // 切目录 → 丢弃旧目录的本地新建线程，避免与新目录 sessions 混显。
+      thisSessionThreadIds.current.clear();
+    });
     // ── 注册 :sessions（侧边栏注入历史 Claude session）─────────────────────
     // 策略：server 列表到达时【替换】localStorage 线程，而非追加。
     // 只保留本次 React 实例新建（thisSessionThreadIds）且尚未在 server 上的线程，
@@ -639,7 +653,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         const newId = makeThreadId();
         thisSessionThreadIds.current.clear();
         thisSessionThreadIds.current.add(newId);
-        setThreads([{ id: newId, status: "regular", title: "新对话" }]);
+        setThreads([{ id: newId, status: "regular", title: "New chat" }]);
         setArchivedThreads([]);
         setMessagesMap({ [newId]: [] });
         setCurrentThreadId(newId);
@@ -1319,7 +1333,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     const newThread: ExternalStoreThreadData<"regular"> = {
       id: newId,
       status: "regular",
-      title: "新对话",
+      title: "New chat",
     };
     setThreads((prev) => {
       const next = [newThread, ...prev];
@@ -1516,6 +1530,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     refreshIdeContext,
     workspaceMentions,
     searchWorkspace,
+    // 工作目录选择器（addin）
+    workingDir,
+    recentDirs,
+    nativePicker,
+    pickWorkingDir: () => bridge.current.sendPickWorkingDir(),
+    setWorkingDir: (path: string) => bridge.current.sendSetWorkingDir(path),
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
     historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,
     historyCursor: historyPageStates[currentThreadId]?.cursor ?? null,

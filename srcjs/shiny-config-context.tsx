@@ -55,6 +55,12 @@ export interface ShinyConfigCtx {
   forkThread?: () => void;
   /** 侧栏折叠且展开按钮浮在主面板左上角时为真 → 顶部"当前提问"框需左侧留白避让按钮 */
   sidebarCollapsed?: boolean;
+  // ── 工作目录选择器（addin）──
+  workingDir?: string;
+  recentDirs?: string[];
+  nativePicker?: boolean;
+  pickWorkingDir?: () => void;
+  setWorkingDir?: (path: string) => void;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({
