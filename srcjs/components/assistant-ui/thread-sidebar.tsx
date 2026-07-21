@@ -51,8 +51,8 @@ export const SidebarToggleButton: FC<
   <button
     type="button"
     onClick={onToggle}
-    aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
-    title={collapsed ? "展开侧边栏" : "收起侧边栏"}
+    aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+    title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
     data-slot="aui_sidebar_toggle"
     className={cn(
       "text-muted-foreground hover:bg-accent hover:text-accent-foreground flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",

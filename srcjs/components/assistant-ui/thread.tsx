@@ -239,7 +239,7 @@ const ShinyHistoryControls: FC<{ onLoadOlder: () => void }> = ({ onLoadOlder }) 
         className="text-muted-foreground flex items-center justify-center gap-2 py-3 text-sm"
       >
         <span className="inline-block size-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        <span>正在读取历史记录…</span>
+        <span>Loading history…</span>
       </div>
     );
   }
@@ -253,7 +253,7 @@ const ShinyHistoryControls: FC<{ onLoadOlder: () => void }> = ({ onLoadOlder }) 
         onClick={onLoadOlder}
         className="text-muted-foreground hover:bg-accent rounded-full border px-3 py-1 text-xs disabled:cursor-wait disabled:opacity-60"
       >
-        {loadingOlder ? "正在加载更早记录…" : "加载更早记录"}
+        {loadingOlder ? "Loading older messages…" : "Load older messages"}
       </button>
     </div>
   );
@@ -343,13 +343,13 @@ const IdeContextIndicator: FC = () => {
       <button
         type="button"
         data-slot="aui_selection_visibility"
-        aria-label={selectionVisible ? "隐藏当前文件，不发送给 Claude" : "把当前文件发送给 Claude"}
-        title={selectionVisible ? "隐藏当前文件，不发送给 Claude" : "把当前文件发送给 Claude"}
+        aria-label={selectionVisible ? "Hide this file from Claude" : "Send this file to Claude"}
+        title={selectionVisible ? "Hide this file from Claude" : "Send this file to Claude"}
         onClick={() => setSelectionVisible(!selectionVisible)}
         className="hover:bg-accent ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5"
       >
         {selectionVisible ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
-        <span>{selectionVisible ? (ideContext.hasSelection ? "上下文已包含" : "文件已包含") : "已隐藏"}</span>
+        <span>{selectionVisible ? (ideContext.hasSelection ? "Context included" : "File included") : "Hidden"}</span>
       </button>
     </div>
   );
@@ -385,7 +385,7 @@ const ShinyWarmingIndicator: FC = () => {
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
       <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      <span>{warmingResuming ? "正在恢复 Claude Code 对话…" : "正在启动 Claude Code…"}</span>
+      <span>{warmingResuming ? "Resuming Claude Code session…" : "Starting Claude Code…"}</span>
     </div>
   );
 };

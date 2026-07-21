@@ -47,7 +47,7 @@ const ArchivedThreadListItems: FC = () => {
   if (!archivedIds || archivedIds.length === 0) return null;
   return (
     <div data-slot="aui_thread-list-archived" className="mt-2 flex flex-col gap-0.5 border-t pt-2">
-      <div className="text-muted-foreground px-2.5 pb-1 text-xs font-medium">已归档</div>
+      <div className="text-muted-foreground px-2.5 pb-1 text-xs font-medium">Archived</div>
       <ThreadListPrimitive.Items archived components={{ ThreadListItem: ArchivedThreadListItem }} />
     </div>
   );
@@ -68,8 +68,8 @@ const ArchivedThreadListItem: FC = () => {
           size="icon"
           data-slot="aui_thread-list-unarchive"
           className="size-6 shrink-0 p-0 opacity-0 group-hover:opacity-100"
-          aria-label="取消归档"
-          title="取消归档"
+          aria-label="Unarchive"
+          title="Unarchive"
         >
           <ArchiveRestoreIcon className="size-3.5" />
         </Button>

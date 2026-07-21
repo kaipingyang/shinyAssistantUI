@@ -34,7 +34,7 @@ bundle 翻倍"的回归；助手代码块高亮改用 `PrismLight` + 显式 `reg
 |---|---|---|---|
 | 显式持久化 | `assistantUIServer(persistence=c("client","server","none"))`；addin 用 `server` | server/none 首帧不读写 localStorage | `verify_slash_context_history.R` |
 | 历史分页 | `on_session_load(session_id,thread_id,send_thread,cursor,limit)` + LRU snapshot(≤3) | 初始最新50 + 向上加载/prepend去重 | `verify_slash_context_history.R` |
-| 双阶段历史状态 | — | `正在读取历史记录…` / `正在恢复 Claude Code 对话…` | 同上 |
+| 双阶段历史状态 | — | `Loading history…` / `Resuming Claude Code session…` | 同上 |
 | Slash 菜单 + Tab | `commands`(skill,蓝chip) vs `action_items`(literal) | Tab 补全成 chip、Enter/点击执行；菜单高亮 scrollIntoView | 同上 |
 | /context 精简 | `.format_context_usage` 仅摘要+分类表 | — | 同上（`test-context-usage.R`）|
 | 工具卡默认折叠 | `toolHistoryDefaultOpen` | 历史大结果折叠、审批展开 | 同上 |

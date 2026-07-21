@@ -41,7 +41,7 @@ describe("ThreadSidebar collapse", () => {
     // 展开态：主面板里没有展开按钮
     expect(getByTestId("main-panel").querySelector("[data-testid=main-expand]")).toBeNull();
 
-    fireEvent.click(getByLabelText("收起侧边栏"));
+    fireEvent.click(getByLabelText("Collapse sidebar"));
 
     // 折叠态：侧栏元素完全消失（无残留窄轨），children 也没了
     expect(container.querySelector("[data-slot=aui_thread_sidebar]")).toBeNull();
@@ -49,16 +49,16 @@ describe("ThreadSidebar collapse", () => {
     // 展开按钮出现在主面板中
     const expandBtn = getByTestId("main-panel").querySelector<HTMLElement>("[data-testid=main-expand]");
     expect(expandBtn).not.toBeNull();
-    expect(expandBtn!.getAttribute("aria-label")).toBe("展开侧边栏");
+    expect(expandBtn!.getAttribute("aria-label")).toBe("Expand sidebar");
 
-    fireEvent.click(getByLabelText("展开侧边栏"));
+    fireEvent.click(getByLabelText("Expand sidebar"));
     expect(container.querySelector("[data-slot=aui_thread_sidebar]")).not.toBeNull();
     expect(queryByTestId("sidebar-child")).not.toBeNull();
   });
 
   it("persists collapsed state to localStorage when a storageKey is given", () => {
     const { getByLabelText } = render(<Harness storageKey="aui:test:sidebar" />);
-    fireEvent.click(getByLabelText("收起侧边栏"));
+    fireEvent.click(getByLabelText("Collapse sidebar"));
     expect(localStorage.getItem("aui:test:sidebar")).toBe("1");
 
     cleanup();
@@ -70,7 +70,7 @@ describe("ThreadSidebar collapse", () => {
 
   it("does not touch localStorage without a storageKey", () => {
     const { getByLabelText } = render(<Harness />);
-    fireEvent.click(getByLabelText("收起侧边栏"));
+    fireEvent.click(getByLabelText("Collapse sidebar"));
     expect(localStorage.length).toBe(0);
   });
 });

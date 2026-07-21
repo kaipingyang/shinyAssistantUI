@@ -51,7 +51,7 @@ export const ShinyCurrentQuestion: FC<{ visible: boolean }> = ({ visible }) => {
         )}
       >
         <span className="text-muted-foreground mt-0.5 shrink-0 text-[10px] font-medium tracking-wide uppercase">
-          提问
+          Question
         </span>
         <p
           className={cn(
@@ -64,7 +64,7 @@ export const ShinyCurrentQuestion: FC<{ visible: boolean }> = ({ visible }) => {
         <button
           type="button"
           data-slot="aui_current_question_toggle"
-          aria-label={expanded ? "收起提问" : "展开提问"}
+          aria-label={expanded ? "Collapse question" : "Expand question"}
           onClick={() => setExpanded((v) => !v)}
           className="text-muted-foreground hover:text-foreground hover:bg-accent -mt-0.5 flex size-5 shrink-0 items-center justify-center rounded transition-colors"
         >
