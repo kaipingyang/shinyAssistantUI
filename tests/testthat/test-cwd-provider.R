@@ -1,0 +1,62 @@
+# Plan 18 Phase 3a：make_claude_handler 支持动态 cwd_provider + reset_clients（切工作目录用）。
+
+test_that("cwd_provider 覆盖 options$cwd 且随之变化（切目录后重连用新 cwd）", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  received <- NULL
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() invisible(NULL)
+  testthat::local_mocked_bindings(.new_claude_client = function(options) { received <<- options; client })
+
+  dir <- "/tmp/dir-A"
+  handler <- make_claude_handler(
+    options = list(cwd = "/tmp/static", permission_mode = "default",
+                   permission_prompt_tool_name = "stdio", include_partial_messages = TRUE),
+    cwd_provider = function() dir,
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("t1")
+  expect_identical(received$cwd, "/tmp/dir-A")     # provider 覆盖了静态 options$cwd
+
+  dir <- "/tmp/dir-B"
+  attr(handler, "reset_clients")()                 # 换目录 → 断开所有 client
+  attr(handler, "warmup")("t1")                    # 重连
+  expect_identical(received$cwd, "/tmp/dir-B")     # 用新目录
+})
+
+test_that("reset_clients 断开并清空所有 client", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  disconnected <- 0L
+  make_client <- function() {
+    cl <- new.env(parent = emptyenv())
+    cl$connect <- function() invisible(NULL)
+    cl$disconnect <- function() { disconnected <<- disconnected + 1L; invisible(NULL) }
+    cl
+  }
+  testthat::local_mocked_bindings(.new_claude_client = function(options) make_client())
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", permission_prompt_tool_name = "stdio",
+                   include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("t1")
+  attr(handler, "warmup")("t2")
+  attr(handler, "reset_clients")()
+  expect_identical(disconnected, 2L)               # 两个 client 都断开
+  expect_silent(attr(handler, "warmup")("t1"))     # 清空后可重连
+})
+
+test_that("cwd_provider=NULL 时回退 options$cwd（非 addin 兼容）", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  received <- NULL
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL); client$disconnect <- function() invisible(NULL)
+  testthat::local_mocked_bindings(.new_claude_client = function(options) { received <<- options; client })
+  handler <- make_claude_handler(
+    options = list(cwd = "/tmp/static", permission_mode = "default",
+                   permission_prompt_tool_name = "stdio", include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("t1")
+  expect_identical(received$cwd, "/tmp/static")
+})

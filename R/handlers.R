@@ -704,6 +704,7 @@ make_ellmer_session_loader <- function(store) {
 #'
 #' @export
 make_claude_handler <- function(options       = NULL,
+                                cwd_provider     = NULL,
                                 session_map_path = ".claude_session_map.rds") {
   if (is.null(options)) {
     options <- .new_claude_options(
@@ -765,9 +766,9 @@ make_claude_handler <- function(options       = NULL,
         permission_mode             = permission_mode_for(thread_id),
         permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
         include_partial_messages    = options$include_partial_messages %||% TRUE,
-        # cwd / system_prompt 之前被漏传 → Claude CLI 只继承 R 进程 getwd()，插件无法指定工作目录。
-        # 补回后 addin 的 cwd=<项目/选定目录> 与启动上下文注入才真正生效（Plan 16 Phase 1）。
-        cwd                         = options$cwd,
+        # cwd：优先动态 cwd_provider()（工作目录选择器），否则静态 options$cwd。
+        # 之前漏传 → CLI 只继承 R 进程 getwd()（Plan 16/18）。
+        cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
         system_prompt               = options$system_prompt,
         resume                      = resume_sid
       )
@@ -822,6 +823,15 @@ make_claude_handler <- function(options       = NULL,
       }
     }
     invisible(tids)
+  }
+
+  # 断开并清空所有 client（切换工作目录时用：换 cwd = 全部重连，下条消息按新 cwd 连）。
+  reset_clients <- function() {
+    .cleanup_claude_client_registry(
+      get_clients   = function() clients,
+      clear_clients = function() clients <<- list()
+    )
+    invisible(NULL)
   }
 
   later_promise <- function(delay = 0.05) {
@@ -1306,6 +1316,8 @@ make_claude_handler <- function(options       = NULL,
   }
   # 暴露"按 session 断开 client"，供 addin 删除会话前调用（见 .claude_delete_session）。
   attr(handler_fn, "release_session") <- release_session
+  # 暴露"断开所有 client"，供 addin 切换工作目录时全部重连。
+  attr(handler_fn, "reset_clients") <- reset_clients
   handler_fn
 }
 
