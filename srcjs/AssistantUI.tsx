@@ -66,6 +66,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     onOpenFile: rt.openFile,
     permissionMode: rt.permissionMode,
     thinking: rt.thinking,
+    model: rt.model,
     ideContext: rt.ideContext,
     selectionVisible: rt.selectionVisible,
     setSelectionVisible: rt.setSelectionVisible,

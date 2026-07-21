@@ -63,7 +63,8 @@
 #' @keywords internal
 #' @noRd
 .claude_chat_app <- function(project, ctx = NULL, options = NULL,
-                              permission_mode = "default", prewarm = FALSE) {
+                              permission_mode = "default", prewarm = FALSE,
+                              models = NULL) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
     stop("The Claude Code addin needs the 'ClaudeAgentSDK' package. Install it first.",
          call. = FALSE)
@@ -90,6 +91,7 @@
   handler <- make_claude_handler(
     options          = options,
     cwd_provider     = cur_dir,
+    models           = models,
     session_map_path = session_map_path
   )
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
@@ -344,6 +346,10 @@
 #'   Ignored when `options` is supplied directly.
 #' @param prewarm Logical (default `FALSE`). If `TRUE`, pre-connect the Claude CLI at launch so
 #'   the first message isn't slowed by the cold start (see [assistantUIServer()]).
+#' @param models Optional character vector of model names/aliases to offer in the Settings
+#'   "Model" selector (e.g. `c("sonnet", "opus")`). A "Default" option is always prepended.
+#'   Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
+#'   `set_model` (no reconnect).
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions] to fully override all defaults.
 #' @return Invisibly, the result of [shiny::runGadget()].
 #' @export
@@ -358,12 +364,14 @@ claude_addin <- function(project         = NULL,
                          viewer          = c("pane", "dialog", "browser"),
                          permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
                          prewarm         = FALSE,
+                         models          = NULL,
                          options         = NULL) {
   viewer          <- match.arg(viewer)
   permission_mode <- match.arg(permission_mode)
   project <- project %||% .addin_project()
   app <- .claude_chat_app(project, options = options,
-                          permission_mode = permission_mode, prewarm = prewarm)
+                          permission_mode = permission_mode, prewarm = prewarm,
+                          models = models)
 
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))

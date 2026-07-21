@@ -80,8 +80,41 @@ export function ThinkingControl() {
   );
 }
 
+export function ModelControl() {
+  const { model } = useShinyConfig();
+  const selectId = useId();
+  if (!model) return null;
+  const selected = model.options.find((o) => o.value === model.value);
+  return (
+    <div className="aui-model-select mt-3 space-y-1.5">
+      <div>
+        <label className="text-foreground text-xs font-medium" htmlFor={selectId}>
+          Model
+        </label>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          {selected?.description ?? "Which model answers your prompts."}
+        </p>
+      </div>
+      <select
+        id={selectId}
+        aria-label="Model"
+        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+        value={model.value}
+        title={selected?.description}
+        onChange={(event) => model.setValue(event.target.value)}
+      >
+        {model.options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export function SidebarSettings() {
-  const { permissionMode, thinking } = useShinyConfig();
+  const { permissionMode, thinking, model } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -91,7 +124,7 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode && !thinking) return null;
+  if (!permissionMode && !thinking && !model) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -127,6 +160,7 @@ export function SidebarSettings() {
           </div>
           <PermissionModeControl />
           <ThinkingControl />
+          <ModelControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>

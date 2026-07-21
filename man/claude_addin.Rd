@@ -9,6 +9,7 @@ claude_addin(
   viewer = c("pane", "dialog", "browser"),
   permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
   prewarm = FALSE,
+  models = NULL,
   options = NULL
 )
 }
@@ -31,6 +32,11 @@ Ignored when \code{options} is supplied directly.}
 
 \item{prewarm}{Logical (default \code{FALSE}). If \code{TRUE}, pre-connect the Claude CLI at launch so
 the first message isn't slowed by the cold start (see \code{\link[=assistantUIServer]{assistantUIServer()}}).}
+
+\item{models}{Optional character vector of model names/aliases to offer in the Settings
+"Model" selector (e.g. \code{c("sonnet", "opus")}). A "Default" option is always prepended.
+Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
+\code{set_model} (no reconnect).}
 
 \item{options}{Optional \link[ClaudeAgentSDK:ClaudeAgentOptions]{ClaudeAgentSDK::ClaudeAgentOptions} to fully override all defaults.}
 }

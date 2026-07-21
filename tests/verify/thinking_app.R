@@ -12,6 +12,12 @@ attr(handler, "ui_capabilities") <- list(
     list(value = "adaptive", label = "Adaptive"),
     list(value = "enabled",  label = "Extended"),
     list(value = "disabled", label = "Off")
+  )),
+  model = list(value = "default", options = list(
+    list(value = "default", label = "Default"),
+    list(value = "haiku",   label = "Haiku"),
+    list(value = "sonnet",  label = "Sonnet"),
+    list(value = "opus",    label = "Opus")
   ))
 )
 

@@ -6,6 +6,9 @@
 \usage{
 make_claude_handler(
   options = NULL,
+  cwd_provider = NULL,
+  thinking_provider = NULL,
+  models = NULL,
   session_map_path = ".claude_session_map.rds"
 )
 }

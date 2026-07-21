@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ShinyConfigContext, type ShinyConfigCtx } from "../../shiny-config-context";
-import { PermissionModeControl, ThinkingControl, SidebarSettings } from "./settings-controls";
+import { PermissionModeControl, ThinkingControl, ModelControl, SidebarSettings } from "./settings-controls";
 
 const baseContext: ShinyConfigCtx = {
   tools: [], commands: [], actionItems: [], showTimestamps: false,
@@ -132,5 +132,31 @@ describe("ThinkingControl", () => {
     expect(screen.getByRole("option", { name: "Extended" })).toBeTruthy();
     fireEvent.change(select, { target: { value: "enabled" } });
     expect(setValue).toHaveBeenCalledWith("enabled");
+  });
+});
+
+describe("ModelControl", () => {
+  const modelOpts = [
+    { value: "default", label: "Default" },
+    { value: "haiku", label: "Haiku" },
+    { value: "sonnet", label: "Sonnet" },
+    { value: "opus", label: "Opus" },
+  ];
+  it("absent without capability", () => {
+    render(<ShinyConfigContext.Provider value={baseContext}><ModelControl /></ShinyConfigContext.Provider>);
+    expect(screen.queryByLabelText("Model")).toBeNull();
+  });
+  it("renders options and delegates selection", () => {
+    const setValue = vi.fn();
+    render(
+      <ShinyConfigContext.Provider value={{ ...baseContext, model: { value: "default", options: modelOpts, setValue } }}>
+        <ModelControl />
+      </ShinyConfigContext.Provider>,
+    );
+    const select = screen.getByLabelText("Model") as HTMLSelectElement;
+    expect(select.value).toBe("default");
+    expect(screen.getByRole("option", { name: "Opus" })).toBeTruthy();
+    fireEvent.change(select, { target: { value: "sonnet" } });
+    expect(setValue).toHaveBeenCalledWith("sonnet");
   });
 });

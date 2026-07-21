@@ -709,6 +709,7 @@ make_ellmer_session_loader <- function(store) {
 make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
                                 thinking_provider = NULL,
+                                models            = NULL,
                                 session_map_path = ".claude_session_map.rds") {
   if (is.null(options)) {
     options <- .new_claude_options(
@@ -760,6 +761,31 @@ make_claude_handler <- function(options       = NULL,
     if (is.null(v) || identical(v, "default")) NULL else list(type = v)
   }
 
+  # 模型档位（#1 /model）：默认 default/haiku/sonnet/opus；models= 覆盖（default 恒在首位）。
+  # set_model 是热切换（不重连）；重连时 make_opts 用 model_state 保持当前模型。
+  if (length(models)) {
+    model_ids <- as.character(models)
+    model_label <- function(m) m
+  } else {
+    model_ids <- c("haiku", "sonnet", "opus")
+    model_label <- function(m) paste0(toupper(substring(m, 1, 1)), substring(m, 2))
+  }
+  model_options <- c(
+    list(list(value = "default", label = "Default",
+              description = "Use the backend's default model")),
+    lapply(model_ids, function(m) list(value = m, label = model_label(m),
+                                        description = paste("Switch to", m)))
+  )
+  model_values <- vapply(model_options, `[[`, character(1), "value")
+  initial_model <- options$model %||% "default"
+  if (!initial_model %in% model_values) initial_model <- "default"
+  model_state <- new.env(parent = emptyenv())
+  model_state$value <- initial_model
+  internal_model <- function() {
+    v <- model_state$value
+    if (is.null(v) || identical(v, "default")) NULL else v
+  }
+
   # Disk is the source of truth because the historical loader and handler own
   # independent closures. Every mutation re-reads and atomically replaces the
   # map so one closure cannot publish a stale snapshot over another's entries.
@@ -796,6 +822,7 @@ make_claude_handler <- function(options       = NULL,
         system_prompt               = options$system_prompt,
         # thinking（思考强度）为连接时 options；内部选择器 > 外部 provider > options$thinking。
         thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
+        model                       = internal_model() %||% options$model,
         resume                      = resume_sid
       )
     }
@@ -886,9 +913,13 @@ make_claude_handler <- function(options       = NULL,
     tryCatch({
       if (grepl("^model:", id)) {
         model <- sub("^model:", "", id)
+        if (!model %in% model_values) {
+          err(paste0("Unknown model: ", model)); return(invisible(NULL))
+        }
         if (is.null(cl)) cl <- get_client(thread_id)
-        cl$set_model(model)
-        ok(paste0("Switched model to ", model))
+        cl$set_model(model)               # 热切换，无需重连
+        model_state$value <- model        # 记住，重连时经 make_opts 保持
+        ok(paste0("Switched model to ", model), value = model)
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)
         if (!mode %in% available_permission_modes) {
@@ -1345,6 +1376,10 @@ make_claude_handler <- function(options       = NULL,
     thinking = list(
       value = thinking_state$value,
       options = thinking_options
+    ),
+    model = list(
+      value = model_state$value,
+      options = model_options
     )
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。

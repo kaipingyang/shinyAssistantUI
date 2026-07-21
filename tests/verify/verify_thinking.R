@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9251L
+port <- 9253L
 unlink(c("/tmp/aui-think.out", "/tmp/aui-think.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -43,6 +43,13 @@ value("(function(){const s=document.querySelector('select[aria-label=\"Thinking 
 chk("thinking action reaches backend (probe = thinking:enabled)", wait_for("(document.getElementById('probe')?.textContent||'').includes('thinking:enabled')", 8),
     value("document.getElementById('probe')?.textContent"))
 chk("selector shows the new value optimistically", wait_for("document.querySelector('select[aria-label=\"Thinking level\"]')?.value==='enabled'", 4))
+# 模型选择器（#1 /model）——同一 Settings 面板
+chk("model selector present in Settings", wait_for("!!document.querySelector('select[aria-label=\"Model\"]')", 6))
+chk("model defaults to 'default'", isTRUE(value("document.querySelector('select[aria-label=\"Model\"]')?.value==='default'")))
+value("(function(){const s=document.querySelector('select[aria-label=\"Model\"]');s.value='sonnet';s.dispatchEvent(new Event('change',{bubbles:true}));return true})()")
+chk("model action reaches backend (probe = model:sonnet)", wait_for("(document.getElementById('probe')?.textContent||'').includes('model:sonnet')", 8),
+    value("document.getElementById('probe')?.textContent"))
+chk("model selector shows the new value optimistically", wait_for("document.querySelector('select[aria-label=\"Model\"]')?.value==='sonnet'", 4))
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
