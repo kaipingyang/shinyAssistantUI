@@ -102,6 +102,33 @@ describe("bridge 多线程路由", () => {
     handlers["chat:tool-result"]({ toolCallId: "tc1", result: "ok", threadId: "t1" });
     expect(cb.calls.toolResult).toEqual([["tc1", "ok", false]]);
   });
+
+  it("sendOpenFile 发出 _open_file 事件（path + line）", () => {
+    const b = createShinyBridge("chat");
+    b.sendOpenFile("R/app.R", 12);
+    const evt = inputValues.find((v) => v.id === "chat_open_file");
+    expect(evt).toBeTruthy();
+    expect(evt!.value).toMatchObject({ path: "R/app.R", line: 12 });
+
+    b.sendOpenFile("R/util.R");
+    const evt2 = inputValues.filter((v) => v.id === "chat_open_file").at(-1);
+    expect(evt2!.value).toMatchObject({ path: "R/util.R", line: null });
+  });
+
+  it("sendArchiveSession / sendDeleteSession 发出对应事件（方案B）", () => {
+    const b = createShinyBridge("chat");
+    b.sendArchiveSession("sess-1", true);
+    const arc = inputValues.find((v) => v.id === "chat_archive_session");
+    expect(arc!.value).toMatchObject({ sessionId: "sess-1", archived: true });
+
+    b.sendArchiveSession("sess-1", false);
+    const unarc = inputValues.filter((v) => v.id === "chat_archive_session").at(-1);
+    expect(unarc!.value).toMatchObject({ sessionId: "sess-1", archived: false });
+
+    b.sendDeleteSession("sess-2");
+    const del = inputValues.find((v) => v.id === "chat_delete_session");
+    expect(del!.value).toMatchObject({ sessionId: "sess-2" });
+  });
 });
 
 describe("bridge inputId 前缀隔离（多 widget）", () => {

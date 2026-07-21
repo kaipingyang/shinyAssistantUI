@@ -25,6 +25,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
+import { toolHistoryDefaultOpen } from "@/helpers";
 const ANIMATION_DURATION = 200;
 
 const pressable = "active:scale-[0.98]";
@@ -540,7 +541,9 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
     status?.type === "incomplete" && status.reason === "cancelled";
   const isRequiresAction = status?.type === "requires-action";
 
-  const [open, setOpen] = useState(isRequiresAction);
+  const [open, setOpen] = useState(
+    toolHistoryDefaultOpen(undefined, isRequiresAction),
+  );
   const [prevRequiresAction, setPrevRequiresAction] =
     useState(isRequiresAction);
   if (isRequiresAction !== prevRequiresAction) {

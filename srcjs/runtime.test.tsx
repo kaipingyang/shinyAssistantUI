@@ -447,6 +447,24 @@ describe("useShinyRuntime — ordinary action correlation", () => {
     expect(actionText.some((text) => text.includes("Second completed"))).toBe(true);
     expect(actionText.some((text) => text.includes("First action"))).toBe(true);
   });
+
+  it("keeps multiline action Markdown block structure", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.invokeAction({ id: "context", label: "Context usage" });
+    });
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId: request.threadId,
+      requestId: request.requestId,
+      actionId: "context",
+      status: "ok",
+      message: "# Context Usage\n\n| Category | Tokens |\n| --- | --- |",
+    });
+    const ack = messages(result).find((message) => message.id.startsWith("ack-"))!;
+    const text = (ack.content as any[]).map((part) => part.text ?? "").join("");
+    expect(text).toBe("✓\n\n# Context Usage\n\n| Category | Tokens |\n| --- | --- |");
+  });
 });
 
 
@@ -655,5 +673,290 @@ describe("useShinyRuntime — live IDE context capability", () => {
     const reload = inputs.find((item) => item.id === "test" && item.value.type === "reload");
     expect(reload).toBeDefined();
     expect(reload!.value.ideContext).toBeUndefined();
+  });
+});
+
+
+describe("useShinyRuntime — historical session lazy load state", () => {
+  it("loads only after click, deduplicates while loading, and marks loaded on :load-thread", async () => {
+    const { result } = setup();
+    const initialThread = currentThreadId(result);
+    const historicalThread = "session-history-1";
+
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "History", createdAt: "2026-07-01T00:00:00Z" }],
+    });
+    const loadRequests = () => inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    );
+    expect(loadRequests()).toHaveLength(0);
+
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(historicalThread);
+      result.current.runtime.threads.switchToThread(historicalThread);
+    });
+    expect(loadRequests()).toHaveLength(1);
+    expect(loadRequests()[0].value).toMatchObject({
+      sessionId: historicalThread,
+      threadId: historicalThread,
+    });
+
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "old-user", role: "user", content: [{ type: "text", text: "restored" }] }],
+    });
+    expect(messages(result).some((message) => message.id === "old-user")).toBe(true);
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(initialThread);
+    });
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(historicalThread);
+    });
+    expect(loadRequests()).toHaveLength(1);
+    expect(messages(result).some((message) => message.id === "old-user")).toBe(true);
+  });
+
+  it("still hydrates and warms a cached historical session once per page lifecycle", async () => {
+    const historicalThread = "session-history-cached";
+    localStorage.setItem(
+      `shinyAssistantUI:test:msgs:${historicalThread}`,
+      JSON.stringify([
+        { id: "cached-user", role: "user", content: [{ type: "text", text: "cached" }] },
+      ]),
+    );
+    const { result } = setup();
+    const initialThread = currentThreadId(result);
+
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Cached history", createdAt: "2026-07-02T00:00:00Z" }],
+    });
+    const loadRequests = () => inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    );
+    expect(loadRequests()).toHaveLength(0);
+
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(historicalThread);
+      result.current.runtime.threads.switchToThread(historicalThread);
+    });
+
+    expect(messages(result).some((message) => message.id === "cached-user")).toBe(true);
+    expect(loadRequests()).toHaveLength(1);
+    expect(loadRequests()[0].value).toMatchObject({
+      sessionId: historicalThread,
+      threadId: historicalThread,
+    });
+
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "server-user", role: "user", content: [{ type: "text", text: "authoritative" }] }],
+    });
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(initialThread);
+    });
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(historicalThread);
+    });
+    expect(loadRequests()).toHaveLength(1);
+    expect(messages(result).some((message) => message.id === "server-user")).toBe(true);
+  });
+});
+
+
+describe("useShinyRuntime — explicit persistence modes", () => {
+  it.each(["server", "none"])(
+    "%s mode does not read or write localStorage on the first render",
+    async (persistence) => {
+      localStorage.setItem(
+        "shinyAssistantUI:test:threads",
+        JSON.stringify([{ id: "persisted-thread", status: "regular", title: "Persisted" }]),
+      );
+      localStorage.setItem(
+        "shinyAssistantUI:test:msgs:persisted-thread",
+        JSON.stringify([{ id: "persisted-message", role: "user", content: [{ type: "text", text: "cached" }] }]),
+      );
+      const getItem = vi.spyOn(Storage.prototype, "getItem");
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+
+      const { result } = setup({ persistence });
+      await act(async () => {});
+
+      expect(currentThreadId(result)).not.toBe("persisted-thread");
+      expect(getItem).not.toHaveBeenCalled();
+      expect(setItem).not.toHaveBeenCalled();
+      expect(removeItem).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "client"])(
+    "%s persistence restores client threads and messages",
+    async (persistence) => {
+      localStorage.setItem(
+        "shinyAssistantUI:test:threads",
+        JSON.stringify([{ id: "persisted-thread", status: "regular", title: "Persisted" }]),
+      );
+      localStorage.setItem(
+        "shinyAssistantUI:test:msgs:persisted-thread",
+        JSON.stringify([{ id: "persisted-message", role: "user", content: [{ type: "text", text: "cached" }] }]),
+      );
+
+      const { result } = setup(persistence ? { persistence } : {});
+      await act(async () => {});
+
+      expect(currentThreadId(result)).toBe("persisted-thread");
+      expect(messages(result).some((message) => message.id === "persisted-message")).toBe(true);
+    },
+  );
+
+  it("server mode treats an empty sessions snapshot as authoritative", async () => {
+    const { result } = setup({ persistence: "server" });
+
+    await fireR("sessions", {
+      sessions: [{ id: "server-history", title: "History", createdAt: "2026-07-01T00:00:00Z" }],
+    });
+    expect(result.current.runtime.threads.getState().threadIds).toContain("server-history");
+
+    await fireR("sessions", { sessions: [] });
+    const state = result.current.runtime.threads.getState();
+    expect(state.threadIds).not.toContain("server-history");
+    expect(state.mainThreadId).not.toBe("server-history");
+  });
+
+  it("方案B：按 archived 标记把会话分流到 active / archived 区", async () => {
+    const { result } = setup({ persistence: "server" });
+    await fireR("sessions", {
+      sessions: [
+        { id: "active-1", title: "Active", createdAt: "2026-07-01T00:00:00Z" },
+        { id: "arch-1", title: "Archived", createdAt: "2026-07-02T00:00:00Z", archived: true },
+      ],
+    });
+    const state = result.current.runtime.threads.getState();
+    expect(state.threadIds).toContain("active-1");
+    expect(state.threadIds).not.toContain("arch-1");
+    expect(state.archivedThreadIds).toContain("arch-1");
+    expect(state.archivedThreadIds).not.toContain("active-1");
+  });
+
+  it("方案B：归档一个会话会通知后端持久化软隐藏", async () => {
+    const { result } = setup({ persistence: "server" });
+    await fireR("sessions", {
+      sessions: [{ id: "active-1", title: "Active", createdAt: "2026-07-01T00:00:00Z" }],
+    });
+    inputs.length = 0;
+    await act(async () => {
+      await result.current.runtime.threads.getItemById("active-1").archive();
+    });
+    const arc = inputs.find((i) => i.id === "test_archive_session");
+    expect(arc).toBeTruthy();
+    expect(arc!.value).toMatchObject({ sessionId: "active-1", archived: true });
+  });
+
+  it("方案B：删除 server 会话会通知后端真删磁盘", async () => {
+    const { result } = setup({ persistence: "server" });
+    await fireR("sessions", {
+      sessions: [
+        { id: "active-1", title: "One", createdAt: "2026-07-01T00:00:00Z" },
+        { id: "active-2", title: "Two", createdAt: "2026-07-02T00:00:00Z" },
+      ],
+    });
+    inputs.length = 0;
+    await act(async () => {
+      await result.current.runtime.threads.getItemById("active-2").delete();
+    });
+    const del = inputs.find((i) => i.id === "test_delete_session");
+    expect(del).toBeTruthy();
+    expect(del!.value).toMatchObject({ sessionId: "active-2" });
+  });
+});
+
+
+describe("useShinyRuntime — paged historical sessions", () => {
+  it("shows reading state, requests older pages, prepends with id dedupe, and keeps restore separate", async () => {
+    const { result } = setup({ persistence: "server" });
+    const historicalThread = "paged-history";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Paged", createdAt: "2026-07-03T00:00:00Z" }],
+    });
+
+    await act(async () => {
+      result.current.runtime.threads.switchToThread(historicalThread);
+    });
+    expect(result.current.readingHistory).toBe(true);
+    expect(result.current.warming).toBe(false);
+
+    const initial = Array.from({ length: 50 }, (_, index) => ({
+      id: `m-${index + 51}`, role: "user",
+      content: [{ type: "text", text: `message-${index + 51}` }],
+    }));
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: initial,
+      cursor: 50,
+      hasMore: true,
+      prepend: false,
+    });
+
+    expect(result.current.readingHistory).toBe(false);
+    expect(result.current.historyHasMore).toBe(true);
+    expect(result.current.loadingOlder).toBe(false);
+    expect(messages(result).map((message) => message.id)).toEqual(
+      Array.from({ length: 50 }, (_, index) => `m-${index + 51}`),
+    );
+
+    await act(async () => result.current.loadOlderHistory());
+    const pageRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session_page",
+    ).at(-1);
+    expect(pageRequest?.value).toMatchObject({
+      sessionId: historicalThread,
+      threadId: historicalThread,
+      cursor: 50,
+      limit: 50,
+    });
+    expect(result.current.loadingOlder).toBe(true);
+
+    const olderWithBoundaryDuplicate = [
+      ...Array.from({ length: 50 }, (_, index) => ({
+        id: `m-${index + 1}`, role: "user",
+        content: [{ type: "text", text: `message-${index + 1}` }],
+      })),
+      initial[0],
+    ];
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: olderWithBoundaryDuplicate,
+      cursor: null,
+      hasMore: false,
+      prepend: true,
+    });
+
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.historyHasMore).toBe(false);
+    const ids = messages(result).map((message) => message.id);
+    expect(ids).toHaveLength(100);
+    expect(ids[0]).toBe("m-1");
+    expect(ids[99]).toBe("m-100");
+    expect(new Set(ids).size).toBe(ids.length);
+
+    await fireR("warming", { threadId: historicalThread, active: true });
+    expect(result.current.readingHistory).toBe(false);
+    expect(result.current.warming).toBe(true);
+  });
+
+  it("keeps backward-compatible unpaged load-thread payloads authoritative", async () => {
+    const { result } = setup();
+    const historicalThread = "legacy-loader";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Legacy", createdAt: "2026-07-03T00:00:00Z" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "legacy-message", role: "user", content: [{ type: "text", text: "all" }] }],
+    });
+    expect(result.current.readingHistory).toBe(false);
+    expect(result.current.historyHasMore).toBe(false);
+    expect(messages(result).map((message) => message.id)).toEqual(["legacy-message"]);
   });
 });

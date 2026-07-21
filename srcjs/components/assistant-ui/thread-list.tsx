@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useShinyConfig } from "@/shiny-config-context";
+import { AlertDialog } from "radix-ui";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -14,6 +15,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
+  ArchiveRestoreIcon,
   GitBranchIcon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -34,7 +36,45 @@ export const ThreadList: FC = () => {
     <ThreadListRoot>
       <ThreadListNew />
       <ThreadListItems />
+      <ArchivedThreadListItems />
     </ThreadListRoot>
+  );
+};
+
+// 方案B：归档区（可恢复）。仅在存在归档线程时显示；每项提供"取消归档"。
+const ArchivedThreadListItems: FC = () => {
+  const archivedIds = useAuiState((s) => s.threads.archivedThreadIds);
+  if (!archivedIds || archivedIds.length === 0) return null;
+  return (
+    <div data-slot="aui_thread-list-archived" className="mt-2 flex flex-col gap-0.5 border-t pt-2">
+      <div className="text-muted-foreground px-2.5 pb-1 text-xs font-medium">已归档</div>
+      <ThreadListPrimitive.Items archived components={{ ThreadListItem: ArchivedThreadListItem }} />
+    </div>
+  );
+};
+
+const ArchivedThreadListItem: FC = () => {
+  return (
+    <ThreadListItemPrimitive.Root
+      data-slot="aui_thread-list-archived-item"
+      className="group hover:bg-accent focus-visible:bg-accent flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm outline-none"
+    >
+      <ThreadListItemPrimitive.Trigger className="aui-thread-list-item-trigger min-w-0 flex-1 truncate text-start">
+        <ThreadListItemPrimitive.Title />
+      </ThreadListItemPrimitive.Trigger>
+      <ThreadListItemPrimitive.Unarchive asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          data-slot="aui_thread-list-unarchive"
+          className="size-6 shrink-0 p-0 opacity-0 group-hover:opacity-100"
+          aria-label="取消归档"
+          title="取消归档"
+        >
+          <ArchiveRestoreIcon className="size-3.5" />
+        </Button>
+      </ThreadListItemPrimitive.Unarchive>
+    </ThreadListItemPrimitive.Root>
   );
 };
 
@@ -249,7 +289,9 @@ export const ThreadListItem: FC = () => {
 
 const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
   const { forkThread } = useShinyConfig();
+  const [confirmOpen, setConfirmOpen] = useState(false);
   return (
+    <>
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
         <Button
@@ -297,16 +339,45 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
             Archive
           </ThreadListItemMorePrimitive.Item>
         </ThreadListItemPrimitive.Archive>
-        <ThreadListItemPrimitive.Delete asChild>
-          <ThreadListItemMorePrimitive.Item
-            data-slot="aui_thread-list-item-more-item"
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
-          >
-            <TrashIcon className="size-4" />
-            Delete
-          </ThreadListItemMorePrimitive.Item>
-        </ThreadListItemPrimitive.Delete>
+        {/* Delete 打开二次确认，不直接删除（不可逆）。 */}
+        <ThreadListItemMorePrimitive.Item
+          data-slot="aui_thread-list-item-more-item"
+          data-delete-request
+          onClick={(event) => {
+            event.preventDefault();
+            setConfirmOpen(true);
+          }}
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
+        >
+          <TrashIcon className="size-4" />
+          Delete
+        </ThreadListItemMorePrimitive.Item>
       </ThreadListItemMorePrimitive.Content>
     </ThreadListItemMorePrimitive.Root>
+    <AlertDialog.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <AlertDialog.Content
+          data-slot="aui_delete_confirm"
+          className="bg-popover text-popover-foreground fixed left-1/2 top-1/2 z-50 w-[min(24rem,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border p-5 shadow-lg data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+        >
+          <AlertDialog.Title className="text-base font-semibold">永久删除此对话？</AlertDialog.Title>
+          <AlertDialog.Description className="text-muted-foreground mt-1.5 text-sm">
+            将从磁盘删除该会话记录，此操作不可恢复。若只想隐藏，请改用 Archive。
+          </AlertDialog.Description>
+          <div className="mt-4 flex justify-end gap-2">
+            <AlertDialog.Cancel asChild>
+              <Button variant="outline" size="sm" data-cancel-delete>取消</Button>
+            </AlertDialog.Cancel>
+            <ThreadListItemPrimitive.Delete asChild>
+              <AlertDialog.Action asChild>
+                <Button variant="destructive" size="sm" data-confirm-delete>永久删除</Button>
+              </AlertDialog.Action>
+            </ThreadListItemPrimitive.Delete>
+          </div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+    </>
   );
 };

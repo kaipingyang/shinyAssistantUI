@@ -24,7 +24,8 @@ import {
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
-function loadThreads(inputId: string): ExternalStoreThreadData<"regular">[] {
+function loadThreads(inputId: string, enabled: boolean): ExternalStoreThreadData<"regular">[] {
+  if (!enabled) return [];
   try {
     const raw = localStorage.getItem(storageKey(inputId, "threads"));
     return raw ? JSON.parse(raw) : [];
@@ -33,7 +34,8 @@ function loadThreads(inputId: string): ExternalStoreThreadData<"regular">[] {
   }
 }
 
-function saveThreads(inputId: string, threads: ExternalStoreThreadData<"regular">[]) {
+function saveThreads(inputId: string, enabled: boolean, threads: ExternalStoreThreadData<"regular">[]) {
+  if (!enabled) return;
   try {
     localStorage.setItem(storageKey(inputId, "threads"), JSON.stringify(threads));
   } catch (e) {
@@ -41,7 +43,8 @@ function saveThreads(inputId: string, threads: ExternalStoreThreadData<"regular"
   }
 }
 
-function loadArchivedThreads(inputId: string): ExternalStoreThreadData<"archived">[] {
+function loadArchivedThreads(inputId: string, enabled: boolean): ExternalStoreThreadData<"archived">[] {
+  if (!enabled) return [];
   try {
     const raw = localStorage.getItem(storageKey(inputId, "archived"));
     return raw ? JSON.parse(raw) : [];
@@ -50,7 +53,8 @@ function loadArchivedThreads(inputId: string): ExternalStoreThreadData<"archived
   }
 }
 
-function saveArchivedThreads(inputId: string, threads: ExternalStoreThreadData<"archived">[]) {
+function saveArchivedThreads(inputId: string, enabled: boolean, threads: ExternalStoreThreadData<"archived">[]) {
+  if (!enabled) return;
   try {
     localStorage.setItem(storageKey(inputId, "archived"), JSON.stringify(threads));
   } catch (e) {
@@ -61,7 +65,8 @@ function saveArchivedThreads(inputId: string, threads: ExternalStoreThreadData<"
 // 把所有未完成（result === undefined）的 tool-call part 标记为中断。
 // markStaleToolCalls 已抽到 ./helpers，此处仅保留 localStorage 读写包装。
 
-function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
+function loadMessages(inputId: string, enabled: boolean, threadId: string): ThreadMessageLike[] {
+  if (!enabled) return [];
   try {
     const raw = localStorage.getItem(storageKey(inputId, `msgs:${threadId}`));
     if (!raw) return [];
@@ -74,7 +79,8 @@ function loadMessages(inputId: string, threadId: string): ThreadMessageLike[] {
 }
 
 // 落盘前剥离附件大体积 base64 data（stripAttachmentData 已抽到 ./helpers）。
-function saveMessages(inputId: string, threadId: string, msgs: ThreadMessageLike[]) {
+function saveMessages(inputId: string, enabled: boolean, threadId: string, msgs: ThreadMessageLike[]) {
+  if (!enabled) return;
   try {
     const slim = stripAttachmentData(msgs);
     localStorage.setItem(storageKey(inputId, `msgs:${threadId}`), JSON.stringify(slim));
@@ -84,7 +90,8 @@ function saveMessages(inputId: string, threadId: string, msgs: ThreadMessageLike
   }
 }
 
-function deleteMessages(inputId: string, threadId: string) {
+function deleteMessages(inputId: string, enabled: boolean, threadId: string) {
+  if (!enabled) return;
   try {
     localStorage.removeItem(storageKey(inputId, `msgs:${threadId}`));
   } catch {}
@@ -101,6 +108,12 @@ const AVAILABLE_PERMISSION_MODES = new Set([
 ]);
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
+  const configuredPersistence = config?.persistence;
+  const persistence = configuredPersistence === "server" || configuredPersistence === "none"
+    ? configuredPersistence
+    : "client";
+  const usesClientPersistence = persistence === "client";
+
   // 从 config 提取 commands，用于 /commandName → cmd.prompt 展开（useMemo 稳定引用）
   const commands = useMemo(
     () => (config?.commands as CommandDef[] | undefined) ?? [],
@@ -140,16 +153,64 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current = createShinyBridge(inputId);
   }
 
-  // 历史 session 线程中尚未从 R 加载消息的 thread_id 集合（lazy load）
-  const unloadedSessionIds = useRef(new Set<string>());
+  type HistoryPageState = {
+    reading: boolean;
+    hasMore: boolean;
+    cursor: string | number | null;
+    loadingOlder: boolean;
+  };
+  const emptyHistoryPage: HistoryPageState = {
+    reading: false, hasMore: false, cursor: null, loadingOlder: false,
+  };
+  const [historyPageStates, setHistoryPageStates] = useState<Record<string, HistoryPageState>>({});
+  const historyPageStatesRef = useRef<Record<string, HistoryPageState>>({});
+  const updateHistoryPage = useCallback((
+    threadId: string,
+    updater: (previous: HistoryPageState) => HistoryPageState,
+  ) => {
+    const next = updater(historyPageStatesRef.current[threadId] ?? emptyHistoryPage);
+    historyPageStatesRef.current = { ...historyPageStatesRef.current, [threadId]: next };
+    setHistoryPageStates(historyPageStatesRef.current);
+  }, []);
+
+  // 历史 session 的 lazy-load 状态。只有收到 :load-thread 才进入 loaded；
+  // loading 用于阻止重复点击发起并发请求，超时后退回 unloaded 允许重试。
+  const sessionLoadStates = useRef(new Map<string, "unloaded" | "loading" | "loaded">());
+  const sessionLoadRetryTimers = useRef(new Map<string, number>());
+  const olderPageRetryTimers = useRef(new Map<string, number>());
   // 稳定 ref，供注册一次的 onSessions 回调读取当前 threadId（绕过 stale closure）
   const currentThreadIdRef = useRef<string>("");
   // 本次 React 实例（页面加载后）新建的线程 ID 集合。
   // onSessions 到达时用 server 列表替换 localStorage 线程，但保留这些本地新建线程，
   // 避免把用户正在进行的对话丢掉。
   const thisSessionThreadIds = useRef(new Set<string>());
-  // server 端调用 send_sessions 后置为 true：消息不再写 localStorage，server 为唯一 truth
-  const isServerMode = useRef(false);
+  const requestSessionLoad = useCallback((threadId: string) => {
+    if (sessionLoadStates.current.get(threadId) !== "unloaded") return;
+    sessionLoadStates.current.set(threadId, "loading");
+    updateHistoryPage(threadId, (previous) => ({
+      ...previous, reading: true, hasMore: false, cursor: null, loadingOlder: false,
+    }));
+    bridge.current.sendLoadSession(threadId, threadId);
+    const timer = window.setTimeout(() => {
+      if (sessionLoadStates.current.get(threadId) === "loading") {
+        sessionLoadStates.current.set(threadId, "unloaded");
+        updateHistoryPage(threadId, (previous) => ({ ...previous, reading: false }));
+      }
+      sessionLoadRetryTimers.current.delete(threadId);
+    }, 15_000);
+    sessionLoadRetryTimers.current.set(threadId, timer);
+  }, [updateHistoryPage]);
+
+  useEffect(() => () => {
+    for (const timer of sessionLoadRetryTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    for (const timer of olderPageRetryTimers.current.values()) {
+      window.clearTimeout(timer);
+    }
+    sessionLoadRetryTimers.current.clear();
+    olderPageRetryTimers.current.clear();
+  }, []);
 
   const [ideContext, setIdeContext] = useState<IdeContextMeta | undefined>(undefined);
   const [selectionVisible, setSelectionVisibleState] = useState(true);
@@ -180,17 +241,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   // 线程列表（持久化）
   const [threads, setThreads] = useState<ExternalStoreThreadData<"regular">[]>(() =>
-    loadThreads(inputId)
+    loadThreads(inputId, usesClientPersistence)
   );
 
   // 归档线程列表（持久化）
   const [archivedThreads, setArchivedThreads] = useState<ExternalStoreThreadData<"archived">[]>(() =>
-    loadArchivedThreads(inputId)
+    loadArchivedThreads(inputId, usesClientPersistence)
   );
 
   // 当前 threadId
   const [currentThreadId, setCurrentThreadId] = useState<string>(() => {
-    const saved = loadThreads(inputId);
+    const saved = loadThreads(inputId, usesClientPersistence);
     if (saved.length > 0) return saved[0].id; // 来自 localStorage（上次运行），不追踪
     const id = makeThreadId();
     thisSessionThreadIds.current.add(id);       // 本次新建，追踪
@@ -199,6 +260,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // 每次 render 更新 ref，让注册一次的回调（onSessions 等）始终读到最新值
   currentThreadIdRef.current = currentThreadId;
   selectionVisibleRef.current = selectionVisible;
+
+  const loadOlderHistory = useCallback(() => {
+    const threadId = currentThreadIdRef.current;
+    const page = historyPageStatesRef.current[threadId];
+    if (!page?.hasMore || page.loadingOlder || page.cursor == null) return;
+
+    updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: true }));
+    bridge.current.sendLoadSessionPage(threadId, threadId, page.cursor, 50);
+    const existingTimer = olderPageRetryTimers.current.get(threadId);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    const timer = window.setTimeout(() => {
+      updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: false }));
+      olderPageRetryTimers.current.delete(threadId);
+    }, 15_000);
+    olderPageRetryTimers.current.set(threadId, timer);
+  }, [updateHistoryPage]);
 
   const requestIdeContextFor = useCallback((threadId: string) => {
     if (!capabilityContract.ide) return;
@@ -233,18 +310,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         { id: currentThreadId, status: "regular" as const, title: "新对话" },
         ...prev,
       ];
-      saveThreads(inputId, next);
+      saveThreads(inputId, usesClientPersistence, next);
       return next;
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 消息 Map（threadId → messages）
   const [messagesMap, setMessagesMap] = useState<Record<string, ThreadMessageLike[]>>(() => {
-    const saved = loadThreads(inputId);
+    const saved = loadThreads(inputId, usesClientPersistence);
     const map: Record<string, ThreadMessageLike[]> = {};
     const ids = saved.length > 0 ? saved.map((t) => t.id) : [currentThreadId];
     for (const id of ids) {
-      map[id] = loadMessages(inputId, id);
+      map[id] = loadMessages(inputId, usesClientPersistence, id);
     }
     return map;
   });
@@ -263,6 +340,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
   const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
   const [warmingThreads, setWarmingThreads] = useState<Set<string>>(new Set());      // 每线程冷启动中
+  const [warmingResumingThreads, setWarmingResumingThreads] = useState<Set<string>>(new Set()); // 冷启动中且为"恢复历史"（非全新）
   const [serverCommands, setServerCommands] = useState<Array<{ name: string; description?: string }>>([]); // #5
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
@@ -292,21 +370,21 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // 策略：threads/archived 列表直接 reload 保持侧栏一致；某 thread 的消息仅在它
   // 不在本 tab 正在 streaming 时才同步（正在跑的线程本地领先磁盘，防覆盖流式中消息）。
   useEffect(() => {
-    if (isServerMode.current) return; // server 权威模式不用 localStorage
+    if (!usesClientPersistence) return; // server/none 模式不用 localStorage
     const prefix = storageKey(inputId, "");
     const onStorage = (e: StorageEvent) => {
-      if (isServerMode.current || !e.key || !e.key.startsWith(prefix)) return;
+      if (!usesClientPersistence || !e.key || !e.key.startsWith(prefix)) return;
       const suffix = e.key.slice(prefix.length);
       if (suffix === "threads") {
-        setThreads(loadThreads(inputId));
+        setThreads(loadThreads(inputId, usesClientPersistence));
       } else if (suffix === "archived") {
-        setArchivedThreads(loadArchivedThreads(inputId));
+        setArchivedThreads(loadArchivedThreads(inputId, usesClientPersistence));
       } else if (suffix.startsWith("msgs:")) {
         const tid = suffix.slice("msgs:".length);
         // 正在 streaming 的线程（含后台并发 run）本地领先磁盘，跳过同步防覆盖；
         // 当前活动线程也跳过（用户正在看/可能将发消息）。
         if (activeRunsRef.current.has(tid) || tid === currentThreadIdRef.current) return;
-        setMessagesMap((prev) => ({ ...prev, [tid]: loadMessages(inputId, tid) }));
+        setMessagesMap((prev) => ({ ...prev, [tid]: loadMessages(inputId, usesClientPersistence, tid) }));
       }
     };
     window.addEventListener("storage", onStorage);
@@ -324,7 +402,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     (updater: (prev: ThreadMessageLike[]) => ThreadMessageLike[]) => {
       setMessagesMap((prev) => {
         const updated = updater(prev[currentThreadId] ?? []);
-        if (!isServerMode.current) saveMessages(inputId, currentThreadId, updated);
+        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, currentThreadId, updated);
         return { ...prev, [currentThreadId]: updated };
       });
     },
@@ -347,7 +425,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         };
         setThreads((prev) => {
           const next = [newThread, ...prev.filter((t) => t.id !== removedId)];
-          saveThreads(inputId, next);
+          saveThreads(inputId, usesClientPersistence, next);
           return next;
         });
         setCurrentThreadId(newId);
@@ -370,7 +448,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       };
       setThreads((prev) => {
         const next = [newThread, ...prev];
-        saveThreads(inputId, next);
+        saveThreads(inputId, usesClientPersistence, next);
         return next;
       });
       setCurrentThreadId(newId);
@@ -415,18 +493,21 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       const target = requestId ? actionAckRefs.current.get(requestId) : undefined;
       if (!target || !result.message) return;
-      const prefix = result.status === "error" ? "\u26a0\ufe0f "
-        : result.status === "progress" ? "\u23f3 "
-        : "\u2713 ";
+      const prefix = result.status === "error" ? "\u26a0\ufe0f"
+        : result.status === "progress" ? "\u23f3"
+        : "\u2713";
+      const renderedMessage = result.message.includes("\n")
+        ? `${prefix}\n\n${result.message}`
+        : `${prefix} ${result.message}`;
       setMessagesMap((prev) => {
         const msgs = prev[target.threadId] ?? [];
         const updated = msgs.map((m): ThreadMessageLike =>
           m.id === target.ackId
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ? ({ ...m, content: [{ type: "text" as const, text: prefix + result.message }] } as any)
+            ? ({ ...m, content: [{ type: "text" as const, text: renderedMessage }] } as any)
             : m,
         );
-        if (!isServerMode.current) saveMessages(inputId, target.threadId, updated);
+        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, target.threadId, updated);
         return { ...prev, [target.threadId]: updated };
       });
       if (result.status !== "progress") actionAckRefs.current.delete(requestId!);
@@ -483,6 +564,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (d.active) next.add(tid); else next.delete(tid);
         return next;
       });
+      setWarmingResumingThreads((prev) => {
+        const next = new Set(prev);
+        if (d.active && d.resuming) next.add(tid); else next.delete(tid);
+        return next;
+      });
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     bridge.current.onServerCommands((d) => {
@@ -514,10 +600,34 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // 只保留本次 React 实例新建（thisSessionThreadIds）且尚未在 server 上的线程，
     // 避免旧 localStorage 孤儿线程（t_XXXX）和 server sessions（UUID）同时显示。
     bridge.current.onSessions(({ sessions }: { sessions: SessionItem[] }) => {
-      if (sessions.length === 0) return;
-
-      // server 提供了 sessions → 切换到 server-authoritative 模式，消息不再写 localStorage
-      isServerMode.current = true;
+      // In explicit server mode even an empty snapshot is authoritative: discard
+      // every previously displayed server/local thread instead of treating the
+      // payload as "no update". Keep one fresh blank thread so the runtime always
+      // has a valid mainThreadId.
+      if (sessions.length === 0) {
+        if (persistence !== "server") return;
+        for (const timer of sessionLoadRetryTimers.current.values()) {
+          window.clearTimeout(timer);
+        }
+        sessionLoadRetryTimers.current.clear();
+        for (const timer of olderPageRetryTimers.current.values()) {
+          window.clearTimeout(timer);
+        }
+        olderPageRetryTimers.current.clear();
+        sessionLoadStates.current.clear();
+        historyPageStatesRef.current = {};
+        setHistoryPageStates({});
+        const newId = makeThreadId();
+        thisSessionThreadIds.current.clear();
+        thisSessionThreadIds.current.add(newId);
+        setThreads([{ id: newId, status: "regular", title: "新对话" }]);
+        setArchivedThreads([]);
+        setMessagesMap({ [newId]: [] });
+        setCurrentThreadId(newId);
+        setIsRunning(false);
+        streamingIdRef.current = null;
+        return;
+      }
 
       const serverIds = new Set(sessions.map((s) => s.id));
 
@@ -533,15 +643,26 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         }
       }
 
-      // 标记所有无本地消息的 server session 为待懒加载
+      // 每个 server session 在当前页面生命周期都必须由 R 至少 hydrate 一次。
+      // localStorage 缓存只用于点击后的即时展示，不能代表本次 R/SDK 生命周期
+      // 已恢复 session 映射或完成 warmup；只有 :load-thread 确认后才进入 loaded。
+      // 已经 loading/loaded 的条目不被后续 :sessions 快照重置。
       for (const s of sessions) {
-        if (loadMessages(inputId, s.id).length === 0) {
-          unloadedSessionIds.current.add(s.id);
+        if (!sessionLoadStates.current.has(s.id)) {
+          sessionLoadStates.current.set(s.id, "unloaded");
         }
       }
 
-      const serverThreads: ExternalStoreThreadData<"regular">[] = sessions.map((s) => ({
+      // 方案B：按服务端权威 archived 标记分流到 active / archived 两区。
+      const activeSessions = sessions.filter((s) => !s.archived);
+      const archivedSessions = sessions.filter((s) => s.archived);
+      const activeIds = new Set(activeSessions.map((s) => s.id));
+
+      const serverThreads: ExternalStoreThreadData<"regular">[] = activeSessions.map((s) => ({
         id: s.id, status: "regular" as const, title: s.title || s.id,
+      }));
+      const serverArchived: ExternalStoreThreadData<"archived">[] = archivedSessions.map((s) => ({
+        id: s.id, status: "archived" as const, title: s.title || s.id,
       }));
 
       setThreads((prev) => {
@@ -551,42 +672,75 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         );
         // 本地新建线程排前面，server 历史线程排后面
         const merged = [...localNew, ...serverThreads];
-        saveThreads(inputId, merged);
+        saveThreads(inputId, usesClientPersistence, merged);
         return merged;
+      });
+
+      // 归档区完全由服务端快照决定（权威），本地不新增归档项。
+      setArchivedThreads(() => {
+        saveArchivedThreads(inputId, usesClientPersistence, serverArchived);
+        return serverArchived;
       });
 
       setMessagesMap((prev) => {
         const patch: Record<string, ThreadMessageLike[]> = {};
         for (const s of sessions) {
-          patch[s.id] = prev[s.id] ?? loadMessages(inputId, s.id);
+          patch[s.id] = prev[s.id] ?? loadMessages(inputId, usesClientPersistence, s.id);
         }
         return { ...prev, ...patch };
       });
 
-      // 当前线程若是被替换掉的 localStorage 孤儿线程，切换到第一个 server session
+      // 当前线程若是被替换掉的 localStorage 孤儿线程，切换并加载第一个 active
+      // session；本次新建的空白线程则继续保持冷启动，历史项等用户点击。
+      // 注意：只看 active（归档项不该被 auto-load）。
       const cur = currentThreadIdRef.current;
       if (!serverIds.has(cur) && !thisSessionThreadIds.current.has(cur)) {
-        setCurrentThreadId(sessions[0].id);
-      }
-
-      // 如果当前线程是未加载的 server session，立即触发加载
-      const activeCur = serverIds.has(currentThreadIdRef.current)
-        ? currentThreadIdRef.current
-        : sessions[0].id;
-      if (unloadedSessionIds.current.has(activeCur)) {
-        bridge.current.sendLoadSession(activeCur, activeCur);
-        unloadedSessionIds.current.delete(activeCur);
+        if (activeSessions.length > 0) {
+          const firstSessionId = activeSessions[0].id;
+          setCurrentThreadId(firstSessionId);
+          requestSessionLoad(firstSessionId);
+        }
+      } else if (activeIds.has(cur)) {
+        requestSessionLoad(cur);
       }
     });
 
-    // ── 注册 :load-thread（接收 R 发来的历史消息）─────────────────────────
-    bridge.current.onLoadThread(({ threadId, messages }: { threadId: string; messages: unknown[] }) => {
-      unloadedSessionIds.current.delete(threadId);
+    // ── 注册 :load-thread（接收 R 发来的历史消息/旧页）─────────────────────
+    bridge.current.onLoadThread((data) => {
+      const { threadId } = data;
+      sessionLoadStates.current.set(threadId, "loaded");
+      const retryTimer = sessionLoadRetryTimers.current.get(threadId);
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      sessionLoadRetryTimers.current.delete(threadId);
+      const olderTimer = olderPageRetryTimers.current.get(threadId);
+      if (olderTimer !== undefined) window.clearTimeout(olderTimer);
+      olderPageRetryTimers.current.delete(threadId);
+
       setMessagesMap((prev) => {
-        const typedMsgs = messages as ThreadMessageLike[];
-        if (!isServerMode.current) saveMessages(inputId, threadId, typedMsgs);
-        return { ...prev, [threadId]: typedMsgs };
+        const incoming = data.messages as ThreadMessageLike[];
+        let updated: ThreadMessageLike[];
+        if (data.prepend === true) {
+          const seen = new Set((prev[threadId] ?? []).map((message) => message.id));
+          const older: ThreadMessageLike[] = [];
+          for (const message of incoming) {
+            if (seen.has(message.id)) continue;
+            seen.add(message.id);
+            older.push(message);
+          }
+          updated = [...older, ...(prev[threadId] ?? [])];
+        } else {
+          updated = incoming;
+        }
+        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+        return { ...prev, [threadId]: updated };
       });
+
+      updateHistoryPage(threadId, () => ({
+        reading: false,
+        hasMore: data.hasMore === true,
+        cursor: data.cursor ?? null,
+        loadingOlder: false,
+      }));
     });
 
     // :sessions handler 已注册，通知 R 可以补发 sessions（解决 React 18 异步 render 时序问题）
@@ -781,7 +935,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 },
               ];
             }
-            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -804,7 +958,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               return { ...m, content: newContent } as any;
             });
-            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -824,7 +978,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
               : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
-            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -840,7 +994,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
               : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
-            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -886,7 +1040,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               prev[threadId] ?? [],
               "Interrupted",
             );
-            if (!isServerMode.current) saveMessages(inputId, threadId, msgs);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, msgs);
             return changed ? { ...prev, [threadId]: msgs } : { ...prev, [threadId]: prev[threadId] ?? [] };
           });
         },
@@ -908,7 +1062,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                 content: [{ type: "text" as const, text: `⚠ Error: ${errMsg}` }],
               },
             ];
-            if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
         },
@@ -946,7 +1100,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         const title = text.slice(0, 20) + (text.length > 20 ? "…" : "");
         setThreads((ts) => {
           const next = ts.map((t) => (t.id === threadId ? { ...t, title } : t));
-          saveThreads(inputId, next);
+          saveThreads(inputId, usesClientPersistence, next);
           return next;
         });
       }
@@ -995,7 +1149,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         ...threadMsgs,
         { id: `user-${Date.now()}`, role: "user" as const, content: [{ type: "text" as const, text }] },
       ];
-      if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+      if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
     startRun(threadId, () => {
@@ -1037,7 +1191,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}\u2026` }], metadata: { custom: { shinyActionAck: true } } as any },
       ];
-      if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+      if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
     actionAckRefs.current.set(requestId, { threadId, ackId });
@@ -1078,7 +1232,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         const threadMsgs = prev[threadId] ?? [];
         const { updated, aborted: ab } = applyEdit(threadMsgs, parentId, newUserMessage);
         if (ab) { aborted = true; return prev; }
-        if (!isServerMode.current) saveMessages(inputId, threadId, updated);
+        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
         return { ...prev, [threadId]: updated };
       });
       if (aborted) return; // 不发消息给 R，保持 UI/R 一致
@@ -1147,7 +1301,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     };
     setThreads((prev) => {
       const next = [newThread, ...prev];
-      saveThreads(inputId, next);
+      saveThreads(inputId, usesClientPersistence, next);
       return next;
     });
     setCurrentThreadId(newId);
@@ -1164,17 +1318,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setThreads((prev) => {
       if (!prev.some((t) => t.id === threadId)) return prev;
       const next = prev.map((t) => (t.id === threadId ? { ...t, title } : t));
-      saveThreads(inputId, next);
+      saveThreads(inputId, usesClientPersistence, next);
       return next;
     });
     setArchivedThreads((prev) => {
       if (!prev.some((t) => t.id === threadId)) return prev;
       const next = prev.map((t) => (t.id === threadId ? { ...t, title } : t));
-      saveArchivedThreads(inputId, next);
+      saveArchivedThreads(inputId, usesClientPersistence, next);
       return next;
     });
     bridge.current.sendRename(threadId, title);
   }, [inputId]);
+
+  // ── 点击文件引用 → 请求在 IDE 打开（addin 侧 rstudioapi::navigateToFile）──────
+  const openFile = useCallback((path: string, line?: number) => {
+    if (!path) return;
+    bridge.current.sendOpenFile(path, line);
+  }, []);
 
   // ── threadList adapter ───────────────────────────────────────────────────
   const threadListAdapter = useMemo(
@@ -1188,24 +1348,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         setIsRunning(false);
         streamingIdRef.current = null;
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
-        // 若目标线程是未加载的历史 session，触发懒加载
-        if (unloadedSessionIds.current.has(threadId)) {
-          bridge.current.sendLoadSession(threadId, threadId);
-          unloadedSessionIds.current.delete(threadId);
-        }
+        // 若目标线程是未加载的历史 session，触发一次懒加载；收到
+        // :load-thread 前保持 loading，避免重复点击产生并发请求。
+        requestSessionLoad(threadId);
       },
       onArchive: (threadId: string) => {
         setThreads((prev) => {
           const target = prev.find((t) => t.id === threadId);
           const next = prev.filter((t) => t.id !== threadId);
-          saveThreads(inputId, next);
+          saveThreads(inputId, usesClientPersistence, next);
           if (target) {
             setArchivedThreads((arch) => {
               const nextArch = [
                 { ...target, status: "archived" as const },
                 ...arch,
               ];
-              saveArchivedThreads(inputId, nextArch);
+              saveArchivedThreads(inputId, usesClientPersistence, nextArch);
               return nextArch;
             });
           }
@@ -1214,15 +1372,37 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           }
           return next;
         });
+        // 方案B：通知服务端持久化软隐藏（可恢复）。
+        bridge.current.sendArchiveSession(threadId, true);
+      },
+      onUnarchive: (threadId: string) => {
+        setArchivedThreads((prev) => {
+          const target = prev.find((t) => t.id === threadId);
+          const next = prev.filter((t) => t.id !== threadId);
+          saveArchivedThreads(inputId, usesClientPersistence, next);
+          if (target) {
+            setThreads((active) => {
+              const nextActive = [
+                { ...target, status: "regular" as const },
+                ...active,
+              ];
+              saveThreads(inputId, usesClientPersistence, nextActive);
+              return nextActive;
+            });
+          }
+          return next;
+        });
+        bridge.current.sendArchiveSession(threadId, false);
       },
       onDelete: (threadId: string) => {
+        const wasServerSession = !thisSessionThreadIds.current.has(threadId);
         // 从活跃或归档列表中删除
         setThreads((prev) => {
           const inActive = prev.some((t) => t.id === threadId);
           if (!inActive) return prev;
           const next = prev.filter((t) => t.id !== threadId);
-          saveThreads(inputId, next);
-          deleteMessages(inputId, threadId);
+          saveThreads(inputId, usesClientPersistence, next);
+          deleteMessages(inputId, usesClientPersistence, threadId);
           if (threadId === currentThreadId) {
             switchAwayFrom(threadId, prev);
           }
@@ -1232,10 +1412,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           const inArchived = prev.some((t) => t.id === threadId);
           if (!inArchived) return prev;
           const next = prev.filter((t) => t.id !== threadId);
-          saveArchivedThreads(inputId, next);
-          deleteMessages(inputId, threadId);
+          saveArchivedThreads(inputId, usesClientPersistence, next);
+          deleteMessages(inputId, usesClientPersistence, threadId);
           return next;
         });
+        // 方案B：server 上真实存在的 session 才通知后端真删磁盘 transcript（不可逆）。
+        // 本次新建、从未上传 server 的空白线程只在本地移除。
+        if (wasServerSession) {
+          bridge.current.sendDeleteSession(threadId);
+        }
       },
     }),
     [inputId, currentThreadId, threads, archivedThreads, switchAwayFrom]
@@ -1301,7 +1486,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   return {
-    runtime, sendToolApproval, switchToNewThread, renameThread, enqueueMessage,
+    runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
     invokeAction, permissionMode,
     ideContext: capabilityContract.ide ? ideContext : undefined,
     selectionVisible,
@@ -1309,6 +1494,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     refreshIdeContext,
     workspaceMentions,
     searchWorkspace,
+    readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
+    historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,
+    historyCursor: historyPageStates[currentThreadId]?.cursor ?? null,
+    loadingOlder: historyPageStates[currentThreadId]?.loadingOlder ?? false,
+    loadOlderHistory,
     artifacts, activeArtifactId,
     openArtifact: (id: string) => setActiveArtifactId(id),
     closeArtifact: () => setActiveArtifactId(null),
@@ -1319,6 +1509,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     statusText,                                                          // #4
     serverCommands,                                                      // #5
     warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
+    warmingResuming: warmingResumingThreads.has(currentThreadId),        // 该冷启动是否为"恢复历史"
     stopTask: (taskId: string) => invokeAction({ id: `stoptask:${taskId}`, label: `Stop task` }), // #7
     forkThread: () => invokeAction({ id: "fork", label: "Fork conversation" }),                    // #6
   };

@@ -52,6 +52,7 @@ export type SessionItem = {
   title: string;
   preview: string;
   createdAt: string; // ISO 8601 datetime string
+  archived?: boolean; // server-authoritative soft-hide (方案B)
 };
 
 export type RunCallbacks = {
@@ -82,6 +83,14 @@ export type ActionResult = {
   value?: unknown;
 };
 
+export type HistoryLoadPayload = {
+  threadId: string;
+  messages: unknown[];
+  cursor?: string | number | null;
+  hasMore?: boolean;
+  prepend?: boolean;
+};
+
 export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy) => void;
   sendReload: (text: string, threadId: string) => void;
@@ -89,7 +98,11 @@ export interface ShinyBridge {
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
+  sendOpenFile: (path: string, line?: number) => void;
+  sendArchiveSession: (sessionId: string, archived: boolean) => void;
+  sendDeleteSession: (sessionId: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
+  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
   sendWarmup: (threadId: string) => void;
@@ -99,12 +112,12 @@ export interface ShinyBridge {
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
-  onLoadThread: (handler: (data: { threadId: string; messages: unknown[] }) => void) => void;
+  onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
-  onWarming: (handler: (data: { threadId?: string; active?: boolean }) => void) => void;
+  onWarming: (handler: (data: { threadId?: string; active?: boolean; resuming?: boolean }) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
   onIdeContext: (handler: (data: IdeContextMeta) => void) => void;
   onWorkspaceResults: (handler: (data: WorkspaceResults) => void) => void;
@@ -114,7 +127,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   // 按 threadId 存储 callbacks，支持多 thread 并发（切 thread 不丢失旧 handler 回调）
   const callbacksMap = new Map<string, RunCallbacks>();
   let sessionsHandler: ((data: { sessions: SessionItem[] }) => void) | null = null;
-  let loadThreadHandler: ((data: { threadId: string; messages: unknown[] }) => void) | null = null;
+  let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
   let bufferedSessions: { sessions: SessionItem[] } | null = null;
@@ -196,7 +209,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
-    loadThreadHandler?.(data as { threadId: string; messages: unknown[] });
+    loadThreadHandler?.(data as HistoryLoadPayload);
   });
 
   return {
@@ -254,10 +267,42 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
+    sendOpenFile(path, line) {
+      Shiny.setInputValue(
+        `${inputId}_open_file`,
+        { path, line: line ?? null, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendArchiveSession(sessionId, archived) {
+      Shiny.setInputValue(
+        `${inputId}_archive_session`,
+        { sessionId, archived, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendDeleteSession(sessionId) {
+      Shiny.setInputValue(
+        `${inputId}_delete_session`,
+        { sessionId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
     sendLoadSession(sessionId, threadId) {
       Shiny.setInputValue(
         inputId,
         { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50) {
+      Shiny.setInputValue(
+        inputId,
+        { type: "load_session_page", sessionId, threadId, cursor, limit, ts: Date.now() },
         { priority: "event" }
       );
     },

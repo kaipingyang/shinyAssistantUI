@@ -32,6 +32,7 @@ export interface ShinyConfigCtx {
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
+  onOpenFile?: (path: string, line?: number) => void;
   permissionMode?: PermissionModeState;
   ideContext?: IdeContextMeta;
   selectionVisible: boolean;
@@ -39,14 +40,21 @@ export interface ShinyConfigCtx {
   refreshIdeContext: () => void;
   workspaceMentions: WorkspaceMentionState;
   searchWorkspace: (query: string) => void;
+  readingHistory?: boolean;
+  historyHasMore?: boolean;
+  loadingOlder?: boolean;
+  loadOlderHistory?: () => void;
   // ── ClaudeAgentSDK 能力对齐 ──
   usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
   tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
   warming?: boolean;
+  warmingResuming?: boolean;
   stopTask?: (taskId: string) => void;
   forkThread?: () => void;
+  /** 侧栏折叠且展开按钮浮在主面板左上角时为真 → 顶部"当前提问"框需左侧留白避让按钮 */
+  sidebarCollapsed?: boolean;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({
@@ -62,6 +70,10 @@ export const ShinyConfigContext = createContext<ShinyConfigCtx>({
   refreshIdeContext: () => {},
   workspaceMentions: { enabled: false, query: "", items: [], loading: false },
   searchWorkspace: () => {},
+  readingHistory: false,
+  historyHasMore: false,
+  loadingOlder: false,
+  loadOlderHistory: () => {},
 });
 
 export const useShinyConfig = () => useContext(ShinyConfigContext);

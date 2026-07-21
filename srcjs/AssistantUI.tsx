@@ -3,6 +3,7 @@ import { AssistantRuntimeProvider, AssistantModalPrimitive } from "@assistant-ui
 import { BotIcon } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
+import { ThreadSidebar, SidebarToggleButton, useSidebarCollapse } from "@/components/assistant-ui/thread-sidebar";
 import { SidebarSettings } from "@/components/assistant-ui/settings-controls";
 import { useShinyRuntime } from "./runtime";
 import { mergeSlashCommands } from "./helpers";
@@ -41,6 +42,10 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const activeArtifact = rt.artifacts.find((a) => a.id === rt.activeArtifactId) ?? null;
   const showThreadList = config?.show_thread_list === true;
   const isModal = config?.modal === true;
+  // 侧栏默认展开：用户经常需要从历史列表里选会话，打开就该看得到。
+  // 折叠只在本会话有效、不持久化（不传 storageKey），因此每次重开 addin 都回到展开态；
+  // 本次会话内仍可临时收起腾出空间。
+  const sidebar = useSidebarCollapse();
 
   const configuredCommands = (config?.commands as {
     name: string; description?: string; prompt: string; category?: string;
@@ -57,6 +62,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     onEnqueue: rt.enqueueMessage,
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
+    onOpenFile: rt.openFile,
     permissionMode: rt.permissionMode,
     ideContext: rt.ideContext,
     selectionVisible: rt.selectionVisible,
@@ -64,13 +70,20 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     refreshIdeContext: rt.refreshIdeContext,
     workspaceMentions: rt.workspaceMentions,
     searchWorkspace: rt.searchWorkspace,
+    readingHistory: rt.readingHistory,
+    historyHasMore: rt.historyHasMore,
+    loadingOlder: rt.loadingOlder,
+    loadOlderHistory: rt.loadOlderHistory,
     usage: rt.usage,
     tasks: rt.tasks,
     rateLimit: rt.rateLimit,
     statusText: rt.statusText,
     warming: rt.warming,
+    warmingResuming: rt.warmingResuming,
     stopTask: rt.stopTask,
     forkThread: rt.forkThread,
+    // 折叠时主面板左上角浮着展开按钮 → 让"当前提问"框左侧留白，二者并排不重叠
+    sidebarCollapsed: showThreadList && sidebar.collapsed,
   };
 
   const threadEl = (
@@ -111,14 +124,23 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
       <ShinyConfigContext.Provider value={cfgValue}>
         <div className="aui-root flex h-full min-h-0">
           {showThreadList && (
-            <div className="aui-thread-list-sidebar relative flex w-56 shrink-0 flex-col overflow-hidden border-r p-2">
+            <ThreadSidebar collapsed={sidebar.collapsed} onToggle={sidebar.toggle}>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <ThreadList />
               </div>
               <SidebarSettings />
-            </div>
+            </ThreadSidebar>
           )}
-          <div className="min-w-0 flex-1">{threadEl}</div>
+          <div className="relative min-h-0 min-w-0 flex-1">
+            {showThreadList && sidebar.collapsed && (
+              <SidebarToggleButton
+                collapsed
+                onToggle={sidebar.toggle}
+                className="bg-background/80 absolute start-2 top-2 z-30 border shadow-sm backdrop-blur"
+              />
+            )}
+            {threadEl}
+          </div>
           {activeArtifact && (
             <div className="w-[45%] min-w-[320px] shrink-0">
               <ArtifactPanel artifact={activeArtifact} onClose={rt.closeArtifact} />

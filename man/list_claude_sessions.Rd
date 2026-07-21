@@ -4,7 +4,11 @@
 \alias{list_claude_sessions}
 \title{List Claude sessions for sidebar injection}
 \usage{
-list_claude_sessions(directory = here::here(), limit = 100L)
+list_claude_sessions(
+  directory = here::here(),
+  limit = 100L,
+  archived_ids = character()
+)
 }
 \arguments{
 \item{directory}{Project directory to filter sessions. Defaults to \code{here::here()}.}

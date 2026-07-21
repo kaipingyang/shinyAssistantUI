@@ -5,6 +5,52 @@
 
 Shiny htmlwidget wrapping `@assistant-ui/react`. R package + React/TypeScript frontend.
 
+## ⚡ 最新状态（截至 2026-07-21）—— 先读这节，历史小节数字可能滞后
+
+> 本文档后半是**逐批次 changelog**（保留作历史）。若与本节冲突，**以本节 + `package.json` + `tests/` 为准**。
+> 操作流程与硬约束见 **[AGENTS.md](./AGENTS.md) Rule #0**（codegraph sync → 双图探索 → 写 plan → 自审5遍 → 测试先行 → 无头浏览器验证）。
+
+**当前 UI 栈（重要）**：已从 `@assistant-ui/react-ui` 的预制 `Thread` 迁移到**本仓自建组件树**
+`srcjs/components/assistant-ui/*`（`thread.tsx`、`composer-input.tsx` 基于 Lexical、`thread-list.tsx`、
+`shiny-tool-fallback.tsx` 等）。`srcjs/AssistantUI.legacy.tsx` 是**死代码**，live 树**不 import 它**
+（CI 硬约束：`srcjs` 内不得出现 legacy import）。
+
+**关键依赖实际版本（以 package.json 为准）**：`@assistant-ui/react` 0.14.27、`react-lexical` 0.2.5、
+`lexical` 0.47.0、`react`/`react-dom` 19.2.7、`react-markdown` ^0.14.5、`react-syntax-highlighter` ^0.14.2、
+`radix-ui` ^1.6.1、`vite` ^5.4.21。构建为**单 IIFE**（`vite.config.mts` `lib.formats:["iife"]` +
+`inlineDynamicImports:true`）→ **无法代码分割**，减体积只能靠 tree-shaking / 少 import 重物。
+
+**测试规模**：JS `npx vitest run` = **9 文件 / 166 用例**；R `testthat` = 18 个 `test-*.R`（addin/context-usage/
+session-archive/session-warmup/persistence/workspace-cache/handler-permissions/ide-context/skills/theme…）。
+`tests/verify/` 有 40+ 真实 chromote 脚本（见下）。
+
+**bundle 分析**：`npm run build` 产出 `inst/www/bundle-stats.html`（rollup-plugin-visualizer，gitignore）——
+想评估体积先看它。曾用它当场抓出"误用 `@assistant-ui/react-syntax-highlighter` 工厂把 ~200 语言全内联使
+bundle 翻倍"的回归；助手代码块高亮改用 `PrismLight` + 显式 `registerLanguage` 才回落。
+
+**Claude addin 近期批次（均测试先行 + chromote 验证，见 `.claude/plans/08–11`）**：
+
+| 能力 | R 接口 / 位置 | 前端 | 验证脚本 |
+|---|---|---|---|
+| 显式持久化 | `assistantUIServer(persistence=c("client","server","none"))`；addin 用 `server` | server/none 首帧不读写 localStorage | `verify_slash_context_history.R` |
+| 历史分页 | `on_session_load(session_id,thread_id,send_thread,cursor,limit)` + LRU snapshot(≤3) | 初始最新50 + 向上加载/prepend去重 | `verify_slash_context_history.R` |
+| 双阶段历史状态 | — | `正在读取历史记录…` / `正在恢复 Claude Code 对话…` | 同上 |
+| Slash 菜单 + Tab | `commands`(skill,蓝chip) vs `action_items`(literal) | Tab 补全成 chip、Enter/点击执行；菜单高亮 scrollIntoView | 同上 |
+| /context 精简 | `.format_context_usage` 仅摘要+分类表 | — | 同上（`test-context-usage.R`）|
+| 工具卡默认折叠 | `toolHistoryDefaultOpen` | 历史大结果折叠、审批展开 | 同上 |
+| 点击文件打开 | `assistantUIServer(on_open_file=)`；addin→`rstudioapi::navigateToFile` | 工具卡 `[data-open-file]` | `verify_openfile_reveal.R` |
+| 编辑后揭示 | server `.new_edit_reveal_tracker` on_done flush | — | 同上（只揭示最近一次成功编辑）|
+| 会话删除/归档(方案B) | `on_delete_session`(真删磁盘`delete_session`+确认) / `on_archive_session`(per-project rds 软隐藏,可恢复) | Delete→AlertDialog确认；归档区+Unarchive | `verify_delete_archive.R` |
+| 助手代码块高亮 | — | `syntax-highlighter.tsx`(PrismLight+oneLight)接进 markdown | 同上 |
+| 侧栏折叠 | — | `thread-sidebar.tsx`(折叠时消失、按钮移主面板)，localStorage 持久化(含 server 模式) | 同上 |
+| workspace 索引 | `.addin_workspace_index_cached`(project+git HEAD 缓存, O(n²)→unique) | `@` 提及 | `verify_addin.R` |
+| RStudio Viewer 输入框 | — | `composer-input.tsx` 挂载后写 inline 关键样式(Viewer 外部 CSS 失效兜底) | `verify_slash_context_history.R` |
+
+**codegraph**：本仓与 `assistant-ui-src/`（上游源码 2600+ 文件）均已建索引，写码前 `codegraph query|explore|node`
+双图查扩展点。`.codegraph/` 保持未跟踪。
+
+---
+
 ## Architecture
 
 ```

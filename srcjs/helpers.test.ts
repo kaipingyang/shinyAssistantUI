@@ -5,6 +5,7 @@ import {
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
   matchSlashAction, mergeSlashCommands, rankMentionItems, mentionInsertText,
+  toolHistoryDefaultOpen,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -420,5 +421,19 @@ describe("workspace mention ranking and literals", () => {
     expect(mentionInsertText({ kind: "file", path: "R/app.R" }, { startLine: 5, endLine: 10 }))
       .toBe("@R/app.R#L5-L10");
     expect(mentionInsertText({ kind: "file", path: "dir/my file.R" })).toBe('@"dir/my file.R"');
+  });
+});
+
+
+describe("toolHistoryDefaultOpen", () => {
+  it("keeps ordinary and large restored tool payloads collapsed by default", () => {
+    expect(toolHistoryDefaultOpen(undefined, false)).toBe(false);
+    expect(toolHistoryDefaultOpen({}, false)).toBe(false);
+  });
+
+  it("honors explicit overrides and keeps pending approvals visible", () => {
+    expect(toolHistoryDefaultOpen({ defaultOpen: true }, false)).toBe(true);
+    expect(toolHistoryDefaultOpen({ defaultOpen: false }, true)).toBe(false);
+    expect(toolHistoryDefaultOpen(undefined, true)).toBe(true);
   });
 });

@@ -121,3 +121,43 @@ test_that(".claude_msgs_to_thread 空输入返回空列表", {
   f <- shinyAssistantUI:::.claude_msgs_to_thread
   expect_equal(f(list()), list())
 })
+
+# ── 合成系统通知（resume 时 CLI 以 user 轮次写入的 <task-notification> 等）过滤 ──
+test_that(".is_synthetic_system_user_text 识别 Claude Code 合成包装标签", {
+  f <- shinyAssistantUI:::.is_synthetic_system_user_text
+  expect_true(f("<task-notification>\n<status>stopped</status>\n</task-notification>"))
+  expect_true(f("  <task-notification>x</task-notification>  "))
+  expect_true(f("<system-reminder>be careful</system-reminder>"))
+  expect_true(f("<local-command-stdout>ok</local-command-stdout>"))
+  expect_true(f("<command-name>/compact</command-name>"))
+  expect_true(f("<command-message>compacting</command-message>"))
+  expect_true(f("<session-start-hook>hi</session-start-hook>"))
+  expect_true(f("[Request interrupted by user for tool use]"))
+  # 正常用户输入不应被判定为合成通知
+  expect_false(f("请解释这段代码"))
+  expect_false(f("what does <task-notification> mean as a concept?"))
+  expect_false(f(""))
+})
+
+test_that(".claude_msgs_to_thread 过滤 <task-notification> 合成 user 气泡", {
+  f <- shinyAssistantUI:::.claude_msgs_to_thread
+  msgs <- list(
+    list(type = "user", uuid = "u1", message = list(content = "真实用户提问")),
+    list(type = "user", uuid = "sys1", message = list(content = list(
+      list(type = "text", text = paste0(
+        "<task-notification>\n<task-id>b4f7icfpc</task-id>\n",
+        "<status>stopped</status>\n<summary>2 background shell tasks stopped</summary>\n",
+        "</task-notification>"
+      ))
+    ))),
+    list(type = "assistant", uuid = "a1", message = list(content = list(
+      list(type = "text", text = "好的")
+    )))
+  )
+  out <- f(msgs)
+  # task-notification 不应成为气泡；真实 user + assistant 保留
+  expect_length(out, 2)
+  expect_equal(out[[1]]$role, "user")
+  expect_equal(out[[1]]$content[[1]]$text, "真实用户提问")
+  expect_equal(out[[2]]$role, "assistant")
+})

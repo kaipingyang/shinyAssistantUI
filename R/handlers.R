@@ -1,5 +1,297 @@
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+
+# Safely read either SDK camelCase fields or their snake_case equivalents.
+.context_usage_field <- function(x, ...) {
+  for (name in c(...)) {
+    value <- tryCatch(x[[name]], error = function(e) NULL)
+    if (!is.null(value)) return(value)
+  }
+  NULL
+}
+
+.context_usage_nonempty <- function(x) {
+  if (is.null(x) || length(x) == 0L) return(FALSE)
+  if (is.character(x) && all(!nzchar(x))) return(FALSE)
+  if (is.list(x)) {
+    return(any(vapply(x, .context_usage_nonempty, logical(1))))
+  }
+  TRUE
+}
+
+# Escape all Markdown punctuation and collapse line breaks so backend metadata
+# cannot inject headings, links, HTML, tables, or fenced code into action cards.
+.escape_context_markdown <- function(x) {
+  text <- paste(as.character(x), collapse = ", ")
+  text <- gsub("\\r\\n?|\\n", " / ", text, perl = TRUE)
+  for (mark in c("\\", "`", "*", "_", "{", "}", "[", "]", "(", ")",
+                 "<", ">", "#", "+", "-", ".", "!", "|")) {
+    text <- gsub(mark, paste0("\\", mark), text, fixed = TRUE)
+  }
+  text
+}
+
+.format_context_scalar <- function(x) {
+  if (is.numeric(x)) {
+    return(paste(vapply(x, function(value) {
+      if (is.na(value)) return("NA")
+      format(value, big.mark = ",", scientific = FALSE, trim = TRUE)
+    }, character(1)), collapse = ", "))
+  }
+  if (is.logical(x)) {
+    return(paste(ifelse(is.na(x), "NA", ifelse(x, "true", "false")),
+                 collapse = ", "))
+  }
+  .escape_context_markdown(x)
+}
+
+.context_usage_lines <- function(x, indent = 0L) {
+  prefix <- paste(rep(" ", indent), collapse = "")
+  if (!is.list(x)) {
+    return(paste0(prefix, "- ", .format_context_scalar(x)))
+  }
+
+  kept <- vapply(x, .context_usage_nonempty, logical(1))
+  x <- x[kept]
+  if (!length(x)) return(character())
+  item_names <- names(x)
+  has_names <- !is.null(item_names) && any(nzchar(item_names))
+  lines <- character()
+  for (i in seq_along(x)) {
+    value <- x[[i]]
+    name <- if (has_names && nzchar(item_names[[i]])) item_names[[i]] else NULL
+    if (!is.null(name)) {
+      label <- .escape_context_markdown(name)
+      if (is.list(value)) {
+        lines <- c(
+          lines,
+          paste0(prefix, "- **", label, "**:"),
+          .context_usage_lines(value, indent + 2L)
+        )
+      } else {
+        lines <- c(lines, paste0(
+          prefix, "- **", label, "**: ", .format_context_scalar(value)
+        ))
+      }
+    } else if (is.list(value)) {
+      lines <- c(
+        lines,
+        paste0(prefix, "- **Item ", i, "**:"),
+        .context_usage_lines(value, indent + 2L)
+      )
+    } else {
+      lines <- c(lines, paste0(prefix, "- ", .format_context_scalar(value)))
+    }
+  }
+  lines
+}
+
+# Compact token labels matching Claude Code's context display.
+.context_token_label <- function(x) {
+  value <- suppressWarnings(as.numeric(x %||% NA_real_))
+  if (!length(value) || is.na(value[[1L]])) return("")
+  value <- value[[1L]]
+  compact <- function(number, suffix) {
+    text <- format(round(number, 1), nsmall = 1L, trim = TRUE, scientific = FALSE)
+    text <- sub("\\.0$", "", text)
+    paste0(text, suffix)
+  }
+  if (abs(value) >= 1e6) return(compact(value / 1e6, "m"))
+  if (abs(value) >= 1e3) return(compact(value / 1e3, "k"))
+  format(value, big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+.context_table_cell <- function(x) {
+  if (is.null(x) || !length(x)) return("")
+  text <- paste(as.character(x), collapse = ", ")
+  text <- gsub("\\r\\n?|\\n", " / ", text, perl = TRUE)
+  text <- gsub("\\", "\\\\", text, fixed = TRUE)
+  text <- gsub("|", "\\|", text, fixed = TRUE)
+  text <- gsub("`", "\\`", text, fixed = TRUE)
+  text <- gsub("<", "&lt;", text, fixed = TRUE)
+  gsub(">", "&gt;", text, fixed = TRUE)
+}
+
+.context_records <- function(value, name_field = "name") {
+  if (is.null(value) || !length(value)) return(list())
+  if (is.data.frame(value)) {
+    return(lapply(seq_len(nrow(value)), function(i) as.list(value[i, , drop = FALSE])))
+  }
+  if (!is.list(value)) {
+    vals <- as.list(value)
+    nms <- names(value)
+    return(lapply(seq_along(vals), function(i) {
+      record <- list(value = vals[[i]])
+      if (!is.null(nms) && nzchar(nms[[i]])) record[[name_field]] <- nms[[i]]
+      record
+    }))
+  }
+  nms <- names(value)
+  # A named map such as list(system = 1200, tools = 800).
+  if (!is.null(nms) && all(nzchar(nms)) &&
+      all(vapply(value, function(item) !is.list(item) || is.object(item), logical(1)))) {
+    return(lapply(seq_along(value), function(i) {
+      record <- list(value = value[[i]])
+      record[[name_field]] <- nms[[i]]
+      record
+    }))
+  }
+  lapply(seq_along(value), function(i) {
+    item <- value[[i]]
+    record <- if (is.list(item)) item else list(value = item)
+    if (!is.null(nms) && nzchar(nms[[i]]) && is.null(record[[name_field]])) {
+      record[[name_field]] <- nms[[i]]
+    }
+    record
+  })
+}
+
+.context_record_field <- function(record, aliases, fallback = NULL) {
+  value <- do.call(.context_usage_field, c(list(record), as.list(aliases)))
+  if (is.null(value)) fallback else value
+}
+
+.context_markdown_table <- function(title, headers, rows) {
+  if (!length(rows)) return(character())
+  rendered <- vapply(rows, function(row) {
+    paste0("| ", paste(vapply(row, .context_table_cell, character(1)), collapse = " | "), " |")
+  }, character(1))
+  c(
+    "", paste0("## ", title),
+    paste0("| ", paste(headers, collapse = " | "), " |"),
+    paste0("| ", paste(rep("---", length(headers)), collapse = " | "), " |"),
+    rendered
+  )
+}
+
+.context_generic_section <- function(title, value) {
+  if (!.context_usage_nonempty(value)) return(character())
+  c("", paste0("## ", title), .context_usage_lines(value))
+}
+
+# Rich Claude Code-compatible context report. Values come directly from the SDK;
+# percentages are only derived for category rows when the SDK omits them.
+.format_context_usage <- function(usage) {
+  if (is.null(usage)) return("Context usage is unavailable.")
+
+  model <- .context_usage_field(usage, "model")
+  total <- .context_usage_field(usage, "totalTokens", "total_tokens")
+  maximum <- .context_usage_field(usage, "maxTokens", "max_tokens")
+  raw_maximum <- .context_usage_field(usage, "rawMaxTokens", "raw_max_tokens")
+  percentage <- .context_usage_field(usage, "percentage")
+  auto_enabled <- .context_usage_field(
+    usage, "isAutoCompactEnabled", "is_auto_compact_enabled"
+  )
+  auto_threshold <- .context_usage_field(
+    usage, "autoCompactThreshold", "auto_compact_threshold"
+  )
+  denominator <- raw_maximum %||% maximum
+
+  lines <- "# Context Usage"
+  if (.context_usage_nonempty(model)) {
+    lines <- c(lines, paste0("**Model:** `", .context_table_cell(model), "`"))
+  }
+  if (.context_usage_nonempty(total) || .context_usage_nonempty(denominator)) {
+    token_text <- paste0(
+      .context_token_label(total),
+      if (.context_usage_nonempty(denominator)) paste0(" / ", .context_token_label(denominator)) else ""
+    )
+    if (.context_usage_nonempty(percentage)) {
+      token_text <- paste0(token_text, " (", format(round(as.numeric(percentage), 1), nsmall = 1L), "%)")
+    }
+    lines <- c(lines, paste0("**Tokens:** ", token_text))
+  }
+  if (.context_usage_nonempty(maximum) && .context_usage_nonempty(raw_maximum) &&
+      !identical(as.numeric(maximum), as.numeric(raw_maximum))) {
+    lines <- c(lines, paste0("**Effective limit:** ", .context_token_label(maximum)))
+  }
+  if (.context_usage_nonempty(auto_enabled)) {
+    lines <- c(lines, paste0(
+      "**Auto-compact:** ", if (isTRUE(auto_enabled)) "enabled" else "disabled",
+      if (.context_usage_nonempty(auto_threshold)) paste0(" at ", .context_token_label(auto_threshold)) else ""
+    ))
+  }
+
+  categories <- .context_usage_field(usage, "categories")
+  category_rows <- lapply(.context_records(categories), function(record) {
+    name <- .context_record_field(record, c("name", "category", "type"), "Unknown")
+    tokens <- .context_record_field(record, c("tokens", "tokenCount", "token_count", "value"))
+    pct <- .context_record_field(record, c("percentage", "percent"))
+    if (is.null(pct) && .context_usage_nonempty(tokens) && .context_usage_nonempty(denominator) &&
+        as.numeric(denominator) != 0) {
+      pct <- 100 * as.numeric(tokens) / as.numeric(denominator)
+    }
+    list(
+      name,
+      .context_token_label(tokens),
+      if (.context_usage_nonempty(pct)) paste0(format(round(as.numeric(pct), 1), nsmall = 1L), "%") else ""
+    )
+  })
+  lines <- c(lines, .context_markdown_table(
+    "Estimated usage by category", c("Category", "Tokens", "Percentage"), category_rows
+  ))
+
+  # /context 只保留摘要 + 分类表；Custom Agents / Memory Files / Skills / MCP Tools /
+  # System Tools / Slash Commands / Message Breakdown / API Usage / Context Grid /
+  # Additional Fields 等明细对用户无用且喧宾夺主，一律不再拼接。
+  # （.context_* helper 保留，供其它调用或将来扩展。）
+  paste(lines, collapse = "\n")
+}
+
+# Small SDK seams keep handler behavior unit-testable without network or CLI.
+.new_claude_options <- function(...) ClaudeAgentSDK::ClaudeAgentOptions(...)
+.new_claude_client <- function(options) ClaudeAgentSDK::ClaudeSDKClient$new(options)
+.get_claude_session_messages <- function(session_id) {
+  ClaudeAgentSDK::get_session_messages(session_id)
+}
+
+.read_claude_session_map <- function(path) {
+  if (!file.exists(path)) return(list())
+  value <- tryCatch(readRDS(path), error = function(e) list())
+  if (is.list(value)) value else list()
+}
+
+.atomic_save_rds <- function(value, path) {
+  directory <- dirname(path)
+  if (!dir.exists(directory)) dir.create(directory, recursive = TRUE)
+  temporary <- paste0(
+    path, ".tmp-", Sys.getpid(), "-", sample.int(.Machine$integer.max, 1L)
+  )
+  on.exit(unlink(temporary), add = TRUE)
+  saveRDS(value, temporary)
+  if (!file.rename(temporary, path)) {
+    stop("Could not atomically replace session map: ", path, call. = FALSE)
+  }
+  invisible(value)
+}
+
+# Read-modify-write avoids either a loader or handler publishing an old in-memory
+# snapshot over mappings added by the other. The same-directory rename keeps
+# readers from observing a partially serialized RDS file.
+.update_claude_session_map <- function(path, thread_id, session_id) {
+  current <- .read_claude_session_map(path)
+  if (is.null(session_id) || !nzchar(session_id %||% "")) {
+    current[[thread_id]] <- NULL
+  } else {
+    current[[thread_id]] <- session_id
+  }
+  .atomic_save_rds(current, path)
+  current
+}
+
+# 按 session_id 移除映射条目（Delete 真删后清理）。map 是 thread_id → session_id，
+# 删除所有指向该 session_id 的条目（以及可能以 session_id 为 key 的条目）。
+.remove_claude_session_map <- function(path, session_id) {
+  if (is.null(session_id) || !nzchar(session_id %||% "")) return(invisible(NULL))
+  current <- .read_claude_session_map(path)
+  if (!length(current)) return(invisible(NULL))
+  keep <- vapply(current, function(v) !identical(as.character(v), as.character(session_id)),
+                 logical(1))
+  current <- current[keep]
+  current[[session_id]] <- NULL
+  .atomic_save_rds(current, path)
+  invisible(current)
+}
 # 把 text + file 类附件拼成注入用的文本上下文（image 类由各 handler 单独处理）。
 # file 类（PDF/xlsx/二进制等）内容是 base64，无法直接喂文本模型——这里至少把
 # 文件名/类型作为提示注入，让 AI 知道用户上传了文件、能据此回应，而非静默丢弃
@@ -204,6 +496,76 @@ make_ellmer_handler <- function(chat,
   })
 }
 
+
+
+# Slice an immutable UI-message snapshot from newest to oldest. The cursor is
+# the number of messages before the page currently visible in the browser.
+# Pagination intentionally happens after backend records are converted because
+# one SDK record does not necessarily map to one renderable UI message.
+.history_message_page <- function(messages, cursor = NULL, limit = 50L) {
+  limit <- suppressWarnings(as.integer(limit %||% 50L))
+  if (is.na(limit) || limit < 1L) limit <- 50L
+  limit <- min(limit, 200L)
+
+  total <- length(messages)
+  upper <- if (is.null(cursor)) total else suppressWarnings(as.integer(cursor))
+  if (is.na(upper)) upper <- 0L
+  upper <- max(0L, min(total, upper))
+  if (upper == 0L) {
+    return(list(messages = list(), cursor = NULL, has_more = FALSE))
+  }
+
+  lower <- max(1L, upper - limit + 1L)
+  next_cursor <- lower - 1L
+  list(
+    messages = messages[seq.int(lower, upper)],
+    cursor = if (next_cursor > 0L) next_cursor else NULL,
+    has_more = next_cursor > 0L
+  )
+}
+
+# Both loader callbacks and send_thread predate pagination. Only pass fields a
+# callback declares (or all fields when it has ...), preserving the original
+# three-argument loader and one-argument send_thread contracts.
+
+.new_history_snapshot_cache <- function(max_entries = 3L) {
+  data <- new.env(parent = emptyenv())
+  order <- character()
+  max_entries <- max(1L, as.integer(max_entries))
+
+  touch <- function(key) {
+    order <<- c(setdiff(order, key), key)
+  }
+  list(
+    has = function(key) exists(key, envir = data, inherits = FALSE),
+    get = function(key) {
+      touch(key)
+      get(key, envir = data, inherits = FALSE)
+    },
+    set = function(key, value) {
+      assign(key, value, envir = data)
+      touch(key)
+      while (length(order) > max_entries) {
+        evict <- order[[1L]]
+        order <<- order[-1L]
+        if (exists(evict, envir = data, inherits = FALSE)) {
+          rm(list = evict, envir = data)
+        }
+      }
+      invisible(value)
+    },
+    keys = function() order
+  )
+}
+.call_history_callback <- function(callback, args) {
+  params <- names(formals(callback))
+  call_args <- if (is.null(params) || "..." %in% params) {
+    args
+  } else {
+    args[names(args) %in% params]
+  }
+  do.call(callback, call_args)
+}
 #' Create an on_session_load callback for ellmer session store
 #'
 #' Returns a function suitable for the `on_session_load` argument of
@@ -215,18 +577,35 @@ make_ellmer_handler <- function(chat,
 #'
 #' @export
 make_ellmer_session_loader <- function(store) {
-  function(session_id, thread_id, send_thread) {
-    saved <- tryCatch(store$load(thread_id), error = function(e) NULL)
-    if (is.null(saved)) { send_thread(list()); return() }
-    turns <- tryCatch({
-      state_json <- memDecompress(base64enc::base64decode(saved$state), asChar = TRUE)
-      recorded   <- jsonlite::unserializeJSON(state_json)
-      lapply(recorded, ellmer::contents_replay, tools = list())
-    }, error = function(e) {
-      message("[ELLMER] session load failed: ", conditionMessage(e))
-      list()
-    })
-    send_thread(.ellmer_turns_to_messages(turns))
+  snapshots <- .new_history_snapshot_cache(3L)
+
+  function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L) {
+    cache_key <- as.character(session_id %||% thread_id)
+    if (!snapshots$has(cache_key)) {
+      saved <- tryCatch(store$load(thread_id), error = function(e) NULL)
+      messages <- list()
+      if (!is.null(saved)) {
+        turns <- tryCatch({
+          state_json <- memDecompress(base64enc::base64decode(saved$state), asChar = TRUE)
+          recorded <- jsonlite::unserializeJSON(state_json)
+          lapply(recorded, ellmer::contents_replay, tools = list())
+        }, error = function(e) {
+          message("[ELLMER] session load failed: ", conditionMessage(e))
+          list()
+        })
+        messages <- .ellmer_turns_to_messages(turns)
+      }
+      snapshots$set(cache_key, messages)
+    }
+
+    page <- .history_message_page(
+      snapshots$get(cache_key), cursor, limit
+    )
+    .call_history_callback(send_thread, list(
+      messages = page$messages,
+      cursor = page$cursor,
+      has_more = page$has_more
+    ))
   }
 }
 
@@ -324,7 +703,7 @@ make_ellmer_session_loader <- function(store) {
 make_claude_handler <- function(options       = NULL,
                                 session_map_path = ".claude_session_map.rds") {
   if (is.null(options)) {
-    options <- ClaudeAgentSDK::ClaudeAgentOptions(
+    options <- .new_claude_options(
       permission_mode             = "default",
       permission_prompt_tool_name = "stdio",
       include_partial_messages    = TRUE
@@ -353,31 +732,21 @@ make_claude_handler <- function(options       = NULL,
          description = "Run all tools without permission prompts (use with care)")
   )
 
-  # session map 持久化。
-  # 磁盘是单一真相源：make_claude_session_loader 在用户导入历史 session 时会写盘，
-  # 但它持有独立的内存副本，无法直接同步到本 handler。因此 get_client 在内存
-  # miss 时回读磁盘，确保进程内导入的 session 也能 resume（见 read_session_map）。
-  session_map <- if (file.exists(session_map_path))
-    tryCatch(readRDS(session_map_path), error = function(e) list())
-  else list()
+  # Disk is the source of truth because the historical loader and handler own
+  # independent closures. Every mutation re-reads and atomically replaces the
+  # map so one closure cannot publish a stale snapshot over another's entries.
+  session_map <- .read_claude_session_map(session_map_path)
 
-  save_session_map <- function() {
-    tryCatch(saveRDS(session_map, session_map_path), error = function(e) NULL)
-  }
-
-  # 取某线程的 session id：先查内存，miss 则回读磁盘（捕获 loader 的写入）。
   read_session_id <- function(thread_id) {
-    sid <- session_map[[thread_id]]
-    if (!is.null(sid) && nzchar(sid %||% "")) return(sid)
-    if (!file.exists(session_map_path)) return(NULL)
-    disk <- tryCatch(readRDS(session_map_path), error = function(e) NULL)
-    if (is.null(disk)) return(NULL)
-    disk_sid <- disk[[thread_id]]
-    if (!is.null(disk_sid) && nzchar(disk_sid %||% "")) {
-      session_map[[thread_id]] <<- disk_sid  # 同步进内存缓存
-      return(disk_sid)
+    if (file.exists(session_map_path)) {
+      disk <- .read_claude_session_map(session_map_path)
+      disk_sid <- disk[[thread_id]]
+      session_map <<- disk
+      if (!is.null(disk_sid) && nzchar(disk_sid %||% "")) return(disk_sid)
+      return(NULL)
     }
-    NULL
+    sid <- session_map[[thread_id]]
+    if (!is.null(sid) && nzchar(sid %||% "")) sid else NULL
   }
 
   clients <- list()
@@ -389,7 +758,7 @@ make_claude_handler <- function(options       = NULL,
     stored_sid <- read_session_id(thread_id)
 
     make_opts <- function(resume_sid = NULL) {
-      ClaudeAgentSDK::ClaudeAgentOptions(
+      .new_claude_options(
         permission_mode             = permission_mode_for(thread_id),
         permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
         include_partial_messages    = options$include_partial_messages %||% TRUE,
@@ -398,7 +767,7 @@ make_claude_handler <- function(options       = NULL,
     }
 
     connect_new_client <- function(client_options) {
-      client <- ClaudeAgentSDK::ClaudeSDKClient$new(client_options)
+      client <- .new_claude_client(client_options)
       .connect_registered_claude_client(
         client,
         register = function(x) clients[[thread_id]] <<- x,
@@ -413,8 +782,10 @@ make_claude_handler <- function(options       = NULL,
         connect_new_client(make_opts(stored_sid)),
         error = function(e) {
           message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
-          session_map[[thread_id]] <<- NULL
-          save_session_map()
+          session_map <<- tryCatch(
+            .update_claude_session_map(session_map_path, thread_id, NULL),
+            error = function(map_error) session_map
+          )
           NULL
         }
       )
@@ -434,8 +805,11 @@ make_claude_handler <- function(options       = NULL,
 
   persist_session <- function(thread_id, sid) {
     if (is.null(sid) || !nzchar(sid %||% "")) return(invisible(NULL))
-    session_map[[thread_id]] <<- sid
-    save_session_map()
+    session_map <<- tryCatch(
+      .update_claude_session_map(session_map_path, thread_id, sid),
+      error = function(e) session_map
+    )
+    invisible(NULL)
   }
 
   # ── 客户端动作分发器(供 assistantUIServer 的 on_action 委派)──────────────
@@ -466,16 +840,7 @@ make_claude_handler <- function(options       = NULL,
       } else if (identical(id, "context")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
         usage <- cl$get_context_usage()
-        # ContextUsageResponse 用 camelCase:totalTokens / maxTokens / percentage / model
-        tot <- tryCatch(usage$totalTokens %||% usage$total_tokens %||% NULL, error = function(e) NULL)
-        pct <- tryCatch(usage$percentage %||% NULL, error = function(e) NULL)
-        mx  <- tryCatch(usage$maxTokens %||% NULL, error = function(e) NULL)
-        if (!is.null(tot)) {
-          txt <- paste0("Context: ", format(tot, big.mark = ","), " tokens")
-          if (!is.null(mx))  txt <- paste0(txt, " / ", format(mx, big.mark = ","))
-          if (!is.null(pct)) txt <- paste0(txt, " (", round(pct, 1), "%)")
-          ok(txt)
-        } else ok("Context usage retrieved")
+        ok(.format_context_usage(usage))
       } else if (identical(id, "interrupt")) {
         if (!is.null(cl)) cl$interrupt()
         ok("Interrupted")
@@ -585,7 +950,9 @@ make_claude_handler <- function(options       = NULL,
     # 就渲染出来(否则 sendCustomMessage 会排到 connect 之后才 flush,指示器出现太晚)。
     cold <- is.null(clients[[thread_id]])
     if (cold && !is.null(on_warming)) {
-      on_warming(TRUE)
+      # resuming=TRUE 表示恢复已有 session（磁盘有映射）；否则是全新对话的冷启动。
+      resuming <- !is.null(read_session_id(thread_id))
+      on_warming(TRUE, resuming)
       coro::await(later_promise(0.05))
     }
     client <- tryCatch(
@@ -907,7 +1274,8 @@ make_claude_handler <- function(options       = NULL,
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
   attr(handler_fn, "warmup") <- function(thread_id) {
-    tryCatch(get_client(thread_id), error = function(e) NULL); invisible(NULL)
+    get_client(thread_id)
+    invisible(NULL)
   }
   handler_fn
 }
@@ -923,12 +1291,13 @@ make_claude_handler <- function(options       = NULL,
 #' @return A list suitable for `ctrl$send_sessions(list(sessions = ...))`.
 #'
 #' @export
-list_claude_sessions <- function(directory = here::here(), limit = 100L) {
+list_claude_sessions <- function(directory = here::here(), limit = 100L,
+                                 archived_ids = character()) {
   raw <- tryCatch(
     ClaudeAgentSDK::list_sessions(directory = directory, limit = limit),
     error = function(e) list()
   )
-  lapply(raw, function(s) {
+  sessions <- lapply(raw, function(s) {
     ts <- s$last_modified %||% s$created_at
     ts <- if (!is.null(ts) && !is.na(ts) && is.numeric(ts)) ts else NULL
     list(
@@ -937,6 +1306,47 @@ list_claude_sessions <- function(directory = here::here(), limit = 100L) {
       preview   = s$first_prompt %||% "",
       createdAt = ts
     )
+  })
+  .annotate_archived(sessions, archived_ids)
+}
+
+# ── 方案B：Archive 持久化软隐藏存储（per-project）───────────────────────────
+# 归档是"可恢复的软隐藏"，服务端权威存储；Delete 才真删磁盘 transcript。
+# 存储为命名 list：key=normalizePath(project)，value=archived session id 向量。
+.archived_store_key <- function(project) {
+  if (is.null(project) || !nzchar(project)) return("_default")
+  tryCatch(normalizePath(project, winslash = "/", mustWork = FALSE),
+           error = function(e) as.character(project))
+}
+
+.read_archived_ids <- function(path, project) {
+  if (!file.exists(path)) return(character(0))
+  store <- tryCatch(readRDS(path), error = function(e) list())
+  if (!is.list(store)) return(character(0))
+  ids <- store[[.archived_store_key(project)]]
+  if (is.null(ids)) character(0) else as.character(ids)
+}
+
+.write_archived_ids <- function(path, project, ids) {
+  store <- if (file.exists(path)) tryCatch(readRDS(path), error = function(e) list()) else list()
+  if (!is.list(store)) store <- list()
+  store[[.archived_store_key(project)]] <- unique(as.character(ids))
+  .atomic_save_rds(store, path)
+  invisible(NULL)
+}
+
+.toggle_archived_id <- function(path, project, session_id, archived) {
+  current <- .read_archived_ids(path, project)
+  next_ids <- if (isTRUE(archived)) unique(c(current, session_id)) else setdiff(current, session_id)
+  .write_archived_ids(path, project, next_ids)
+  invisible(next_ids)
+}
+
+.annotate_archived <- function(sessions, archived_ids = character()) {
+  archived_ids <- as.character(archived_ids %||% character())
+  lapply(sessions, function(s) {
+    s$archived <- isTRUE((s$id %||% "") %in% archived_ids)
+    s
   })
 }
 
@@ -952,22 +1362,39 @@ list_claude_sessions <- function(directory = here::here(), limit = 100L) {
 #'
 #' @export
 make_claude_session_loader <- function(session_map_path = ".claude_session_map.rds") {
-  session_map <- if (file.exists(session_map_path))
-    tryCatch(readRDS(session_map_path), error = function(e) list())
-  else list()
+  snapshots <- .new_history_snapshot_cache(3L)
 
-  function(session_id, thread_id, send_thread) {
-    # 预填 session_map（使 get_client 能 resume）
-    if (!is.null(session_id) && nzchar(session_id %||% "")) {
-      session_map[[thread_id]] <<- session_id
-      tryCatch(saveRDS(session_map, session_map_path), error = function(e) NULL)
+  function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L) {
+    # Pre-fill the mapping before the initial page is delivered so asynchronous
+    # warmup resumes this historical SDK session instead of starting fresh.
+    if (is.null(cursor) && !is.null(session_id) && nzchar(session_id %||% "")) {
+      tryCatch(
+        .update_claude_session_map(session_map_path, thread_id, session_id),
+        error = function(e) NULL
+      )
     }
 
-    msgs <- tryCatch(
-      ClaudeAgentSDK::get_session_messages(session_id),
-      error = function(e) list()
+    cache_key <- as.character(session_id %||% thread_id)
+    if (!snapshots$has(cache_key)) {
+      # ClaudeAgentSDK's current limit/offset API still parses the complete JSONL
+      # session internally. Read and convert once here, cache the immutable UI
+      # snapshot, then page in memory. This reduces browser transfer/render work,
+      # but not the SDK's one-time full-file parsing cost.
+      msgs <- tryCatch(
+        .get_claude_session_messages(session_id),
+        error = function(e) list()
+      )
+      snapshots$set(cache_key, .claude_msgs_to_thread(msgs))
+    }
+
+    page <- .history_message_page(
+      snapshots$get(cache_key), cursor, limit
     )
-    send_thread(.claude_msgs_to_thread(msgs))
+    .call_history_callback(send_thread, list(
+      messages = page$messages,
+      cursor = page$cursor,
+      has_more = page$has_more
+    ))
   }
 }
 
@@ -978,6 +1405,10 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 
 .append_ide_context <- function(message, context) {
   if (is.null(context) || !is.list(context)) return(message)
+  # selection_visible 语义 = 是否把 IDE 上下文（活动文件 + 选区）发给 Claude。
+  # 用户点了 composer 上的眼睛关闭时为 FALSE → 整段都不注入，连文件引用都不给 Claude
+  # （“让此文件不被 Claude 发现”）。非 addin 后端不带此字段（NULL），保持旧行为。
+  if (identical(context$selection_visible, FALSE)) return(message)
   path <- context$relative_path %||% context$active_file
   selection <- if (isTRUE(context$selection_visible)) context$selection_text else NULL
   if (is.null(path) && is.null(selection)) return(message)
@@ -1007,6 +1438,67 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
   substr(text, 1L, marker - 1L)
 }
 
+# Claude Code 在 resume/hook/命令等场景会以 user 轮次把合成系统通知写进 transcript
+# （例如孤儿后台任务的 <task-notification>）。这些不是用户真实输入，回放成 user 气泡会造成
+# 困惑。它们在 SDK 层不带 isMeta，无法被 get_session_messages 的 .is_visible_message 过滤，
+# 因此在显示层按已知包装标签识别。标签清单对齐 ClaudeAgentSDK sessions.R 的
+# .skip_first_prompt_re，并补充 resume 场景的 <task-notification> 等。
+.SYNTHETIC_SYSTEM_USER_RE <- paste0(
+  "^(?:",
+  "<task-notification>|",
+  "<system-reminder>|",
+  "<local-command-stdout>|",
+  "<local-command-caveat>|",
+  "<command-name>|",
+  "<command-message>|",
+  "<session-start-hook>|",
+  "<tick>|",
+  "<goal>|",
+  "<ide_opened_file>|",
+  "<ide_selection>|",
+  "\\[Request interrupted by user[^\\]]*\\]",
+  ")"
+)
+
+.is_synthetic_system_user_text <- function(text) {
+  if (!is.character(text) || length(text) != 1L) return(FALSE)
+  trimmed <- trimws(text)
+  if (!nzchar(trimmed)) return(FALSE)
+  grepl(.SYNTHETIC_SYSTEM_USER_RE, trimmed, perl = TRUE)
+}
+
+# ── 任务 D：编辑揭示 tracker ─────────────────────────────────────────────────
+# Claude 一次可能编辑多个文件；全部在编辑器打开对用户无意义。这里按 run 收集成功
+# 的编辑文件，run 结束时只揭示最近一次成功编辑（flush 返回它并清空）。
+.EDIT_REVEAL_TOOLS <- c("Edit", "Write", "MultiEdit", "NotebookEdit", "Update")
+
+.new_edit_reveal_tracker <- function(edit_tools = .EDIT_REVEAL_TOOLS) {
+  pending <- new.env(parent = emptyenv())
+  last <- NULL
+  list(
+    note_call = function(tool_call_id, tool_name, args = list()) {
+      fp <- NULL
+      if (is.list(args)) fp <- args$file_path %||% args$path %||% NULL
+      if (isTRUE(tool_name %in% edit_tools) && is.character(fp) && length(fp) == 1L && nzchar(fp)) {
+        assign(tool_call_id, fp, envir = pending)
+      }
+      invisible(NULL)
+    },
+    note_result = function(tool_call_id, is_error = FALSE) {
+      if (!exists(tool_call_id, envir = pending, inherits = FALSE)) return(invisible(NULL))
+      fp <- get(tool_call_id, envir = pending)
+      rm(list = tool_call_id, envir = pending)
+      if (!isTRUE(is_error)) last <<- fp
+      invisible(NULL)
+    },
+    flush = function() {
+      fp <- last
+      last <<- NULL
+      fp
+    }
+  )
+}
+
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
 .claude_msgs_to_thread <- function(msgs) {
   result <- list()
@@ -1021,6 +1513,9 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               }
       text <- .strip_ide_context_suffix(text)
       if (!nzchar(trimws(text))) next
+      # resume/hook 时 CLI 以 user 轮次写入的合成系统通知（如孤儿任务 <task-notification>）
+      # 不是用户真实输入，跳过而非渲染为 user 气泡。
+      if (.is_synthetic_system_user_text(text)) next
       result[[length(result) + 1L]] <- list(
         id      = paste0("h-", m$uuid),
         role    = "user",

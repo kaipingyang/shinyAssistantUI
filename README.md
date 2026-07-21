@@ -97,13 +97,23 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
 - **Project-rooted & agentic**: launches at the active RStudio project (`cwd`), so Claude's
   `Read`/`Edit`/`Bash`/`Grep` tools operate on your real files.
 - **Context-aware**: the active editor file + selection are sampled again for every new
-  prompt (not frozen at addin startup). The composer shows the current file/line range and lets
-  you hide selection text while still keeping the active-file reference.
+  prompt (not frozen at addin startup). The composer shows the current file/line range with an
+  eye toggle; click it to hide the active file (and any selection) from Claude for the next
+  prompts, or show it again — the file reference and selection are only sent when the eye is on.
 - **Workspace mentions**: type `@` to fuzzy-search git-visible files and folders. Entries stay
   literal (`@R/app.R`, `@R/app.R#L5-L10`, `@R/`) and respect Git ignore rules; the browser does
   not expand file contents.
 - **Safe by default**: file edits and shell commands are gated by the in-app approval card
-  (`permission_mode = "default"`).
+  (`permission_mode = "default"`). Which tools prompt is decided entirely by Claude Code (working-
+  directory boundary, built-in read-only allowances, and your `.claude/settings.json` rules) — the
+  addin simply renders whatever the CLI asks. To force a prompt for **every** (or specific) tool,
+  use Claude Code's own permission config, e.g. in the project's `.claude/settings.json`:
+
+  ```json
+  { "permissions": { "ask": ["*"] } }
+  ```
+
+  `ask` rules also accept per-tool / per-path patterns such as `"Bash(rm*)"` or `"Read(/tmp/**)"`.
 - Requires the [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) package and a
   working `claude` CLI. Runs in the browser if called outside RStudio.
 

@@ -84,6 +84,11 @@
 #' @param show_thread_list Logical. If `TRUE`, a thread list sidebar is shown
 #'   inside the widget for switching between conversations. Default `FALSE`
 #'   (backward-compatible).
+#' @param persistence Where thread history is persisted. `"client"` (default)
+#'   restores and synchronizes browser `localStorage`; `"server"` treats
+#'   `send_sessions()` snapshots as authoritative and never accesses
+#'   `localStorage`; `"none"` keeps state only for the current page lifetime and
+#'   likewise never accesses `localStorage`.
 #' @param suggestions List of starter suggestion bubbles shown before the first
 #'   message. Each element is a list with `prompt` (required, the text sent on
 #'   click) and optional `text` (display label, defaults to `prompt`).
@@ -155,9 +160,12 @@
 #' @param prewarm Logical (default `FALSE`). If `TRUE` and the `handler` exposes a
 #'   `warmup` attribute (e.g. [make_claude_handler()]), pre-connect the initial
 #'   thread's client on mount so the **first** message on that thread isn't slowed
-#'   by the cold start (ClaudeSDKClient spawning the `claude` CLI subprocess). A
-#'   brief cold-start indicator is shown while connecting. New threads / loaded
-#'   sessions still cold-start on their first message (indicator shown).
+#'   by the cold start (ClaudeSDKClient spawning the `claude` CLI subprocess).
+#'   Historical sessions are warmed independently after `send_thread()` succeeds,
+#'   regardless of this option; their warmups are deduplicated per thread and a
+#'   failed warmup may be retried on a later load. A brief cold-start indicator is
+#'   shown while connecting. Newly created blank threads remain lazy unless they
+#'   are the initial thread covered by this one-shot option.
 #'   **Left `FALSE` by default on purpose**: enabling it makes app startup attempt
 #'   a backend connection at mount, so a slow/unreachable backend would stall the
 #'   open (the default lazy connect only happens on the first message). Turn on
@@ -165,6 +173,19 @@
 #' @param on_rename Optional `function(thread_id, title)` called when the user
 #'   renames a thread in the sidebar. The new title is already persisted
 #'   client-side (localStorage); use this to sync server-side session stores.
+#' @param on_open_file Optional `function(path, line = NULL)` called when the
+#'   user clicks a file reference in a tool card, or after the assistant edits a
+#'   file (the most recent successful edit of a run is revealed). The Claude
+#'   addin wires this to `rstudioapi::navigateToFile()`; leave `NULL` (default)
+#'   in browser contexts where no editor is available.
+#' @param on_archive_session Optional `function(session_id, archived)` called when
+#'   the user archives (`archived = TRUE`) or unarchives (`FALSE`) a session in the
+#'   sidebar. Use it to persist a server-authoritative soft-hide list so archived
+#'   sessions stay hidden across reopens (the Claude addin stores this per project).
+#' @param on_delete_session Optional `function(session_id)` called when the user
+#'   confirms deleting a session. This is destructive: the Claude addin wires it to
+#'   `ClaudeAgentSDK::delete_session()`, permanently removing the transcript from
+#'   disk. The UI requires an explicit confirmation before invoking it.
 #' @param theme Optional named list of theme tokens to recolor the widget, e.g.#'   from [assistant_theme()]. Colors may be hex/named/`rgb()` strings and are
 #'   converted to assistant-ui's HSL-component format. Applied as scoped CSS
 #'   variables on this widget only (multiple widgets can have different themes).
@@ -193,6 +214,7 @@
 #' @export
 assistantUIServer <- function(id, handler,
                               show_thread_list  = FALSE,
+                              persistence       = c("client", "server", "none"),
                               suggestions       = list(),
                               commands          = list(),
                               tools             = list(),
@@ -203,6 +225,9 @@ assistantUIServer <- function(id, handler,
                               on_session_load   = NULL,
                               on_feedback       = NULL,
                               on_rename         = NULL,
+                              on_open_file      = NULL,
+                              on_archive_session = NULL,
+                              on_delete_session = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -212,10 +237,20 @@ assistantUIServer <- function(id, handler,
                               modal             = FALSE,
                               prewarm           = FALSE) {
   force(show_thread_list); force(suggestions); force(commands)
+  persistence <- tryCatch(
+    match.arg(persistence),
+    error = function(e) stop(
+      "`persistence` must be one of \"client\", \"server\", or \"none\".",
+      call. = FALSE
+    )
+  )
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(ide_context_provider); force(workspace_search_provider)
   force(on_feedback); force(modal)
   force(on_rename)
+  force(on_open_file)
+  force(on_archive_session)
+  force(on_delete_session)
   # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
   # 且用户未自定义 on_action,则自动接线,使 /model、/clear 等客户端动作开箱即用。
   # 只有该 dispatcher 实际生效时才发布配套 capability；否则 UI 会把 permission
@@ -253,6 +288,7 @@ assistantUIServer <- function(id, handler,
 
   config <- list(
     show_thread_list = show_thread_list,
+    persistence      = persistence,
     suggestions      = suggestions,
     commands         = commands,
     tools            = tools,
@@ -283,12 +319,20 @@ assistantUIServer <- function(id, handler,
   # 的 onDone 会错误清掉新 thread 的 running 状态，旧消息也可能串入新 thread。
   # 新版：每次 ExtendedTask 启动时动态构建，消息携带 threadId，JS 按 threadId 路由。
   make_callbacks <- function(thread_id) {
+    # 任务 D：per-run 编辑揭示 tracker——run 结束只揭示最近一次成功编辑的文件。
+    edit_reveal <- .new_edit_reveal_tracker()
     list(
       on_chunk = function(text) {
         session$sendCustomMessage(paste0(input_id, ":chunk"),
                                   list(text = text, threadId = thread_id))
       },
       on_done = function(suggestions = list()) {
+        if (!is.null(on_open_file)) {
+          reveal_path <- edit_reveal$flush()
+          if (!is.null(reveal_path)) {
+            tryCatch(on_open_file(reveal_path, NULL), error = function(e) NULL)
+          }
+        }
         session$sendCustomMessage(paste0(input_id, ":done"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
@@ -300,6 +344,7 @@ assistantUIServer <- function(id, handler,
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
         # （多 widget 同页时模块级单例会串台，靠 inputId 路由隔离）。
         annotations$inputId <- input_id
+        edit_reveal$note_call(tool_call_id, tool_name, args)
         session$sendCustomMessage(
           paste0(input_id, ":tool-call"),
           list(
@@ -330,6 +375,7 @@ assistantUIServer <- function(id, handler,
         )
       },
       on_tool_result = function(tool_call_id, result, is_error = FALSE) {
+        edit_reveal$note_result(tool_call_id, is_error)
         session$sendCustomMessage(
           paste0(input_id, ":tool-result"),
           list(toolCallId = tool_call_id, result = result, isError = is_error, threadId = thread_id)
@@ -388,9 +434,10 @@ assistantUIServer <- function(id, handler,
                                        threadId = thread_id))
       },
       # 每线程冷启动指示:client 首次连接(spawn CLI 子进程)期间 active=TRUE。
-      on_warming = function(active) {
+      on_warming = function(active, resuming = FALSE) {
         session$sendCustomMessage(paste0(input_id, ":warming"),
-                                  list(active = isTRUE(active), threadId = thread_id))
+                                  list(active = isTRUE(active), resuming = isTRUE(resuming),
+                                       threadId = thread_id))
       }
     )
   }
@@ -500,6 +547,35 @@ assistantUIServer <- function(id, handler,
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
+  # 点击文件引用 → on_open_file 回调（addin 用 rstudioapi::navigateToFile 在编辑器打开）。
+  if (!is.null(on_open_file)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_open_file")]], {
+      of <- session$input[[paste0(input_id, "_open_file")]]
+      if (is.null(of) || is.null(of$path) || !nzchar(of$path)) return()
+      line <- suppressWarnings(as.integer(of$line))
+      if (length(line) != 1L || is.na(line)) line <- NULL
+      tryCatch(on_open_file(of$path, line), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # 方案B：Archive 软隐藏（可恢复，持久化在服务端）。
+  if (!is.null(on_archive_session)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_archive_session")]], {
+      ev <- session$input[[paste0(input_id, "_archive_session")]]
+      if (is.null(ev) || is.null(ev$sessionId) || !nzchar(ev$sessionId)) return()
+      tryCatch(on_archive_session(ev$sessionId, isTRUE(ev$archived)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # 方案B：Delete 真删磁盘 transcript（不可逆，前端已二次确认）。
+  if (!is.null(on_delete_session)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_delete_session")]], {
+      ev <- session$input[[paste0(input_id, "_delete_session")]]
+      if (is.null(ev) || is.null(ev$sessionId) || !nzchar(ev$sessionId)) return()
+      tryCatch(on_delete_session(ev$sessionId), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
   # 独立 observer 监听 cancel 信号
   shiny::observeEvent(session$input[[paste0(input_id, "_cancel")]], {
     msg <- session$input[[paste0(input_id, "_cancel")]]
@@ -582,6 +658,47 @@ assistantUIServer <- function(id, handler,
   # handler 尚未注册，消息被静默丢弃。JS ready 信号到达后，用缓存的 sessions 补发。
   pending_sessions <- NULL
 
+  # Historical sessions always warm after their messages are delivered, even
+  # when initial prewarm is disabled. State is per thread: concurrent/repeated
+  # loads deduplicate, success stays warm, and failure removes the marker so a
+  # later load can retry.
+  .warmup_fn <- attr(handler, "warmup")
+  warmup_states <- new.env(parent = emptyenv())
+  schedule_warmup <- function(thread_id, delay = 0) {
+    if (!is.function(.warmup_fn) || is.null(thread_id) ||
+        !nzchar(thread_id %||% "")) return(invisible(FALSE))
+    state <- get0(thread_id, envir = warmup_states, inherits = FALSE)
+    if (!is.null(state) && state %in% c("warming", "warmed")) {
+      return(invisible(FALSE))
+    }
+
+    assign(thread_id, "warming", envir = warmup_states)
+    cbs <- make_callbacks(thread_id)
+    later::later(function() {
+      # 历史 session 的 warmup = 恢复既有对话，resuming=TRUE。
+      tryCatch(cbs$on_warming(TRUE, TRUE), error = function(e) NULL)
+      # Yield once more so the warming signal can flush before a blocking CLI
+      # connection. This also guarantees load_session itself stays non-blocking.
+      later::later(function() {
+        succeeded <- tryCatch(
+          {
+            .warmup_fn(thread_id)
+            TRUE
+          },
+          interrupt = function(e) FALSE,
+          error = function(e) FALSE
+        )
+        tryCatch(cbs$on_warming(FALSE), error = function(e) NULL)
+        if (isTRUE(succeeded)) {
+          assign(thread_id, "warmed", envir = warmup_states)
+        } else if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
+          rm(list = thread_id, envir = warmup_states)
+        }
+      }, 0.05)
+    }, delay)
+    invisible(TRUE)
+  }
+
   shiny::observeEvent(session$input[[paste0(input_id, "_sessions_ready")]], {
     if (!is.null(pending_sessions)) {
       session$sendCustomMessage(paste0(input_id, ":sessions"), pending_sessions)
@@ -591,18 +708,35 @@ assistantUIServer <- function(id, handler,
   shiny::observeEvent(session$input[[input_id]], {
     msg <- session$input[[input_id]]
     if (is.null(msg)) return()
-    # load_session 消息没有 text 字段，不能用 nzchar 过滤
-    if (!identical(msg$type, "load_session") && !nzchar(trimws(msg$text %||% ""))) return()
+    # History requests have no text field and never enter stream_task.
+    is_initial_history <- identical(msg$type, "load_session")
+    is_older_history <- identical(msg$type, "load_session_page")
+    is_history_request <- is_initial_history || is_older_history
+    if (!is_history_request && !nzchar(trimws(msg$text %||% ""))) return()
 
-    # load_session：前端请求某历史 session 的消息记录，不走 stream_task
-    if (identical(msg$type, "load_session") && !is.null(on_session_load)) {
-      send_thread <- function(messages) {
+    if (is_history_request && !is.null(on_session_load)) {
+      send_thread <- function(messages, cursor = NULL, has_more = FALSE) {
         session$sendCustomMessage(
           paste0(input_id, ":load-thread"),
-          list(threadId = msg$threadId, messages = messages)
+          list(
+            threadId = msg$threadId,
+            messages = messages,
+            cursor = cursor,
+            hasMore = isTRUE(has_more),
+            prepend = is_older_history
+          )
         )
+        # Restoring the SDK conversation is a distinct second phase. Loading an
+        # older UI page must not reconnect or warm the same thread again.
+        if (is_initial_history) schedule_warmup(msg$threadId)
       }
-      on_session_load(msg$sessionId, msg$threadId, send_thread)
+      .call_history_callback(on_session_load, list(
+        session_id = msg$sessionId,
+        thread_id = msg$threadId,
+        send_thread = send_thread,
+        cursor = if (is_older_history) msg$cursor else NULL,
+        limit = msg$limit %||% 50L
+      ))
       return()
     }
 
@@ -628,23 +762,13 @@ assistantUIServer <- function(id, handler,
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # 预热:prewarm=TRUE 且 handler 暴露 warmup(如 make_claude_handler)时,JS 挂载会发来
-  # 当前 threadId → 后台连接该线程的 client,使【首条消息】不再冷启动。复用冷启动指示器:
-  # 嵌套 later 让 on_warming(TRUE) 先 flush(指示器渲染)再跑阻塞式 connect。仅初始线程一次。
-  .warmup_fn <- attr(handler, "warmup")
+  # Initial blank-thread warmup remains opt-in and one-shot. Historical loads
+  # call schedule_warmup independently above and are not gated by this observer.
   if (isTRUE(prewarm) && is.function(.warmup_fn)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_warmup")]], {
       msg <- session$input[[paste0(input_id, "_warmup")]]
       tid <- if (is.list(msg)) msg$threadId else NULL
-      if (is.null(tid) || !nzchar(tid %||% "")) return()
-      cbs <- make_callbacks(tid)
-      later::later(function() {
-        cbs$on_warming(TRUE)
-        later::later(function() {
-          tryCatch(.warmup_fn(tid), error = function(e) NULL)
-          cbs$on_warming(FALSE)
-        }, 0.05)
-      }, 0.1)
+      schedule_warmup(tid, delay = 0.1)
     }, once = TRUE, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

@@ -25,6 +25,35 @@
 }
 
 # 活动编辑器上下文:list(path, rel, selection, first_line, last_line) 或 NULL。全程 guard。
+# 点击文件引用 / Claude 编辑后揭示 → 在 RStudio 编辑器打开。
+# 相对路径按 project 解析成绝对路径；若编辑器已聚焦同一文件则不重复跳转（避免抢焦点）。
+.addin_open_file <- function(path, line = NULL, project = NULL) {
+  if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(invisible(NULL))
+  if (!requireNamespace("rstudioapi", quietly = TRUE) ||
+      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+
+  abs_path <- path
+  if (!isTRUE(startsWith(path, "/")) && !grepl("^[A-Za-z]:", path) && !is.null(project)) {
+    abs_path <- file.path(project, path)
+  }
+  abs_path <- tryCatch(normalizePath(abs_path, winslash = "/", mustWork = FALSE),
+                       error = function(e) abs_path)
+  if (!file.exists(abs_path)) return(invisible(NULL))
+
+  # 已聚焦同一文件则不跳转
+  current <- tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) NULL)
+  if (!is.null(current) && nzchar(current)) {
+    current_norm <- tryCatch(normalizePath(current, winslash = "/", mustWork = FALSE),
+                             error = function(e) current)
+    if (identical(current_norm, abs_path)) return(invisible(NULL))
+  }
+
+  ln <- suppressWarnings(as.integer(line))
+  if (length(ln) != 1L || is.na(ln) || ln < 1L) ln <- -1L
+  tryCatch(rstudioapi::navigateToFile(abs_path, line = ln), error = function(e) NULL)
+  invisible(NULL)
+}
+
 # 只采样第一段 selection，确保文本与行范围属于同一个选区。
 .addin_editor_context <- function(project = NULL) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
@@ -83,21 +112,58 @@
   files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
   files <- head(sort(unique(files)), max(0L, as.integer(max_files)))
 
-  folders <- character(0)
-  for (file in files) {
+  # 文件夹推导：先收集到 list（避免循环内 c() 的 O(n^2) 累加），最后一次 unique。
+  folder_lists <- lapply(files, function(file) {
+    acc <- character(0)
     parent <- dirname(file)
     while (!identical(parent, ".") && nzchar(parent)) {
-      folders <- c(folders, paste0(parent, "/"))
+      acc <- c(acc, paste0(parent, "/"))
       next_parent <- dirname(parent)
       if (identical(next_parent, parent)) break
       parent <- next_parent
     }
-  }
-  folders <- sort(unique(folders))
+    acc
+  })
+  folders <- sort(unique(unlist(folder_lists, use.names = FALSE)))
   c(
     lapply(folders, function(path) list(kind = "folder", path = path)),
     lapply(files, function(path) list(kind = "file", path = path))
   )
+}
+
+# git HEAD 指纹（用于 workspace 索引缓存失效）。非 git/detached/空仓返回 NULL → 不缓存。
+.addin_git_head <- function(project) {
+  if (Sys.which("git") == "" || is.null(project) || !dir.exists(project)) return(NULL)
+  head <- suppressWarnings(tryCatch(
+    system2("git", c("-C", shQuote(project), "rev-parse", "HEAD"),
+            stdout = TRUE, stderr = FALSE),
+    error = function(e) character(0)
+  ))
+  head <- head[nzchar(head)]
+  if (!length(head)) NULL else head[[1L]]
+}
+
+# 带缓存的 workspace 索引：按 normalizePath(project)+git HEAD 缓存到 home 的 rds。
+# 命中直接读，HEAD 变化或非 git 时重建（非 git 不写缓存）。
+.addin_workspace_index_cached <- function(project, cache_path, max_files = 10000L) {
+  head <- .addin_git_head(project)
+  key <- tryCatch(normalizePath(project, winslash = "/", mustWork = FALSE),
+                  error = function(e) as.character(project))
+  if (!is.null(head) && file.exists(cache_path)) {
+    store <- tryCatch(readRDS(cache_path), error = function(e) list())
+    entry <- if (is.list(store)) store[[key]] else NULL
+    if (is.list(entry) && identical(entry$head, head) && is.list(entry$index)) {
+      return(entry$index)
+    }
+  }
+  index <- .addin_workspace_index(project, max_files = max_files)
+  if (!is.null(head)) {
+    store <- if (file.exists(cache_path)) tryCatch(readRDS(cache_path), error = function(e) list()) else list()
+    if (!is.list(store)) store <- list()
+    store[[key]] <- list(head = head, index = index)
+    tryCatch(.atomic_save_rds(store, cache_path), error = function(e) NULL)
+  }
+  index
 }
 
 .addin_fuzzy_match <- function(needle, haystack) {
@@ -158,8 +224,10 @@
   lapply(result, function(x) x[setdiff(names(x), c(".score", ".depth"))])
 }
 
-.make_addin_workspace_search_provider <- function(project) {
-  index <- .addin_workspace_index(project)
+.make_addin_workspace_search_provider <- function(project, cache_path = NULL) {
+  cache_path <- cache_path %||% file.path(
+    Sys.getenv("HOME", unset = "~"), ".claude_addin_workspace_cache.rds")
+  index <- .addin_workspace_index_cached(project, cache_path)
   function(query = "", kinds = c("file", "folder"), limit = 50L) {
     .addin_workspace_search(index, query = query, kinds = kinds, limit = limit)
   }
@@ -242,6 +310,9 @@
   # session_map stored in user home to survive project switches
   session_map_path <- file.path(
     Sys.getenv("HOME", unset = "~"), ".claude_addin_session_map.rds")
+  # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
+  archived_path <- file.path(
+    Sys.getenv("HOME", unset = "~"), ".claude_addin_archived.rds")
   handler <- make_claude_handler(
     options          = options,
     session_map_path = session_map_path
@@ -262,21 +333,47 @@
     ctrl <- assistantUIServer(
       "chat", handler = handler,
       show_thread_list = TRUE,
+      persistence      = "server",
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
+      on_open_file     = function(path, line = NULL) .addin_open_file(path, line, project),
+      on_archive_session = function(session_id, archived) {
+        # 仅服务端持久化软隐藏；前端已本地乐观更新（移入/移出归档区）。
+        # 不再重推会话列表——重推会把"当前对话已生成的 server session"与其客户端新线程
+        # 双显（同标题两条）。重开时初始推送（带 archived 标记）才是权威来源。
+        .toggle_archived_id(archived_path, project, session_id, archived)
+      },
+      on_delete_session = function(session_id) {
+        # Delete 真删磁盘 transcript（不可逆）+ 清归档/映射记录。前端已本地移除该项；
+        # 同样不重推（避免当前对话重复）。
+        tryCatch(ClaudeAgentSDK::delete_session(session_id, directory = project),
+                 error = function(e) NULL)
+        .toggle_archived_id(archived_path, project, session_id, FALSE)
+        tryCatch(.remove_claude_session_map(session_map_path, session_id),
+                 error = function(e) NULL)
+      },
       ide_context_provider = function() .addin_editor_context(project),
       workspace_search_provider = workspace_search,
       prewarm          = prewarm
     )
 
+    # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
+    # 才运行，ctrl 已赋值）。
+    push_sessions <- function() {
+      ctrl$send_sessions(list(
+        sessions = list_claude_sessions(
+          directory = project,
+          archived_ids = .read_archived_ids(archived_path, project)
+        )
+      ))
+    }
+
     # on_session_load 只负责用户点击后加载消息；侧栏列表必须另行注入。
     # assistantUIServer 会缓存首次发送，并在前端 :sessions handler ready 后补发，
     # 因而这里可在初始 reactive flush 中安全发送。
     shiny::observe({
-      ctrl$send_sessions(list(
-        sessions = list_claude_sessions(directory = project)
-      ))
+      push_sessions()
     })
   }
   shiny::shinyApp(ui, server)

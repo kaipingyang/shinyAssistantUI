@@ -5,6 +5,32 @@ Agent-facing operating guide for **shinyAssistantUI** (R Shiny htmlwidget wrappi
 read it for architecture, the R↔JS bridge protocol, test coverage, and design history.
 This file front-loads the operational rules that are easy to get wrong.
 
+## 🔴 Rule #0 — Standard workflow for any non-trivial change
+
+Follow this pipeline for features, bug fixes, or gap-filling (skip steps only for a truly
+one-line change):
+
+1. **Update codegraph** — `codegraph sync .` for shinyAssistantUI. The engine lives in
+   `~/.codegraph`; per-project indexes are in each project's `.codegraph/` (gitignored, keep
+   untracked). `initialize_workspace` alone does **not** build the index — run `codegraph sync`.
+2. **Dual-graph explore** — query BOTH codegraphs before writing code:
+   `codegraph query|explore|node` in **shinyAssistantUI** (our wrappers) AND in
+   **`assistant-ui-src/`** (upstream `@assistant-ui/react` source: 2600+ files) to find the
+   official extension points / prop contracts instead of guessing.
+3. **Write a plan** to `.claude/plans/NN-<slug>.md` — root cause with file:line evidence,
+   the fix, back-compat notes, test plan, delivery gates, and anything explicitly deferred.
+4. **Self-review the plan ~5 passes** — check correctness, edge cases, destructive-action
+   safety, closure/timing traps, protocol back-compat, test coverage, no-legacy. Record the
+   revisions in the plan.
+5. **Test-first (RED → GREEN)** — write the failing test (vitest / testthat), watch it fail,
+   implement, watch it pass. Then full `vitest` + `testthat`.
+6. **Headless-browser verify** — a real `chromote` script under `tests/verify/` that drives
+   the *installed* package and asserts DOM/`data-*` truth + **0 console errors**
+   (see Rule #1c). This is the "did it actually work" gate, not just unit tests.
+
+Hard constraints throughout: no `AssistantUI.legacy.tsx` imports in the live tree; do **not**
+`git commit`/`push` or `npm audit fix` unless asked; keep `.kiro/` and `.codegraph/` untracked.
+
 ## 🔴 Rule #1 — After editing R **or** JS, rebuild + reinstall before testing
 
 Example apps and verification scripts launch via `library(shinyAssistantUI)`, which loads

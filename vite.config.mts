@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { visualizer } from "rollup-plugin-visualizer";
 import { resolve } from "path";
 import { writeFileSync } from "fs";
 
@@ -31,6 +32,14 @@ export default defineConfig({
         }
       },
     },
+    // 构建期产出 bundle 构成报告（treemap，含 gzip/brotli 尺寸）。仅 build 期，
+    // 不进运行时 bundle；产物 gitignore。用于评估"哪些依赖占体积"。
+    visualizer({
+      filename: "inst/www/bundle-stats.html",
+      title: "shinyAssistantUI bundle",
+      gzipSize: true,
+      brotliSize: true,
+    }),
   ],
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),

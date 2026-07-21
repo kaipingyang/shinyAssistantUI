@@ -1,42 +1,34 @@
-test_that("IDE context normalization hides selection without losing active file", {
-  raw <- list(
-    path = "/proj/R/app.R", rel = "R/app.R", selection = "secret <- 42",
-    first_line = 7L, last_line = 9L
-  )
-  visible <- .normalize_ide_context(raw, selection_visible = TRUE)
-  hidden <- .normalize_ide_context(raw, selection_visible = FALSE)
+# .append_ide_context：眼睛(selection_visible)关闭时，整段 IDE 上下文（含活动文件引用）
+# 都不注入 —— 让当前文件“不被 Claude 发现”。开启时注入文件（+选区）。
 
-  expect_identical(visible$relative_path, "R/app.R")
-  expect_identical(visible$selection_text, "secret <- 42")
-  expect_identical(hidden$relative_path, "R/app.R")
-  expect_null(hidden$selection_text)
-  expect_false(hidden$selection_visible)
+test_that("selection_visible=FALSE 时不注入任何 IDE 上下文（连文件都藏）", {
+  ctx <- list(relative_path = "R/app.R", active_file = "/proj/R/app.R",
+              selection_text = "x <- 1", start_line = 4L, end_line = 6L,
+              selection_visible = FALSE)
+  out <- shinyAssistantUI:::.append_ide_context("hello", ctx)
+  expect_identical(out, "hello")                       # 原样返回
+  expect_false(grepl("Active file", out, fixed = TRUE))
+  expect_false(grepl("ide_context", out, fixed = TRUE))
 })
 
-test_that("IDE context suffix is structured, bounded, and removable from history", {
-  ctx <- list(
-    relative_path = "R/app.R", selection_text = strrep("x", 5000L),
-    start_line = 3L, end_line = 8L, selection_visible = TRUE
-  )
-  sent <- .append_ide_context("Please explain this", ctx)
-  expect_match(sent, "Please explain this", fixed = TRUE)
-  expect_match(sent, "R/app.R", fixed = TRUE)
-  expect_match(sent, "lines 3-8", fixed = TRUE)
-  expect_match(sent, "truncated", fixed = TRUE)
-  expect_lt(nchar(sent), 4600L)
-  expect_identical(.strip_ide_context_suffix(sent), "Please explain this")
-  expect_identical(.append_ide_context("plain", NULL), "plain")
+test_that("selection_visible=TRUE 注入活动文件（无选区也注入文件）", {
+  ctx <- list(relative_path = "R/app.R", selection_visible = TRUE)
+  out <- shinyAssistantUI:::.append_ide_context("hello", ctx)
+  expect_true(grepl("Active file: `R/app.R`", out, fixed = TRUE))
 })
 
-test_that("historical user messages never expose injected IDE context", {
-  sent <- .append_ide_context(
-    "Refactor it",
-    list(relative_path = "R/app.R", selection_text = "private_value", start_line = 1L,
-         end_line = 1L, selection_visible = TRUE)
-  )
-  out <- .claude_msgs_to_thread(list(
-    list(type = "user", uuid = "u-context", message = list(content = sent))
-  ))
-  expect_identical(out[[1L]]$content[[1L]]$text, "Refactor it")
-  expect_false(grepl("private_value", out[[1L]]$content[[1L]]$text, fixed = TRUE))
+test_that("selection_visible=TRUE 且有选区时文件与选区都注入", {
+  ctx <- list(relative_path = "R/app.R", selection_text = "x <- 1",
+              start_line = 4L, end_line = 6L, selection_visible = TRUE)
+  out <- shinyAssistantUI:::.append_ide_context("hello", ctx)
+  expect_true(grepl("Active file: `R/app.R`", out, fixed = TRUE))
+  expect_true(grepl("x <- 1", out, fixed = TRUE))
+  expect_true(grepl("lines 4-6", out, fixed = TRUE))
+})
+
+test_that("无 selection_visible 字段(非 addin 后端)保持旧行为：注入文件、不注入选区", {
+  ctx <- list(relative_path = "R/app.R", selection_text = "x <- 1", start_line = 4L)
+  out <- shinyAssistantUI:::.append_ide_context("hello", ctx)
+  expect_true(grepl("Active file: `R/app.R`", out, fixed = TRUE))
+  expect_false(grepl("x <- 1", out, fixed = TRUE))
 })

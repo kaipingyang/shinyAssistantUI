@@ -1,10 +1,7 @@
 "use client";
 import { safeUrl as shinySafeUrl } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
-import {
-  formatMessageTime, detectSlashTrigger, detectMentionTrigger,
-  rankMentionItems, mentionInsertText,
-} from "@/helpers";
+import { formatMessageTime } from "@/helpers";
 
 import {
   ComposerAddAttachment,
@@ -19,6 +16,8 @@ import {
   ReasoningText,
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
+import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
+import { ShinyCurrentQuestion } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { PermissionModeControl } from "@/components/assistant-ui/settings-controls";
 import {
@@ -56,8 +55,6 @@ import {
   EyeIcon,
   EyeOffIcon,
   FileTextIcon,
-  FolderIcon,
-  WrenchIcon,
   MicIcon,
   ClockIcon,
   MoreHorizontalIcon,
@@ -69,6 +66,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ComponentType,
@@ -124,6 +122,50 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  const { historyHasMore, loadingOlder, loadOlderHistory } = useShinyConfig();
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  const previousLoadingOlderRef = useRef(Boolean(loadingOlder));
+  // 内容溢出（需翻页）时才显示顶部"当前提问"小框，短对话不占布局。
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      setOverflowing(viewport.scrollHeight > viewport.clientHeight + 24);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    if (contentRef.current) observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const requestOlder = () => {
+    if (!historyHasMore || loadingOlder || !loadOlderHistory) return;
+    const viewport = viewportRef.current;
+    if (viewport) {
+      olderAnchorRef.current = {
+        height: viewport.scrollHeight,
+        top: viewport.scrollTop,
+      };
+    }
+    loadOlderHistory();
+  };
+
+  useLayoutEffect(() => {
+    const wasLoading = previousLoadingOlderRef.current;
+    previousLoadingOlderRef.current = Boolean(loadingOlder);
+    if (!wasLoading || loadingOlder || !olderAnchorRef.current) return;
+    const viewport = viewportRef.current;
+    if (viewport) {
+      const anchor = olderAnchorRef.current;
+      viewport.scrollTop = anchor.top + (viewport.scrollHeight - anchor.height);
+    }
+    olderAnchorRef.current = null;
+  }, [loadingOlder]);
 
   return (
     <ThreadPrimitive.Root
@@ -137,11 +179,16 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       }}
     >
       <ThreadPrimitive.Viewport
-        turnAnchor="top"
+        ref={viewportRef}
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        onScroll={(event) => {
+          if (event.currentTarget.scrollTop <= 120) requestOlder();
+        }}
+        className="relative flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
+        <ShinyCurrentQuestion visible={overflowing} />
         <div
+          ref={contentRef}
           className={cn(
             "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4",
             isEmpty && "justify-center",
@@ -155,6 +202,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             data-slot="aui_message-group"
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
+            <ShinyHistoryControls onLoadOlder={requestOlder} />
             <ThreadPrimitive.Messages>
               {() => <ThreadMessage />}
             </ThreadPrimitive.Messages>
@@ -179,6 +227,35 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         </div>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+  );
+};
+
+const ShinyHistoryControls: FC<{ onLoadOlder: () => void }> = ({ onLoadOlder }) => {
+  const { readingHistory, historyHasMore, loadingOlder } = useShinyConfig();
+  if (readingHistory) {
+    return (
+      <div
+        data-slot="aui_history_reading"
+        className="text-muted-foreground flex items-center justify-center gap-2 py-3 text-sm"
+      >
+        <span className="inline-block size-3 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        <span>正在读取历史记录…</span>
+      </div>
+    );
+  }
+  if (!historyHasMore) return null;
+  return (
+    <div className="flex justify-center">
+      <button
+        type="button"
+        data-slot="aui_load_older"
+        disabled={loadingOlder}
+        onClick={onLoadOlder}
+        className="text-muted-foreground hover:bg-accent rounded-full border px-3 py-1 text-xs disabled:cursor-wait disabled:opacity-60"
+      >
+        {loadingOlder ? "正在加载更早记录…" : "加载更早记录"}
+      </button>
+    </div>
   );
 };
 
@@ -261,21 +338,19 @@ const IdeContextIndicator: FC = () => {
       className="aui-ide-context text-muted-foreground flex min-w-0 items-center gap-1.5 px-2 text-xs"
     >
       <FileTextIcon className="size-3.5 shrink-0" />
-      <span className="truncate">{file}</span>
-      {lineText && <span className="shrink-0">· {lineText}</span>}
-      {ideContext.hasSelection && (
-        <button
-          type="button"
-          data-slot="aui_selection_visibility"
-          aria-label={selectionVisible ? "Hide selection from prompt" : "Include selection in prompt"}
-          title={selectionVisible ? "Hide selection from prompt" : "Include selection in prompt"}
-          onClick={() => setSelectionVisible(!selectionVisible)}
-          className="hover:bg-accent ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5"
-        >
-          {selectionVisible ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
-          <span>{selectionVisible ? "Selection included" : "Selection hidden"}</span>
-        </button>
-      )}
+      <span className={cn("truncate", !selectionVisible && "line-through opacity-60")}>{file}</span>
+      {lineText && <span className={cn("shrink-0", !selectionVisible && "line-through opacity-60")}>· {lineText}</span>}
+      <button
+        type="button"
+        data-slot="aui_selection_visibility"
+        aria-label={selectionVisible ? "隐藏当前文件，不发送给 Claude" : "把当前文件发送给 Claude"}
+        title={selectionVisible ? "隐藏当前文件，不发送给 Claude" : "把当前文件发送给 Claude"}
+        onClick={() => setSelectionVisible(!selectionVisible)}
+        className="hover:bg-accent ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5"
+      >
+        {selectionVisible ? <EyeIcon className="size-3.5" /> : <EyeOffIcon className="size-3.5" />}
+        <span>{selectionVisible ? (ideContext.hasSelection ? "上下文已包含" : "文件已包含") : "已隐藏"}</span>
+      </button>
     </div>
   );
 };
@@ -291,92 +366,80 @@ const Composer: FC = () => {
         >
           <ComposerAttachments />
           <IdeContextIndicator />
-          <div className="relative">
-            <ShinySlashCommands />
-            <ShinyMentions />
-            <ComposerPrimitive.Input
-              placeholder="Send a message..."
-              className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
-              rows={1}
-              autoFocus
-              enterKeyHint="send"
-              aria-label="Message input"
-              onFocus={refreshIdeContext}
-            />
-          </div>
+          <ShinyComposerInput onFocus={refreshIdeContext} />
           <ComposerAction />
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
 };
-// Slash 命令面板(Claude Code 风格):合并 config.commands(→ AI 的 prompt/skill)与
-// config.action_items(→ 客户端动作,如 /model /clear,不发给 AI)。检测 /trigger 前缀过滤,
-// 按 section 分组。选中:prompt 命令插入 `/name `(发送时 expandSlashCommands 展开);
-// action 直接 onInvokeAction(执行操作 + 记录气泡,不触发 AI)。↑↓ 选择、Enter/点击确认。
-type SlashEntry =
-  | { kind: "prompt"; key: string; label: string; desc?: string; section: string }
-  | { kind: "action"; key: string; label: string; command: string; desc?: string; section: string;
-      item: { id: string; command?: string; label?: string; description?: string; section?: string } };
 
-// ── 每线程冷启动指示器:该线程 client 首次连接(spawn CLI 子进程)期间显示 ──────
-// 出现在对话流最后一条消息(用户消息)之后,连上后消失、正常回复接管。
+// Per-thread Claude CLI connection indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming } = useShinyConfig();
+  const { warming, warmingResuming } = useShinyConfig();
   if (!warming) return null;
   return (
     <div
       data-slot="aui_warming"
+      data-resuming={warmingResuming ? "true" : "false"}
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
       <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      <span>❄️ Claude Code 正在冷启动这个对话线程…(首次连接较慢,后续会快)</span>
+      <span>{warmingResuming ? "正在恢复 Claude Code 对话…" : "正在启动 Claude Code…"}</span>
     </div>
   );
 };
 
-// ── ClaudeAgentSDK 能力对齐 UI ────────────────────────────────────────────────
-// #3 限流 banner + #2 子agent/Task 进度卡 + #4 系统状态行 + #7 stop_task 按钮
 const ShinyStatusPanels: FC = () => {
   const { rateLimit, tasks, statusText, stopTask } = useShinyConfig();
   const activeTasks = (tasks ?? []).filter(
-    (t) => !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(t.status ?? ""),
+    (task) => !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(task.status ?? ""),
   );
   const hasAny = rateLimit || activeTasks.length > 0 || statusText;
   if (!hasAny) return null;
   return (
     <div className="aui-sdk-panels flex flex-col gap-2">
       {rateLimit && (
-        <div className="aui-rate-limit-banner flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
-             data-slot="aui_rate_limit">
+        <div
+          className="aui-rate-limit-banner flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+          data-slot="aui_rate_limit"
+        >
           <span>⚠️ Rate limited{rateLimit.type ? ` (${rateLimit.type})` : ""}</span>
           {typeof rateLimit.utilization === "number" && <span>· {Math.round(rateLimit.utilization)}% used</span>}
           {rateLimit.resetsAt && <span>· resets {rateLimit.resetsAt}</span>}
         </div>
       )}
-      {activeTasks.map((t) => (
-        <div key={t.taskId}
-             data-slot="aui_task_card" data-task-id={t.taskId}
-             className="aui-task-card flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+      {activeTasks.map((task) => (
+        <div
+          key={task.taskId}
+          data-slot="aui_task_card"
+          data-task-id={task.taskId}
+          className="aui-task-card flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
+        >
           <span className="animate-pulse">⚙️</span>
           <span className="flex-1 truncate">
-            {t.description || t.summary || `Subagent ${t.taskId.slice(0, 6)}`}
-            {t.toolName ? <span className="text-muted-foreground"> · {t.toolName}</span> : null}
-            {t.status ? <span className="text-muted-foreground"> · {t.status}</span> : null}
+            {task.description || task.summary || `Subagent ${task.taskId.slice(0, 6)}`}
+            {task.toolName ? <span className="text-muted-foreground"> · {task.toolName}</span> : null}
+            {task.status ? <span className="text-muted-foreground"> · {task.status}</span> : null}
           </span>
           {stopTask && (
             <button
               type="button"
-              data-slot="aui_task_stop" data-stop-task={t.taskId}
-              onClick={() => stopTask(t.taskId)}
+              data-slot="aui_task_stop"
+              data-stop-task={task.taskId}
+              onClick={() => stopTask(task.taskId)}
               className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
-            >Stop</button>
+            >
+              Stop
+            </button>
           )}
         </div>
       ))}
       {statusText && (
-        <div className="aui-status-line flex items-center gap-2 px-1 text-xs text-muted-foreground"
-             data-slot="aui_status_line">
+        <div
+          className="aui-status-line flex items-center gap-2 px-1 text-xs text-muted-foreground"
+          data-slot="aui_status_line"
+        >
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
           <span>{statusText}</span>
         </div>
@@ -385,7 +448,6 @@ const ShinyStatusPanels: FC = () => {
   );
 };
 
-// #1 成本/用量页脚
 const ShinyUsageFooter: FC = () => {
   const { usage } = useShinyConfig();
   if (!usage || (usage.costUsd == null && usage.tokens == null)) return null;
@@ -395,254 +457,12 @@ const ShinyUsageFooter: FC = () => {
   if (usage.turns != null) parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
   if (usage.durationMs != null) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
   return (
-    <div className="aui-usage-footer flex items-center justify-end gap-2 px-1 text-xs text-muted-foreground"
-         data-slot="aui_usage_footer" data-cost-usd={usage.costUsd ?? ""}>
+    <div
+      className="aui-usage-footer flex items-center justify-end gap-2 px-1 text-xs text-muted-foreground"
+      data-slot="aui_usage_footer"
+      data-cost-usd={usage.costUsd ?? ""}
+    >
       <span>{parts.join(" · ")}</span>
-    </div>
-  );
-};
-
-const ShinySlashCommands: FC = () => {
-  const { commands, actionItems, onInvokeAction } = useShinyConfig();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const aui = useAui() as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const text = useAuiState((s: any) => (s.composer?.text as string) ?? "");
-  const [idx, setIdx] = useState(0);
-
-  const total = commands.length + actionItems.length;
-  const cursor = text.length;
-  const trig = total ? detectSlashTrigger(text, cursor) : null;
-  if (!trig) return null;
-  const q = trig.query.toLowerCase();
-
-  const entries: SlashEntry[] = [
-    ...actionItems
-      .filter((a) => (a.command ?? a.id).toLowerCase().startsWith(q) || a.id.toLowerCase().startsWith(q) || (a.label ?? "").toLowerCase().includes(q))
-      .map((a): SlashEntry => ({ kind: "action", key: `a-${a.id}`, label: a.label ?? a.id, command: a.command ?? a.id, desc: a.description, section: a.section ?? "Actions", item: a })),
-    ...commands
-      .filter((c) => c.name.toLowerCase().startsWith(q))
-      .map((c): SlashEntry => ({ kind: "prompt", key: `c-${c.name}`, label: c.name, desc: c.description, section: c.category ?? "Commands" })),
-  ];
-  if (entries.length === 0) return null;
-  const sel = Math.min(idx, entries.length - 1);
-
-  const chooseCommand = (name: string) => {
-    const before = text.slice(0, trig.offset);
-    const after = text.slice(cursor);
-    aui.composer().setText(`${before}/${name} ${after}`);
-    setIdx(0);
-    (document.querySelector(".aui-composer-input") as HTMLTextAreaElement | null)?.focus();
-  };
-  const chooseAction = (item: { id: string; command?: string; label?: string; description?: string; section?: string }) => {
-    // 清掉输入框里的 /trigger,再执行动作(不发给 AI)
-    const before = text.slice(0, trig.offset);
-    const after = text.slice(cursor);
-    aui.composer().setText(`${before}${after}`);
-    setIdx(0);
-    onInvokeAction(item);
-  };
-  const pick = (e: SlashEntry) => (e.kind === "action" ? chooseAction(e.item) : chooseCommand(e.label));
-
-  // 按 section 分组(保持插入顺序)
-  const sections: { name: string; items: { e: SlashEntry; gi: number }[] }[] = [];
-  entries.forEach((e, gi) => {
-    let s = sections.find((x) => x.name === e.section);
-    if (!s) { s = { name: e.section, items: [] }; sections.push(s); }
-    s.items.push({ e, gi });
-  });
-
-  return (
-    <div
-      className="aui-slash-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-lg"
-      onKeyDownCapture={(ev) => {
-        if (ev.key === "ArrowDown") { ev.preventDefault(); setIdx((i) => (i + 1) % entries.length); }
-        else if (ev.key === "ArrowUp") { ev.preventDefault(); setIdx((i) => (i - 1 + entries.length) % entries.length); }
-        else if (ev.key === "Enter") { ev.preventDefault(); pick(entries[sel]); }
-        else if (ev.key === "Escape") { ev.preventDefault(); setIdx(0); }
-      }}
-    >
-      {sections.map((s) => (
-        <div key={s.name}>
-          <div className="text-muted-foreground px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide">{s.name}</div>
-          {s.items.map(({ e, gi }) => (
-            <button
-              key={e.key}
-              type="button"
-              data-slash-cmd={e.kind === "prompt" ? e.label : undefined}
-              data-slash-action={e.kind === "action" ? e.item.id : undefined}
-              onMouseDown={(ev) => { ev.preventDefault(); pick(e); }}
-              className={
-                "aui-slash-item flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-start text-sm " +
-                (gi === sel ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
-              }
-            >
-              <span className="font-medium">{e.kind === "action" ? `⚙️ /${e.command}` : `/${e.label}`}</span>
-              {e.kind === "action" && e.label !== e.command && <span className="text-muted-foreground text-xs">{e.label}</span>}
-              {e.desc && <span className="text-muted-foreground text-xs">{e.desc}</span>}
-            </button>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-};
-
-// @mention discovery: tools plus capability-backed workspace files/folders.
-// File content is never expanded in the browser; choosing an item inserts only a
-// literal @path (or @path#Lx-Ly for the current IDE selection).
-type MentionEntry = {
-  key: string;
-  section: "Selection" | "Files" | "Folders" | "Tools";
-  label: string;
-  description?: string;
-  insertText: string;
-  kind: "selection" | "file" | "folder" | "tool";
-};
-
-const ShinyMentions: FC = () => {
-  const {
-    tools, ideContext, selectionVisible,
-    workspaceMentions, searchWorkspace,
-  } = useShinyConfig();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const aui = useAui() as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const text = useAuiState((state: any) => (state.composer?.text as string) ?? "");
-  const [idx, setIdx] = useState(0);
-  const popoverRef = useRef<HTMLDivElement>(null);
-
-  const cursor = text.length;
-  const enabled = tools.length > 0 || workspaceMentions.enabled || Boolean(ideContext?.hasSelection);
-  const trig = enabled ? detectMentionTrigger(text, cursor) : null;
-  const query = trig?.query ?? "";
-
-  useEffect(() => {
-    if (!trig || !workspaceMentions.enabled) return;
-    const timer = window.setTimeout(() => searchWorkspace(query), 80);
-    return () => window.clearTimeout(timer);
-  }, [query, Boolean(trig), workspaceMentions.enabled, searchWorkspace]);
-
-  const q = query.toLowerCase();
-  const workspace = rankMentionItems(workspaceMentions.items, query);
-  const entries: MentionEntry[] = [];
-  const activePath = ideContext?.relativePath;
-  if (
-    selectionVisible && ideContext?.hasSelection && activePath &&
-    (!q || activePath.toLowerCase().includes(q))
-  ) {
-    entries.push({
-      key: `selection-${activePath}`,
-      section: "Selection",
-      label: mentionInsertText(
-        { kind: "file", path: activePath },
-        { startLine: ideContext.startLine, endLine: ideContext.endLine },
-      ),
-      description: "Current IDE selection",
-      insertText: mentionInsertText(
-        { kind: "file", path: activePath },
-        { startLine: ideContext.startLine, endLine: ideContext.endLine },
-      ),
-      kind: "selection",
-    });
-  }
-  for (const item of workspace) {
-    entries.push({
-      key: `${item.kind}-${item.path}`,
-      section: item.kind === "file" ? "Files" : "Folders",
-      label: item.insertText ?? mentionInsertText(item),
-      description: item.path,
-      insertText: item.insertText ?? mentionInsertText(item),
-      kind: item.kind,
-    });
-  }
-  for (const tool of tools.filter((item) =>
-    item.name.toLowerCase().startsWith(q) || (item.description ?? "").toLowerCase().includes(q),
-  )) {
-    entries.push({
-      key: `tool-${tool.name}`, section: "Tools", label: `@${tool.name}`,
-      description: tool.description, insertText: `@${tool.name}`, kind: "tool",
-    });
-  }
-
-  const selected = Math.min(idx, Math.max(0, entries.length - 1));
-  const choose = (entry: MentionEntry) => {
-    if (!trig) return;
-    const before = text.slice(0, trig.offset);
-    const after = text.slice(cursor);
-    aui.composer().setText(`${before}${entry.insertText} ${after}`);
-    setIdx(0);
-  };
-
-  // The popover is a sibling of the textarea, so key events from the focused
-  // composer never bubble through the popover itself. Listen in document capture
-  // while this widget's own textarea is active; this preserves multi-widget
-  // isolation and prevents Enter from submitting the raw @query.
-  useEffect(() => {
-    if (!trig || !entries.length) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      const input = popoverRef.current?.parentElement?.querySelector("textarea.aui-composer-input");
-      if (!input || document.activeElement !== input) return;
-      if (event.key === "ArrowDown") {
-        event.preventDefault(); event.stopPropagation();
-        setIdx((value) => (value + 1) % entries.length);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault(); event.stopPropagation();
-        setIdx((value) => (value - 1 + entries.length) % entries.length);
-      } else if (event.key === "Enter") {
-        event.preventDefault(); event.stopPropagation();
-        choose(entries[selected]);
-      }
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [trig?.offset, text, cursor, entries, selected]);
-
-  if (!trig || (entries.length === 0 && !workspaceMentions.loading)) return null;
-  const sections = (["Selection", "Files", "Folders", "Tools"] as const)
-    .map((name) => ({ name, items: entries.filter((entry) => entry.section === name) }))
-    .filter((section) => section.items.length > 0);
-
-  return (
-    <div
-      ref={popoverRef}
-      className="aui-mention-popover bg-popover text-popover-foreground absolute bottom-full left-0 z-50 mb-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-lg"
-      data-slot="aui_mention_popover"
-    >
-      {workspaceMentions.loading && entries.length === 0 && (
-        <div className="text-muted-foreground px-2.5 py-2 text-xs">Searching workspace…</div>
-      )}
-      {sections.map((section) => (
-        <div key={section.name} data-mention-section={section.name.toLowerCase()}>
-          <div className="text-muted-foreground px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide">
-            {section.name}
-          </div>
-          {section.items.map((entry) => {
-            const globalIndex = entries.indexOf(entry);
-            const Icon = entry.kind === "folder" ? FolderIcon
-              : entry.kind === "tool" ? WrenchIcon : FileTextIcon;
-            return (
-              <button
-                key={entry.key}
-                type="button"
-                data-mention-kind={entry.kind}
-                data-mention-path={entry.kind === "tool" ? undefined : entry.description}
-                onMouseDown={(event) => { event.preventDefault(); choose(entry); }}
-                className={
-                  "aui-mention-item flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-start text-sm " +
-                  (globalIndex === selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/60")
-                }
-              >
-                <Icon className="mt-0.5 size-4 shrink-0" />
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">{entry.label}</span>
-                  {entry.description && <span className="text-muted-foreground block truncate text-xs">{entry.description}</span>}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ))}
     </div>
   );
 };

@@ -403,3 +403,11 @@ export function mentionInsertText(
   const end = lines.endLine ? Math.max(start, Math.trunc(lines.endLine)) : start;
   return `${base}#L${start}${end === start ? "" : `-L${end}`}`;
 }
+
+export function toolHistoryDefaultOpen(
+  options: { defaultOpen?: boolean } | undefined,
+  requiresAction: boolean,
+): boolean {
+  if (typeof options?.defaultOpen === "boolean") return options.defaultOpen;
+  return requiresAction;
+}

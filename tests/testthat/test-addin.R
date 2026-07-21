@@ -67,7 +67,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
       normal_stop_calls <<- normal_stop_calls + 1L
       invisible(NULL)
     },
-    list_claude_sessions = function(directory, limit = 100L) {
+    list_claude_sessions = function(directory, limit = 100L, archived_ids = character()) {
       listed_directory <<- directory
       expected
     },
@@ -90,6 +90,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
   expect_identical(listed_directory, project)
   expect_length(sent_sessions, 1L)
   expect_identical(sent_sessions[[1L]], list(sessions = expected))
+  expect_identical(server_args$persistence, "server")
   action_commands <- vapply(server_args$action_items, `[[`, character(1), "command")
   expect_setequal(action_commands, c("context", "compact", "clear", "mcp"))
 })

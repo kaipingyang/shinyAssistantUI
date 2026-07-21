@@ -8,6 +8,7 @@ assistantUIServer(
   id,
   handler,
   show_thread_list = FALSE,
+  persistence = c("client", "server", "none"),
   suggestions = list(),
   commands = list(),
   tools = list(),
@@ -18,6 +19,9 @@ assistantUIServer(
   on_session_load = NULL,
   on_feedback = NULL,
   on_rename = NULL,
+  on_open_file = NULL,
+  on_archive_session = NULL,
+  on_delete_session = NULL,
   code_theme = "one-light",
   strings = NULL,
   assistant_avatar = list(fallback = "AI"),
@@ -118,6 +122,12 @@ streaming; errors from the promise are automatically forwarded via
 inside the widget for switching between conversations. Default \code{FALSE}
 (backward-compatible).}
 
+\item{persistence}{Where thread history is persisted. \code{"client"} (default)
+restores and synchronizes browser \code{localStorage}; \code{"server"} treats
+\code{send_sessions()} snapshots as authoritative and never accesses
+\code{localStorage}; \code{"none"} keeps state only for the current page lifetime and
+likewise never accesses \code{localStorage}.}
+
 \item{suggestions}{List of starter suggestion bubbles shown before the first
 message. Each element is a list with \code{prompt} (required, the text sent on
 click) and optional \code{text} (display label, defaults to \code{prompt}).}
@@ -130,14 +140,6 @@ shown as a section header, such as \code{"Personal Skills"} or \code{"Project Sk
 \item{tools}{List of tool definitions for the \@ mention menu. Each element
 is a list with \code{name} and \code{description}. Typically mirrors the tools
 registered with ellmer.}
-
-\item{ide_context_provider}{Optional zero-argument function sampled for every
-new user submission. It may return active file/selection metadata; selection
-text remains on the R side and is never sent to the browser.}
-
-\item{workspace_search_provider}{Optional function accepting \code{query}, \code{kinds},
-and \code{limit}, returning literal file/folder mention entries. Supplying it
-advertises the workspace mention capability.}
 
 \item{action_items}{List of action-type slash-command items. Unlike
 \code{commands}, these do not send a message to the AI — instead, clicking them
@@ -154,6 +156,14 @@ for exact direct input; defaults to \code{id}), \code{label}, and optional
 )
 }\if{html}{\out{</div>}}}
 
+\item{ide_context_provider}{Optional zero-argument function sampled for every
+new user submission. It may return active file/selection metadata; selection
+text remains on the R side and is never sent to the browser.}
+
+\item{workspace_search_provider}{Optional function accepting \code{query}, \code{kinds},
+and \code{limit}, returning literal file/folder mention entries. Supplying it
+advertises the workspace mention capability.}
+
 \item{on_action}{\verb{function(id)} called when the user clicks an item from
 \code{action_items}. \code{id} is the string from the item definition. Use this to
 trigger server-side logic (e.g. toggle a setting, open a URL, call
@@ -168,6 +178,22 @@ clicks a 👍/👎 feedback button (\code{type} is \code{"positive"} or \code{"n
 \item{on_rename}{Optional \verb{function(thread_id, title)} called when the user
 renames a thread in the sidebar. The new title is already persisted
 client-side (localStorage); use this to sync server-side session stores.}
+
+\item{on_open_file}{Optional \verb{function(path, line = NULL)} called when the
+user clicks a file reference in a tool card, or after the assistant edits a
+file (the most recent successful edit of a run is revealed). The Claude
+addin wires this to \code{rstudioapi::navigateToFile()}; leave \code{NULL} (default)
+in browser contexts where no editor is available.}
+
+\item{on_archive_session}{Optional \verb{function(session_id, archived)} called when
+the user archives (\code{archived = TRUE}) or unarchives (\code{FALSE}) a session in the
+sidebar. Use it to persist a server-authoritative soft-hide list so archived
+sessions stay hidden across reopens (the Claude addin stores this per project).}
+
+\item{on_delete_session}{Optional \verb{function(session_id)} called when the user
+confirms deleting a session. This is destructive: the Claude addin wires it to
+\code{ClaudeAgentSDK::delete_session()}, permanently removing the transcript from
+disk. The UI requires an explicit confirmation before invoking it.}
 
 \item{code_theme}{Character string selecting the syntax-highlighting theme
 for code blocks. Available light themes: \code{"one-light"} (default),
@@ -229,9 +255,12 @@ instead of an inline panel.}
 \item{prewarm}{Logical (default \code{FALSE}). If \code{TRUE} and the \code{handler} exposes a
 \code{warmup} attribute (e.g. \code{\link[=make_claude_handler]{make_claude_handler()}}), pre-connect the initial
 thread's client on mount so the \strong{first} message on that thread isn't slowed
-by the cold start (ClaudeSDKClient spawning the \code{claude} CLI subprocess). A
-brief cold-start indicator is shown while connecting. New threads / loaded
-sessions still cold-start on their first message (indicator shown).
+by the cold start (ClaudeSDKClient spawning the \code{claude} CLI subprocess).
+Historical sessions are warmed independently after \code{send_thread()} succeeds,
+regardless of this option; their warmups are deduplicated per thread and a
+failed warmup may be retried on a later load. A brief cold-start indicator is
+shown while connecting. Newly created blank threads remain lazy unless they
+are the initial thread covered by this one-shot option.
 \strong{Left \code{FALSE} by default on purpose}: enabling it makes app startup attempt
 a backend connection at mount, so a slow/unreachable backend would stall the
 open (the default lazy connect only happens on the first message). Turn on

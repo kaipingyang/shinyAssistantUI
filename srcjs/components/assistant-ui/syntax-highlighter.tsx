@@ -1,0 +1,61 @@
+import type { FC } from "react";
+import type { SyntaxHighlighterProps } from "@assistant-ui/react-markdown";
+import { PrismLight } from "react-syntax-highlighter";
+
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import r from "react-syntax-highlighter/dist/esm/languages/prism/r";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+import css from "react-syntax-highlighter/dist/esm/languages/prism/css";
+
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+
+// 助手消息代码块的语法高亮。直接渲染 PrismLight（同步、只打包下面显式注册的语言），
+// 刻意不走 @assistant-ui/react-syntax-highlighter 的 make* 工厂——它会把完整
+// react-syntax-highlighter（约 200 种语言）拉进单 IIFE bundle 使体积翻倍。
+// 与工具结果卡（shiny-tool-result.tsx）统一用 PrismLight + oneLight。
+PrismLight.registerLanguage("r", r);
+PrismLight.registerLanguage("rscript", r);
+PrismLight.registerLanguage("python", python);
+PrismLight.registerLanguage("py", python);
+PrismLight.registerLanguage("bash", bash);
+PrismLight.registerLanguage("sh", bash);
+PrismLight.registerLanguage("shell", bash);
+PrismLight.registerLanguage("json", json);
+PrismLight.registerLanguage("yaml", yaml);
+PrismLight.registerLanguage("yml", yaml);
+PrismLight.registerLanguage("sql", sql);
+PrismLight.registerLanguage("markdown", markdown);
+PrismLight.registerLanguage("md", markdown);
+PrismLight.registerLanguage("css", css);
+PrismLight.registerLanguage("javascript", javascript);
+PrismLight.registerLanguage("js", javascript);
+PrismLight.registerLanguage("typescript", typescript);
+PrismLight.registerLanguage("ts", typescript);
+PrismLight.registerLanguage("tsx", tsx);
+PrismLight.registerLanguage("jsx", tsx);
+
+export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }) => {
+  return (
+    <PrismLight
+      language={language || "text"}
+      style={oneLight}
+      data-syntax-highlighter="prism"
+      customStyle={{
+        margin: 0,
+        width: "100%",
+        background: "transparent",
+        padding: 0,
+        fontSize: "13px",
+      }}
+    >
+      {code}
+    </PrismLight>
+  );
+};
