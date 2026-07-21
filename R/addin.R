@@ -85,13 +85,12 @@
         .toggle_archived_id(archived_path, project, session_id, archived)
       },
       on_delete_session = function(session_id) {
-        # Delete 真删磁盘 transcript（不可逆）+ 清归档/映射记录。前端已本地移除该项；
-        # 同样不重推（避免当前对话重复）。
-        tryCatch(ClaudeAgentSDK::delete_session(session_id, directory = project),
-                 error = function(e) NULL)
-        .toggle_archived_id(archived_path, project, session_id, FALSE)
-        tryCatch(.remove_claude_session_map(session_map_path, session_id),
-                 error = function(e) NULL)
+        # 删前断开该 session 的 client（避免 CLI 写回）；真删失败不再静默——重推让它重现。
+        .claude_delete_session(
+          session_id, project = project, handler = handler,
+          archived_path = archived_path, session_map_path = session_map_path,
+          on_reappear = function() tryCatch(push_sessions(), error = function(e) NULL)
+        )
       },
       ide_context_provider = function() .addin_editor_context(project),
       workspace_search_provider = workspace_search,
@@ -117,6 +116,27 @@
     })
   }
   shiny::shinyApp(ui, server)
+}
+
+# 删除一个会话：先断开仍连着它的 client（否则 CLI 会把 transcript 写回 → 删了又出现），
+# 再真删磁盘 transcript。删除失败**不静默**：warning + on_reappear（重推列表，让该会话重新出现，
+# 诚实反馈而非假装删了）。成功才清归档/映射。返回 TRUE/FALSE。
+.claude_delete_session <- function(session_id, project, handler,
+                                   archived_path, session_map_path,
+                                   on_reappear = function() invisible(NULL)) {
+  tryCatch(attr(handler, "release_session")(session_id), error = function(e) NULL)
+  ok <- tryCatch({ .delete_claude_session(session_id, directory = project); TRUE },
+                 error = function(e) {
+                   warning("[CLAUDE] delete_session failed: ", conditionMessage(e), call. = FALSE)
+                   FALSE
+                 })
+  if (isTRUE(ok)) {
+    .toggle_archived_id(archived_path, project, session_id, FALSE)
+    tryCatch(.remove_claude_session_map(session_map_path, session_id), error = function(e) NULL)
+  } else {
+    tryCatch(on_reappear(), error = function(e) NULL)
+  }
+  invisible(ok)
 }
 
 # Stop the gadget with a normal NULL return. This is deliberately separate so

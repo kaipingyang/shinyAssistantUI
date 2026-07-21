@@ -241,6 +241,9 @@
 # Small SDK seams keep handler behavior unit-testable without network or CLI.
 .new_claude_options <- function(...) ClaudeAgentSDK::ClaudeAgentOptions(...)
 .new_claude_client <- function(options) ClaudeAgentSDK::ClaudeSDKClient$new(options)
+# 删除会话 transcript 的 seam（可单测 mock）。失败时 delete_session 会 stop()（不静默）。
+.delete_claude_session <- function(session_id, directory = NULL)
+  ClaudeAgentSDK::delete_session(session_id, directory = directory)
 .get_claude_session_messages <- function(session_id) {
   ClaudeAgentSDK::get_session_messages(session_id)
 }
@@ -801,6 +804,26 @@ make_claude_handler <- function(options       = NULL,
     client
   }
 
+  # 按 session_id 反查线程并断开其仍连着的 client（删除会话前调用，避免 CLI 把
+  # transcript 写回磁盘导致"删了又出现"）。老 session（无活动 client）= no-op。
+  release_session <- function(session_id) {
+    if (is.null(session_id) || !nzchar(session_id %||% "")) return(invisible(character(0)))
+    matches <- function(m) {
+      if (!length(m)) return(character(0))
+      names(m)[vapply(m, function(s) identical(as.character(s), as.character(session_id)), logical(1))]
+    }
+    disk <- tryCatch(.read_claude_session_map(session_map_path), error = function(e) list())
+    tids <- unique(c(matches(disk), matches(session_map)))
+    for (tid in tids) {
+      cl <- clients[[tid]]
+      if (!is.null(cl)) {
+        .disconnect_claude_client_safely(cl)
+        clients[[tid]] <<- NULL
+      }
+    }
+    invisible(tids)
+  }
+
   later_promise <- function(delay = 0.05) {
     promises::promise(function(resolve, reject) {
       later::later(function() resolve(NULL), delay = delay)
@@ -1281,6 +1304,8 @@ make_claude_handler <- function(options       = NULL,
     get_client(thread_id)
     invisible(NULL)
   }
+  # 暴露"按 session 断开 client"，供 addin 删除会话前调用（见 .claude_delete_session）。
+  attr(handler_fn, "release_session") <- release_session
   handler_fn
 }
 
