@@ -151,8 +151,7 @@
 }
 
 .make_addin_workspace_search_provider <- function(project, cache_path = NULL) {
-  cache_path <- cache_path %||% file.path(
-    Sys.getenv("HOME", unset = "~"), ".claude_addin_workspace_cache.rds")
+  cache_path <- cache_path %||% .claude_addin_path("workspace_cache.rds")
   # project 可为字符串（固定）或函数（动态当前工作目录）。每次查询按当前目录取带缓存的索引，
   # 从而工作目录切换后 @mention 搜索自动跟随。
   dir_provider <- if (is.function(project)) project else function() project

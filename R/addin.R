@@ -7,6 +7,36 @@
 # IDE 上下文见 addin-context.R；workspace 搜索见 addin-workspace.R；UI/动作项见 addin-ui.R。
 # `%||%` 已是包内函数(见 handlers.R),此处直接复用。
 
+# ── addin 持久化存储：统一放 ~/.claude_addin/ 目录（原来散落 $HOME 根） ──────────
+.claude_addin_dir <- function(home = Sys.getenv("HOME", unset = "~")) {
+  file.path(home, ".claude_addin")
+}
+.claude_addin_path <- function(name, home = Sys.getenv("HOME", unset = "~")) {
+  file.path(.claude_addin_dir(home), name)
+}
+# 一次性迁移：把旧的 ~/.claude_addin_*.rds 搬进 ~/.claude_addin/<name>.rds。
+# 新文件已存在则不覆盖（保护当前数据）。启动时调用一次。
+.migrate_addin_storage <- function(home = Sys.getenv("HOME", unset = "~")) {
+  dir <- .claude_addin_dir(home)
+  if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+  moves <- list(
+    c(".claude_addin_session_map.rds",     "session_map.rds"),
+    c(".claude_addin_archived.rds",        "archived.rds"),
+    c(".claude_addin_workspace_cache.rds", "workspace_cache.rds"),
+    c(".claude_addin_recent_dirs.rds",     "recent_dirs.rds"),
+    c(".claude_addin_projects.rds",        "projects.rds")
+  )
+  for (m in moves) {
+    old <- file.path(home, m[[1]]); new <- file.path(dir, m[[2]])
+    if (file.exists(old) && !file.exists(new)) {
+      ok <- isTRUE(tryCatch(file.rename(old, new), error = function(e) FALSE))
+      if (!ok) tryCatch({ file.copy(old, new, overwrite = FALSE); file.remove(old) },
+                        error = function(e) NULL)
+    }
+  }
+  invisible(dir)
+}
+
 # 当前项目根:RStudio 项目 → 否则 getwd()。无 rstudioapi 时安全回落。
 .addin_project <- function() {
   proj <- NULL
@@ -47,12 +77,11 @@
       include_partial_messages    = TRUE
     )
   }
+  .migrate_addin_storage()
   # session_map stored in user home to survive project switches
-  session_map_path <- file.path(
-    Sys.getenv("HOME", unset = "~"), ".claude_addin_session_map.rds")
+  session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
-  archived_path <- file.path(
-    Sys.getenv("HOME", unset = "~"), ".claude_addin_archived.rds")
+  archived_path <- .claude_addin_path("archived.rds")
   # 当前工作目录（可切换）。用普通环境持有，cwd_provider 在连接时读取；工作目录选择器
   # （Phase 3b）改它并触发 reset_clients + 重推 sessions。默认 = 初始 project。
   dir_state <- new.env(parent = emptyenv())
@@ -89,7 +118,7 @@
     on_set_wd <- function(path) apply_working_dir(path)
 
     # 收藏夹（持久化 home）。保存当前目录 / 删除，改后回推列表。apply/ctrl 惰性引用。
-    projects_path <- file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_projects.rds")
+    projects_path <- .claude_addin_path("projects.rds")
     on_save_project <- function() {
       ctrl$send_projects(.add_saved_project(projects_path, dir_state$cwd))
     }
@@ -105,7 +134,7 @@
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
       on_set_working_dir  = on_set_wd,
-      projects          = .read_saved_projects(file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_projects.rds")),
+      projects          = .read_saved_projects(.claude_addin_path("projects.rds")),
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
@@ -157,7 +186,7 @@
     })
 
     # 最近工作目录（存 home，跨会话保留；最近在前，上限 8）。
-    recent_path <- file.path(Sys.getenv("HOME", unset = "~"), ".claude_addin_recent_dirs.rds")
+    recent_path <- .claude_addin_path("recent_dirs.rds")
     read_recent <- function() {
       if (!file.exists(recent_path)) return(character(0))
       v <- tryCatch(readRDS(recent_path), error = function(e) character(0))
