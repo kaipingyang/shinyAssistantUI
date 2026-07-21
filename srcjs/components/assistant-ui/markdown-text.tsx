@@ -14,6 +14,7 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { SyntaxHighlighter, resolveCodeLanguage } from "@/components/assistant-ui/syntax-highlighter";
+import { DiffCodeBlock } from "@/components/assistant-ui/diff-viewer";
 import { cn } from "@/lib/utils";
 
 const MarkdownTextImpl = () => {
@@ -22,6 +23,10 @@ const MarkdownTextImpl = () => {
       remarkPlugins={[remarkGfm]}
       className="aui-md"
       components={defaultComponents}
+      componentsByLanguage={{
+        diff: { SyntaxHighlighter: DiffCodeBlock },
+        patch: { SyntaxHighlighter: DiffCodeBlock },
+      }}
       defer
     />
   );

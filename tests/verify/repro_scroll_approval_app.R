@@ -24,6 +24,24 @@ repro_handler <- function(message, thread_id, on_chunk, on_done,
     })
     return(invisible(NULL))
   }
+  if (grepl("editdiff", message, fixed = TRUE)) {
+    # Edit 工具 → 工具卡应自动渲染 git 式 diff（old_string→new_string）
+    on_tool_call("edit-1", "Edit",
+                 args = list(file_path = "/tmp/demo.R",
+                             old_string = "x <- 1\nprint(x)",
+                             new_string = "x <- 2\nprint(x)"),
+                 annotations = list(icon = "pencil", defaultOpen = TRUE))
+    on_tool_result("edit-1", "ok", is_error = FALSE)
+    on_chunk("done")
+    on_done()
+    return(invisible(NULL))
+  }
+  if (grepl("diffblock", message, fixed = TRUE)) {
+    # 手动打印的 ```diff 块（裸 +/- 无 hunk 头）应上色为红绿
+    on_chunk("Diff:\n\n```diff\n- x <- 1\n+ x <- 2\n```\n")
+    on_done()
+    return(invisible(NULL))
+  }
   if (grepl("codeblock", message, fixed = TRUE)) {
     # 裸 ``` 代码块（无语言标签）→ assistant-ui 记为 "unknown" → 期望本 addin 按 R 处理
     on_chunk("Here is some code:\n\n```\nx <- 1\nprint(x)\n```\n")

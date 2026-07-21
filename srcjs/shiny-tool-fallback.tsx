@@ -4,7 +4,8 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { Button } from "@/components/ui/button";
 import { resolveApprovalHandler } from "./approval-registry";
 import { ShinyToolResult } from "./shiny-tool-result";
-import { computeToolDepth, toolHistoryDefaultOpen } from "./helpers";
+import { computeToolDepth, toolHistoryDefaultOpen, getEditDiff } from "./helpers";
+import { DiffViewer } from "@/components/assistant-ui/diff-viewer";
 import { useShinyConfig } from "./shiny-config-context";
 import {
   SearchIcon, DatabaseIcon, CodeIcon, FileTextIcon, GlobeIcon, TerminalIcon,
@@ -34,6 +35,8 @@ const _decisionRegistry = new Map<string, "approved" | "denied">();
 export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, args, argsText, result, status, artifact, toolCallId } = props;
   const ann = artifact as Record<string, unknown> | undefined;
+  // Edit/MultiEdit：用 old_string→new_string 渲染 git 式 diff（替代裸参数 JSON）。
+  const editDiff = getEditDiff(toolName, args);
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
   const defaultOpen = toolHistoryDefaultOpen(
@@ -133,35 +136,18 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
         <ToolFallback.Trigger toolName={displayTitle} status={status} />
         <ToolFallback.Content>
-          <ToolFallback.Args argsText={argsText} />
-
-          {pending && needsApproval && decision === null && (
-            <div className="aui-shiny-approval flex flex-col gap-2 pt-1">
-              {Boolean(ann?.title || ann?.description || ann?.displayName) && (
-                <div className="aui-approval-meta flex flex-col gap-0.5">
-                  {ann?.title != null && String(ann.title) !== "" && (
-                    <p data-approval-title className="text-sm font-medium text-foreground">
-                      {String(ann.title)}
-                    </p>
-                  )}
-                  {ann?.displayName != null && String(ann.displayName) !== "" && (
-                    <p data-approval-displayname className="text-xs font-medium text-muted-foreground">
-                      {String(ann.displayName)}
-                    </p>
-                  )}
-                  {ann?.description != null && String(ann.description) !== "" && (
-                    <p data-approval-description className="text-xs text-muted-foreground">
-                      {String(ann.description)}
-                    </p>
-                  )}
-                </div>
-              )}
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" onClick={() => decide(true)}>Approve</Button>
-                <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
-              </div>
+          {editDiff ? (
+            <div data-slot="aui_edit_diff" className="mt-1 max-h-96 overflow-y-auto">
+              <DiffViewer
+                oldFile={{ content: editDiff.oldContent, name: editDiff.fileName }}
+                newFile={{ content: editDiff.newContent, name: editDiff.fileName }}
+                viewMode="unified"
+              />
             </div>
+          ) : (
+            <ToolFallback.Args argsText={argsText} />
           )}
+
           {!pending && (
             <div className="aui-shiny-tool-result">
               <p className="text-muted-foreground text-xs font-medium">Result:</p>
@@ -172,6 +158,35 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
           )}
         </ToolFallback.Content>
       </ToolFallback.Root>
+      {/* 审批 UI 放在折叠内容【外面】：待审批时始终可见，即使工具卡被折叠也能操作
+          （与下方 ✓ Approved 指示同源的修复）。 */}
+      {pending && needsApproval && decision === null && (
+        <div className="aui-shiny-approval mt-1 flex flex-col gap-2">
+          {Boolean(ann?.title || ann?.description || ann?.displayName) && (
+            <div className="aui-approval-meta flex flex-col gap-0.5">
+              {ann?.title != null && String(ann.title) !== "" && (
+                <p data-approval-title className="text-sm font-medium text-foreground">
+                  {String(ann.title)}
+                </p>
+              )}
+              {ann?.displayName != null && String(ann.displayName) !== "" && (
+                <p data-approval-displayname className="text-xs font-medium text-muted-foreground">
+                  {String(ann.displayName)}
+                </p>
+              )}
+              {ann?.description != null && String(ann.description) !== "" && (
+                <p data-approval-description className="text-xs text-muted-foreground">
+                  {String(ann.description)}
+                </p>
+              )}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={() => decide(true)}>Approve</Button>
+            <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
+          </div>
+        </div>
+      )}
       {/* 审批结果指示放在折叠内容【外面】，折叠状态下也始终可见（回归修复）。 */}
       {decision && (
         <div

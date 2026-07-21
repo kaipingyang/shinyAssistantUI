@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9221L
+port <- 9227L
 unlink(c("/tmp/aui-repro.out", "/tmp/aui-repro.err"))
 report <- function(name, detail) cat(sprintf("[OBSERVE] %-42s %s\n", name, detail))
 failures <- character()
@@ -85,6 +85,10 @@ inview <- isTRUE(value(paste0(
   "(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));",
   "if(!b)return false;const r=b.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight+1})()")))
 chk("approval button is within viewport (visible)", inview)
+# #审批UI在折叠内容之外：折叠工具卡后仍能看到并操作（与 ✓Approved 同源修复）
+chk("approval buttons sit outside collapsible content", isTRUE(value(paste0(
+  "(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));",
+  "if(!b)return false;return !b.closest('[data-slot=tool-fallback-content], [role=region]')})()"))))
 # 批准 A → B 才出现
 value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
 chk("after approving A, task proceeds to B", wait_for("document.body.innerText.includes('Run Rscript') || [...document.querySelectorAll('button')].some(b=>/^Approve$/i.test((b.textContent||'').trim()))", 8))
@@ -106,6 +110,19 @@ chk("unlabeled code block is labelled r (not unknown)",
     value("(document.querySelector('.aui-code-header-language')?.textContent||'').trim()"))
 chk("unlabeled code block is syntax-highlighted (token spans)",
     isTRUE(value("!!document.querySelector('.aui-md pre code span, pre code span')")))
+
+# ── Edit 工具卡自动 git 式 diff（改前改后） ─────────────────────────────────────
+type_text("editdiff please"); key("Enter", "Enter", 13L)
+chk("Edit tool renders a diff viewer", wait_for("!!document.querySelector('[data-slot=aui_edit_diff] [data-slot=diff-viewer]')", 8))
+chk("Edit diff has an added line", isTRUE(value("!!document.querySelector('[data-slot=diff-viewer-line][data-type=add]')")))
+chk("Edit diff has a deleted line", isTRUE(value("!!document.querySelector('[data-slot=diff-viewer-line][data-type=del]')")))
+chk("Edit diff shows new content", isTRUE(value("document.body.innerText.includes('x <- 2')")))
+
+# ── 手动 ```diff 块上色（裸 +/- 也红绿） ────────────────────────────────────────
+type_text("show a diffblock"); key("Enter", "Enter", 13L)
+chk("diff code block renders a diff viewer", wait_for("document.querySelectorAll('[data-slot=diff-viewer]').length >= 2", 8))
+chk("diff code block colours +/- lines", isTRUE(value(
+  "!!document.querySelector('[data-slot=diff-viewer-line][data-type=add]') && !!document.querySelector('[data-slot=diff-viewer-line][data-type=del]')")))
 
 # ── 残留任务卡：run 结束后带 Stop 的任务卡应被清理 ─────────────────────────────
 type_text("stucktask please"); key("Enter", "Enter", 13L)

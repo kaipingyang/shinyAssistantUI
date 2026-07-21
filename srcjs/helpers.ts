@@ -306,6 +306,42 @@ export function computeToolDepth(
   return depth;
 }
 
+// ── Edit/MultiEdit 工具 → 改前/改后内容（供工具卡渲染 git 式 diff）──────────────
+// Claude Code：Edit tool_input = {file_path, old_string, new_string}；
+// MultiEdit = {file_path, edits:[{old_string,new_string}]}。Write 只有新内容（无旧内容）→ null，
+// 不臆造 diff。缺字段（流式中 args 不全）→ null，调用方回退显示原始参数。
+export function getEditDiff(
+  toolName: string | undefined,
+  args: unknown,
+): { oldContent: string; newContent: string; fileName?: string } | null {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const fileName =
+    typeof a.file_path === "string" && a.file_path ? a.file_path
+    : typeof a.path === "string" && a.path ? a.path
+    : undefined;
+  if (toolName === "Edit") {
+    const o = a.old_string, n = a.new_string;
+    if (typeof o === "string" && typeof n === "string")
+      return { oldContent: o, newContent: n, fileName };
+    return null;
+  }
+  if (toolName === "MultiEdit") {
+    const edits = Array.isArray(a.edits) ? a.edits : null;
+    if (!edits || edits.length === 0) return null;
+    const olds: string[] = [];
+    const news: string[] = [];
+    for (const e of edits) {
+      const eo = (e as Record<string, unknown>)?.old_string;
+      const en = (e as Record<string, unknown>)?.new_string;
+      if (typeof eo !== "string" || typeof en !== "string") return null;
+      olds.push(eo);
+      news.push(en);
+    }
+    return { oldContent: olds.join("\n"), newContent: news.join("\n"), fileName };
+  }
+  return null;
+}
+
 // ── Theme customization（Tailwind v4 token 注入）─────────────────────────────
 // 把 R 端 theme 对象（token → 任意 CSS 颜色）转成 [cssVar, value] 对,注入到 widget
 // 根元素 inline style,覆盖 globals.css 的 :root token。token 名下划线转连字符,加

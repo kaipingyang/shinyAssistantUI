@@ -1,10 +1,9 @@
 "use client";
 
-import { type ComponentProps, useMemo } from "react";
+import { type ComponentProps, type FC, useMemo } from "react";
 import type { SyntaxHighlighterProps } from "@assistant-ui/react-markdown";
 import { cva, type VariantProps } from "class-variance-authority";
 import { diffLines } from "diff";
-import parseDiff from "parse-diff";
 
 import { cn } from "@/lib/utils";
 
@@ -30,48 +29,38 @@ interface SplitLinePair {
   right: ParsedLine | null;
 }
 
-function parsePatch(patch: string): ParsedFile[] {
-  const files = parseDiff(patch);
-  return files.map((file) => {
-    const lines: ParsedLine[] = [];
-    let additions = 0;
-    let deletions = 0;
-    for (const chunk of file.chunks) {
-      let oldLine = chunk.oldStart;
-      let newLine = chunk.newStart;
-      for (const change of chunk.changes) {
-        if (change.type === "add") {
-          additions++;
-          lines.push({
-            type: "add",
-            content: change.content.slice(1),
-            newLineNumber: newLine++,
-          });
-        } else if (change.type === "del") {
-          deletions++;
-          lines.push({
-            type: "del",
-            content: change.content.slice(1),
-            oldLineNumber: oldLine++,
-          });
-        } else {
-          lines.push({
-            type: "normal",
-            content: change.content.slice(1),
-            oldLineNumber: oldLine++,
-            newLineNumber: newLine++,
-          });
-        }
-      }
+// 裸 diff 兜底：` ```diff ` 块常只有 +/- 行、无 `@@`/`diff --git` 头，parse-diff 解析不了。
+// 按行首归类上色；`+++`/`---`/`diff `/`@@` 头行归 normal（不计增删）。无任何 +/- → 返回 []。
+function parseLooseDiff(text: string): ParsedFile[] {
+  const raw = text.replace(/\n$/, "").split("\n");
+  const lines: ParsedLine[] = [];
+  let additions = 0;
+  let deletions = 0;
+  let oldLine = 1;
+  let newLine = 1;
+  for (const l of raw) {
+    if (l.startsWith("+++") || l.startsWith("---") || l.startsWith("diff ") || l.startsWith("@@")) {
+      lines.push({ type: "normal", content: l, oldLineNumber: oldLine, newLineNumber: newLine });
+      continue;
     }
-    return {
-      oldName: file.from,
-      newName: file.to,
-      lines,
-      additions,
-      deletions,
-    };
-  });
+    const c0 = l[0];
+    if (c0 === "+") {
+      additions++;
+      lines.push({ type: "add", content: l.slice(1), newLineNumber: newLine++ });
+    } else if (c0 === "-") {
+      deletions++;
+      lines.push({ type: "del", content: l.slice(1), oldLineNumber: oldLine++ });
+    } else {
+      lines.push({
+        type: "normal",
+        content: c0 === " " ? l.slice(1) : l,
+        oldLineNumber: oldLine++,
+        newLineNumber: newLine++,
+      });
+    }
+  }
+  if (additions === 0 && deletions === 0) return [];
+  return [{ oldName: undefined, newName: undefined, lines, additions, deletions }];
 }
 
 function computeDiff(
@@ -462,7 +451,7 @@ function DiffViewer({
 
   const parsedFiles = useMemo(() => {
     if (diffPatch) {
-      return parsePatch(diffPatch);
+      return parseLooseDiff(diffPatch);
     }
     if (oldFile && newFile) {
       const { lines, additions, deletions } = computeDiff(
@@ -536,10 +525,18 @@ function DiffViewer({
 
 DiffViewer.displayName = "DiffViewer";
 
+// markdown ` ```diff `/` ```patch ` 代码块适配器：走 componentsByLanguage 替换默认高亮器。
+// ghost 变体（无边框/底色）融入外层 pre.aui-md-pre，避免双层边框。
+const DiffCodeBlock: FC<SyntaxHighlighterProps> = ({ code }) => (
+  <DiffViewer patch={code} viewMode="unified" variant="ghost" showLineNumbers={false} />
+);
+DiffCodeBlock.displayName = "DiffCodeBlock";
+
 export type { ParsedLine, ParsedFile, SplitLinePair };
 
 export {
   DiffViewer,
+  DiffCodeBlock,
   DiffViewerFile,
   DiffViewerHeader,
   DiffViewerContent,
@@ -550,6 +547,5 @@ export {
   diffViewerVariants,
   diffLineVariants,
   diffLineTextVariants,
-  parsePatch,
   computeDiff,
 };
