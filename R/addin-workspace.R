@@ -153,8 +153,11 @@
 .make_addin_workspace_search_provider <- function(project, cache_path = NULL) {
   cache_path <- cache_path %||% file.path(
     Sys.getenv("HOME", unset = "~"), ".claude_addin_workspace_cache.rds")
-  index <- .addin_workspace_index_cached(project, cache_path)
+  # project 可为字符串（固定）或函数（动态当前工作目录）。每次查询按当前目录取带缓存的索引，
+  # 从而工作目录切换后 @mention 搜索自动跟随。
+  dir_provider <- if (is.function(project)) project else function() project
   function(query = "", kinds = c("file", "folder"), limit = 50L) {
+    index <- .addin_workspace_index_cached(dir_provider(), cache_path)
     .addin_workspace_search(index, query = query, kinds = kinds, limit = limit)
   }
 }

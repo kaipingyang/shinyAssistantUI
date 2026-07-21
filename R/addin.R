@@ -53,12 +53,18 @@
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
   archived_path <- file.path(
     Sys.getenv("HOME", unset = "~"), ".claude_addin_archived.rds")
+  # 当前工作目录（可切换）。用普通环境持有，cwd_provider 在连接时读取；工作目录选择器
+  # （Phase 3b）改它并触发 reset_clients + 重推 sessions。默认 = 初始 project。
+  dir_state <- new.env(parent = emptyenv())
+  dir_state$cwd <- project
+  cur_dir <- function() dir_state$cwd
   handler <- make_claude_handler(
     options          = options,
+    cwd_provider     = cur_dir,
     session_map_path = session_map_path
   )
-  skills <- tryCatch(load_claude_skills(project_dir = project), error = function(e) list())
-  workspace_search <- .make_addin_workspace_search_provider(project)
+  skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
+  workspace_search <- .make_addin_workspace_search_provider(cur_dir)
 
   ui <- .claude_chat_ui()
   server <- function(input, output, session) {
@@ -77,33 +83,33 @@
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
-      on_open_file     = function(path, line = NULL) .addin_open_file(path, line, project),
+      on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
       on_archive_session = function(session_id, archived) {
         # 仅服务端持久化软隐藏；前端已本地乐观更新（移入/移出归档区）。
         # 不再重推会话列表——重推会把"当前对话已生成的 server session"与其客户端新线程
         # 双显（同标题两条）。重开时初始推送（带 archived 标记）才是权威来源。
-        .toggle_archived_id(archived_path, project, session_id, archived)
+        .toggle_archived_id(archived_path, cur_dir(), session_id, archived)
       },
       on_delete_session = function(session_id) {
         # 删前断开该 session 的 client（避免 CLI 写回）；真删失败不再静默——重推让它重现。
         .claude_delete_session(
-          session_id, project = project, handler = handler,
+          session_id, project = cur_dir(), handler = handler,
           archived_path = archived_path, session_map_path = session_map_path,
           on_reappear = function() tryCatch(push_sessions(), error = function(e) NULL)
         )
       },
-      ide_context_provider = function() .addin_editor_context(project),
+      ide_context_provider = function() .addin_editor_context(cur_dir()),
       workspace_search_provider = workspace_search,
       prewarm          = prewarm
     )
 
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
-    # 才运行，ctrl 已赋值）。
+    # 才运行，ctrl 已赋值）。按当前工作目录 cur_dir() 分桶。
     push_sessions <- function() {
       ctrl$send_sessions(list(
         sessions = list_claude_sessions(
-          directory = project,
-          archived_ids = .read_archived_ids(archived_path, project)
+          directory = cur_dir(),
+          archived_ids = .read_archived_ids(archived_path, cur_dir())
         )
       ))
     }
