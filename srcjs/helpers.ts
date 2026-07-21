@@ -306,6 +306,22 @@ export function computeToolDepth(
   return depth;
 }
 
+// ── 工具参数美化：合法 JSON → 缩进后交语法高亮；流式半截/非 JSON → 原样(raw) ──────
+export function formatToolArgs(
+  argsText: string | undefined,
+): { kind: "json"; text: string } | { kind: "raw"; text: string } | null {
+  if (!argsText) return null;
+  try {
+    const parsed = JSON.parse(argsText);
+    // 仅对象/数组值得 pretty；标量(如 "abc"/42)直接 raw，避免徒增引号缩进。
+    if (parsed !== null && typeof parsed === "object")
+      return { kind: "json", text: JSON.stringify(parsed, null, 2) };
+    return { kind: "raw", text: argsText };
+  } catch {
+    return { kind: "raw", text: argsText };
+  }
+}
+
 // ── Edit/MultiEdit 工具 → 改前/改后内容（供工具卡渲染 git 式 diff）──────────────
 // Claude Code：Edit tool_input = {file_path, old_string, new_string}；
 // MultiEdit = {file_path, edits:[{old_string,new_string}]}。Write 只有新内容（无旧内容）→ null，

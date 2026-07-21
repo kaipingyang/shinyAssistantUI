@@ -67,3 +67,21 @@ export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }
     </PrismLight>
   );
 };
+
+// 工具参数 JSON 高亮（缩进后的对象）——复用 PrismLight + json（已注册）+ oneLight。
+export const JsonHighlighter: FC<{ code: string }> = ({ code }) => (
+  <PrismLight
+    language="json"
+    style={oneLight}
+    data-syntax-highlighter="prism-json"
+    customStyle={{
+      margin: 0,
+      width: "100%",
+      background: "transparent",
+      padding: 0,
+      fontSize: "12px",
+    }}
+  >
+    {code}
+  </PrismLight>
+);

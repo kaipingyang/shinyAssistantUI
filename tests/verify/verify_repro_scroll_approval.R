@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9227L
+port <- 9229L
 unlink(c("/tmp/aui-repro.out", "/tmp/aui-repro.err"))
 report <- function(name, detail) cat(sprintf("[OBSERVE] %-42s %s\n", name, detail))
 failures <- character()
@@ -128,6 +128,10 @@ chk("diff code block colours +/- lines", isTRUE(value(
 type_text("stucktask please"); key("Enter", "Enter", 13L)
 chk("task card appears while running", wait_for("!!document.querySelector('[data-slot=aui_task_card]')", 10))
 chk("task card has a Stop button", isTRUE(value("!!document.querySelector('[data-slot=aui_task_card] [data-slot=aui_task_stop]')")))
+# gate 是 Bash 工具（requiresApproval → 强制展开），其参数 {command:"ls"} 应美化为缩进 + JSON 高亮
+chk("Bash tool args render as highlighted JSON", wait_for("!!document.querySelector('[data-slot=tool-fallback-args][data-args-format=json] [data-syntax-highlighter=prism-json]')", 8))
+chk("args JSON is indented (multi-line)", isTRUE(value(
+  "(document.querySelector('[data-slot=tool-fallback-args][data-args-format=json]')?.textContent||'').includes(String.fromCharCode(10))")))
 # 批准 gate → run 结束
 value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
 chk("run completes", wait_for("document.body.innerText.includes('done')", 8))

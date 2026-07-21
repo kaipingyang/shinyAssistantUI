@@ -3,6 +3,23 @@ import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
 import { getEditDiff } from "@/helpers";
 import { DiffViewer } from "./diff-viewer";
+import { formatToolArgs } from "@/helpers";
+
+describe("formatToolArgs", () => {
+  it("合法 JSON 对象 → 缩进 pretty", () => {
+    const r = formatToolArgs('{"command":"ls","cwd":"/tmp"}');
+    expect(r).toEqual({ kind: "json", text: '{\n  "command": "ls",\n  "cwd": "/tmp"\n}' });
+  });
+  it("流式半截/非 JSON → raw 原样", () => {
+    expect(formatToolArgs('{"command":"l')).toEqual({ kind: "raw", text: '{"command":"l' });
+    expect(formatToolArgs("not json")).toEqual({ kind: "raw", text: "not json" });
+  });
+  it("空 → null；标量 → raw", () => {
+    expect(formatToolArgs(undefined)).toBeNull();
+    expect(formatToolArgs("")).toBeNull();
+    expect(formatToolArgs("42")).toEqual({ kind: "raw", text: "42" });
+  });
+});
 
 describe("getEditDiff", () => {
   it("Edit → old/new/file", () => {
