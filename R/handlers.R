@@ -708,6 +708,7 @@ make_ellmer_session_loader <- function(store) {
 #' @export
 make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
+                                thinking_provider = NULL,
                                 session_map_path = ".claude_session_map.rds") {
   if (is.null(options)) {
     options <- .new_claude_options(
@@ -773,6 +774,8 @@ make_claude_handler <- function(options       = NULL,
         # 之前漏传 → CLI 只继承 R 进程 getwd()（Plan 16/18）。
         cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
         system_prompt               = options$system_prompt,
+        # thinking（思考强度）为连接时 options；动态 provider 优先，切换后经 reset_clients 重连生效。
+        thinking                    = (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
         resume                      = resume_sid
       )
     }
