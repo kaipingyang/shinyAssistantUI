@@ -80,41 +80,67 @@ export function ThinkingControl() {
   );
 }
 
-export function ModelControl() {
+// `/model` 命令触发的模型选择器弹窗（选中即 set_model，热切换）。由 runtime 的
+// model.pickerOpen 控制显隐；渲染在 composer 附近（见 thread.tsx）。
+export function ModelPickerDialog() {
   const { model } = useShinyConfig();
-  const selectId = useId();
-  if (!model) return null;
-  const selected = model.options.find((o) => o.value === model.value);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const open = model?.pickerOpen ?? false;
+  useEffect(() => {
+    if (open) dialogRef.current?.focus();
+  }, [open]);
+  if (!model || !open) return null;
+  const close = () => model.setPickerOpen(false);
   return (
-    <div className="aui-model-select mt-3 space-y-1.5">
-      <div>
-        <label className="text-foreground text-xs font-medium" htmlFor={selectId}>
-          Model
-        </label>
-        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
-          {selected?.description ?? "Which model answers your prompts."}
-        </p>
-      </div>
-      <select
-        id={selectId}
-        aria-label="Model"
-        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
-        value={model.value}
-        title={selected?.description}
-        onChange={(event) => model.setValue(event.target.value)}
+    <div
+      className="aui-model-picker-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/20"
+      onClick={close}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label="Select model"
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); close(); }
+        }}
+        className="bg-popover text-popover-foreground w-72 rounded-lg border p-2 shadow-lg outline-none"
       >
-        {model.options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+        <div className="flex items-center justify-between px-2 py-1">
+          <h2 className="text-sm font-semibold">Select model</h2>
+          <button type="button" className="hover:bg-accent rounded p-1"
+                  aria-label="Close model picker" onClick={close}>
+            <XIcon className="size-3.5" />
+          </button>
+        </div>
+        <div className="mt-1 flex flex-col">
+          {model.options.map((option) => {
+            const active = option.value === model.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                data-model-option={option.value}
+                aria-current={active}
+                className={`hover:bg-accent focus:bg-accent flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-start text-sm outline-none ${active ? "bg-accent" : ""}`}
+                onClick={() => { model.setValue(option.value); close(); }}
+              >
+                <span className="font-medium">{option.label}{active ? " ✓" : ""}</span>
+                {option.description && (
+                  <span className="text-muted-foreground text-[11px] leading-4">{option.description}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
 
 export function SidebarSettings() {
-  const { permissionMode, thinking, model } = useShinyConfig();
+  const { permissionMode, thinking } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -124,7 +150,7 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode && !thinking && !model) return null;
+  if (!permissionMode && !thinking) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -160,7 +186,6 @@ export function SidebarSettings() {
           </div>
           <PermissionModeControl />
           <ThinkingControl />
-          <ModelControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>

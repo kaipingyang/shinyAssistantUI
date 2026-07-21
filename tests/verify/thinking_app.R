@@ -33,7 +33,8 @@ server <- function(input, output, session) {
     got(id)
     send_action_result(paste("ok", id), "ok", value = sub("^thinking:", "", id))
   }
-  assistantUIServer("chat", handler = h, show_thread_list = TRUE)
+  assistantUIServer("chat", handler = h, show_thread_list = TRUE,
+                    action_items = shinyAssistantUI:::.claude_action_items())
   output$probe <- renderText(got())
 }
 shinyApp(ui, server)

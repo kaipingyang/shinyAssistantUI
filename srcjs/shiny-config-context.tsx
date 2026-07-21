@@ -26,6 +26,8 @@ export interface ModelState {
   value: string;
   options: PermissionModeOption[];
   setValue: (value: string) => void;
+  pickerOpen: boolean;
+  setPickerOpen: (open: boolean) => void;
 }
 export interface WorkspaceMentionState {
   enabled: boolean;

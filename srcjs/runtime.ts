@@ -406,6 +406,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [permissionErrors, setPermissionErrors] = useState<Record<string, string | null>>({});
   const [thinkingValue, setThinkingValue] = useState<string | undefined>(undefined);  // 乐观显示值
   const [modelValue, setModelValue] = useState<string | undefined>(undefined);        // 乐观显示值
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);                       // /model 弹选择器
   const permissionPendingRef = useRef<Record<string, PermissionPending>>({});
   const permissionRequestsRef = useRef(new Map<string, { threadId: string; requested: string }>());
   const makeActionRequestId = () => `action-${Date.now()}-${++actionRequestSeq.current}`;
@@ -1152,6 +1153,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       const slashAction = matchSlashAction(text, actionItems);
       if (slashAction) {
+        if (slashAction.id === "model") { setModelPickerOpen(true); return; }
         invokeActionRef.current?.(slashAction);
         return;
       }
@@ -1207,6 +1209,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!text.trim()) return;
     const slashAction = matchSlashAction(text, actionItems);
     if (slashAction) {
+      if (slashAction.id === "model") { setModelPickerOpen(true); return; }
       invokeActionRef.current?.(slashAction);
       return;
     }
@@ -1553,6 +1556,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         value: modelValue ?? modelCapability.value,
         options: modelCapability.options,
         setValue: setModel,
+        pickerOpen: modelPickerOpen,
+        setPickerOpen: setModelPickerOpen,
       }
     : undefined;
 

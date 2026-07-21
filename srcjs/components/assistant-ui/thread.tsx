@@ -19,7 +19,7 @@ import {
 import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
-import { PermissionModeControl } from "@/components/assistant-ui/settings-controls";
+import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -359,6 +359,7 @@ const Composer: FC = () => {
   const { refreshIdeContext } = useShinyConfig();
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+      <ModelPickerDialog />
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"

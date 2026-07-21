@@ -19,6 +19,8 @@
     list(section = "Context", id = "clear", command = "clear",
          label = "New conversation", description = "Clear this conversation and start fresh"),
     list(section = "Customize", id = "mcp", command = "mcp",
-         label = "MCP status", description = "Show connected MCP servers")
+         label = "MCP status", description = "Show connected MCP servers"),
+    list(section = "Customize", id = "model", command = "model",
+         label = "Switch model", description = "Choose which model answers your prompts")
   )
 }

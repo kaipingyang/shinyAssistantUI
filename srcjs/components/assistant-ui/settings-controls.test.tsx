@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ShinyConfigContext, type ShinyConfigCtx } from "../../shiny-config-context";
-import { PermissionModeControl, ThinkingControl, ModelControl, SidebarSettings } from "./settings-controls";
+import { PermissionModeControl, ThinkingControl, ModelPickerDialog, SidebarSettings } from "./settings-controls";
 
 const baseContext: ShinyConfigCtx = {
   tools: [], commands: [], actionItems: [], showTimestamps: false,
@@ -87,6 +87,33 @@ describe("PermissionModeControl", () => {
   });
 });
 
+describe("ModelPickerDialog", () => {
+  const modelOpts = [
+    { value: "default", label: "Default" },
+    { value: "haiku", label: "Haiku" },
+    { value: "sonnet", label: "Sonnet" },
+    { value: "opus", label: "Opus" },
+  ];
+  const mk = (over = {}) => ({ value: "default", options: modelOpts, setValue: vi.fn(), pickerOpen: true, setPickerOpen: vi.fn(), ...over });
+  it("renders nothing when closed", () => {
+    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ pickerOpen: false }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
+    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
+  });
+  it("renders nothing without capability", () => {
+    render(<ShinyConfigContext.Provider value={baseContext}><ModelPickerDialog /></ShinyConfigContext.Provider>);
+    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
+  });
+  it("lists options and applies + closes on pick", () => {
+    const setValue = vi.fn(); const setPickerOpen = vi.fn();
+    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
+    expect(screen.getByRole("dialog", { name: "Select model" })).toBeTruthy();
+    expect(screen.getByText("Opus")).toBeTruthy();
+    fireEvent.click(screen.getByText("Sonnet"));
+    expect(setValue).toHaveBeenCalledWith("sonnet");
+    expect(setPickerOpen).toHaveBeenCalledWith(false);
+  });
+});
+
 describe("SidebarSettings", () => {
   it("opens an inline non-Portal settings panel sharing the permission control", () => {
     const { container } = renderWithContext(<SidebarSettings />, {
@@ -132,31 +159,5 @@ describe("ThinkingControl", () => {
     expect(screen.getByRole("option", { name: "Extended" })).toBeTruthy();
     fireEvent.change(select, { target: { value: "enabled" } });
     expect(setValue).toHaveBeenCalledWith("enabled");
-  });
-});
-
-describe("ModelControl", () => {
-  const modelOpts = [
-    { value: "default", label: "Default" },
-    { value: "haiku", label: "Haiku" },
-    { value: "sonnet", label: "Sonnet" },
-    { value: "opus", label: "Opus" },
-  ];
-  it("absent without capability", () => {
-    render(<ShinyConfigContext.Provider value={baseContext}><ModelControl /></ShinyConfigContext.Provider>);
-    expect(screen.queryByLabelText("Model")).toBeNull();
-  });
-  it("renders options and delegates selection", () => {
-    const setValue = vi.fn();
-    render(
-      <ShinyConfigContext.Provider value={{ ...baseContext, model: { value: "default", options: modelOpts, setValue } }}>
-        <ModelControl />
-      </ShinyConfigContext.Provider>,
-    );
-    const select = screen.getByLabelText("Model") as HTMLSelectElement;
-    expect(select.value).toBe("default");
-    expect(screen.getByRole("option", { name: "Opus" })).toBeTruthy();
-    fireEvent.change(select, { target: { value: "sonnet" } });
-    expect(setValue).toHaveBeenCalledWith("sonnet");
   });
 });

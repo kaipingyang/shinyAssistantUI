@@ -60,7 +60,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
   )
 
   local_mocked_bindings(
-    make_claude_handler = function(options, cwd_provider = NULL, session_map_path) function(...) NULL,
+    make_claude_handler = function(options, cwd_provider = NULL, models = NULL, session_map_path) function(...) NULL,
     load_claude_skills = function(project_dir) list(),
     make_claude_session_loader = function(session_map_path) function(...) NULL,
     .stop_claude_gadget_normally = function() {
@@ -92,7 +92,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
   expect_identical(sent_sessions[[1L]], list(sessions = expected))
   expect_identical(server_args$persistence, "server")
   action_commands <- vapply(server_args$action_items, `[[`, character(1), "command")
-  expect_setequal(action_commands, c("context", "compact", "clear", "mcp"))
+  expect_setequal(action_commands, c("context", "compact", "clear", "mcp", "model"))
 })
 
 test_that(".claude_chat_ui fills the page without Bootstrap", {
@@ -150,7 +150,7 @@ test_that("Claude addin wires live IDE context and workspace providers", {
   skip_if_not_installed("ClaudeAgentSDK")
   server_args <- NULL
   local_mocked_bindings(
-    make_claude_handler = function(options, cwd_provider = NULL, session_map_path) function(...) NULL,
+    make_claude_handler = function(options, cwd_provider = NULL, models = NULL, session_map_path) function(...) NULL,
     load_claude_skills = function(project_dir) list(),
     make_claude_session_loader = function(session_map_path) function(...) NULL,
     list_claude_sessions = function(directory, limit = 100L) list(),
