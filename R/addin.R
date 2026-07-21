@@ -112,6 +112,8 @@
       commands         = skills,
       action_items     = .claude_action_items(),
       on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
+      on_rename        = function(thread_id, title)
+        .claude_rename_session(thread_id, title, session_map_path, cur_dir()),
       on_archive_session = function(session_id, archived) {
         # 仅服务端持久化软隐藏；前端已本地乐观更新（移入/移出归档区）。
         # 不再重推会话列表——重推会把"当前对话已生成的 server session"与其客户端新线程
@@ -218,6 +220,16 @@
   next_ids <- setdiff(.read_saved_projects(path), as.character(dir))
   tryCatch(.atomic_save_rds(next_ids, path), error = function(e) NULL)
   invisible(next_ids)
+}
+
+# 侧栏重命名 → 同步到 SDK session 存储（server 模式重开标题不丢）。按 thread 反查 session_id；
+# 无映射（未生成 session 的新对话）则 no-op。返回 TRUE/FALSE。
+.claude_rename_session <- function(thread_id, title, session_map_path, directory = NULL) {
+  sid <- tryCatch(.read_claude_session_map(session_map_path)[[thread_id]], error = function(e) NULL)
+  if (is.null(sid) || !nzchar(sid %||% "") || is.null(title) || !nzchar(title)) return(invisible(FALSE))
+  ok <- tryCatch({ .rename_claude_session(sid, title, directory = directory); TRUE },
+                 error = function(e) FALSE)
+  invisible(ok)
 }
 
 # Stop the gadget with a normal NULL return. This is deliberately separate so

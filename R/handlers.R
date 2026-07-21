@@ -244,6 +244,9 @@
 # 删除会话 transcript 的 seam（可单测 mock）。失败时 delete_session 会 stop()（不静默）。
 .delete_claude_session <- function(session_id, directory = NULL)
   ClaudeAgentSDK::delete_session(session_id, directory = directory)
+# 重命名会话的 seam（同步侧栏标题到 SDK session 存储，可单测 mock）。
+.rename_claude_session <- function(session_id, title, directory = NULL)
+  ClaudeAgentSDK::rename_session(session_id, title, directory = directory)
 .get_claude_session_messages <- function(session_id) {
   ClaudeAgentSDK::get_session_messages(session_id)
 }
