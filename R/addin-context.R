@@ -41,6 +41,28 @@
   invisible(NULL)
 }
 
+# 编辑前保存：判定活动文档是否该保存。有路径 + 有 doc id → 返回 id；untitled（无路径）→ NULL
+# （不保存，避免 documentSave 弹"另存为"阻塞 gadget）。纯函数，便于单测。
+.addin_savable_doc_id <- function(ctx) {
+  if (is.null(ctx)) return(NULL)
+  path <- tryCatch(ctx$path, error = function(e) "")
+  if (is.null(path) || !nzchar(path)) return(NULL)
+  id <- tryCatch(ctx$id, error = function(e) NULL)
+  if (is.null(id) || !nzchar(id %||% "")) return(NULL)
+  id
+}
+
+# 提交前保存活动编辑器文档（有路径的），让 Claude 的 Edit/Write 基于最新已保存内容、
+# 且不丢用户未保存改动。untitled 脚本跳过。全程 guard，非 RStudio 为 no-op。
+.addin_save_dirty_docs <- function() {
+  if (!requireNamespace("rstudioapi", quietly = TRUE) ||
+      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+  ctx <- tryCatch(rstudioapi::getSourceEditorContext(), error = function(e) NULL)
+  id <- .addin_savable_doc_id(ctx)
+  if (!is.null(id)) tryCatch(rstudioapi::documentSave(id), error = function(e) NULL)
+  invisible(NULL)
+}
+
 # 只采样第一段 selection，确保文本与行范围属于同一个选区。
 .addin_editor_context <- function(project = NULL) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||

@@ -128,7 +128,11 @@
           on_reappear = function() tryCatch(push_sessions(), error = function(e) NULL)
         )
       },
-      ide_context_provider = function() .addin_editor_context(cur_dir()),
+      ide_context_provider = function() {
+        # 提交前保存活动文档（有路径的；untitled 跳过）→ Claude 编辑基于最新、且不丢未保存改动。
+        .addin_save_dirty_docs()
+        .addin_editor_context(cur_dir())
+      },
       workspace_search_provider = workspace_search,
       prewarm          = prewarm
     )
