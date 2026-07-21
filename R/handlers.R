@@ -1526,6 +1526,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 .new_edit_reveal_tracker <- function(edit_tools = .EDIT_REVEAL_TOOLS) {
   pending <- new.env(parent = emptyenv())
   last <- NULL
+  all_edits <- list()   # 本轮所有成功编辑（供 Markers 面板），{path}
   list(
     note_call = function(tool_call_id, tool_name, args = list()) {
       fp <- NULL
@@ -1539,13 +1540,21 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
       if (!exists(tool_call_id, envir = pending, inherits = FALSE)) return(invisible(NULL))
       fp <- get(tool_call_id, envir = pending)
       rm(list = tool_call_id, envir = pending)
-      if (!isTRUE(is_error)) last <<- fp
+      if (!isTRUE(is_error)) {
+        last <<- fp
+        all_edits[[length(all_edits) + 1L]] <<- list(path = fp)
+      }
       invisible(NULL)
     },
     flush = function() {
       fp <- last
       last <<- NULL
       fp
+    },
+    take_edits = function() {
+      e <- all_edits
+      all_edits <<- list()
+      e
     }
   )
 }

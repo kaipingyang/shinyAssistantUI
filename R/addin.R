@@ -112,6 +112,7 @@
       commands         = skills,
       action_items     = .claude_action_items(),
       on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
+      on_edits         = function(edits) .addin_show_edit_markers(edits, cur_dir()),
       on_rename        = function(thread_id, title)
         .claude_rename_session(thread_id, title, session_map_path, cur_dir()),
       on_archive_session = function(session_id, archived) {
@@ -234,6 +235,33 @@
   ok <- tryCatch({ .rename_claude_session(sid, title, directory = directory); TRUE },
                  error = function(e) FALSE)
   invisible(ok)
+}
+
+# A5：把本轮编辑构建成 rstudioapi::sourceMarkers 的 markers 列表（去重、相对转绝对、file 级）。
+# 纯函数，便于单测。edits = list(list(path=...), ...)。
+.addin_edit_markers <- function(edits, project) {
+  if (!length(edits)) return(list())
+  paths <- unique(vapply(edits, function(e) as.character(e$path %||% ""), character(1)))
+  paths <- paths[nzchar(paths)]
+  lapply(paths, function(p) {
+    abs_path <- if (isTRUE(startsWith(p, "/")) || grepl("^[A-Za-z]:", p) || is.null(project) || !nzchar(project))
+      p else file.path(project, p)
+    list(type = "info", file = abs_path, line = 1L, column = 1L, message = "Edited by Claude")
+  })
+}
+
+# 把本轮编辑推进 RStudio Markers 面板（可点击跳转）。非 RStudio/空则 no-op。
+.addin_show_edit_markers <- function(edits, project) {
+  if (!requireNamespace("rstudioapi", quietly = TRUE) ||
+      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+  markers <- .addin_edit_markers(edits, project)
+  if (!length(markers)) return(invisible(NULL))
+  tryCatch(
+    rstudioapi::sourceMarkers(name = "Claude edits", markers = markers,
+                              basePath = project, autoSelect = "none"),
+    error = function(e) NULL
+  )
+  invisible(NULL)
 }
 
 # Stop the gadget with a normal NULL return. This is deliberately separate so

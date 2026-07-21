@@ -226,6 +226,7 @@ assistantUIServer <- function(id, handler,
                               on_feedback       = NULL,
                               on_rename         = NULL,
                               on_open_file      = NULL,
+                              on_edits          = NULL,
                               on_archive_session = NULL,
                               on_delete_session = NULL,
                               working_dir       = NULL,
@@ -347,6 +348,10 @@ assistantUIServer <- function(id, handler,
             tryCatch(on_open_file(reveal_path, NULL), error = function(e) NULL)
           }
         }
+        # 本轮所有成功编辑 → on_edits（addin 用于 Markers 面板可跳转清单）。始终 take 以清空累积。
+        run_edits <- edit_reveal$take_edits()
+        if (!is.null(on_edits) && length(run_edits))
+          tryCatch(on_edits(run_edits), error = function(e) NULL)
         session$sendCustomMessage(paste0(input_id, ":done"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
