@@ -762,6 +762,10 @@ make_claude_handler <- function(options       = NULL,
         permission_mode             = permission_mode_for(thread_id),
         permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
         include_partial_messages    = options$include_partial_messages %||% TRUE,
+        # cwd / system_prompt 之前被漏传 → Claude CLI 只继承 R 进程 getwd()，插件无法指定工作目录。
+        # 补回后 addin 的 cwd=<项目/选定目录> 与启动上下文注入才真正生效（Plan 16 Phase 1）。
+        cwd                         = options$cwd,
+        system_prompt               = options$system_prompt,
         resume                      = resume_sid
       )
     }
