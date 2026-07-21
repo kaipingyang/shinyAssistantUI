@@ -337,6 +337,25 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   type TaskInfo = { taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string };
   const [usageMap, setUsageMap] = useState<Record<string, UsageInfo>>({});          // #1 每线程最新用量
   const [tasksMap, setTasksMap] = useState<Record<string, Record<string, TaskInfo>>>({}); // #2 每线程 taskId→info
+  // run 结束（done/error）时把该线程未收到终止状态的任务标记为终止，避免任务卡（带 Stop）
+  // 永久浮在 composer 上方（CLI 有时漏发 task_updated 终态，尤其子代理/bypass 场景）。
+  const markThreadTasksDone = useCallback((threadId: string) => {
+    setTasksMap((prev) => {
+      const forThread = prev[threadId];
+      if (!forThread) return prev;
+      let changed = false;
+      const next: Record<string, TaskInfo> = {};
+      for (const [id, t] of Object.entries(forThread)) {
+        if (!/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(t.status ?? "")) {
+          next[id] = { ...t, status: "completed" };
+          changed = true;
+        } else {
+          next[id] = t;
+        }
+      }
+      return changed ? { ...prev, [threadId]: next } : prev;
+    });
+  }, []);
   const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
   const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
   const [warmingThreads, setWarmingThreads] = useState<Set<string>>(new Set());      // 每线程冷启动中
@@ -1032,6 +1051,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               setTimeout(() => deliverTextRef.current?.(nextText, threadId), 40);
             }
           }
+          // run 结束：清理该线程残留任务卡（见 markThreadTasksDone）。
+          markThreadTasksDone(threadId);
           setMessagesMap((prev) => {
             // 收口：把任何未完成的 tool-call part 标记中断。正常结束时无半截卡
             // （changed=false，零影响）；中断 drain 时 R 可能漏发 on_tool_result，
@@ -1052,6 +1073,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             activeRunsRef.current.delete(threadId);
             bridge.current.setRunCallbacks(threadId, null);
           }
+          markThreadTasksDone(threadId);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const updated = [

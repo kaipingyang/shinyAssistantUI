@@ -92,6 +92,24 @@ describe("useShinyRuntime — onNew 基本流", () => {
 });
 
 describe("useShinyRuntime — onError / thinking", () => {
+  it("run 结束(onDone)清理残留任务卡，不再永久显示 Stop", async () => {
+    const isActive = (t: { status?: string }) =>
+      !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(t.status ?? "");
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("go");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("task", {
+      taskId: "t-1", kind: "subagent", description: "Find global_mapping.xlsx",
+      toolName: "local_bash", status: "running", threadId: tid,
+    });
+    expect(result.current.tasks.filter(isActive).length).toBe(1);
+    await fireR("done", { threadId: tid });
+    expect(result.current.tasks.filter(isActive).length).toBe(0);
+  });
+
   it("error → 追加错误消息 + isRunning false", async () => {
     const { result } = setup();
     await act(async () => {

@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9211L
+port <- 9219L
 unlink(c("/tmp/aui-repro.out", "/tmp/aui-repro.err"))
 report <- function(name, detail) cat(sprintf("[OBSERVE] %-42s %s\n", name, detail))
 failures <- character()
@@ -97,6 +97,16 @@ pending2 <- as.integer(value("[...document.querySelectorAll('button')].filter(b=
 chk("still only one approval pending at a time (B)", pending2 <= 1L, sprintf("pending=%d", pending2))
 value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
 chk("task completes after serial approvals", wait_for("document.body.innerText.includes('done')", 8))
+
+# ── 残留任务卡：run 结束后带 Stop 的任务卡应被清理 ─────────────────────────────
+type_text("stucktask please"); key("Enter", "Enter", 13L)
+chk("task card appears while running", wait_for("!!document.querySelector('[data-slot=aui_task_card]')", 10))
+chk("task card has a Stop button", isTRUE(value("!!document.querySelector('[data-slot=aui_task_card] [data-slot=aui_task_stop]')")))
+# 批准 gate → run 结束
+value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
+chk("run completes", wait_for("document.body.innerText.includes('done')", 8))
+# 关键：run 结束后任务卡（带 Stop）不再残留
+chk("task card is cleared after the run ends", wait_for("!document.querySelector('[data-slot=aui_task_card]')", 6))
 
 chk("no browser console errors", length(console_errors) == 0,
     if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
