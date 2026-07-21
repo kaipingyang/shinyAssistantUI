@@ -47,8 +47,41 @@ export function PermissionModeControl({ compact = false }: { compact?: boolean }
   );
 }
 
+export function ThinkingControl() {
+  const { thinking } = useShinyConfig();
+  const selectId = useId();
+  if (!thinking) return null;
+  const selected = thinking.options.find((o) => o.value === thinking.value);
+  return (
+    <div className="aui-thinking-mode mt-3 space-y-1.5">
+      <div>
+        <label className="text-foreground text-xs font-medium" htmlFor={selectId}>
+          Thinking
+        </label>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          {selected?.description ?? "How much the assistant thinks before responding."}
+        </p>
+      </div>
+      <select
+        id={selectId}
+        aria-label="Thinking level"
+        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+        value={thinking.value}
+        title={selected?.description}
+        onChange={(event) => thinking.setValue(event.target.value)}
+      >
+        {thinking.options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 export function SidebarSettings() {
-  const { permissionMode } = useShinyConfig();
+  const { permissionMode, thinking } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -58,7 +91,7 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode) return null;
+  if (!permissionMode && !thinking) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -93,6 +126,7 @@ export function SidebarSettings() {
             </button>
           </div>
           <PermissionModeControl />
+          <ThinkingControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>

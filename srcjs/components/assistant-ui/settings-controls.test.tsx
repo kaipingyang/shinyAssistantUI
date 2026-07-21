@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ShinyConfigContext, type ShinyConfigCtx } from "../../shiny-config-context";
-import { PermissionModeControl, SidebarSettings } from "./settings-controls";
+import { PermissionModeControl, ThinkingControl, SidebarSettings } from "./settings-controls";
 
 const baseContext: ShinyConfigCtx = {
   tools: [], commands: [], actionItems: [], showTimestamps: false,
@@ -106,5 +106,31 @@ describe("SidebarSettings", () => {
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     expect(document.activeElement).toBe(settingsButton);
+  });
+});
+
+describe("ThinkingControl", () => {
+  const thinkingOpts = [
+    { value: "default", label: "Default" },
+    { value: "adaptive", label: "Adaptive" },
+    { value: "enabled", label: "Extended" },
+    { value: "disabled", label: "Off" },
+  ];
+  it("absent without capability", () => {
+    render(<ShinyConfigContext.Provider value={baseContext}><ThinkingControl /></ShinyConfigContext.Provider>);
+    expect(screen.queryByLabelText("Thinking level")).toBeNull();
+  });
+  it("renders options and delegates selection", () => {
+    const setValue = vi.fn();
+    render(
+      <ShinyConfigContext.Provider value={{ ...baseContext, thinking: { value: "default", options: thinkingOpts, setValue } }}>
+        <ThinkingControl />
+      </ShinyConfigContext.Provider>,
+    );
+    const select = screen.getByLabelText("Thinking level") as HTMLSelectElement;
+    expect(select.value).toBe("default");
+    expect(screen.getByRole("option", { name: "Extended" })).toBeTruthy();
+    fireEvent.change(select, { target: { value: "enabled" } });
+    expect(setValue).toHaveBeenCalledWith("enabled");
   });
 });

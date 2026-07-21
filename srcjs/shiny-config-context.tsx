@@ -17,6 +17,11 @@ export interface PermissionModeState {
   error: string | null;
   setValue: (value: string) => void;
 }
+export interface ThinkingState {
+  value: string;
+  options: PermissionModeOption[];
+  setValue: (value: string) => void;
+}
 export interface WorkspaceMentionState {
   enabled: boolean;
   query: string;
@@ -34,6 +39,7 @@ export interface ShinyConfigCtx {
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void;
   permissionMode?: PermissionModeState;
+  thinking?: ThinkingState;
   ideContext?: IdeContextMeta;
   selectionVisible: boolean;
   setSelectionVisible: (visible: boolean) => void;

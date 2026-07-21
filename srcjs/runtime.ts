@@ -136,6 +136,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
     return { value: raw.value, options };
   }, [config]);
+  // 思考强度能力（B3）：与 permission 同形状的 {value, options}。
+  const thinkingCapability = useMemo(() => {
+    const caps = config?.ui_capabilities as Record<string, unknown> | undefined;
+    const raw = caps?.thinking as { value?: unknown; options?: unknown } | undefined;
+    if (typeof raw?.value !== "string" || !Array.isArray(raw.options)) return undefined;
+    const options = raw.options.filter((option): option is PermissionModeOption => {
+      if (!option || typeof option !== "object") return false;
+      const c = option as Record<string, unknown>;
+      return typeof c.value === "string" && typeof c.label === "string";
+    });
+    return { value: raw.value, options };
+  }, [config]);
   const capabilityContract = useMemo(() => {
     const caps = config?.ui_capabilities as Record<string, unknown> | undefined;
     if (caps?.contract_version !== 1) return { ide: false, workspace: false };
@@ -380,6 +392,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [permissionValues, setPermissionValues] = useState<Record<string, string>>({});
   const [permissionPending, setPermissionPending] = useState<Record<string, PermissionPending>>({});
   const [permissionErrors, setPermissionErrors] = useState<Record<string, string | null>>({});
+  const [thinkingValue, setThinkingValue] = useState<string | undefined>(undefined);  // 乐观显示值
   const permissionPendingRef = useRef<Record<string, PermissionPending>>({});
   const permissionRequestsRef = useRef(new Map<string, { threadId: string; requested: string }>());
   const makeActionRequestId = () => `action-${Date.now()}-${++actionRequestSeq.current}`;
@@ -1496,6 +1509,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
   }, [permissionCapability]);
 
+  const setThinking = useCallback((nextValue: string) => {
+    if (!thinkingCapability) return;
+    if (!thinkingCapability.options.some((o) => o.value === nextValue)) return;
+    setThinkingValue(nextValue);   // 乐观显示；R 侧改状态并重连（下条消息 resume 生效）
+    bridge.current.sendAction(`thinking:${nextValue}`, currentThreadIdRef.current, {
+      requestId: makeActionRequestId(),
+      silent: true,
+    });
+  }, [thinkingCapability]);
+  const thinking = thinkingCapability
+    ? {
+        value: thinkingValue ?? thinkingCapability.value,
+        options: thinkingCapability.options,
+        setValue: setThinking,
+      }
+    : undefined;
+
   const currentPermissionPending = permissionPending[currentThreadId];
   const permissionMode: PermissionModeState | undefined = permissionCapability
     ? {
@@ -1529,7 +1559,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   return {
     runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
-    invokeAction, permissionMode,
+    invokeAction, permissionMode, thinking,
     ideContext: capabilityContract.ide ? ideContext : undefined,
     selectionVisible,
     setSelectionVisible,
