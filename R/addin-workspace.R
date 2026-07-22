@@ -40,7 +40,11 @@
   status <- suppressWarnings(tryCatch(
     system2(
       "git",
-      c("-C", shQuote(project), "ls-files", "-z", "--cached", "--others", pathspecs),
+      c("-C", shQuote(project),
+        # 共享盘上仓库常属于别的用户 → git "dubious ownership" 会拒绝。对只读查询放行；
+        # 同时禁用 fsmonitor,堵掉 safe.directory=* 下恶意仓库经 fsmonitor 钩子执行代码的向量。
+        "-c", shQuote("safe.directory=*"), "-c", shQuote("core.fsmonitor=false"),
+        "ls-files", "-z", "--cached", "--others", pathspecs),
       stdout = out, stderr = err
     ),
     error = function(e) 1L
@@ -80,7 +84,8 @@
 .addin_git_head <- function(project) {
   if (Sys.which("git") == "" || is.null(project) || !dir.exists(project)) return(NULL)
   head <- suppressWarnings(tryCatch(
-    system2("git", c("-C", shQuote(project), "rev-parse", "HEAD"),
+    system2("git", c("-C", shQuote(project), "-c", shQuote("safe.directory=*"),
+                     "rev-parse", "HEAD"),
             stdout = TRUE, stderr = FALSE),
     error = function(e) character(0)
   ))
