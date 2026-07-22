@@ -43,6 +43,23 @@ test_that("search finds a gitignored dev file by name (underscore ok)", {
   expect_true(any(vapply(hits, function(x) grepl("dev_helper.R", x$path), logical(1))))
 })
 
+test_that("non-git project falls back to a pruned file walk (empty @ index fix)", {
+  proj <- normalizePath(tempfile("nogit"), winslash = "/", mustWork = FALSE)
+  dir.create(file.path(proj, "R"), recursive = TRUE)
+  dir.create(file.path(proj, "node_modules", "pkg"), recursive = TRUE)
+  writeLines("x", file.path(proj, "R", "app.R"))
+  writeLines("y", file.path(proj, "notes.md"))
+  writeLines("z", file.path(proj, "node_modules", "pkg", "index.js"))
+  expect_false(dir.exists(file.path(proj, ".git")))          # 确非 git 仓库
+
+  idx <- shinyAssistantUI:::.addin_workspace_index(proj)
+  paths <- vapply(idx, `[[`, character(1), "path")
+  expect_true("R/app.R" %in% paths)      # 普通文件被索引
+  expect_true("notes.md" %in% paths)
+  expect_true("R/" %in% paths)           # 文件夹被推导
+  expect_false(any(grepl("node_modules", paths)))   # 噪声目录剪枝
+})
+
 test_that("search provider memoizes the index within TTL (no per-keystroke git/readRDS)", {
   # Q1 优化 A：同一目录连续按键复用内存索引，不重跑 .addin_workspace_index_cached。
   build_calls <- 0L

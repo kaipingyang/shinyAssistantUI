@@ -26,38 +26,64 @@
 
 # 构建 tracked + untracked、遵守 gitignore/global excludes 的 workspace index。
 # 非 Git 项目诚实返回空列表，不用 list.files() 冒充 ignore-aware 结果。
-.addin_workspace_index <- function(project, max_files = 10000L) {
-  if (Sys.which("git") == "" || is.null(project) || !dir.exists(project)) return(list())
-  project <- normalizePath(project, mustWork = TRUE)
-  out <- tempfile("claude-workspace-", fileext = ".nul")
-  err <- tempfile("claude-workspace-", fileext = ".err")
-  on.exit(unlink(c(out, err)), add = TRUE)
-  # Option 1：包含被 gitignore 的内容（去掉 --exclude-standard），用 pathspec 让 git
-  # 直接跳过"噪声大户"（不遍历 → 快）；R 侧再用黑名单兜底保证正确。
-  pathspecs <- unlist(lapply(.WORKSPACE_BLOCK_DIRS, function(d)
-    c(shQuote(paste0(":(exclude,glob)", d, "/**")),
-      shQuote(paste0(":(exclude,glob)**/", d, "/**")))), use.names = FALSE)
-  status <- suppressWarnings(tryCatch(
-    system2(
-      "git",
-      c("-C", shQuote(project),
-        # 共享盘上仓库常属于别的用户 → git "dubious ownership" 会拒绝。对只读查询放行；
-        # 同时禁用 fsmonitor,堵掉 safe.directory=* 下恶意仓库经 fsmonitor 钩子执行代码的向量。
-        "-c", shQuote("safe.directory=*"), "-c", shQuote("core.fsmonitor=false"),
-        "ls-files", "-z", "--cached", "--others", pathspecs),
-      stdout = out, stderr = err
-    ),
-    error = function(e) 1L
-  ))
-  if (!identical(as.integer(status), 0L)) return(list())
+# 非 git 回退：剪枝式 BFS 文件遍历。跳过隐藏项(all.files=FALSE → .git/.Rproj.user 等)
+# 与 blocklist 大户(node_modules/renv/library…),封顶 max_files,避免走进巨型忽略目录。
+.addin_fs_walk <- function(root, block_re, max_files) {
+  out <- character(0)
+  stack <- root
+  root_pref <- paste0(sub("/+$", "", root), "/")
+  while (length(stack) && length(out) < max_files) {
+    d <- stack[[1L]]; stack <- stack[-1L]
+    entries <- list.files(d, all.files = FALSE, full.names = TRUE, no.. = TRUE)
+    if (!length(entries)) next
+    rel <- sub(root_pref, "", entries, fixed = TRUE)
+    keep <- !grepl(block_re, rel)
+    entries <- entries[keep]; rel <- rel[keep]
+    if (!length(entries)) next
+    isdir <- dir.exists(entries)
+    out <- c(out, rel[!isdir])
+    stack <- c(stack, entries[isdir])
+  }
+  head(out, max(0L, as.integer(max_files)))
+}
 
-  files <- .read_nul_paths(out)
-  files <- gsub("\\\\", "/", files)
-  files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
-  # 黑名单兜底（pathspec 不一定覆盖所有 git 版本/边界）：按路径段剔除噪声目录。
+.addin_workspace_index <- function(project, max_files = 10000L) {
+  if (is.null(project) || !dir.exists(project)) return(list())
+  project <- normalizePath(project, mustWork = TRUE)
+  # 黑名单正则：git 结果兜底过滤 + 非 git 遍历时剪枝,两处共用。
   block_re <- paste0("(^|/)(",
                      paste(gsub(".", "\\.", .WORKSPACE_BLOCK_DIRS, fixed = TRUE), collapse = "|"),
                      ")(/|$)")
+
+  files <- NULL
+  if (Sys.which("git") != "") {
+    out <- tempfile("claude-workspace-", fileext = ".nul")
+    err <- tempfile("claude-workspace-", fileext = ".err")
+    on.exit(unlink(c(out, err)), add = TRUE)
+    # Option 1：包含被 gitignore 的内容（去掉 --exclude-standard），用 pathspec 让 git
+    # 直接跳过"噪声大户"（不遍历 → 快）；R 侧再用黑名单兜底保证正确。
+    pathspecs <- unlist(lapply(.WORKSPACE_BLOCK_DIRS, function(d)
+      c(shQuote(paste0(":(exclude,glob)", d, "/**")),
+        shQuote(paste0(":(exclude,glob)**/", d, "/**")))), use.names = FALSE)
+    status <- suppressWarnings(tryCatch(
+      system2(
+        "git",
+        c("-C", shQuote(project),
+          # 共享盘上仓库常属于别的用户 → git "dubious ownership" 会拒绝。对只读查询放行；
+          # 同时禁用 fsmonitor,堵掉 safe.directory=* 下恶意仓库经 fsmonitor 钩子执行代码的向量。
+          "-c", shQuote("safe.directory=*"), "-c", shQuote("core.fsmonitor=false"),
+          "ls-files", "-z", "--cached", "--others", pathspecs),
+        stdout = out, stderr = err
+      ),
+      error = function(e) 1L
+    ))
+    if (identical(as.integer(status), 0L)) files <- .read_nul_paths(out)
+  }
+  # 无 git / 非 git 仓库 / ls-files 失败 → 剪枝遍历回退（普通文件夹也能 @ 搜）。
+  if (is.null(files)) files <- .addin_fs_walk(project, block_re, max_files)
+
+  files <- gsub("\\\\", "/", files)
+  files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
   files <- files[!grepl(block_re, files)]
   files <- head(sort(unique(files)), max(0L, as.integer(max_files)))
 
