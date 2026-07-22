@@ -132,41 +132,58 @@
 
 # 确定性 fuzzy 排序：basename prefix/substring > path prefix/substring >
 # subsequence；同分时浅层路径、folder、短路径、字典序优先。
+# 向量化实现（Q1 优化 C+D）：整列小写 + 向量化 startsWith/grepl，fuzzy 只对未命中子集，
+# 去掉 per-item lapply 与 5×vapply 排序，重项目下每次按键的搜索成本大幅下降。
 .addin_workspace_search <- function(index, query = "", kinds = c("file", "folder"), limit = 50L) {
   query <- tolower(trimws(query %||% ""))
   kinds <- intersect(as.character(kinds %||% c("file", "folder")), c("file", "folder"))
   if (!length(kinds)) return(list())
-  candidates <- Filter(function(x) is.list(x) && x$kind %in% kinds && nzchar(x$path %||% ""), index)
-  scored <- lapply(candidates, function(item) {
-    path <- tolower(item$path)
-    base <- tolower(basename(sub("/$", "", item$path)))
-    score <- if (!nzchar(query)) 0L
-      else if (startsWith(base, query)) 0L
-      else if (grepl(query, base, fixed = TRUE)) 1L
-      else if (startsWith(path, query)) 2L
-      else if (grepl(query, path, fixed = TRUE)) 3L
-      else if (.addin_fuzzy_match(query, base)) 4L
-      else if (.addin_fuzzy_match(query, path)) 5L
-      else Inf
-    if (!is.finite(score)) return(NULL)
-    depth <- lengths(regmatches(item$path, gregexpr("/", item$path, fixed = TRUE)))
-    c(item, list(
-      label = basename(sub("/$", "", item$path)),
-      insertText = .addin_mention_insert_text(item$path),
-      .score = score, .depth = depth
-    ))
+  cand <- Filter(function(x) is.list(x) && x$kind %in% kinds && nzchar(x$path %||% ""), index)
+  n <- length(cand)
+  if (!n) return(list())
+
+  paths <- vapply(cand, function(x) x$path, character(1))
+  lpath <- tolower(paths)
+  lbase <- tolower(basename(sub("/$", "", paths)))
+  score <- rep(Inf, n)
+
+  if (!nzchar(query)) {
+    score[] <- 0L
+  } else {
+    hit <- startsWith(lbase, query);                 score[hit] <- pmin(score[hit], 0L)
+    rem <- is.infinite(score) & grepl(query, lbase, fixed = TRUE); score[rem] <- 1L
+    rem <- is.infinite(score) & startsWith(lpath, query);         score[rem] <- 2L
+    rem <- is.infinite(score) & grepl(query, lpath, fixed = TRUE); score[rem] <- 3L
+    # fuzzy（subsequence）最贵 —— 只对仍未命中的子集逐项算
+    idx_rem <- which(is.infinite(score))
+    if (length(idx_rem)) {
+      fb <- vapply(idx_rem, function(i) .addin_fuzzy_match(query, lbase[i]), logical(1))
+      score[idx_rem[fb]] <- 4L
+      idx_rem2 <- idx_rem[!fb]
+      if (length(idx_rem2)) {
+        fp <- vapply(idx_rem2, function(i) .addin_fuzzy_match(query, lpath[i]), logical(1))
+        score[idx_rem2[fp]] <- 5L
+      }
+    }
+  }
+
+  keep <- which(is.finite(score))
+  if (!length(keep)) return(list())
+  kpaths <- paths[keep]
+  depth <- nchar(gsub("[^/]", "", kpaths))                 # "/" 个数 = 路径深度（向量化）
+  folder_first <- vapply(cand[keep], function(x) if (identical(x$kind, "folder")) 0L else 1L, integer(1))
+  ord <- order(score[keep], depth, folder_first, nchar(kpaths), tolower(kpaths))
+  cap <- max(1L, min(100L, as.integer(limit %||% 50L)))
+  sel <- keep[ord][seq_len(min(length(ord), cap))]
+  lapply(sel, function(i) {
+    x <- cand[[i]]
+    list(
+      kind = x$kind,
+      path = x$path,
+      label = basename(sub("/$", "", x$path)),
+      insertText = .addin_mention_insert_text(x$path)
+    )
   })
-  scored <- Filter(Negate(is.null), scored)
-  if (!length(scored)) return(list())
-  ord <- order(
-    vapply(scored, `[[`, numeric(1), ".score"),
-    vapply(scored, `[[`, integer(1), ".depth"),
-    vapply(scored, function(x) if (identical(x$kind, "folder")) 0L else 1L, integer(1)),
-    vapply(scored, function(x) nchar(x$path), integer(1)),
-    vapply(scored, `[[`, character(1), "path")
-  )
-  result <- head(scored[ord], max(1L, min(100L, as.integer(limit %||% 50L))))
-  lapply(result, function(x) x[setdiff(names(x), c(".score", ".depth"))])
 }
 
 .make_addin_workspace_search_provider <- function(project, cache_path = NULL) {
@@ -174,8 +191,25 @@
   # project 可为字符串（固定）或函数（动态当前工作目录）。每次查询按当前目录取带缓存的索引，
   # 从而工作目录切换后 @mention 搜索自动跟随。
   dir_provider <- if (is.function(project)) project else function() project
+  # Q1 优化 A：内存级 memo。同一目录 head_ttl 秒内的连续按键直接复用内存索引，
+  # 跳过每键的 git rev-parse 子进程 + readRDS 磁盘反序列化（重项目的主要卡顿源）。
+  memo <- new.env(parent = emptyenv())
+  head_ttl <- 5
+  get_index <- function(dir) {
+    now <- as.numeric(Sys.time())
+    entry <- get0(dir, envir = memo, inherits = FALSE)
+    if (is.list(entry) && (now - entry$checked_at) < head_ttl) return(entry$index)  # 纯内存命中
+    head <- .addin_git_head(dir)
+    if (is.list(entry) && identical(entry$head, head)) {                            # HEAD 未变 → 复用，免 readRDS
+      assign(dir, list(index = entry$index, head = head, checked_at = now), envir = memo)
+      return(entry$index)
+    }
+    idx <- .addin_workspace_index_cached(dir, cache_path)                            # 真正重建/读盘（少见）
+    assign(dir, list(index = idx, head = head, checked_at = now), envir = memo)
+    idx
+  }
   function(query = "", kinds = c("file", "folder"), limit = 50L) {
-    index <- .addin_workspace_index_cached(dir_provider(), cache_path)
+    index <- get_index(dir_provider())
     .addin_workspace_search(index, query = query, kinds = kinds, limit = limit)
   }
 }

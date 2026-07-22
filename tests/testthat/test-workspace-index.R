@@ -42,3 +42,20 @@ test_that("search finds a gitignored dev file by name (underscore ok)", {
   hits <- shinyAssistantUI:::.addin_workspace_search(idx, "dev_helper", limit = 5)
   expect_true(any(vapply(hits, function(x) grepl("dev_helper.R", x$path), logical(1))))
 })
+
+test_that("search provider memoizes the index within TTL (no per-keystroke git/readRDS)", {
+  # Q1 优化 A：同一目录连续按键复用内存索引，不重跑 .addin_workspace_index_cached。
+  build_calls <- 0L
+  testthat::local_mocked_bindings(
+    .addin_workspace_index_cached = function(project, cache_path, max_files = 10000L) {
+      build_calls <<- build_calls + 1L
+      list(list(kind = "file", path = "R/app.R"))
+    }
+  )
+  provider <- shinyAssistantUI:::.make_addin_workspace_search_provider(
+    function() "/tmp/proj", cache_path = tempfile()
+  )
+  provider("a"); provider("ap"); provider("app")   # 三次连续"按键"
+  expect_identical(build_calls, 1L)                 # 只构建一次
+})
+

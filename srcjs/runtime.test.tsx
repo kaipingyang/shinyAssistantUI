@@ -657,9 +657,9 @@ describe("useShinyRuntime — live IDE context capability", () => {
 
   it("drops stale workspace results and accepts the latest correlated query", async () => {
     const { result } = setup(config);
-    await act(async () => { result.current.searchWorkspace("old"); });
+    await act(async () => { result.current.searchWorkspace("old"); await new Promise((r) => setTimeout(r, 160)); });
     const first = inputs.filter((x) => x.id === "test_workspace_search").at(-1)!.value;
-    await act(async () => { result.current.searchWorkspace("app"); });
+    await act(async () => { result.current.searchWorkspace("app"); await new Promise((r) => setTimeout(r, 160)); });
     const second = inputs.filter((x) => x.id === "test_workspace_search").at(-1)!.value;
 
     await fireR("workspace-results", {
@@ -672,6 +672,20 @@ describe("useShinyRuntime — live IDE context capability", () => {
       items: [{ kind: "file", path: "R/app.R", insertText: "@R/app.R" }],
     });
     expect(result.current.workspaceMentions.items[0].path).toBe("R/app.R");
+  });
+
+  it("debounces rapid workspace queries into a single backend call", async () => {
+    const { result } = setup(config);
+    const before = inputs.filter((x) => x.id === "test_workspace_search").length;
+    await act(async () => {
+      result.current.searchWorkspace("a");
+      result.current.searchWorkspace("ap");
+      result.current.searchWorkspace("app");
+      await new Promise((r) => setTimeout(r, 160));
+    });
+    const sent = inputs.filter((x) => x.id === "test_workspace_search");
+    expect(sent.length - before).toBe(1);                 // 三次连打 → 只发一次
+    expect(sent.at(-1)!.value.query).toBe("app");
   });
 
   it("reload never sends an IDE context policy", async () => {

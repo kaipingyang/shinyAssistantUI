@@ -234,6 +234,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     }
     sessionLoadRetryTimers.current.clear();
     olderPageRetryTimers.current.clear();
+    if (workspaceDebounceRef.current !== null) window.clearTimeout(workspaceDebounceRef.current);
   }, []);
 
   const [ideContext, setIdeContext] = useState<IdeContextMeta | undefined>(undefined);
@@ -256,6 +257,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
   const workspaceRequestSeq = useRef(0);
+  const workspaceDebounceRef = useRef<number | null>(null);
   const latestIdeRequest = useRef<string | null>(null);
   const latestWorkspaceRequest = useRef<string | null>(null);
   const selectionVisibleRef = useRef(true);
@@ -333,10 +335,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const searchWorkspace = useCallback((query: string) => {
     if (!capabilityContract.workspace) return;
     const threadId = currentThreadIdRef.current;
-    const requestId = `workspace-${Date.now()}-${++workspaceRequestSeq.current}`;
-    latestWorkspaceRequest.current = requestId;
+    // 立即回显查询 + loading（UI 不迟钝）；真正发往 R 的搜索防抖 150ms，
+    // 快速输入合并成一次，避免每键触发 R 端 git+readRDS+全量搜索（Q1 优化 B）。
     setWorkspaceMentions((prev) => ({ ...prev, enabled: true, query, loading: true }));
-    bridge.current.searchWorkspace(requestId, threadId, query, ["file", "folder"], 50);
+    if (workspaceDebounceRef.current !== null) window.clearTimeout(workspaceDebounceRef.current);
+    workspaceDebounceRef.current = window.setTimeout(() => {
+      const requestId = `workspace-${Date.now()}-${++workspaceRequestSeq.current}`;
+      latestWorkspaceRequest.current = requestId;
+      bridge.current.searchWorkspace(requestId, threadId, query, ["file", "folder"], 50);
+    }, 150);
   }, [capabilityContract.workspace]);
 
   // 确保初始线程在列表里
