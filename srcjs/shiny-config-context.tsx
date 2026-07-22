@@ -78,6 +78,8 @@ export interface ShinyConfigCtx {
   projects?: string[];
   saveProject?: () => void;
   removeProject?: (path: string) => void;
+  filesPaneFollow?: boolean;
+  setFilesPaneFollow?: (value: boolean) => void;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({

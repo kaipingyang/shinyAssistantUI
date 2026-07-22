@@ -248,6 +248,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   );
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const nativePicker = config?.native_picker === true;
+  // Files 面板跟随开关（addin/RStudio）。undefined = 无此能力（不显示开关）。
+  const [filesPaneFollow, setFilesPaneFollowState] = useState<boolean | undefined>(
+    () => (typeof config?.files_pane_follow === "boolean" ? config.files_pane_follow : undefined),
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -1610,6 +1614,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     projects,
     saveProject: () => bridge.current.sendSaveProject(),
     removeProject: (path: string) => bridge.current.sendRemoveProject(path),
+    filesPaneFollow,
+    setFilesPaneFollow: (value: boolean) => {
+      setFilesPaneFollowState(value);
+      bridge.current.sendFilesPaneFollow(value);
+    },
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
     historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,
     historyCursor: historyPageStates[currentThreadId]?.cursor ?? null,

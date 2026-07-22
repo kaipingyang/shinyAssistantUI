@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
-  extractAttachments, expandSlashCommands, safeUrl,
+  extractAttachments, expandSlashCommands, safeUrl, parseFileRef,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
   matchSlashAction, mergeSlashCommands, rankMentionItems, mentionInsertText,
@@ -76,6 +76,29 @@ describe("safeUrl", () => {
     expect(safeUrl("/path")).toBe("/path");
     expect(safeUrl("./rel")).toBe("./rel");
     expect(safeUrl("#anchor")).toBe("#anchor");
+  });
+});
+
+describe("parseFileRef", () => {
+  it("recognizes relative paths and bare filenames with known extensions", () => {
+    expect(parseFileRef("R/app.R")).toEqual({ path: "R/app.R" });
+    expect(parseFileRef("config.R")).toEqual({ path: "config.R" });
+    expect(parseFileRef("src/foo.tsx")).toEqual({ path: "src/foo.tsx" });
+  });
+  it("captures an optional :line suffix", () => {
+    expect(parseFileRef("bgtm_download_all.R:14")).toEqual({ path: "bgtm_download_all.R", line: 14 });
+  });
+  it("rejects non-file tokens (no known extension)", () => {
+    expect(parseFileRef("modules_metadata")).toBeNull();
+    expect(parseFileRef("run_module_select()")).toBeNull();
+    expect(parseFileRef("plyr::rbind.fill")).toBeNull();
+    expect(parseFileRef("1.5")).toBeNull();
+    expect(parseFileRef("e.g")).toBeNull();
+  });
+  it("rejects tokens with spaces/quotes/parens or over-long input", () => {
+    expect(parseFileRef("a file.R")).toBeNull();
+    expect(parseFileRef("'foo.R'")).toBeNull();
+    expect(parseFileRef("x".repeat(201) + ".R")).toBeNull();
   });
 });
 

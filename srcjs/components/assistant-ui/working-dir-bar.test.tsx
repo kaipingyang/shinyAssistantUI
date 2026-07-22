@@ -40,3 +40,18 @@ describe("WorkingDirBar favorites (collapsible)", () => {
     expect(setWorkingDir).toHaveBeenCalledWith("/a/one");
   });
 });
+
+describe("WorkingDirBar files-pane-follow toggle", () => {
+  it("is absent when the capability is not provided", () => {
+    renderBar();
+    expect(screen.queryByText("Sync Files pane to folder")).toBeNull();
+  });
+  it("reflects the value and reports changes", () => {
+    const setFilesPaneFollow = vi.fn();
+    renderBar({ filesPaneFollow: true, setFilesPaneFollow });
+    const box = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    expect(setFilesPaneFollow).toHaveBeenCalledWith(false);
+  });
+});

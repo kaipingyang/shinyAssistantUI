@@ -13,6 +13,7 @@ export const WorkingDirBar: FC = () => {
   const {
     workingDir, recentDirs, nativePicker, pickWorkingDir, setWorkingDir,
     projects, saveProject, removeProject,
+    filesPaneFollow, setFilesPaneFollow,
   } = useShinyConfig();
   const [editing, setEditing] = useState(false);
   const [favOpen, setFavOpen] = useState(false);   // 收藏默认收起，展开滚动
@@ -96,6 +97,21 @@ export const WorkingDirBar: FC = () => {
             </div>
           )}
         </div>
+      )}
+      {filesPaneFollow !== undefined && (
+        <label
+          data-slot="aui_files_pane_follow"
+          className="text-muted-foreground hover:text-foreground flex cursor-pointer items-center gap-1.5 px-2 py-0.5 text-[11px]"
+          title="Navigate the RStudio Files pane when you switch folders"
+        >
+          <input
+            type="checkbox"
+            checked={filesPaneFollow}
+            onChange={(e) => setFilesPaneFollow?.(e.target.checked)}
+            className="size-3 accent-current"
+          />
+          <span>Sync Files pane to folder</span>
+        </label>
       )}
       {saved.length > 0 && (
         <div data-slot="aui_projects" className="flex flex-col">

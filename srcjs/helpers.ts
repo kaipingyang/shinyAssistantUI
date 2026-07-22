@@ -189,6 +189,24 @@ export function safeUrl(url: string): string | null {
   return null;
 }
 
+// 行内 `code` 是否长得像"可打开的文件引用"（addin 里点击可在 RStudio 打开）。
+// 最稳妥策略：必须有已知代码/文本扩展名（避免把 1.5 / e.g / modules_metadata 之类误判），
+// 允许可选 :行号；含空格/引号/括号一律不算。返回 {path,line} 或 null。
+const FILE_REF_EXT =
+  /\.(R|r|Rmd|rmd|qmd|Rnw|py|pyi|js|jsx|ts|tsx|mjs|cjs|json|ya?ml|toml|ini|cfg|xml|csv|tsv|sql|sh|bash|zsh|md|markdown|txt|c|h|cc|cpp|hpp|hxx|java|kt|go|rs|rb|php|cs|swift|css|scss|sass|less|html?|vue|svelte|lua|pl|jl|dart|scala|clj)$/i;
+export function parseFileRef(raw: string): { path: string; line?: number } | null {
+  if (!raw) return null;
+  const text = raw.trim();
+  if (text.length === 0 || text.length > 200) return null;
+  const m = text.match(/^([^\s`'"()<>]+?)(?::(\d+))?$/);
+  if (!m) return null;
+  const path = m[1]!;
+  if (!FILE_REF_EXT.test(path)) return null;   // 必须有已知扩展名
+  const line = m[2] ? Number(m[2]) : undefined;
+  return line !== undefined ? { path, line } : { path };
+}
+
+
 // 流式 markdown 表格补全：补上缺失的 separator 行，使流式中途的表格也能渲染。
 export function preprocessStreamingMarkdown(text: string): string {
   // 快速短路：每个流式 token 都会调用本函数，绝大多数 markdown 不含表格。

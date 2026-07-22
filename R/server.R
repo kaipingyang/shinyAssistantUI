@@ -236,6 +236,8 @@ assistantUIServer <- function(id, handler,
                               projects          = NULL,
                               on_save_project   = NULL,
                               on_remove_project = NULL,
+                              files_pane_follow = NULL,
+                              on_toggle_files_pane_follow = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -318,6 +320,8 @@ assistantUIServer <- function(id, handler,
   }
   # 工作目录收藏夹初始列表（addin）。
   if (!is.null(projects)) config$projects <- as.list(as.character(projects))
+  # Files 面板跟随开关初始态（addin/RStudio；NULL = 不显示该开关）。
+  if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
@@ -502,6 +506,15 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       path <- if (is.list(msg)) msg$path else msg
       tryCatch(on_remove_project(as.character(path %||% "")), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  # Files 面板跟随开关切换（addin 持久化偏好）。
+  if (is.function(on_toggle_files_pane_follow)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_files_pane_follow")]], {
+      msg <- session$input[[paste0(input_id, "_files_pane_follow")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_toggle_files_pane_follow(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

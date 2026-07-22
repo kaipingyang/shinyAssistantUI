@@ -96,6 +96,8 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     projects: rt.projects,
     saveProject: rt.saveProject,
     removeProject: rt.removeProject,
+    filesPaneFollow: rt.filesPaneFollow,
+    setFilesPaneFollow: rt.setFilesPaneFollow,
   };
 
   const threadEl = (

@@ -88,6 +88,12 @@
   dir_state <- new.env(parent = emptyenv())
   dir_state$cwd <- project
   cur_dir <- function() dir_state$cwd
+  # Files 面板跟随偏好（持久化，默认 TRUE）：切目录时是否同步 RStudio Files 面板。
+  follow_pref <- new.env(parent = emptyenv())
+  follow_pref$on <- {
+    v <- tryCatch(readRDS(.claude_addin_path("follow_files.rds")), error = function(e) TRUE)
+    if (is.logical(v) && length(v) == 1L && !is.na(v)) v else TRUE
+  }
   handler <- make_claude_handler(
     options          = options,
     cwd_provider     = cur_dir,
@@ -139,6 +145,12 @@
       projects          = .read_saved_projects(.claude_addin_path("projects.rds")),
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
+      files_pane_follow = if (native_picker) follow_pref$on else NULL,
+      on_toggle_files_pane_follow = function(v) {
+        follow_pref$on <- isTRUE(v)
+        tryCatch(saveRDS(follow_pref$on, .claude_addin_path("follow_files.rds")),
+                 error = function(e) NULL)
+      },
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
@@ -209,6 +221,13 @@
       if (!dir.exists(nd) || identical(nd, dir_state$cwd)) return(invisible(NULL))
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
+      # Files 面板跟随（受开关控制；纯前端调用，gadget 占用 console 也生效）。
+      if (isTRUE(follow_pref$on) &&
+          requireNamespace("rstudioapi", quietly = TRUE) &&
+          isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE)) &&
+          isTRUE(tryCatch(rstudioapi::hasFun("filesPaneNavigate"), error = function(e) FALSE))) {
+        tryCatch(rstudioapi::filesPaneNavigate(nd), error = function(e) NULL)
+      }
       recent <- add_recent(nd)
       ctrl$send_working_dir(nd, as.list(recent))
       push_sessions()

@@ -16,6 +16,8 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { SyntaxHighlighter, resolveCodeLanguage } from "@/components/assistant-ui/syntax-highlighter";
 import { DiffCodeBlock } from "@/components/assistant-ui/diff-viewer";
 import { cn } from "@/lib/utils";
+import { safeUrl, parseFileRef } from "@/helpers";
+import { useShinyConfig } from "@/shiny-config-context";
 
 const MarkdownTextImpl = () => {
   return (
@@ -146,15 +148,23 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  a: ({ className, ...props }) => (
-    <a
-      className={cn(
-        "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
-        className,
-      )}
-      {...props}
-    />
-  ),
+  a: ({ className, href, ...props }) => {
+    // 外链在新标签打开（RStudio Viewer 会交给系统浏览器），不顶掉聊天界面；
+    // safeUrl 过滤 javascript:/data: 等危险 scheme（不安全则渲染为不可点文本）。
+    const safe = typeof href === "string" ? safeUrl(href) : null;
+    return (
+      <a
+        className={cn(
+          "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
+          className,
+        )}
+        {...(safe ? { href: safe } : {})}
+        target="_blank"
+        rel="noopener noreferrer"
+        {...props}
+      />
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
@@ -189,13 +199,16 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   table: ({ className, ...props }) => (
-    <table
-      className={cn(
-        "aui-md-table my-3 w-full border-separate border-spacing-0 overflow-y-auto",
-        className,
-      )}
-      {...props}
-    />
+    // 宽表格用横向滚动容器兜底，避免右侧列被消息宽度裁掉（#4）。
+    <div className="aui-md-table-wrap my-3 w-full overflow-x-auto">
+      <table
+        className={cn(
+          "aui-md-table min-w-full border-separate border-spacing-0",
+          className,
+        )}
+        {...props}
+      />
+    </div>
   ),
   th: ({ className, ...props }) => (
     <th
@@ -248,8 +261,38 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
-  code: function Code({ className, ...props }) {
+  code: function Code({ className, children, ...props }) {
     const isCodeBlock = useIsMarkdownCodeBlock();
+    const { onOpenFile } = useShinyConfig();
+    // 行内 code 且长得像仓库文件路径（严格：需已知扩展名）→ addin 里点击在 RStudio 打开。
+    const text = typeof children === "string"
+      ? children
+      : Array.isArray(children) ? children.filter((c) => typeof c === "string").join("") : "";
+    const fileRef = !isCodeBlock && onOpenFile ? parseFileRef(text) : null;
+    if (fileRef && onOpenFile) {
+      return (
+        <code
+          role="button"
+          tabIndex={0}
+          data-file-ref={fileRef.path}
+          title={`Open ${fileRef.path}${fileRef.line ? ":" + fileRef.line : ""} in RStudio`}
+          onClick={() => onOpenFile(fileRef.path, fileRef.line)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              onOpenFile(fileRef.path, fileRef.line);
+            }
+          }}
+          className={cn(
+            "aui-md-inline-code aui-file-ref bg-muted hover:bg-accent cursor-pointer rounded-md px-1.5 py-0.5 font-mono text-[0.85em] underline decoration-dotted underline-offset-2",
+            className,
+          )}
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
     return (
       <code
         className={cn(
@@ -258,7 +301,9 @@ const defaultComponents = memoizeMarkdownComponents({
           className,
         )}
         {...props}
-      />
+      >
+        {children}
+      </code>
     );
   },
   CodeHeader,
