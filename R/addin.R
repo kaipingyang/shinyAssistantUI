@@ -14,6 +14,17 @@
 .claude_addin_path <- function(name, home = Sys.getenv("HOME", unset = "~")) {
   file.path(.claude_addin_dir(home), name)
 }
+# 把 RStudio Files 面板导航到某目录（纯前端 rstudioapi 调用，gadget 占用 console 也生效）。
+# rstudioapi 不可用/无该函数/非目录时安全无操作。抽出以便复用（切目录 + 开启同步时）与测试。
+.addin_files_pane_navigate <- function(path) {
+  if (is.null(path) || !nzchar(path)) return(invisible(FALSE))
+  ok <- requireNamespace("rstudioapi", quietly = TRUE) &&
+    isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE)) &&
+    isTRUE(tryCatch(rstudioapi::hasFun("filesPaneNavigate"), error = function(e) FALSE))
+  if (!ok) return(invisible(FALSE))
+  tryCatch({ rstudioapi::filesPaneNavigate(path); TRUE },
+           error = function(e) FALSE)
+}
 # 一次性迁移：把旧的 ~/.claude_addin_*.rds 搬进 ~/.claude_addin/<name>.rds。
 # 新文件已存在则不覆盖（保护当前数据）。启动时调用一次。
 .migrate_addin_storage <- function(home = Sys.getenv("HOME", unset = "~")) {
@@ -91,7 +102,8 @@
   # Files 面板跟随偏好（持久化，默认 TRUE）：切目录时是否同步 RStudio Files 面板。
   follow_pref <- new.env(parent = emptyenv())
   follow_pref$on <- {
-    v <- tryCatch(readRDS(.claude_addin_path("follow_files.rds")), error = function(e) TRUE)
+    p <- .claude_addin_path("follow_files.rds")
+    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) TRUE) else TRUE
     if (is.logical(v) && length(v) == 1L && !is.na(v)) v else TRUE
   }
   handler <- make_claude_handler(
@@ -150,6 +162,8 @@
         follow_pref$on <- isTRUE(v)
         tryCatch(saveRDS(follow_pref$on, .claude_addin_path("follow_files.rds")),
                  error = function(e) NULL)
+        # 刚开启 → 立即把 Files 面板跟到当前目录（Bug2：开启动作本身也导航）。
+        if (isTRUE(v)) .addin_files_pane_navigate(dir_state$cwd)
       },
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
@@ -218,16 +232,12 @@
       if (is.null(new_dir) || !nzchar(new_dir)) return(invisible(NULL))
       nd <- tryCatch(normalizePath(new_dir, winslash = "/", mustWork = FALSE),
                      error = function(e) new_dir)
-      if (!dir.exists(nd) || identical(nd, dir_state$cwd)) return(invisible(NULL))
+      if (!dir.exists(nd)) return(invisible(NULL))
+      # 显式点选目录：只要同步开就刷新 Files 面板——即使还是当前目录（Bug2）。
+      if (isTRUE(follow_pref$on)) .addin_files_pane_navigate(nd)
+      if (identical(nd, dir_state$cwd)) return(invisible(nd))   # cwd 未变 → 跳过重连/收藏/推送
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
-      # Files 面板跟随（受开关控制；纯前端调用，gadget 占用 console 也生效）。
-      if (isTRUE(follow_pref$on) &&
-          requireNamespace("rstudioapi", quietly = TRUE) &&
-          isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE)) &&
-          isTRUE(tryCatch(rstudioapi::hasFun("filesPaneNavigate"), error = function(e) FALSE))) {
-        tryCatch(rstudioapi::filesPaneNavigate(nd), error = function(e) NULL)
-      }
       recent <- add_recent(nd)
       ctrl$send_working_dir(nd, as.list(recent))
       push_sessions()
