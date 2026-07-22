@@ -112,6 +112,23 @@ describe("ModelPickerDialog", () => {
     expect(setValue).toHaveBeenCalledWith("sonnet");
     expect(setPickerOpen).toHaveBeenCalledWith(false);
   });
+  it("arrow keys move the highlight and Enter confirms", () => {
+    const setValue = vi.fn(); const setPickerOpen = vi.fn();
+    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
+    const dialog = screen.getByRole("dialog", { name: "Select model" });
+    fireEvent.keyDown(dialog, { key: "ArrowDown" });   // default(0) → haiku(1)
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(setValue).toHaveBeenCalledWith("haiku");
+    expect(setPickerOpen).toHaveBeenCalledWith(false);
+  });
+  it("ArrowUp from the first option wraps to the last", () => {
+    const setValue = vi.fn();
+    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
+    const dialog = screen.getByRole("dialog", { name: "Select model" });
+    fireEvent.keyDown(dialog, { key: "ArrowUp" });     // default(0) → opus(3)
+    fireEvent.keyDown(dialog, { key: "Enter" });
+    expect(setValue).toHaveBeenCalledWith("opus");
+  });
 });
 
 describe("SidebarSettings", () => {

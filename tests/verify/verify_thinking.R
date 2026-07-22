@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9255L
+port <- 9259L
 unlink(c("/tmp/aui-think.out", "/tmp/aui-think.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -49,13 +49,20 @@ press_key <- function(key, code, vk) {
   browser$Input$dispatchKeyEvent(type = "keyUp",   key = key, code = code, windowsVirtualKeyCode = vk)
 }
 click_sel(".aui-lexical-input[contenteditable='true']")   # 聚焦 composer
+Sys.sleep(0.4)
 browser$Input$insertText(text = "/model")
+Sys.sleep(0.4)
 press_key("Escape", "Escape", 27L)   # 关闭 slash 弹层，保留 "/model" 文本
+Sys.sleep(0.3)
 press_key("Enter",  "Enter",  13L)   # 提交 → matchSlashAction 拦截 /model → 开选择器
+Sys.sleep(0.3)
 chk("/model opens the model picker dialog", wait_for("!!document.querySelector('[role=\"dialog\"][aria-label=\"Select model\"]')", 6))
 chk("picker lists model options", isTRUE(value("!!document.querySelector('[data-model-option=\"sonnet\"]')")))
-click_sel("[data-model-option=\"sonnet\"]")               # 点选 Sonnet 确认
-chk("picking a model reaches backend (probe = model:sonnet)", wait_for("(document.getElementById('probe')?.textContent||'').includes('model:sonnet')", 8),
+press_key("ArrowDown", "ArrowDown", 40L)   # default(0) → haiku(1)
+press_key("ArrowDown", "ArrowDown", 40L)   # → sonnet(2)
+chk("arrow keys move the highlight", wait_for("document.querySelector('[data-model-option=\"sonnet\"]')?.getAttribute('data-highlighted')==='true'", 4))
+press_key("Enter", "Enter", 13L)           # Enter 确认高亮项
+chk("Enter confirms and reaches backend (probe = model:sonnet)", wait_for("(document.getElementById('probe')?.textContent||'').includes('model:sonnet')", 8),
     value("document.getElementById('probe')?.textContent"))
 chk("picker closes after pick", wait_for("!document.querySelector('[role=\"dialog\"][aria-label=\"Select model\"]')", 4))
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")

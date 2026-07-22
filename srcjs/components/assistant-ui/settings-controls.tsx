@@ -85,12 +85,25 @@ export function ThinkingControl() {
 export function ModelPickerDialog() {
   const { model } = useShinyConfig();
   const dialogRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const open = model?.pickerOpen ?? false;
+  const options = model?.options ?? [];
+  const [highlighted, setHighlighted] = useState(0);
+  // 打开时把高亮定位到当前模型并聚焦弹窗（以接收方向键/Enter）。
   useEffect(() => {
-    if (open) dialogRef.current?.focus();
+    if (!open) return;
+    const idx = options.findIndex((o) => o.value === model?.value);
+    setHighlighted(idx >= 0 ? idx : 0);
+    dialogRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+  // 键盘移动高亮时让其滚入可视区（models= 自定义可能较长）。
+  useEffect(() => {
+    if (open) itemRefs.current.get(highlighted)?.scrollIntoView?.({ block: "nearest" });
+  }, [highlighted, open]);
   if (!model || !open) return null;
   const close = () => model.setPickerOpen(false);
+  const pick = (value: string) => { model.setValue(value); close(); };
   return (
     <div
       className="aui-model-picker-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/20"
@@ -104,6 +117,9 @@ export function ModelPickerDialog() {
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           if (event.key === "Escape") { event.preventDefault(); close(); }
+          else if (event.key === "ArrowDown") { event.preventDefault(); setHighlighted((h) => (h + 1) % options.length); }
+          else if (event.key === "ArrowUp") { event.preventDefault(); setHighlighted((h) => (h - 1 + options.length) % options.length); }
+          else if (event.key === "Enter") { event.preventDefault(); const opt = options[highlighted]; if (opt) pick(opt.value); }
         }}
         className="bg-popover text-popover-foreground w-72 rounded-lg border p-2 shadow-lg outline-none"
       >
@@ -115,16 +131,20 @@ export function ModelPickerDialog() {
           </button>
         </div>
         <div className="mt-1 flex flex-col">
-          {model.options.map((option) => {
+          {options.map((option, index) => {
             const active = option.value === model.value;
+            const isHighlighted = index === highlighted;
             return (
               <button
                 key={option.value}
                 type="button"
+                ref={(node) => { if (node) itemRefs.current.set(index, node); else itemRefs.current.delete(index); }}
                 data-model-option={option.value}
+                data-highlighted={isHighlighted || undefined}
                 aria-current={active}
-                className={`hover:bg-accent focus:bg-accent flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-start text-sm outline-none ${active ? "bg-accent" : ""}`}
-                onClick={() => { model.setValue(option.value); close(); }}
+                onMouseEnter={() => setHighlighted(index)}
+                className={`flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-start text-sm outline-none ${isHighlighted ? "bg-accent" : ""}`}
+                onClick={() => pick(option.value)}
               >
                 <span className="font-medium">{option.label}{active ? " ✓" : ""}</span>
                 {option.description && (

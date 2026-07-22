@@ -15,6 +15,7 @@ export const WorkingDirBar: FC = () => {
     projects, saveProject, removeProject,
   } = useShinyConfig();
   const [editing, setEditing] = useState(false);
+  const [favOpen, setFavOpen] = useState(false);   // 收藏默认收起，展开滚动
   if (!workingDir) return null;
 
   const base = workingDir.replace(/\/+$/, "").split("/").pop() || workingDir;
@@ -98,39 +99,50 @@ export const WorkingDirBar: FC = () => {
       )}
       {saved.length > 0 && (
         <div data-slot="aui_projects" className="flex flex-col">
-          <div className="text-muted-foreground px-2 pt-0.5 text-[10px] font-semibold tracking-wide uppercase">
-            Favorites
-          </div>
-          {saved.map((d) => (
-            <div
-              key={d}
-              data-slot="aui_project_item"
-              data-project={d}
-              className="group hover:bg-accent flex items-center gap-1 rounded-md pe-1"
-            >
-              <button
-                type="button"
-                data-slot="aui_project_jump"
-                onClick={() => setWorkingDir?.(d)}
-                title={d}
-                className="text-muted-foreground min-w-0 flex-1 truncate px-2 py-1 text-start text-xs"
-              >
-                {dirBase(d)}
-              </button>
-              {removeProject && (
-                <button
-                  type="button"
-                  data-slot="aui_project_remove"
-                  onClick={() => removeProject(d)}
-                  aria-label="Remove from favorites"
-                  title="Remove from favorites"
-                  className="hover:bg-destructive/10 hover:text-destructive text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded opacity-0 group-hover:opacity-100"
+          <button
+            type="button"
+            data-slot="aui_projects_toggle"
+            aria-expanded={favOpen}
+            onClick={() => setFavOpen((v) => !v)}
+            className="text-muted-foreground hover:bg-accent flex items-center gap-1 rounded px-2 pt-0.5 pb-0.5 text-[10px] font-semibold tracking-wide uppercase"
+          >
+            <ChevronDownIcon className={"size-3 transition-transform " + (favOpen ? "" : "-rotate-90")} />
+            <span>Favorites ({saved.length})</span>
+          </button>
+          {favOpen && (
+            <div data-slot="aui_projects_list" className="flex max-h-40 flex-col overflow-y-auto">
+              {saved.map((d) => (
+                <div
+                  key={d}
+                  data-slot="aui_project_item"
+                  data-project={d}
+                  className="group hover:bg-accent flex items-center gap-1 rounded-md pe-1"
                 >
-                  <XIcon className="size-3" />
-                </button>
-              )}
+                  <button
+                    type="button"
+                    data-slot="aui_project_jump"
+                    onClick={() => setWorkingDir?.(d)}
+                    title={d}
+                    className="text-muted-foreground min-w-0 flex-1 truncate px-2 py-1 text-start text-xs"
+                  >
+                    {dirBase(d)}
+                  </button>
+                  {removeProject && (
+                    <button
+                      type="button"
+                      data-slot="aui_project_remove"
+                      onClick={() => removeProject(d)}
+                      aria-label="Remove from favorites"
+                      title="Remove from favorites"
+                      className="hover:bg-destructive/10 hover:text-destructive text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded opacity-0 group-hover:opacity-100"
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>
