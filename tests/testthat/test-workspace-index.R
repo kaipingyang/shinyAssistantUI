@@ -43,6 +43,24 @@ test_that("search finds a gitignored dev file by name (underscore ok)", {
   expect_true(any(vapply(hits, function(x) grepl("dev_helper.R", x$path), logical(1))))
 })
 
+test_that(".addin_fs_walk prunes noise dirs, reaches deep files, and caps at max_files", {
+  root <- normalizePath(tempfile("walk"), winslash = "/", mustWork = FALSE)
+  dir.create(file.path(root, "a", "b"), recursive = TRUE)
+  dir.create(file.path(root, "node_modules"), recursive = TRUE)
+  for (i in 1:5) writeLines("x", file.path(root, "a", paste0("f", i, ".R")))
+  writeLines("y", file.path(root, "a", "b", "deep.R"))
+  writeLines("z", file.path(root, "node_modules", "pkg.js"))
+  block_re <- "(^|/)(node_modules)(/|$)"
+
+  all <- shinyAssistantUI:::.addin_fs_walk(root, block_re, 1000L)
+  expect_true("a/b/deep.R" %in% all)          # BFS 到达深层文件
+  expect_false(any(grepl("node_modules", all)))  # 剪枝
+  expect_true(all(grepl("^a/", all)))
+
+  capped <- shinyAssistantUI:::.addin_fs_walk(root, block_re, 2L)
+  expect_length(capped, 2L)                    # max_files 封顶
+})
+
 test_that("non-git project falls back to a pruned file walk (empty @ index fix)", {
   proj <- normalizePath(tempfile("nogit"), winslash = "/", mustWork = FALSE)
   dir.create(file.path(proj, "R"), recursive = TRUE)

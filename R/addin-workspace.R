@@ -27,24 +27,34 @@
 # 构建 tracked + untracked、遵守 gitignore/global excludes 的 workspace index。
 # 非 Git 项目诚实返回空列表，不用 list.files() 冒充 ignore-aware 结果。
 # 非 git 回退：剪枝式 BFS 文件遍历。跳过隐藏项(all.files=FALSE → .git/.Rproj.user 等)
-# 与 blocklist 大户(node_modules/renv/library…),封顶 max_files,避免走进巨型忽略目录。
-.addin_fs_walk <- function(root, block_re, max_files) {
-  out <- character(0)
-  stack <- root
+# 与 blocklist 大户(node_modules/renv/library…),封顶 max_files。
+# 性能：出队用索引指针(避免 queue[-1] 整段复制)、文件结果收进 list 最后一次 unlist
+# (避免 out<-c(out,..) 的 O(n^2))、time_budget 兜底极端超大非黑名单目录。
+.addin_fs_walk <- function(root, block_re, max_files, time_budget = 2) {
   root_pref <- paste0(sub("/+$", "", root), "/")
-  while (length(stack) && length(out) < max_files) {
-    d <- stack[[1L]]; stack <- stack[-1L]
+  queue <- root
+  qi <- 1L                       # 索引指针出队：O(1),不复制
+  collected <- list()            # 每目录文件收进 list,末尾 unlist：O(n)
+  n_files <- 0L
+  deadline <- Sys.time() + time_budget
+  while (qi <= length(queue) && n_files < max_files && Sys.time() < deadline) {
+    d <- queue[[qi]]; qi <- qi + 1L
     entries <- list.files(d, all.files = FALSE, full.names = TRUE, no.. = TRUE)
     if (!length(entries)) next
     rel <- sub(root_pref, "", entries, fixed = TRUE)
-    keep <- !grepl(block_re, rel)
+    keep <- !grepl(block_re, rel)          # 剪枝：blocklist 目录/文件不入队、不收
+    if (!any(keep)) next
     entries <- entries[keep]; rel <- rel[keep]
-    if (!length(entries)) next
     isdir <- dir.exists(entries)
-    out <- c(out, rel[!isdir])
-    stack <- c(stack, entries[isdir])
+    fh <- rel[!isdir]
+    if (length(fh)) {
+      collected[[length(collected) + 1L]] <- fh
+      n_files <- n_files + length(fh)
+    }
+    sd <- entries[isdir]
+    if (length(sd)) queue <- c(queue, sd)  # 入队次数 = 目录数(远少于文件),可接受
   }
-  head(out, max(0L, as.integer(max_files)))
+  head(unlist(collected, use.names = FALSE), max(0L, as.integer(max_files)))
 }
 
 .addin_workspace_index <- function(project, max_files = 10000L) {
