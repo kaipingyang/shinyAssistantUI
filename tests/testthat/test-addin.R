@@ -111,24 +111,27 @@ test_that(".claude_chat_ui fills the page without Bootstrap", {
 })
 
 
-test_that("workspace index follows git ignore rules and derives folders", {
+test_that("workspace index includes gitignored files (Option 1), derives folders, excludes noise dirs", {
   skip_if(Sys.which("git") == "", "git is required")
   project <- tempfile("workspace-")
   dir.create(project)
   dir.create(file.path(project, "R"))
   dir.create(file.path(project, "nested", "deep"), recursive = TRUE)
+  dir.create(file.path(project, "node_modules"))
   writeLines("ignored.txt", file.path(project, ".gitignore"))
   writeLines("x <- 1", file.path(project, "R", "app.R"))
   writeLines("visible", file.path(project, "nested", "deep", "note.txt"))
   writeLines("secret", file.path(project, "ignored.txt"))
+  writeLines("pkg", file.path(project, "node_modules", "pkg.js"))
   system2("git", c("-C", shQuote(project), "init", "--quiet"))
 
   index <- .addin_workspace_index(project)
   files <- vapply(Filter(function(x) identical(x$kind, "file"), index), `[[`, character(1), "path")
   folders <- vapply(Filter(function(x) identical(x$kind, "folder"), index), `[[`, character(1), "path")
 
-  expect_setequal(files, c("R/app.R", "nested/deep/note.txt", ".gitignore"))
-  expect_false("ignored.txt" %in% files)
+  # Option 1：被 gitignore 的 ignored.txt 现在也包含。
+  expect_true(all(c("R/app.R", "nested/deep/note.txt", ".gitignore", "ignored.txt") %in% files))
+  expect_false(any(grepl("node_modules", files)))   # 噪声目录仍排除
   expect_true(all(c("R/", "nested/", "nested/deep/") %in% folders))
 })
 

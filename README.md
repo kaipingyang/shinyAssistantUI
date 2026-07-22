@@ -100,8 +100,10 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
   prompt (not frozen at addin startup). The composer shows the current file/line range with an
   eye toggle; click it to hide the active file (and any selection) from Claude for the next
   prompts, or show it again — the file reference and selection are only sent when the eye is on.
-- **Workspace mentions**: type `@` to fuzzy-search git-visible files and folders. Entries stay
-  literal (`@R/app.R`, `@R/app.R#L5-L10`, `@R/`) and respect Git ignore rules; the browser does
+- **Workspace mentions**: type `@` to fuzzy-search files and folders. Entries stay
+  literal (`@R/app.R`, `@R/app.R#L5-L10`, `@R/`); the search now includes Git-ignored
+  entries too (e.g. a `dev/` folder), skipping only heavy package/cache dirs such as
+  `node_modules`, `renv/library`, `.venv`, `__pycache__`, and `.Rproj.user`. The browser does
   not expand file contents.
 - **Safe by default**: file edits and shell commands are gated by the in-app approval card
   (`permission_mode = "default"`). Which tools prompt is decided entirely by Claude Code (working-

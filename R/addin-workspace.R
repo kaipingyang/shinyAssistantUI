@@ -2,6 +2,15 @@
 # 从 addin.R 拆出（Plan 16 Phase 2，行为不变）：git-aware 索引、缓存、模糊搜索 provider。
 # `%||%` / `.atomic_save_rds` 见 handlers.R / 其它包内文件。
 
+# @mention 索引默认排除的"噪声大户"目录（Option 1：展示所有含 gitignore 的内容，
+# 但跳过这些包缓存/依赖目录，否则会卡顿）。未来可由 Settings 自定义。
+.WORKSPACE_BLOCK_DIRS <- c(
+  "node_modules", ".Rproj.user", "__pycache__", ".venv", "venv", ".cache",
+  ".quarto", "_freeze", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+  ".ipynb_checkpoints", "renv/library", "renv/staging", "renv/cellar",
+  "packrat/lib", "packrat/src", ".git"
+)
+
 # git ls-files -z 的 NUL-safe 解码。system2(stdout=TRUE) 按行读取会破坏含换行的
 # 合法文件名，因此先写 raw 临时文件再按 NUL 切分。
 .read_nul_paths <- function(path) {
@@ -23,10 +32,15 @@
   out <- tempfile("claude-workspace-", fileext = ".nul")
   err <- tempfile("claude-workspace-", fileext = ".err")
   on.exit(unlink(c(out, err)), add = TRUE)
+  # Option 1：包含被 gitignore 的内容（去掉 --exclude-standard），用 pathspec 让 git
+  # 直接跳过"噪声大户"（不遍历 → 快）；R 侧再用黑名单兜底保证正确。
+  pathspecs <- unlist(lapply(.WORKSPACE_BLOCK_DIRS, function(d)
+    c(shQuote(paste0(":(exclude,glob)", d, "/**")),
+      shQuote(paste0(":(exclude,glob)**/", d, "/**")))), use.names = FALSE)
   status <- suppressWarnings(tryCatch(
     system2(
       "git",
-      c("-C", shQuote(project), "ls-files", "-z", "--cached", "--others", "--exclude-standard"),
+      c("-C", shQuote(project), "ls-files", "-z", "--cached", "--others", pathspecs),
       stdout = out, stderr = err
     ),
     error = function(e) 1L
@@ -36,6 +50,11 @@
   files <- .read_nul_paths(out)
   files <- gsub("\\\\", "/", files)
   files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
+  # 黑名单兜底（pathspec 不一定覆盖所有 git 版本/边界）：按路径段剔除噪声目录。
+  block_re <- paste0("(^|/)(",
+                     paste(gsub(".", "\\.", .WORKSPACE_BLOCK_DIRS, fixed = TRUE), collapse = "|"),
+                     ")(/|$)")
+  files <- files[!grepl(block_re, files)]
   files <- head(sort(unique(files)), max(0L, as.integer(max_files)))
 
   # 文件夹推导：先收集到 list（避免循环内 c() 的 O(n^2) 累加），最后一次 unique。
