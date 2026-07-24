@@ -71,6 +71,7 @@
   if (is.null(hl) || length(hl) != length(lines))
     hl <- if (requireNamespace("cli", quietly = TRUE)) cli::col_blue(lines) else lines
   prompts <- c("> ", rep("+ ", max(0L, length(hl) - 1L)))
+  if (requireNamespace("cli", quietly = TRUE)) prompts <- cli::col_blue(prompts)
   paste0(prompts, hl)
 }
 
