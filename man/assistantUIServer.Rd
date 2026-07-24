@@ -30,6 +30,8 @@ assistantUIServer(
   projects = NULL,
   on_save_project = NULL,
   on_remove_project = NULL,
+  files_pane_follow = NULL,
+  on_toggle_files_pane_follow = NULL,
   code_theme = "one-light",
   strings = NULL,
   assistant_avatar = list(fallback = "AI"),

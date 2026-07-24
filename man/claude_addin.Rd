@@ -10,7 +10,8 @@ claude_addin(
   permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
   prewarm = FALSE,
   models = NULL,
-  options = NULL
+  options = NULL,
+  background = FALSE
 )
 }
 \arguments{
@@ -39,6 +40,12 @@ Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
 \code{set_model} (no reconnect).}
 
 \item{options}{Optional \link[ClaudeAgentSDK:ClaudeAgentOptions]{ClaudeAgentSDK::ClaudeAgentOptions} to fully override all defaults.}
+
+\item{background}{Logical (default \code{FALSE}). If \code{TRUE}, run the chat as an RStudio
+\strong{background job} (via \code{\link[rstudioapi:jobRunScript]{rstudioapi::jobRunScript()}}) shown in the Viewer, so the R console
+stays free while you chat. IDE integration (editor context, open-file, Files pane, markers,
+save-before-edit) still works from the job via child-process \code{rstudioapi}. Requires a running
+RStudio session. \code{FALSE} keeps the classic blocking gadget.}
 }
 \value{
 Invisibly, the result of \code{\link[shiny:runGadget]{shiny::runGadget()}}.

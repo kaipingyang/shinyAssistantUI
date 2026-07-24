@@ -347,6 +347,82 @@
   )
 }
 
+# ── Background-job launcher (Plan 20) ────────────────────────────────────────
+# 选一个空闲端口：httpuv::randomPort 优先,否则安全区间随机(排除已知不安全端口)。
+.claude_random_port <- function() {
+  if (requireNamespace("httpuv", quietly = TRUE) &&
+      isTRUE(tryCatch(is.function(httpuv::randomPort), error = function(e) FALSE))) {
+    p <- tryCatch(httpuv::randomPort(), error = function(e) NA_integer_)
+    if (!is.na(p)) return(as.integer(p))
+  }
+  unsafe <- c(3659, 4045, 5060, 5061, 6000, 6566, 6665:6669, 6697)
+  as.integer(sample(setdiff(3000:8000, unsafe), 1L))
+}
+
+# TCP 层轮询端口就绪(job 里的 Shiny 起来没)。可注入用于测试。
+.claude_wait_for_port <- function(host, port, timeout = 30, interval = 0.25) {
+  deadline <- Sys.time() + timeout
+  repeat {
+    ok <- isTRUE(tryCatch({
+      con <- socketConnection(host = host, port = port, server = FALSE,
+                              blocking = TRUE, open = "r+", timeout = 1)
+      close(con); TRUE
+    }, warning = function(w) FALSE, error = function(e) FALSE))
+    if (ok) return(TRUE)
+    if (Sys.time() >= deadline) return(FALSE)
+    Sys.sleep(interval)
+  }
+}
+
+# 生成 background job 脚本文本：注入主会话 libPaths(让 job 能加载 shinyAssistantUI,
+# 含外部库/renv)、library、再调 .claude_run_in_job 起 app。纯函数,便于单测。
+.claude_bg_launch_script <- function(spec_path, port, host, libpaths) {
+  c(
+    sprintf(".libPaths(%s)", paste(deparse(as.character(libpaths)), collapse = "")),
+    "library(shinyAssistantUI)",
+    sprintf("shinyAssistantUI:::.claude_run_in_job(%s, port = %dL, host = %s)",
+            deparse(spec_path), as.integer(port), deparse(host))
+  )
+}
+
+# 在 job 进程里运行：读参数 → 构建同一个 .claude_chat_app → runApp(非阻塞浏览器)。
+.claude_run_in_job <- function(spec_path, port, host = "127.0.0.1") {
+  spec <- readRDS(spec_path)
+  app <- .claude_chat_app(
+    project         = spec$project,
+    options         = spec$options,
+    permission_mode = spec$permission_mode %||% "default",
+    prewarm         = isTRUE(spec$prewarm),
+    models          = spec$models
+  )
+  shiny::runApp(app, port = as.integer(port), host = host, launch.browser = FALSE)
+}
+
+# 主会话侧：序列化参数 → 写 job 脚本 → jobRunScript → 轮询就绪 → 在 Viewer 显示。
+# job_run / show_viewer / wait_ready / port 均可注入,使主会话逻辑无需真实 RStudio 即可单测。
+.run_claude_bg_job <- function(spec, host = "127.0.0.1", port = NULL,
+                               libpaths = .libPaths(),
+                               job_run = NULL, show_viewer = NULL,
+                               wait_ready = .claude_wait_for_port) {
+  port <- as.integer(port %||% .claude_random_port())
+  spec_path <- tempfile("claude-addin-spec-", fileext = ".rds")
+  saveRDS(spec, spec_path)
+  script_path <- tempfile("claude-addin-job-", fileext = ".R")
+  writeLines(.claude_bg_launch_script(spec_path, port, host, libpaths), script_path)
+
+  job_run <- job_run %||% function(path, name, workingDir)
+    rstudioapi::jobRunScript(path, name = name, workingDir = workingDir)
+  show_viewer <- show_viewer %||% function(u)
+    rstudioapi::viewer(tryCatch(rstudioapi::translateLocalUrl(u, absolute = TRUE),
+                                error = function(e) u))
+
+  job_run(script_path, name = "Claude Code Chat", workingDir = spec$project)
+  url <- sprintf("http://%s:%d", host, port)
+  ready <- isTRUE(wait_ready(host, port))
+  if (ready) show_viewer(url)
+  invisible(list(port = port, url = url, script = script_path, spec_path = spec_path, ready = ready))
+}
+
 #' Open a Claude Code chat inside RStudio
 #'
 #' Launches the shinyAssistantUI chat (backed by ClaudeAgentSDK) in the RStudio Viewer pane or a
@@ -380,6 +456,11 @@
 #'   Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
 #'   `set_model` (no reconnect).
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions] to fully override all defaults.
+#' @param background Logical (default `FALSE`). If `TRUE`, run the chat as an RStudio
+#'   **background job** (via [rstudioapi::jobRunScript()]) shown in the Viewer, so the R console
+#'   stays free while you chat. IDE integration (editor context, open-file, Files pane, markers,
+#'   save-before-edit) still works from the job via child-process `rstudioapi`. Requires a running
+#'   RStudio session. `FALSE` keeps the classic blocking gadget.
 #' @return Invisibly, the result of [shiny::runGadget()].
 #' @export
 #' @examples
@@ -394,16 +475,29 @@ claude_addin <- function(project         = NULL,
                          permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
                          prewarm         = FALSE,
                          models          = NULL,
-                         options         = NULL) {
+                         options         = NULL,
+                         background      = FALSE) {
   viewer          <- match.arg(viewer)
   permission_mode <- match.arg(permission_mode)
   project <- project %||% .addin_project()
-  app <- .claude_chat_app(project, options = options,
-                          permission_mode = permission_mode, prewarm = prewarm,
-                          models = models)
 
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))
+
+  # 后台模式(Plan 20)：Shiny 跑进 RStudio background job → R console 空出来;
+  # IDE 集成经"子进程回连主会话"仍工作(已真机验证)。app 必须在 job 里构建,故只传参数。
+  if (isTRUE(background)) {
+    if (!in_rstudio || !isTRUE(tryCatch(rstudioapi::hasFun("jobRunScript"), error = function(e) FALSE)))
+      stop("`background = TRUE` requires a running RStudio session (rstudioapi::jobRunScript).",
+           call. = FALSE)
+    spec <- list(project = project, options = options, permission_mode = permission_mode,
+                 prewarm = prewarm, models = models)
+    return(invisible(.run_claude_bg_job(spec)))
+  }
+
+  app <- .claude_chat_app(project, options = options,
+                          permission_mode = permission_mode, prewarm = prewarm,
+                          models = models)
   vw <- if (!in_rstudio) shiny::browserViewer()
         else switch(viewer,
                     pane    = shiny::paneViewer(minHeight = 600),
