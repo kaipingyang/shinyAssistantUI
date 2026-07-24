@@ -477,11 +477,12 @@
 #'   Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
 #'   `set_model` (no reconnect).
 #' @param options Optional [ClaudeAgentSDK::ClaudeAgentOptions] to fully override all defaults.
-#' @param background Logical (default `FALSE`). If `TRUE`, run the chat as an RStudio
+#' @param background Logical (default `TRUE`). Run the chat as an RStudio/Positron
 #'   **background job** (via [rstudioapi::jobRunScript()]) shown in the Viewer, so the R console
 #'   stays free while you chat. IDE integration (editor context, open-file, Files pane, markers,
-#'   save-before-edit) still works from the job via child-process `rstudioapi`. Requires a running
-#'   RStudio session. `FALSE` keeps the classic blocking gadget.
+#'   save-before-edit) still works from the job via child-process `rstudioapi`. Falls back to the
+#'   classic blocking gadget when background jobs aren't available (e.g. plain R / browser). Set
+#'   `FALSE` to force the classic gadget.
 #' @return Invisibly, the result of [shiny::runGadget()].
 #' @export
 #' @examples
@@ -497,7 +498,7 @@ claude_addin <- function(project         = NULL,
                          prewarm         = FALSE,
                          models          = NULL,
                          options         = NULL,
-                         background      = FALSE) {
+                         background      = TRUE) {
   viewer          <- match.arg(viewer)
   permission_mode <- match.arg(permission_mode)
   project <- project %||% .addin_project()
@@ -505,15 +506,12 @@ claude_addin <- function(project         = NULL,
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
 
-  # 后台模式(Plan 20)：Shiny 跑进 RStudio background job → R console 空出来;
+  # 默认后台模式(Plan 20)：Shiny 跑进 RStudio/Positron background job → R console 空出来;
   # IDE 集成经"子进程回连主会话"仍工作(已真机验证)。app 必须在 job 里构建,故只传参数。
-  if (isTRUE(background)) {
-    # 不卡 isAvailable()：Positron 等环境 isAvailable() 为 FALSE 但 jobRunScript 可用。
-    # 只要 rstudioapi 在,就尝试;真不支持时由 jobRunScript 自身报清晰错误。
-    if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-        !("jobRunScript" %in% getNamespaceExports("rstudioapi")))
-      stop("`background = TRUE` needs the 'rstudioapi' package (RStudio or Positron).",
-           call. = FALSE)
+  # 能起 job 就起;环境不支持(非 RStudio/Positron、纯浏览器)则优雅回退到 gadget/浏览器。
+  can_background <- isTRUE(background) && in_rstudio &&
+    ("jobRunScript" %in% getNamespaceExports("rstudioapi"))
+  if (can_background) {
     spec <- list(project = project, options = options, permission_mode = permission_mode,
                  prewarm = prewarm, models = models)
     return(invisible(.run_claude_bg_job(spec)))
