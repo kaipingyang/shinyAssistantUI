@@ -253,7 +253,8 @@ assistantUIServer <- function(id, handler,
                               dark_mode         = FALSE,
                               show_timestamps   = FALSE,
                               modal             = FALSE,
-                              prewarm           = FALSE) {
+                              prewarm           = FALSE,
+                              allow_warmup      = TRUE) {
   force(show_thread_list); force(suggestions); force(commands)
   persistence <- tryCatch(
     match.arg(persistence),
@@ -768,6 +769,10 @@ assistantUIServer <- function(id, handler,
   .warmup_fn <- attr(handler, "warmup")
   warmup_states <- new.env(parent = emptyenv())
   schedule_warmup <- function(thread_id, delay = 0) {
+    # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧
+    # 首条消息 ~55s 卡顿(见 Plan 22)。此时禁用一切 warm-ahead,让连接发生在首条
+    # 消息发送时(connect+send 相邻 = 快路径)。
+    if (!isTRUE(allow_warmup)) return(invisible(FALSE))
     if (!is.function(.warmup_fn) || is.null(thread_id) ||
         !nzchar(thread_id %||% "")) return(invisible(FALSE))
     state <- get0(thread_id, envir = warmup_states, inherits = FALSE)

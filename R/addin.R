@@ -242,7 +242,9 @@
         .addin_editor_context(cur_dir())
       },
       workspace_search_provider = workspace_search,
-      prewarm          = prewarm
+      prewarm          = prewarm,
+      # 角度 B:run_r MCP 激活时禁用 warm-ahead(否则连接后闲置→首条消息 ~55s 卡顿)。
+      allow_warmup     = is.null(run_r_server)
     )
 
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
@@ -505,9 +507,10 @@
 #'     \item{`"bypassPermissions"`}{All tool calls run without prompts (fastest, use with care).}
 #'   }
 #'   Ignored when `options` is supplied directly.
-#' @param prewarm Logical (default `TRUE`). If `TRUE`, pre-connect the Claude CLI at launch so
-#'   the first message isn't slowed by the cold start (see [assistantUIServer()]). Set `FALSE`
-#'   to defer the CLI subprocess until the first message.
+#' @param prewarm Logical (default `FALSE`). If `TRUE`, pre-connect the Claude CLI at launch so
+#'   the first message isn't slowed by the cold start (see [assistantUIServer()]).
+#'   Note: leave `FALSE` when the in-process `run_r` MCP tool is active — warming the
+#'   connection ahead of the first message triggers a CLI-side stall (see Plan 22 notes).
 #' @param models Optional character vector of model names/aliases to offer in the Settings
 #'   "Model" selector (e.g. `c("sonnet", "opus")`). A "Default" option is always prepended.
 #'   Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
@@ -531,7 +534,7 @@
 claude_addin <- function(project         = NULL,
                          viewer          = c("pane", "dialog", "browser"),
                          permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
-                         prewarm         = TRUE,
+                         prewarm         = FALSE,
                          models          = NULL,
                          options         = NULL,
                          background      = TRUE) {

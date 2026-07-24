@@ -8,7 +8,7 @@ claude_addin(
   project = NULL,
   viewer = c("pane", "dialog", "browser"),
   permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
-  prewarm = TRUE,
+  prewarm = FALSE,
   models = NULL,
   options = NULL,
   background = TRUE
@@ -31,9 +31,10 @@ in-chat approval card (safest — recommended for shared/production projects).}
 }
 Ignored when \code{options} is supplied directly.}
 
-\item{prewarm}{Logical (default \code{TRUE}). If \code{TRUE}, pre-connect the Claude CLI at launch so
-the first message isn't slowed by the cold start (see \code{\link[=assistantUIServer]{assistantUIServer()}}). Set \code{FALSE}
-to defer the CLI subprocess until the first message.}
+\item{prewarm}{Logical (default \code{FALSE}). If \code{TRUE}, pre-connect the Claude CLI at launch so
+the first message isn't slowed by the cold start (see \code{\link[=assistantUIServer]{assistantUIServer()}}).
+Note: leave \code{FALSE} when the in-process \code{run_r} MCP tool is active — warming the
+connection ahead of the first message triggers a CLI-side stall (see Plan 22 notes).}
 
 \item{models}{Optional character vector of model names/aliases to offer in the Settings
 "Model" selector (e.g. \code{c("sonnet", "opus")}). A "Default" option is always prepended.

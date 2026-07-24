@@ -42,7 +42,8 @@ assistantUIServer(
   dark_mode = FALSE,
   show_timestamps = FALSE,
   modal = FALSE,
-  prewarm = FALSE
+  prewarm = FALSE,
+  allow_warmup = TRUE
 )
 }
 \arguments{
