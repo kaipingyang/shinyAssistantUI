@@ -100,3 +100,60 @@
   if (is.null(res) || !is.list(res)) return(list(ok = FALSE, output = "", error = "console server timeout"))
   res
 }
+
+
+# ── Angle B (Plan 22): Claude-agentic run_r as an in-process SDK MCP tool ──────
+# Claude calls run_r → (approval) → this handler runs in the background job →
+# routes over nanonext to the main-session env-server (above) → the code runs
+# VISIBLY in the user's live .GlobalEnv (echo) and the capture is returned to
+# Claude. Reuses the Angle A env-server; needs ClaudeAgentSDK's in-process MCP
+# support (create_sdk_mcp_server / sdk_mcp_tool). No new dependencies.
+
+# autorun toggle → which allowed_tools to connect with. When on, run_r is
+# auto-allowed (no approval card); when off, run_r hits the approval card.
+.addin_run_r_allowed_tools <- function(autorun_on, base = NULL) {
+  tool <- "mcp__r_session__run_r"
+  if (!isTRUE(autorun_on)) return(base)
+  if (tool %in% base) return(base)
+  c(base, tool)
+}
+
+# Build the in-process "r_session" MCP server exposing run_r. Returns NULL when
+# the installed ClaudeAgentSDK lacks in-process MCP support (older versions) —
+# callers then simply don't register it.
+.addin_run_r_server <- function(console_url, run_remote = .addin_run_r_remote,
+                                timeout = 60000) {
+  if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE) ||
+      !("create_sdk_mcp_server" %in% getNamespaceExports("ClaudeAgentSDK")))
+    return(NULL)
+  run_r <- ClaudeAgentSDK::sdk_mcp_tool(
+    name = "run_r",
+    description = paste(
+      "Execute R code in the user's LIVE R session (.GlobalEnv).",
+      "Use this to inspect or use their real data, objects and loaded packages.",
+      "Output and errors are returned as text (no images)."
+    ),
+    input_schema = list(code = list(
+      type = "string",
+      description = "R code to run in the user's live R session (.GlobalEnv)."
+    )),
+    handler = function(args) {
+      code <- args$code %||% ""
+      cap <- tryCatch(
+        run_remote(console_url, code, timeout = timeout),
+        error = function(e) list(ok = FALSE, output = "", error = conditionMessage(e))
+      )
+      if (!isTRUE(cap$ok)) {
+        return(list(
+          content = list(list(type = "text",
+                              text = paste0("Error: ", cap$error %||% "unknown error"))),
+          isError = TRUE
+        ))
+      }
+      out <- cap$output %||% ""
+      if (!nzchar(out)) out <- "(no visible output)"
+      list(content = list(list(type = "text", text = out)), isError = FALSE)
+    }
+  )
+  ClaudeAgentSDK::create_sdk_mcp_server("r_session", tools = list(run_r))
+}

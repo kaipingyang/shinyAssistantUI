@@ -55,3 +55,18 @@ describe("WorkingDirBar files-pane-follow toggle", () => {
     expect(setFilesPaneFollow).toHaveBeenCalledWith(false);
   });
 });
+
+describe("WorkingDirBar auto-run toggle", () => {
+  it("is absent when the capability is not provided", () => {
+    renderBar();
+    expect(screen.queryByText("Auto-run R (Claude)")).toBeNull();
+  });
+  it("reflects the value and reports changes", () => {
+    const setAutoRunEnabled = vi.fn();
+    renderBar({ autoRunEnabled: false, setAutoRunEnabled });
+    const box = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    expect(setAutoRunEnabled).toHaveBeenCalledWith(true);
+  });
+});

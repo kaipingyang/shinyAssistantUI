@@ -131,6 +131,15 @@
     v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) TRUE) else TRUE
     if (is.logical(v) && length(v) == 1L && !is.na(v)) v else TRUE
   }
+  # 角度 B(Plan 22):bg 模式下(console_url 存在且 SDK 支持进程内 MCP)把 run_r
+  # 工具注入 options$mcp_servers,让 Claude 能在你的活 .GlobalEnv 执行 R(经角度 A
+  # env-server,可见)。gadget 模式无 console_url → run_r_server 为 NULL,不注册。
+  run_r_server <- if (!is.null(console_url)) .addin_run_r_server(console_url) else NULL
+  if (!is.null(run_r_server)) {
+    ms <- options$mcp_servers %||% list()
+    ms[["r_session"]] <- run_r_server
+    options$mcp_servers <- ms
+  }
   handler <- make_claude_handler(
     options          = options,
     cwd_provider     = cur_dir,
@@ -193,6 +202,11 @@
         # 刚开启 → 立即把 Files 面板跟到当前目录（Bug2：开启动作本身也导航）。
         if (isTRUE(v)) .addin_files_pane_navigate_soon(dir_state$cwd)
       },
+      # 角度 B:自动批准 run_r 开关(仅当 run_r 已注册才暴露;初始关)。
+      auto_run = if (!is.null(run_r_server)) FALSE else NULL,
+      on_toggle_auto_run = if (!is.null(run_r_server)) function(v) {
+        tryCatch(attr(handler, "set_autorun")(isTRUE(v)), error = function(e) NULL)
+      } else NULL,
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),

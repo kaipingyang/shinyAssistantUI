@@ -244,6 +244,8 @@ assistantUIServer <- function(id, handler,
                               on_remove_project = NULL,
                               files_pane_follow = NULL,
                               on_toggle_files_pane_follow = NULL,
+                              auto_run = NULL,
+                              on_toggle_auto_run = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -328,6 +330,8 @@ assistantUIServer <- function(id, handler,
   if (!is.null(projects)) config$projects <- as.list(as.character(projects))
   # Files 面板跟随开关初始态（addin/RStudio；NULL = 不显示该开关）。
   if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
+  # 角度 B:自动批准 run_r 开关(仅当能力存在,即 on_toggle_auto_run 提供时暴露)。
+  if (!is.null(auto_run)) config$auto_run <- isTRUE(auto_run)
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
 
@@ -523,6 +527,16 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_toggle_files_pane_follow(isTRUE(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # 角度 B:自动批准 run_r 开关切换 → 委派给 addin(set_autorun → reset_clients)。
+  if (is.function(on_toggle_auto_run)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_auto_run_enabled")]], {
+      msg <- session$input[[paste0(input_id, "_auto_run_enabled")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_toggle_auto_run(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

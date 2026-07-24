@@ -14,6 +14,7 @@ export const WorkingDirBar: FC = () => {
     workingDir, recentDirs, nativePicker, pickWorkingDir, setWorkingDir,
     projects, saveProject, removeProject,
     filesPaneFollow, setFilesPaneFollow,
+    autoRunEnabled, setAutoRunEnabled,
   } = useShinyConfig();
   const [editing, setEditing] = useState(false);
   const [favOpen, setFavOpen] = useState(false);   // 收藏默认收起，展开滚动
@@ -111,6 +112,21 @@ export const WorkingDirBar: FC = () => {
             className="size-3 accent-current"
           />
           <span>Sync Files pane to folder</span>
+        </label>
+      )}
+      {autoRunEnabled !== undefined && (
+        <label
+          data-slot="aui_auto_run"
+          className="text-muted-foreground hover:text-foreground flex cursor-pointer items-center gap-1.5 px-2 py-0.5 text-[11px]"
+          title="Auto-approve Claude's run_r calls in your live R session (this session)"
+        >
+          <input
+            type="checkbox"
+            checked={autoRunEnabled}
+            onChange={(e) => setAutoRunEnabled?.(e.target.checked)}
+            className="size-3 accent-current"
+          />
+          <span>Auto-run R (Claude)</span>
         </label>
       )}
       {saved.length > 0 && (

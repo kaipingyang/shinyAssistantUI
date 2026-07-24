@@ -253,6 +253,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [filesPaneFollow, setFilesPaneFollowState] = useState<boolean | undefined>(
     () => (typeof config?.files_pane_follow === "boolean" ? config.files_pane_follow : undefined),
   );
+  const [autoRunEnabled, setAutoRunEnabledState] = useState<boolean | undefined>(
+    () => (typeof config?.auto_run === "boolean" ? config.auto_run : undefined),
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -1648,6 +1651,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setFilesPaneFollow: (value: boolean) => {
       setFilesPaneFollowState(value);
       bridge.current.sendFilesPaneFollow(value);
+    },
+    autoRunEnabled,
+    setAutoRunEnabled: (value: boolean) => {
+      setAutoRunEnabledState(value);
+      bridge.current.sendAutoRunEnabled(value);
     },
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
     historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,

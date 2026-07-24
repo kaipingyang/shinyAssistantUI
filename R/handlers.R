@@ -786,6 +786,11 @@ make_claude_handler <- function(options       = NULL,
     if (is.null(v) || identical(v, "default")) NULL else v
   }
 
+  # 自动批准 run_r(本会话开关,默认关,不持久化)。开 → run_r 加入 allowed_tools
+  # 免审批;切换经 set_autorun 触发 reset_clients(allowed_tools 是连接时 option)。
+  autorun_state <- new.env(parent = emptyenv())
+  autorun_state$on <- FALSE
+
   # Disk is the source of truth because the historical loader and handler own
   # independent closures. Every mutation re-reads and atomically replaces the
   # map so one closure cannot publish a stale snapshot over another's entries.
@@ -823,6 +828,12 @@ make_claude_handler <- function(options       = NULL,
         # thinking（思考强度）为连接时 options；内部选择器 > 外部 provider > options$thinking。
         thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
         model                       = internal_model() %||% options$model,
+        # 角度 B:透传进程内 MCP servers(含 run_r);autorun 开且 run_r 已注册 →
+        # 把 run_r 加进 allowed_tools 免审批,否则走审批卡。
+        mcp_servers                 = options$mcp_servers,
+        allowed_tools               = .addin_run_r_allowed_tools(
+          isTRUE(autorun_state$on) && ("r_session" %in% names(options$mcp_servers)),
+          options$allowed_tools),
         resume                      = resume_sid
       )
     }
@@ -1391,6 +1402,12 @@ make_claude_handler <- function(options       = NULL,
   attr(handler_fn, "release_session") <- release_session
   # 暴露"断开所有 client"，供 addin 切换工作目录时全部重连。
   attr(handler_fn, "reset_clients") <- reset_clients
+  # 角度 B:autorun 开关(本会话)。设状态 + 重连(allowed_tools 是连接时 option)。
+  attr(handler_fn, "set_autorun") <- function(on) {
+    autorun_state$on <- isTRUE(on)
+    reset_clients()
+    invisible(autorun_state$on)
+  }
   handler_fn
 }
 

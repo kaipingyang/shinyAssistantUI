@@ -107,6 +107,7 @@ export interface ShinyBridge {
   sendPickWorkingDir: () => void;
   sendSetWorkingDir: (path: string) => void;
   sendFilesPaneFollow: (value: boolean) => void;
+  sendAutoRunEnabled: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
@@ -453,6 +454,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendFilesPaneFollow(value) {
       Shiny.setInputValue(`${inputId}_files_pane_follow`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendAutoRunEnabled(value) {
+      Shiny.setInputValue(`${inputId}_auto_run_enabled`, { value, ts: Date.now() }, { priority: "event" });
     },
     onProjects(handler) {
       projectsHandler = handler;

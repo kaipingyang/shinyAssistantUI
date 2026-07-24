@@ -27,7 +27,7 @@ Suggests:
     promises,
     later,
     ellmer,
-    ClaudeAgentSDK,
+    ClaudeAgentSDK (>= 0.2.2),
     here,
     rstudioapi
 Config/testthat/edition: 3

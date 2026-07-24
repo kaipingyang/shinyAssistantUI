@@ -81,6 +81,8 @@ export interface ShinyConfigCtx {
   removeProject?: (path: string) => void;
   filesPaneFollow?: boolean;
   setFilesPaneFollow?: (value: boolean) => void;
+  autoRunEnabled?: boolean;
+  setAutoRunEnabled?: (value: boolean) => void;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({
