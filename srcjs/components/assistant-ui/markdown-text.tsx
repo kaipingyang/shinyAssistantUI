@@ -10,7 +10,7 @@ import {
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useState } from "react";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PlayIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { SyntaxHighlighter, resolveCodeLanguage } from "@/components/assistant-ui/syntax-highlighter";
@@ -38,24 +38,39 @@ export const MarkdownText = memo(MarkdownTextImpl);
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
+  const { onRunInConsole } = useShinyConfig();
   const onCopy = () => {
     if (!code || isCopied) return;
     copyToClipboard(code);
   };
+  // 仅对明确的 R 代码块、且 addin 提供了 console 执行能力时,显示"在 R Console 运行"。
+  const isR = typeof language === "string" && /^(r|rscript)$/i.test(language.trim());
+  const canRun = isR && !!onRunInConsole && !!code;
 
   return (
     <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {resolveCodeLanguage(language)}
       </span>
-      <TooltipIconButton tooltip="Copy" onClick={onCopy}>
-        {!isCopied && (
-          <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+      <span className="flex items-center gap-1">
+        {canRun && (
+          <TooltipIconButton
+            tooltip="Run in R Console"
+            data-run-in-console=""
+            onClick={() => onRunInConsole!(code!)}
+          >
+            <PlayIcon className="animate-in zoom-in-75 fade-in duration-150" />
+          </TooltipIconButton>
         )}
-        {isCopied && (
-          <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-        )}
-      </TooltipIconButton>
+        <TooltipIconButton tooltip="Copy" onClick={onCopy}>
+          {!isCopied && (
+            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+          )}
+          {isCopied && (
+            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+          )}
+        </TooltipIconButton>
+      </span>
     </div>
   );
 };

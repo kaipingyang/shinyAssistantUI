@@ -1417,6 +1417,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!path) return;
     bridge.current.sendOpenFile(path, line);
   }, []);
+  // 代码块"Run in Console"：在用户活 R 会话执行(addin/RStudio；config.console_run 开启才暴露)。
+  const consoleRunEnabled = config?.console_run === true;
+  const runInConsole = useCallback((code: string) => {
+    if (!code) return;
+    bridge.current.sendRunInConsole(code);
+  }, []);
 
   // ── threadList adapter ───────────────────────────────────────────────────
   const threadListAdapter = useMemo(
@@ -1605,6 +1611,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   return {
     runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
+    runInConsole, consoleRunEnabled,
     invokeAction, permissionMode, thinking, model,
     ideContext: capabilityContract.ide ? ideContext : undefined,
     selectionVisible,

@@ -45,6 +45,7 @@ export interface ShinyConfigCtx {
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void;
+  onRunInConsole?: (code: string) => void;
   permissionMode?: PermissionModeState;
   thinking?: ThinkingState;
   model?: ModelState;

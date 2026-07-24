@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9261L
+port <- 9271L
 unlink(c("/tmp/aui-md.out", "/tmp/aui-md.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -56,6 +56,13 @@ chk("file path is a clickable ref", wait_for("!!document.querySelector('code[dat
 click_sel("code[data-file-ref=\"R/app.R\"]")
 chk("clicking file path fires open_file (probe = R/app.R:12)", wait_for("(document.getElementById('probe')?.textContent||'').includes('R/app.R:12')", 6),
     value("document.getElementById('probe')?.textContent"))
+
+# 角度1：R 代码块上出现"Run in Console"按钮,点击 → on_run_in_console 收到代码
+chk("R code block shows a Run-in-Console button", wait_for("!!document.querySelector('[data-run-in-console]')", 6))
+click_sel("[data-run-in-console]")
+chk("clicking Run sends code to console callback (ran contains mean(x))",
+    wait_for("(document.getElementById('ran')?.textContent||'').includes('mean(x)')", 6),
+    value("document.getElementById('ran')?.textContent"))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 

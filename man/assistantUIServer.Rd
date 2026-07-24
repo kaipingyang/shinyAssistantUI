@@ -20,6 +20,7 @@ assistantUIServer(
   on_feedback = NULL,
   on_rename = NULL,
   on_open_file = NULL,
+  on_run_in_console = NULL,
   on_edits = NULL,
   on_archive_session = NULL,
   on_delete_session = NULL,
@@ -194,6 +195,12 @@ user clicks a file reference in a tool card, or after the assistant edits a
 file (the most recent successful edit of a run is revealed). The Claude
 addin wires this to \code{rstudioapi::navigateToFile()}; leave \code{NULL} (default)
 in browser contexts where no editor is available.}
+
+\item{on_run_in_console}{Optional \verb{function(code)} called when the user clicks
+"Run in Console" on an R code block. The Claude addin wires this to
+\code{rstudioapi::sendToConsole(code, execute = TRUE)} so the code runs in the user's
+live R session (visible, with their objects/packages/plots). When supplied, R code
+blocks show a run button. Leave \code{NULL} (default) outside RStudio.}
 
 \item{on_archive_session}{Optional \verb{function(session_id, archived)} called when
 the user archives (\code{archived = TRUE}) or unarchives (\code{FALSE}) a session in the

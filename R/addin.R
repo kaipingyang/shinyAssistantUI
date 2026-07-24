@@ -38,6 +38,18 @@
     .addin_files_pane_navigate(path)
   }
 }
+
+# 在用户的活 R 会话执行代码(代码块"Run in Console")。child_ok 环境 + sendToConsole 可用才执行;
+# 从 background job 已验证可用。返回 TRUE/FALSE。
+.addin_send_to_console <- function(code) {
+  if (is.null(code) || !nzchar(code)) return(invisible(FALSE))
+  ok <- requireNamespace("rstudioapi", quietly = TRUE) &&
+    isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE)) &&
+    ("sendToConsole" %in% getNamespaceExports("rstudioapi"))
+  if (!ok) return(invisible(FALSE))
+  tryCatch({ rstudioapi::sendToConsole(code, execute = TRUE); TRUE },
+           error = function(e) FALSE)
+}
 # 一次性迁移：把旧的 ~/.claude_addin_*.rds 搬进 ~/.claude_addin/<name>.rds。
 # 新文件已存在则不覆盖（保护当前数据）。启动时调用一次。
 .migrate_addin_storage <- function(home = Sys.getenv("HOME", unset = "~")) {
@@ -185,6 +197,10 @@
       commands         = skills,
       action_items     = .claude_action_items(),
       on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
+      on_run_in_console = if (requireNamespace("rstudioapi", quietly = TRUE) &&
+                              isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE),
+                                              error = function(e) FALSE)))
+                            .addin_send_to_console else NULL,
       on_edits         = function(edits) .addin_show_edit_markers(edits, cur_dir()),
       on_rename        = function(thread_id, title)
         .claude_rename_session(thread_id, title, session_map_path, cur_dir()),

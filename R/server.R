@@ -178,6 +178,11 @@
 #'   file (the most recent successful edit of a run is revealed). The Claude
 #'   addin wires this to `rstudioapi::navigateToFile()`; leave `NULL` (default)
 #'   in browser contexts where no editor is available.
+#' @param on_run_in_console Optional `function(code)` called when the user clicks
+#'   "Run in Console" on an R code block. The Claude addin wires this to
+#'   `rstudioapi::sendToConsole(code, execute = TRUE)` so the code runs in the user's
+#'   live R session (visible, with their objects/packages/plots). When supplied, R code
+#'   blocks show a run button. Leave `NULL` (default) outside RStudio.
 #' @param on_archive_session Optional `function(session_id, archived)` called when
 #'   the user archives (`archived = TRUE`) or unarchives (`FALSE`) a session in the
 #'   sidebar. Use it to persist a server-authoritative soft-hide list so archived
@@ -226,6 +231,7 @@ assistantUIServer <- function(id, handler,
                               on_feedback       = NULL,
                               on_rename         = NULL,
                               on_open_file      = NULL,
+                              on_run_in_console = NULL,
                               on_edits          = NULL,
                               on_archive_session = NULL,
                               on_delete_session = NULL,
@@ -322,6 +328,8 @@ assistantUIServer <- function(id, handler,
   if (!is.null(projects)) config$projects <- as.list(as.character(projects))
   # Files 面板跟随开关初始态（addin/RStudio；NULL = 不显示该开关）。
   if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
+  # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
+  if (is.function(on_run_in_console)) config$console_run <- TRUE
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
@@ -616,6 +624,17 @@ assistantUIServer <- function(id, handler,
       line <- suppressWarnings(as.integer(of$line))
       if (length(line) != 1L || is.na(line)) line <- NULL
       tryCatch(on_open_file(of$path, line), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  # 代码块"Run in Console" → 在用户的活 R 会话执行（addin：rstudioapi::sendToConsole）。
+  if (is.function(on_run_in_console)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_run_in_console")]], {
+      msg <- session$input[[paste0(input_id, "_run_in_console")]]
+      if (is.null(msg)) return()
+      code <- if (is.list(msg)) msg$code else msg
+      code <- as.character(code %||% "")
+      if (!nzchar(code)) return()
+      tryCatch(on_run_in_console(code), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

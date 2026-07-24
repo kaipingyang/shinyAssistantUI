@@ -101,6 +101,7 @@ export interface ShinyBridge {
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
   sendOpenFile: (path: string, line?: number) => void;
+  sendRunInConsole: (code: string) => void;
   sendArchiveSession: (sessionId: string, archived: boolean) => void;
   sendDeleteSession: (sessionId: string) => void;
   sendPickWorkingDir: () => void;
@@ -297,6 +298,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       Shiny.setInputValue(
         `${inputId}_open_file`,
         { path, line: line ?? null, ts: Date.now() },
+        { priority: "event" }
+      );
+    },
+
+    sendRunInConsole(code) {
+      Shiny.setInputValue(
+        `${inputId}_run_in_console`,
+        { code, ts: Date.now() },
         { priority: "event" }
       );
     },

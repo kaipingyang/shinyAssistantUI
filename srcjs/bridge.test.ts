@@ -103,6 +103,14 @@ describe("bridge 多线程路由", () => {
     expect(cb.calls.toolResult).toEqual([["tc1", "ok", false]]);
   });
 
+  it("sendRunInConsole 发出 _run_in_console 事件（code）", () => {
+    const b = createShinyBridge("chat");
+    b.sendRunInConsole("plot(1:10)");
+    const evt = inputValues.filter((v) => v.id === "chat_run_in_console").at(-1);
+    expect(evt).toBeTruthy();
+    expect(evt!.value).toMatchObject({ code: "plot(1:10)" });
+  });
+
   it("sendOpenFile 发出 _open_file 事件（path + line）", () => {
     const b = createShinyBridge("chat");
     b.sendOpenFile("R/app.R", 12);

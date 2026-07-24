@@ -7,6 +7,12 @@ test_that(".addin_files_pane_navigate 在非 RStudio 环境安全无操作", {
   expect_false(shinyAssistantUI:::.addin_files_pane_navigate(tempdir()))
 })
 
+test_that(".addin_send_to_console 在非 RStudio 环境安全无操作", {
+  expect_false(shinyAssistantUI:::.addin_send_to_console(NULL))
+  expect_false(shinyAssistantUI:::.addin_send_to_console(""))
+  expect_false(shinyAssistantUI:::.addin_send_to_console("1 + 1"))   # 无 RStudio → FALSE，不报错
+})
+
 test_that("开启同步 + 重选当前目录 都会导航 Files 面板（Bug2）", {
   skip_if_not_installed("shiny")
   temp_home <- normalizePath(tempfile("home"), winslash = "/", mustWork = FALSE)

@@ -64,6 +64,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
     onOpenFile: rt.openFile,
+    onRunInConsole: rt.consoleRunEnabled ? rt.runInConsole : undefined,
     permissionMode: rt.permissionMode,
     thinking: rt.thinking,
     model: rt.model,
