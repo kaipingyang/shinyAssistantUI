@@ -19,8 +19,8 @@
 .addin_files_pane_navigate <- function(path) {
   if (is.null(path) || !nzchar(path)) return(invisible(FALSE))
   ok <- requireNamespace("rstudioapi", quietly = TRUE) &&
-    isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE)) &&
-    isTRUE(tryCatch(rstudioapi::hasFun("filesPaneNavigate"), error = function(e) FALSE))
+    isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE)) &&
+    ("filesPaneNavigate" %in% getNamespaceExports("rstudioapi"))
   if (!ok) return(invisible(FALSE))
   tryCatch({ rstudioapi::filesPaneNavigate(path); TRUE },
            error = function(e) FALSE)
@@ -52,7 +52,7 @@
 .addin_project <- function() {
   proj <- NULL
   if (requireNamespace("rstudioapi", quietly = TRUE) &&
-      isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) {
+      isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) {
     proj <- tryCatch(rstudioapi::getActiveProject(), error = function(e) NULL)
   }
   if (is.null(proj) || !nzchar(proj)) getwd() else proj
@@ -127,7 +127,7 @@
 
     # 工作目录选择器：RStudio 有原生目录弹窗；apply_working_dir 由下方定义（惰性引用 ctrl/push_sessions）。
     native_picker <- requireNamespace("rstudioapi", quietly = TRUE) &&
-      isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))
+      isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
     on_pick_wd <- function() {
       if (!native_picker) return(invisible(NULL))
       d <- tryCatch(rstudioapi::selectDirectory(caption = "Select working directory",
@@ -313,7 +313,7 @@
 # 把本轮编辑推进 RStudio Markers 面板（可点击跳转）。非 RStudio/空则 no-op。
 .addin_show_edit_markers <- function(edits, project) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+      !isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) return(invisible(NULL))
   markers <- .addin_edit_markers(edits, project)
   if (!length(markers)) return(invisible(NULL))
   tryCatch(
@@ -486,7 +486,7 @@ claude_addin <- function(project         = NULL,
   project <- project %||% .addin_project()
 
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
-    isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))
+    isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
 
   # 后台模式(Plan 20)：Shiny 跑进 RStudio background job → R console 空出来;
   # IDE 集成经"子进程回连主会话"仍工作(已真机验证)。app 必须在 job 里构建,故只传参数。

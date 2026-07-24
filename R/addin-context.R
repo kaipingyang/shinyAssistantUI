@@ -17,7 +17,7 @@
 .addin_open_file <- function(path, line = NULL, project = NULL) {
   if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(invisible(NULL))
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+      !isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) return(invisible(NULL))
 
   abs_path <- path
   if (!isTRUE(startsWith(path, "/")) && !grepl("^[A-Za-z]:", path) && !is.null(project)) {
@@ -56,7 +56,7 @@
 # 且不丢用户未保存改动。untitled 脚本跳过。全程 guard，非 RStudio 为 no-op。
 .addin_save_dirty_docs <- function() {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(invisible(NULL))
+      !isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) return(invisible(NULL))
   ctx <- tryCatch(rstudioapi::getSourceEditorContext(), error = function(e) NULL)
   id <- .addin_savable_doc_id(ctx)
   if (!is.null(id)) tryCatch(rstudioapi::documentSave(id), error = function(e) NULL)
@@ -79,7 +79,7 @@
 # 只采样第一段 selection，确保文本与行范围属于同一个选区。
 .addin_editor_context <- function(project = NULL) {
   if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-      !isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(NULL)
+      !isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) return(NULL)
   ctx <- tryCatch(rstudioapi::getSourceEditorContext(), error = function(e) NULL)
   if (is.null(ctx)) return(NULL)
   path <- tryCatch(ctx$path, error = function(e) "")
