@@ -636,6 +636,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return next;
       });
     });
+    // "Run in Console" 结果回流：自动提交一条消息把代码+输出报告给 Claude(Plan 21/A)。
+    bridge.current.onConsoleResult((d) => {
+      const threadId = currentThreadIdRef.current;
+      const code = String(d?.code ?? "");
+      const ok = d?.ok === true;
+      const body = ok
+        ? (String(d?.output ?? "").trim() || "(no visible output)")
+        : `Error: ${String(d?.error ?? "").trim()}`;
+      const text = [
+        "I ran this in my R console:",
+        "```r", code, "```",
+        ok ? "Output:" : "It errored:",
+        "```", body, "```",
+      ].join("\n");
+      deliverTextRef.current?.(text, threadId);
+    });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     bridge.current.onServerCommands((d) => {
       const cmds = (d.commands ?? []) as Array<Record<string, unknown>>;

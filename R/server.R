@@ -626,7 +626,7 @@ assistantUIServer <- function(id, handler,
       tryCatch(on_open_file(of$path, line), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
-  # 代码块"Run in Console" → 在用户的活 R 会话执行（addin：rstudioapi::sendToConsole）。
+  # 代码块"Run in Console" → 在用户的活 R 会话执行,并把捕获结果回传前端(喂给 Claude)。
   if (is.function(on_run_in_console)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_run_in_console")]], {
       msg <- session$input[[paste0(input_id, "_run_in_console")]]
@@ -634,7 +634,16 @@ assistantUIServer <- function(id, handler,
       code <- if (is.list(msg)) msg$code else msg
       code <- as.character(code %||% "")
       if (!nzchar(code)) return()
-      tryCatch(on_run_in_console(code), error = function(e) NULL)
+      res <- tryCatch(on_run_in_console(code),
+                      error = function(e) list(ok = FALSE, output = "", error = conditionMessage(e)))
+      if (is.list(res)) {
+        session$sendCustomMessage(paste0(input_id, ":console-result"), list(
+          code   = code,
+          ok     = isTRUE(res$ok),
+          output = as.character(res$output %||% ""),
+          error  = as.character(res$error %||% "")
+        ))
+      }
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

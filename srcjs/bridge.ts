@@ -122,6 +122,7 @@ export interface ShinyBridge {
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
+  onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
@@ -146,6 +147,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   let bufferedWorkingDir: WorkingDirPayload | null = null;
   let projectsHandler: ((data: ProjectsPayload) => void) | null = null;
   let bufferedProjects: ProjectsPayload | null = null;
+  type ConsoleResultData = { code: string; ok: boolean; output: string; error: string };
+  let consoleResultHandler: ((data: ConsoleResultData) => void) | null = null;
+  let bufferedConsoleResult: ConsoleResultData | null = null;
 
   // 按 threadId 取回调。缺 threadId 时：单线程场景回退到唯一回调；多线程则告警 + 放弃
   // （静默路由到"第一个"会在并发时投递到错误线程）。R 端所有消息都应带 threadId。
@@ -237,6 +241,11 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     const d = data as ProjectsPayload;
     if (projectsHandler) projectsHandler(d);
     else bufferedProjects = d;
+  });
+  Shiny.addCustomMessageHandler(`${inputId}:console-result`, (data) => {
+    const d = data as ConsoleResultData;
+    if (consoleResultHandler) consoleResultHandler(d);
+    else bufferedConsoleResult = d;
   });
 
   return {
@@ -448,6 +457,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     onProjects(handler) {
       projectsHandler = handler;
       if (bufferedProjects) { handler(bufferedProjects); bufferedProjects = null; }
+    },
+    onConsoleResult(handler) {
+      consoleResultHandler = handler;
+      if (bufferedConsoleResult) { handler(bufferedConsoleResult); bufferedConsoleResult = null; }
     },
     sendSaveProject() {
       Shiny.setInputValue(`${inputId}_save_project`, { ts: Date.now() }, { priority: "event" });

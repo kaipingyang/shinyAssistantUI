@@ -100,7 +100,7 @@
 #' @noRd
 .claude_chat_app <- function(project, ctx = NULL, options = NULL,
                               permission_mode = "default", prewarm = FALSE,
-                              models = NULL) {
+                              models = NULL, console_url = NULL) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
     stop("The Claude Code addin needs the 'ClaudeAgentSDK' package. Install it first.",
          call. = FALSE)
@@ -199,8 +199,12 @@
       on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
       on_run_in_console = if (requireNamespace("rstudioapi", quietly = TRUE) &&
                               isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE),
-                                              error = function(e) FALSE)))
-                            .addin_send_to_console else NULL,
+                                              error = function(e) FALSE))) {
+        if (!is.null(console_url))
+          function(code) .addin_run_r_remote(console_url, code)          # 主会话 .GlobalEnv + 捕获回传
+        else
+          function(code) { .addin_send_to_console(code); list(ok = TRUE, output = "", error = NULL) }
+      } else NULL,
       on_edits         = function(edits) .addin_show_edit_markers(edits, cur_dir()),
       on_rename        = function(thread_id, title)
         .claude_rename_session(thread_id, title, session_map_path, cur_dir()),
@@ -426,7 +430,8 @@
     options         = spec$options,
     permission_mode = spec$permission_mode %||% "default",
     prewarm         = isTRUE(spec$prewarm),
-    models          = spec$models
+    models          = spec$models,
+    console_url     = spec$console_url
   )
   shiny::runApp(app, port = as.integer(port), host = host, launch.browser = FALSE)
 }
@@ -528,8 +533,15 @@ claude_addin <- function(project         = NULL,
   can_background <- isTRUE(background) && in_rstudio &&
     ("jobRunScript" %in% getNamespaceExports("rstudioapi"))
   if (can_background) {
+    # 在主会话启动 nanonext R-console 环境服务器（later 轮询,console 空闲时服务）,
+    # 让 job 里"Run in Console"能在你的活 .GlobalEnv 执行并把结果回传 Claude(Plan 21/A)。
+    console_url <- NULL
+    if (requireNamespace("nanonext", quietly = TRUE) && requireNamespace("later", quietly = TRUE)) {
+      u <- paste0("ipc://", tempfile("claude-addin-console-", fileext = ".sock"))
+      if (isTRUE(.addin_start_r_console_server(u, envir = globalenv()))) console_url <- u
+    }
     spec <- list(project = project, options = options, permission_mode = permission_mode,
-                 prewarm = prewarm, models = models)
+                 prewarm = prewarm, models = models, console_url = console_url)
     return(invisible(.run_claude_bg_job(spec)))
   }
 

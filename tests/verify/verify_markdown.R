@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9271L
+port <- 9273L
 unlink(c("/tmp/aui-md.out", "/tmp/aui-md.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -63,6 +63,10 @@ click_sel("[data-run-in-console]")
 chk("clicking Run sends code to console callback (ran contains mean(x))",
     wait_for("(document.getElementById('ran')?.textContent||'').includes('mean(x)')", 6),
     value("document.getElementById('ran')?.textContent"))
+# Angle A：捕获结果自动喂回 Claude —— handler 收到含输出的消息(lastmsg 含 RESULT_42)
+chk("console result is auto-submitted back to the model (lastmsg has RESULT_42)",
+    wait_for("(document.getElementById('lastmsg')?.textContent||'').includes('RESULT_42')", 8),
+    value("(document.getElementById('lastmsg')?.textContent||'').slice(0,80)"))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 

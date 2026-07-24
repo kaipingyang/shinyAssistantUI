@@ -60,7 +60,7 @@ test_that(".claude_run_in_job reads spec, builds app with those params, runs on 
                prewarm = TRUE, models = c("opus")), spec_path)
   cap <- new.env()
   testthat::local_mocked_bindings(
-    .claude_chat_app = function(project, options, permission_mode, prewarm, models) {
+    .claude_chat_app = function(project, options, permission_mode, prewarm, models, console_url = NULL) {
       cap$args <- list(project = project, permission_mode = permission_mode,
                        prewarm = prewarm, models = models)
       "APP_OBJ"

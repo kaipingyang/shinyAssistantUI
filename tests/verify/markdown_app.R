@@ -13,23 +13,27 @@ md <- paste0(
   "| non-group | run_module_select result | `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_very_long_unbreakable_cell` |\n"
 )
 
-handler <- function(message, on_chunk, on_done, ...) { on_chunk(md); on_done() }
+handler <- function(message, on_chunk, on_done, ...) { lastmsg(message); on_chunk(md); on_done() }
 
 ui <- page_fluid(
   tags$style(HTML("html, body, .container-fluid { height: 100%; margin: 0; padding: 0; }")),
   div(style = "width: 620px;", assistantUIOutput("chat", height = "78vh")),
   verbatimTextOutput("probe"),
-  verbatimTextOutput("ran")
+  verbatimTextOutput("ran"),
+  verbatimTextOutput("lastmsg")
 )
 server <- function(input, output, session) {
   opened <- reactiveVal("")
   ran <- reactiveVal("")
+  lastmsg <<- reactiveVal("")
   assistantUIServer(
     "chat", handler = handler,
     on_open_file = function(path, line = NULL) opened(paste0(path, ":", line %||% "")),
-    on_run_in_console = function(code) ran(code)
+    # 模拟捕获:返回 list(ok/output),触发 :console-result → 前端自动把结果喂给 Claude。
+    on_run_in_console = function(code) { ran(code); list(ok = TRUE, output = "RESULT_42", error = "") }
   )
   output$probe <- renderText(opened())
   output$ran <- renderText(ran())
+  output$lastmsg <- renderText(lastmsg())
 }
 shinyApp(ui, server)
