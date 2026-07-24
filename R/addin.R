@@ -411,7 +411,11 @@
   writeLines(.claude_bg_launch_script(spec_path, port, host, libpaths), script_path)
 
   job_run <- job_run %||% function(path, name, workingDir)
-    rstudioapi::jobRunScript(path, name = name, workingDir = workingDir)
+    tryCatch(
+      rstudioapi::jobRunScript(path, name = name, workingDir = workingDir),
+      error = function(e) stop(
+        "Could not start an RStudio/Positron background job: ", conditionMessage(e),
+        "\nUse `background = FALSE` for the classic gadget instead.", call. = FALSE))
   show_viewer <- show_viewer %||% function(u)
     rstudioapi::viewer(tryCatch(rstudioapi::translateLocalUrl(u, absolute = TRUE),
                                 error = function(e) u))
@@ -487,8 +491,11 @@ claude_addin <- function(project         = NULL,
   # 后台模式(Plan 20)：Shiny 跑进 RStudio background job → R console 空出来;
   # IDE 集成经"子进程回连主会话"仍工作(已真机验证)。app 必须在 job 里构建,故只传参数。
   if (isTRUE(background)) {
-    if (!in_rstudio || !isTRUE(tryCatch(rstudioapi::hasFun("jobRunScript"), error = function(e) FALSE)))
-      stop("`background = TRUE` requires a running RStudio session (rstudioapi::jobRunScript).",
+    # 不卡 isAvailable()：Positron 等环境 isAvailable() 为 FALSE 但 jobRunScript 可用。
+    # 只要 rstudioapi 在,就尝试;真不支持时由 jobRunScript 自身报清晰错误。
+    if (!requireNamespace("rstudioapi", quietly = TRUE) ||
+        !("jobRunScript" %in% getNamespaceExports("rstudioapi")))
+      stop("`background = TRUE` needs the 'rstudioapi' package (RStudio or Positron).",
            call. = FALSE)
     spec <- list(project = project, options = options, permission_mode = permission_mode,
                  prewarm = prewarm, models = models)
