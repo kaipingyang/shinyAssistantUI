@@ -61,6 +61,34 @@
   invisible(res)
 }
 
+# 把 Claude 执行的代码渲染成"经典 R console 输入"样式:`> `/`+ ` 提示符前缀 +
+# 语法高亮(prettycode,交互 console 才显色)或蓝色(cli)兜底,纯文本最终兜底。
+.addin_console_prompt_code <- function(code) {
+  lines <- strsplit(paste(as.character(code), collapse = "\n"), "\n", fixed = TRUE)[[1]]
+  if (!length(lines)) lines <- ""
+  hl <- if (requireNamespace("prettycode", quietly = TRUE))
+    tryCatch(as.character(prettycode::highlight(lines)), error = function(e) NULL) else NULL
+  if (is.null(hl) || length(hl) != length(lines))
+    hl <- if (requireNamespace("cli", quietly = TRUE)) cli::col_blue(lines) else lines
+  prompts <- c("> ", rep("+ ", max(0L, length(hl) - 1L)))
+  paste0(prompts, hl)
+}
+
+# 回显行(可测):青色规则标题 + 提示符代码 + 报错(红)/正常输出(默认)。
+.addin_console_echo_lines <- function(code, cap) {
+  header <- if (requireNamespace("cli", quietly = TRUE))
+    as.character(cli::rule(left = "Claude ran in console", col = "cyan"))
+  else "\u2500\u2500 Claude ran in console \u2500\u2500"
+  lines <- c(header, .addin_console_prompt_code(code))
+  if (!is.null(cap$error)) {
+    e <- paste0("Error: ", cap$error)
+    lines <- c(lines, if (requireNamespace("cli", quietly = TRUE)) cli::col_red(e) else e)
+  } else if (nzchar(cap$output %||% "")) {
+    lines <- c(lines, cap$output)
+  }
+  lines
+}
+
 .addin_start_r_console_server <- function(url, envir = globalenv(), echo = TRUE) {
   if (!requireNamespace("nanonext", quietly = TRUE) ||
       !requireNamespace("later", quietly = TRUE)) return(invisible(FALSE))
@@ -71,9 +99,7 @@
   .claude_console_state$active <- TRUE
   .claude_console_state$url <- url
   echo_fn <- if (isTRUE(echo)) function(code, cap) {
-    cat("\n\u2500\u2500 Claude ran in console \u2500\u2500\n", code, "\n", sep = "")
-    if (!is.null(cap$error)) cat("Error:", cap$error, "\n")
-    else if (nzchar(cap$output)) cat(cap$output, "\n")
+    cat("\n", paste(.addin_console_echo_lines(code, cap), collapse = "\n"), "\n", sep = "")
   } else NULL
   service <- function() {
     if (!isTRUE(.claude_console_state$active)) return(invisible(NULL))

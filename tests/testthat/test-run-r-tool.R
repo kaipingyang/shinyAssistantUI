@@ -66,3 +66,22 @@ test_that("run_r handler passes the code through to run_remote", {
   expect_equal(seen$url, "the-url")
   expect_equal(seen$code, "summary(mtcars)")
 })
+
+# ── console echo styling (classic R prompt + highlight/blue) ──────────────────
+strip <- function(x) if (requireNamespace("cli", quietly = TRUE)) cli::ansi_strip(x) else x
+
+test_that("console echo prefixes code with classic > / + prompts", {
+  expect_equal(strip(.addin_console_prompt_code("summary(df)")), "> summary(df)")
+  expect_equal(strip(.addin_console_prompt_code("a <- 1\nb <- 2")),
+               c("> a <- 1", "+ b <- 2"))
+})
+
+test_that("console echo lines carry header, prompted code, and output/error", {
+  ok <- strip(.addin_console_echo_lines("summary(df)", list(ok = TRUE, output = "OUT", error = NULL)))
+  expect_true(any(grepl("Claude ran in console", ok)))
+  expect_true(any(grepl("^> summary\\(df\\)$", ok)))
+  expect_true("OUT" %in% ok)
+
+  er <- strip(.addin_console_echo_lines("stop('x')", list(ok = FALSE, output = "", error = "boom")))
+  expect_true(any(grepl("Error: boom", er)))
+})
