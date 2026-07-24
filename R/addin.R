@@ -505,8 +505,9 @@
 #'     \item{`"bypassPermissions"`}{All tool calls run without prompts (fastest, use with care).}
 #'   }
 #'   Ignored when `options` is supplied directly.
-#' @param prewarm Logical (default `FALSE`). If `TRUE`, pre-connect the Claude CLI at launch so
-#'   the first message isn't slowed by the cold start (see [assistantUIServer()]).
+#' @param prewarm Logical (default `TRUE`). If `TRUE`, pre-connect the Claude CLI at launch so
+#'   the first message isn't slowed by the cold start (see [assistantUIServer()]). Set `FALSE`
+#'   to defer the CLI subprocess until the first message.
 #' @param models Optional character vector of model names/aliases to offer in the Settings
 #'   "Model" selector (e.g. `c("sonnet", "opus")`). A "Default" option is always prepended.
 #'   Omit to use the built-in tiers (Default/Haiku/Sonnet/Opus). Switching is a live
@@ -530,7 +531,7 @@
 claude_addin <- function(project         = NULL,
                          viewer          = c("pane", "dialog", "browser"),
                          permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
-                         prewarm         = FALSE,
+                         prewarm         = TRUE,
                          models          = NULL,
                          options         = NULL,
                          background      = TRUE) {
