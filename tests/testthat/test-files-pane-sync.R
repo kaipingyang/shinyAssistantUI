@@ -27,7 +27,7 @@ test_that("开启同步 + 重选当前目录 都会导航 Files 面板（Bug2）
     },
     load_claude_skills = function(project_dir) list(),
     make_claude_session_loader = function(session_map_path) function(...) NULL,
-    .addin_files_pane_navigate = function(path) {
+    .addin_files_pane_navigate_soon = function(path, delay = 0.1) {
       nav_calls[[length(nav_calls) + 1L]] <<- as.character(path); TRUE
     },
     assistantUIServer = function(...) {

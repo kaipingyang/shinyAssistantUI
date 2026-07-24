@@ -25,6 +25,19 @@
   tryCatch({ rstudioapi::filesPaneNavigate(path); TRUE },
            error = function(e) FALSE)
 }
+
+# 延迟一拍再导航 Files 面板：修复"selectDirectory 模态返回后紧跟 filesPaneNavigate 被吞"
+# (background job 里两个子进程 rstudioapi 调用相邻时,第二个不被主会话处理)。用 later 在
+# 下一个事件循环 tick 执行,让模态的 RPC 上下文完全退出;收藏/手输路径(无模态)也照常工作。
+.addin_files_pane_navigate_soon <- function(path, delay = 0.1) {
+  if (requireNamespace("later", quietly = TRUE)) {
+    force(path)
+    later::later(function() .addin_files_pane_navigate(path), delay)
+    invisible(TRUE)
+  } else {
+    .addin_files_pane_navigate(path)
+  }
+}
 # 一次性迁移：把旧的 ~/.claude_addin_*.rds 搬进 ~/.claude_addin/<name>.rds。
 # 新文件已存在则不覆盖（保护当前数据）。启动时调用一次。
 .migrate_addin_storage <- function(home = Sys.getenv("HOME", unset = "~")) {
@@ -125,6 +138,9 @@
       .stop_claude_gadget_normally()
     }, ignoreInit = TRUE)
 
+    # 启动时把 Files 面板同步到初始工作目录(受开关控制;延迟以确保会话就绪 + 避开 RPC 竞争)。
+    if (isTRUE(follow_pref$on)) .addin_files_pane_navigate_soon(dir_state$cwd, delay = 0.8)
+
     # 工作目录选择器：RStudio 有原生目录弹窗；apply_working_dir 由下方定义（惰性引用 ctrl/push_sessions）。
     native_picker <- requireNamespace("rstudioapi", quietly = TRUE) &&
       isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
@@ -163,7 +179,7 @@
         tryCatch(saveRDS(follow_pref$on, .claude_addin_path("follow_files.rds")),
                  error = function(e) NULL)
         # 刚开启 → 立即把 Files 面板跟到当前目录（Bug2：开启动作本身也导航）。
-        if (isTRUE(v)) .addin_files_pane_navigate(dir_state$cwd)
+        if (isTRUE(v)) .addin_files_pane_navigate_soon(dir_state$cwd)
       },
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
@@ -234,7 +250,8 @@
                      error = function(e) new_dir)
       if (!dir.exists(nd)) return(invisible(NULL))
       # 显式点选目录：只要同步开就刷新 Files 面板——即使还是当前目录（Bug2）。
-      if (isTRUE(follow_pref$on)) .addin_files_pane_navigate(nd)
+      # 用 _soon 延迟一拍,避开"selectDirectory 模态后紧跟调用被吞"。
+      if (isTRUE(follow_pref$on)) .addin_files_pane_navigate_soon(nd)
       if (identical(nd, dir_state$cwd)) return(invisible(nd))   # cwd 未变 → 跳过重连/收藏/推送
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
