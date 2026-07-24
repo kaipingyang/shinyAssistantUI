@@ -48,16 +48,17 @@
 # 处理一个待处理请求（若有）；无返回值风格,供 later 轮询或手动 pump 调用。
 .addin_console_service_once <- function(sock, envir = globalenv(),
                                         on_echo = NULL, timeout = 150) {
-  ctx <- nanonext::context(sock)
-  res <- tryCatch(
+  # context() 也可能因 socket 已关闭抛错("Object closed")——整体 tryCatch,
+  # 让陈旧/关闭的 socket 安全返回 NULL,不把异常抛给 later 回调。
+  res <- tryCatch({
+    ctx <- nanonext::context(sock)
     nanonext::reply(ctx, execute = function(req) {
       code <- if (is.list(req)) req$code else req
       cap <- .addin_run_r_capture(code, envir = envir)
       if (is.function(on_echo)) tryCatch(on_echo(as.character(code), cap), error = function(e) NULL)
       cap
-    }, timeout = timeout),
-    error = function(e) NULL
-  )
+    }, timeout = timeout)
+  }, error = function(e) NULL)
   invisible(res)
 }
 
@@ -103,7 +104,10 @@
     cat("\n", paste(.addin_console_echo_lines(code, cap), collapse = "\n"), "\n", sep = "")
   } else NULL
   service <- function() {
-    if (!isTRUE(.claude_console_state$active)) return(invisible(NULL))
+    # 守卫:server 已停(active=FALSE),或本循环持有的是被新 server 替换掉的
+    # 陈旧 socket(重启/换目录重连时)→ 自我终止,不再轮询,避免用已关闭 socket 报错。
+    if (!isTRUE(.claude_console_state$active) ||
+        !identical(sock, .claude_console_state$socket)) return(invisible(NULL))
     .addin_console_service_once(sock, envir = envir, on_echo = echo_fn)
     later::later(service, 0.1)
   }

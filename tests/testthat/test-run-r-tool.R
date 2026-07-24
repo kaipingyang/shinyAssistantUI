@@ -70,6 +70,7 @@ test_that("run_r handler passes the code through to run_remote", {
 # ── console echo styling (classic R prompt + highlight/blue) ──────────────────
 strip <- function(x) if (requireNamespace("cli", quietly = TRUE)) cli::ansi_strip(x) else x
 
+# ── console echo styling (classic R prompt + highlight/blue) ──────────────────
 test_that("console echo prefixes code with classic > / + prompts", {
   expect_equal(strip(.addin_console_prompt_code("summary(df)")), "> summary(df)")
   expect_equal(strip(.addin_console_prompt_code("a <- 1\nb <- 2")),
@@ -84,4 +85,15 @@ test_that("console echo lines carry header, prompted code, and output/error", {
 
   er <- strip(.addin_console_echo_lines("stop('x')", list(ok = FALSE, output = "", error = "boom")))
   expect_true(any(grepl("Error: boom", er)))
+})
+
+
+# ── env-server robustness ─────────────────────────────────────────────────────
+test_that(".addin_console_service_once on a closed socket returns NULL (no throw)", {
+  skip_if_not(requireNamespace("nanonext", quietly = TRUE))
+  u <- paste0("ipc://", tempfile("test-closed-", fileext = ".sock"))
+  sock <- nanonext::socket("rep", listen = u)
+  close(sock)
+  # closed socket -> nanonext::context() would error; must be swallowed to NULL
+  expect_null(.addin_console_service_once(sock, timeout = 50))
 })
