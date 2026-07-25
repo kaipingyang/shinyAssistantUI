@@ -152,39 +152,30 @@
 # Build the in-process "r_session" MCP server exposing run_r. Returns NULL when
 # the installed ClaudeAgentSDK lacks in-process MCP support (older versions) —
 # callers then simply don't register it.
-.addin_run_r_server <- function(console_url, run_remote = .addin_run_r_remote,
-                                timeout = 60000) {
+# Build the run_r MCP server config. Returns an EXTERNAL stdio server config
+# (type="stdio") that launches inst/mcp/run_r_server.R — NOT an in-process
+# (type="sdk") server, because the CLI stalls ~50s on the first message when an
+# in-process server is registered and the connection idles first (Plan 22).
+# The stdio subprocess is curl-free (ClaudeAgentSDK + nanonext only). console_url
+# and the library paths are passed via the server's env. Returns NULL when the
+# installed ClaudeAgentSDK lacks stdio-MCP support or the script is missing.
+.addin_run_r_server <- function(console_url, timeout = 60000) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE) ||
-      !("create_sdk_mcp_server" %in% getNamespaceExports("ClaudeAgentSDK")))
+      !("mcp_serve_stdio" %in% getNamespaceExports("ClaudeAgentSDK")))
     return(NULL)
-  run_r <- ClaudeAgentSDK::sdk_mcp_tool(
-    name = "run_r",
-    description = paste(
-      "Execute R code in the user's LIVE R session (.GlobalEnv).",
-      "Use this to inspect or use their real data, objects and loaded packages.",
-      "Output and errors are returned as text (no images)."
-    ),
-    input_schema = list(code = list(
-      type = "string",
-      description = "R code to run in the user's live R session (.GlobalEnv)."
-    )),
-    handler = function(args) {
-      code <- args$code %||% ""
-      cap <- tryCatch(
-        run_remote(console_url, code, timeout = timeout),
-        error = function(e) list(ok = FALSE, output = "", error = conditionMessage(e))
-      )
-      if (!isTRUE(cap$ok)) {
-        return(list(
-          content = list(list(type = "text",
-                              text = paste0("Error: ", cap$error %||% "unknown error"))),
-          isError = TRUE
-        ))
-      }
-      out <- cap$output %||% ""
-      if (!nzchar(out)) out <- "(no visible output)"
-      list(content = list(list(type = "text", text = out)), isError = FALSE)
-    }
+  script <- system.file("mcp", "run_r_server.R", package = "shinyAssistantUI")
+  if (!nzchar(script) || !file.exists(script)) return(NULL)
+  rscript <- file.path(R.home("bin"),
+                       if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+  list(
+    type    = "stdio",
+    command = rscript,
+    # --vanilla for a deterministic startup (no project .Rprofile/renv surprises);
+    # R_LIBS in env still sets libPaths so ClaudeAgentSDK + nanonext are found.
+    args    = list("--vanilla", script),
+    env     = list(
+      CLAUDE_ADDIN_CONSOLE_URL = console_url,
+      R_LIBS                   = paste(.libPaths(), collapse = .Platform$path.sep)
+    )
   )
-  ClaudeAgentSDK::create_sdk_mcp_server("r_session", tools = list(run_r))
 }

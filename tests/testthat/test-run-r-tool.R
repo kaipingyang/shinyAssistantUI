@@ -10,61 +10,35 @@ test_that(".addin_run_r_allowed_tools adds run_r only when autorun is on", {
   expect_equal(.addin_run_r_allowed_tools(TRUE, "mcp__r_session__run_r"), "mcp__r_session__run_r")
 })
 
-sdk_has_mcp <- function() {
+sdk_has_stdio_mcp <- function() {
   requireNamespace("ClaudeAgentSDK", quietly = TRUE) &&
-    "create_sdk_mcp_server" %in% getNamespaceExports("ClaudeAgentSDK")
+    "mcp_serve_stdio" %in% getNamespaceExports("ClaudeAgentSDK")
 }
 
-test_that(".addin_run_r_server builds a type='sdk' server 'r_session' with run_r", {
-  skip_if_not(sdk_has_mcp())
-  srv <- .addin_run_r_server("ipc:///tmp/x.sock",
-                             run_remote = function(...) list(ok = TRUE, output = "", error = NULL))
-  expect_equal(srv$type, "sdk")
-  expect_equal(srv$name, "r_session")
-  expect_true("run_r" %in% names(srv$instance$tools))
+test_that(".addin_run_r_server returns an EXTERNAL stdio config (not in-process sdk)", {
+  skip_if_not(sdk_has_stdio_mcp())
+  cfg <- .addin_run_r_server("ipc:///tmp/x.sock")
+  # stdio — NOT 'sdk' — because the CLI stalls ~50s on the first message when an
+  # in-process server is registered and the connection idles first (Plan 22).
+  expect_equal(cfg$type, "stdio")
+  expect_true(grepl("Rscript", cfg$command))
+  script <- cfg$args[[length(cfg$args)]]
+  expect_true(grepl("run_r_server\\.R$", script))
+  expect_true(file.exists(script))
+  # console_url + libpaths passed via the server's env
+  expect_equal(cfg$env$CLAUDE_ADDIN_CONSOLE_URL, "ipc:///tmp/x.sock")
+  expect_true(nzchar(cfg$env$R_LIBS))
 })
 
-test_that("run_r handler formats a successful capture as MCP text content (never image)", {
-  skip_if_not(sdk_has_mcp())
-  srv <- .addin_run_r_server("u",
-    run_remote = function(url, code, timeout = NULL) list(ok = TRUE, output = "RESULT_42", error = NULL))
-  res <- srv$instance$tools$run_r$handler(list(code = "17 + 25"))
-  expect_false(isTRUE(res$isError))
-  expect_equal(res$content[[1]]$type, "text")
-  expect_equal(res$content[[1]]$text, "RESULT_42")
-  types <- vapply(res$content, function(x) x$type, character(1))
-  expect_false("image" %in% types)   # D3: never send images/base64
-})
-
-test_that("run_r handler surfaces errors with isError = TRUE", {
-  skip_if_not(sdk_has_mcp())
-  srv <- .addin_run_r_server("u",
-    run_remote = function(url, code, timeout = NULL) list(ok = FALSE, output = "", error = "boom"))
-  res <- srv$instance$tools$run_r$handler(list(code = "stop('x')"))
-  expect_true(isTRUE(res$isError))
-  expect_true(grepl("boom", res$content[[1]]$text))
-})
-
-test_that("run_r handler yields a non-empty placeholder when output is empty", {
-  skip_if_not(sdk_has_mcp())
-  srv <- .addin_run_r_server("u",
-    run_remote = function(url, code, timeout = NULL) list(ok = TRUE, output = "", error = NULL))
-  res <- srv$instance$tools$run_r$handler(list(code = "invisible(1)"))
-  expect_false(isTRUE(res$isError))
-  expect_true(nzchar(res$content[[1]]$text))
-})
-
-test_that("run_r handler passes the code through to run_remote", {
-  skip_if_not(sdk_has_mcp())
-  seen <- new.env(parent = emptyenv())
-  srv <- .addin_run_r_server("the-url",
-    run_remote = function(url, code, timeout = NULL) {
-      seen$url <- url; seen$code <- code
-      list(ok = TRUE, output = "ok", error = NULL)
-    })
-  srv$instance$tools$run_r$handler(list(code = "summary(mtcars)"))
-  expect_equal(seen$url, "the-url")
-  expect_equal(seen$code, "summary(mtcars)")
+test_that("run_r stdio server script parses and is curl-free", {
+  script <- system.file("mcp", "run_r_server.R", package = "shinyAssistantUI")
+  if (!nzchar(script)) script <- "../../inst/mcp/run_r_server.R"
+  skip_if_not(file.exists(script))
+  expect_silent(parse(script))                       # valid R
+  src <- paste(readLines(script), collapse = "\n")
+  expect_true(grepl("mcp_serve_stdio", src))
+  expect_true(grepl("run_r", src))
+  expect_false(grepl("library\\(ellmer|ellmer::", src))   # no ellmer usage -> no curl
 })
 
 # ── console echo styling (classic R prompt + highlight/blue) ──────────────────

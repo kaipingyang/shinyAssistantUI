@@ -242,9 +242,7 @@
         .addin_editor_context(cur_dir())
       },
       workspace_search_provider = workspace_search,
-      prewarm          = prewarm,
-      # 角度 B:run_r MCP 激活时禁用 warm-ahead(否则连接后闲置→首条消息 ~55s 卡顿)。
-      allow_warmup     = is.null(run_r_server)
+      prewarm          = prewarm
     )
 
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
