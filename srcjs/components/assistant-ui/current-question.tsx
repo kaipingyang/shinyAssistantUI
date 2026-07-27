@@ -25,17 +25,38 @@ function useLatestUserQuestion(): string {
   });
 }
 
+// 所有 user 提问文本,按渲染顺序用 \u0000 连接成【单个字符串】返回 —— selector 返回 string
+// 使 Object.is 稳定,流式期间不触发重渲染;调用方 split("\u0000") 得数组。供顶部条 scroll-spy 用。
+export function useAllUserQuestions(): string {
+  return useAuiState((s) => {
+    const parts: string[] = [];
+    const messages = s.thread?.messages ?? [];
+    for (const m of messages) {
+      if (m.role !== "user") continue;
+      const text = (m.content ?? [])
+        .filter((p): p is { type: "text"; text: string } => p?.type === "text")
+        .map((p) => p.text)
+        .join(" ")
+        .trim();
+      parts.push(text);
+    }
+    return parts.join("\u0000");
+  });
+}
+
 /**
  * VS Code / Claude Code 式"当前提问"顶部小框：内容长到需要翻页（`visible`，由 Thread 按视口
  * 溢出判定）时，在滚动区顶部 sticky 显示最近一次用户提问。折叠为单行、可展开看全文。
  * 与底部自动跟随互补：流式跟到底部的同时，顶部始终能看到"我问了什么"。
  */
-export const ShinyCurrentQuestion: FC<{ visible: boolean }> = ({ visible }) => {
-  const question = useLatestUserQuestion();
+export const ShinyCurrentQuestion: FC<{ visible: boolean; question?: string }> = ({ visible, question }) => {
+  const latest = useLatestUserQuestion();
+  // scroll-spy 传入当前视口所在轮的提问;缺省(独立使用)回退到最新一次。
+  const q = question ?? latest;
   const [expanded, setExpanded] = useState(false);
   const { sidebarCollapsed } = useShinyConfig();
 
-  if (!visible || !question) return null;
+  if (!visible || !q) return null;
 
   return (
     <div
@@ -59,7 +80,7 @@ export const ShinyCurrentQuestion: FC<{ visible: boolean }> = ({ visible }) => {
             expanded ? "max-h-40 overflow-y-auto whitespace-pre-wrap" : "truncate",
           )}
         >
-          {question}
+          {q}
         </p>
         <button
           type="button"

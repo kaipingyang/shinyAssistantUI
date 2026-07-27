@@ -17,7 +17,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
-import { ShinyCurrentQuestion } from "@/components/assistant-ui/current-question";
+import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import {
@@ -64,9 +64,11 @@ import {
 } from "lucide-react";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentType,
@@ -130,18 +132,57 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   // 内容溢出（需翻页）时才显示顶部"当前提问"小框，短对话不占布局。
   const [overflowing, setOverflowing] = useState(false);
 
+  // scroll-spy：顶部条显示【当前视口所在那一轮】的用户提问(而非恒定最新)。
+  const questionsJoined = useAllUserQuestions();
+  const questions = useMemo(
+    () => (questionsJoined ? questionsJoined.split("\u0000") : []),
+    [questionsJoined],
+  );
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const computeActiveQuestion = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const threshold = vp.getBoundingClientRect().top + 40; // 避让 sticky 条高度
+    const users = vp.querySelectorAll('[data-role="user"]');
+    let idx = -1;
+    users.forEach((el, i) => {
+      if (el.getBoundingClientRect().top <= threshold) idx = i;
+    });
+    setActiveIdx(idx);
+  }, []);
+
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || typeof ResizeObserver === "undefined") return;
     const measure = () => {
       setOverflowing(viewport.scrollHeight > viewport.clientHeight + 24);
+      computeActiveQuestion();
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(viewport);
     if (contentRef.current) observer.observe(contentRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [computeActiveQuestion]);
+
+  // 消息数/溢出态变化(新提问、翻页加载、流式)时重算当前轮。
+  useEffect(() => {
+    computeActiveQuestion();
+  }, [questionsJoined, overflowing, computeActiveQuestion]);
+
+  // 原生 scroll 监听:任何滚动(用户滚轮/拖动、程序化 scrollTop、内容 settle)都重算当前轮
+  // —— 比 React onScroll 更可靠(程序化滚动也触发)。
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.addEventListener("scroll", computeActiveQuestion, { passive: true });
+    return () => viewport.removeEventListener("scroll", computeActiveQuestion);
+  }, [computeActiveQuestion]);
+
+  const activeQuestion =
+    activeIdx >= 0 && activeIdx < questions.length
+      ? questions[activeIdx]
+      : (questions[questions.length - 1] ?? "");
 
   const requestOlder = () => {
     if (!historyHasMore || loadingOlder || !loadOlderHistory) return;
@@ -186,7 +227,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         }}
         className="relative flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
-        <ShinyCurrentQuestion visible={overflowing} />
+        <ShinyCurrentQuestion visible={overflowing} question={activeQuestion} />
         <div
           ref={contentRef}
           className={cn(

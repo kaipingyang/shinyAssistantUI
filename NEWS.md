@@ -1,9 +1,14 @@
-# shinyAssistantUI 0.2.0.9001 (development version)
+# shinyAssistantUI 0.2.0.9002 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
 
 ## Markdown / rendering polish
+
+- Pinned top **"Question"** bar is now a **scroll-spy**: as you scroll up through the
+  history it shows the user prompt of the turn currently in view (not always the
+  latest), matching the Claude Code CLI; scrolling back to the bottom shows the
+  latest prompt again.
 
 - Unlabeled / `unknown` fenced code blocks now render (and are labelled) as
   **markdown** instead of being forced to **R** — no more mislabelling plain

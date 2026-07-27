@@ -21,7 +21,7 @@ beforeAll(() => {
 
 afterEach(() => cleanup());
 
-function Harness({ visible, send }: { visible: boolean; send?: string }) {
+function Harness({ visible, send, question }: { visible: boolean; send?: string; question?: string }) {
   const runtime = useLocalRuntime(noOpAdapter);
   if (send && !(runtime as unknown as { __seeded?: boolean }).__seeded) {
     (runtime as unknown as { __seeded?: boolean }).__seeded = true;
@@ -30,7 +30,7 @@ function Harness({ visible, send }: { visible: boolean; send?: string }) {
     <div data-testid="host">
       <AssistantRuntimeProvider runtime={runtime}>
         <Seed text={send} />
-        <ShinyCurrentQuestion visible={visible} />
+        <ShinyCurrentQuestion visible={visible} question={question} />
       </AssistantRuntimeProvider>
     </div>
   );
@@ -83,5 +83,18 @@ describe("ShinyCurrentQuestion", () => {
     const { getByTestId } = render(<Harness visible />);
     await new Promise((r) => setTimeout(r, 50));
     expect(getByTestId("host").querySelector("[data-slot=aui_current_question]")).toBeNull();
+  });
+
+  it("shows the provided `question` prop, overriding the latest (scroll-spy)", async () => {
+    const { getByTestId } = render(
+      <Harness visible send={longQ} question="上一轮的问题 ABC" />,
+    );
+    const bar = await waitFor(() => {
+      const el = getByTestId("host").querySelector<HTMLElement>("[data-slot=aui_current_question]");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(bar.textContent).toContain("上一轮的问题 ABC");
+    expect(bar.textContent).not.toContain("请帮我创建一个临时");
   });
 });
