@@ -1,3 +1,31 @@
+# shinyAssistantUI 0.2.0.9000 (development version)
+
+RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
+for the agentic R tool).
+
+## New features
+
+- **Run in Console** — R code blocks show a ▶ button that runs the snippet in your
+  live R session (`.GlobalEnv`), echoing it to the console; the captured output is
+  fed back to Claude automatically.
+- **Agentic `run_r`** — Claude can write R and run it in your live session via an
+  external stdio MCP server (`inst/mcp/run_r_server.R`, curl-free), routed over
+  nanonext to the main-session env-server. Gated by the approval card; a per-session
+  **"Auto-run R"** toggle can auto-approve.
+- **Console echo styling** — Claude-run code is shown classic-R-console style: a cyan
+  rule header, blue `> `/`+ ` prompts, `prettycode` syntax highlighting, red errors.
+- **Full-width chat by default** — the conversation now fills the pane (like the CLI /
+  VS Code) instead of a centered 44rem column; opt back into a fixed column with
+  `assistantUIServer(thread_max_width = "44rem")`.
+
+## Fixes
+
+- Route `run_r` as an external **stdio** MCP server (not in-process `type="sdk"`),
+  eliminating a ~55s first-message stall the CLI exhibits for in-process servers when
+  the connection idles before the first message.
+- env-server no longer throws `nanonext::context(): Object closed` on addin
+  restart/reconnect (stale poll loop self-terminates; closed-socket poll is safe).
+
 # shinyAssistantUI 0.2.0
 
 Major release: migrated to the official `@assistant-ui/react` registry model and
