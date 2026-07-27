@@ -299,7 +299,7 @@ const defaultComponents = memoizeMarkdownComponents({
             }
           }}
           className={cn(
-            "aui-md-inline-code aui-file-ref bg-muted hover:bg-accent cursor-pointer rounded-md px-1.5 py-0.5 font-mono text-[0.85em] underline decoration-dotted underline-offset-2",
+            "aui-md-inline-code aui-file-ref bg-blue-500/10 text-blue-700 dark:text-blue-300 hover:bg-blue-500/20 cursor-pointer rounded-md px-1.5 py-0.5 font-mono text-[0.85em] underline decoration-dotted underline-offset-2",
             className,
           )}
           {...props}
@@ -312,7 +312,7 @@ const defaultComponents = memoizeMarkdownComponents({
       <code
         className={cn(
           !isCodeBlock &&
-            "aui-md-inline-code bg-muted rounded-md px-1.5 py-0.5 font-mono text-[0.85em]",
+            "aui-md-inline-code bg-blue-500/10 text-blue-700 dark:text-blue-300 rounded-md px-1.5 py-0.5 font-mono text-[0.85em]",
           className,
         )}
         {...props}

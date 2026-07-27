@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9273L
+port <- 9302L
 unlink(c("/tmp/aui-md.out", "/tmp/aui-md.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -68,8 +68,16 @@ chk("console result is auto-submitted back to the model (lastmsg has RESULT_42)"
     wait_for("(document.getElementById('lastmsg')?.textContent||'').includes('RESULT_42')", 8),
     value("(document.getElementById('lastmsg')?.textContent||'').slice(0,80)"))
 
-chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
+# 未知/无语言代码块 → 标签显示 "markdown"(不再硬当 r)
+chk("unlabeled code block header shows 'markdown' (not 'r')",
+    isTRUE(value("Array.from(document.querySelectorAll('.aui-code-header-language')).some(e => (e.textContent||'').trim()==='markdown')")),
+    value("Array.from(document.querySelectorAll('.aui-code-header-language')).map(e=>(e.textContent||'').trim()).join('|')"))
+# 行内 code → 蓝字(oklch 蓝色相 ~264 或 rgb 蓝通道最强),不再黑/灰
+chk("inline code text is blue",
+    isTRUE(value("(function(){var e=document.querySelector('.aui-md-inline-code');if(!e)return false;var c=getComputedStyle(e).color;if(/oklch/i.test(c)){var n=c.match(/[\\d.]+/g);var h=parseFloat(n[n.length-1]);return h>=220&&h<=290;}var m=c.match(/\\d+/g);return m&&(+m[2])>(+m[0])&&(+m[2])>(+m[1])&&(+m[2])>100;})()")),
+    value("(function(){var e=document.querySelector('.aui-md-inline-code');return e?getComputedStyle(e).color:'none';})()"))
 
+chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
 if (length(failures)) stop("verification failed: ", paste(failures, collapse = ", "))
 cat("MARKDOWN_VERIFY_DONE\n")

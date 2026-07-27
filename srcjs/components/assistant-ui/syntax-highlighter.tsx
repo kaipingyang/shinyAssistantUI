@@ -46,7 +46,9 @@ PrismLight.registerLanguage("jsx", tsx);
 // 无标签代码块就是 R）。显式指定的语言（python/bash/json…）原样保留。
 export function resolveCodeLanguage(language?: string): string {
   const lang = (language ?? "").trim();
-  return !lang || lang.toLowerCase() === "unknown" ? "r" : lang;
+  // Unknown / language-less fences: treat as markdown (neutral) rather than
+  // forcing R — avoids mislabelling plain text/output as R code.
+  return !lang || lang.toLowerCase() === "unknown" ? "markdown" : lang;
 }
 
 export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }) => {

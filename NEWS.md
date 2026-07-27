@@ -1,7 +1,18 @@
-# shinyAssistantUI 0.2.0.9000 (development version)
+# shinyAssistantUI 0.2.0.9001 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Markdown / rendering polish
+
+- Unlabeled / `unknown` fenced code blocks now render (and are labelled) as
+  **markdown** instead of being forced to **R** — no more mislabelling plain
+  text/output as R code. (`ClaudeAgentSDK`-independent.)
+- Inline `` `code` `` is now **blue** (blue text + light-blue background), matching
+  the Claude Code CLI, instead of the muted gray. Applies in the addin /
+  non-Bootstrap hosts; Bootstrap-based embeds still have Bootstrap's `code` style
+  win (a known bslib scoping conflict — the addin uses `assistantUIPage()` which
+  suppresses Bootstrap).
 
 ## New features
 

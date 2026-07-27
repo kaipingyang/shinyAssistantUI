@@ -6,11 +6,11 @@ import { SyntaxHighlighter, resolveCodeLanguage } from "./syntax-highlighter";
 const noComponents = { Pre: () => null, Code: () => null } as never;
 
 describe("resolveCodeLanguage", () => {
-  it("defaults unlabeled / unknown code blocks to R (this is an R addin)", () => {
-    expect(resolveCodeLanguage("")).toBe("r");
-    expect(resolveCodeLanguage(undefined)).toBe("r");
-    expect(resolveCodeLanguage("unknown")).toBe("r");
-    expect(resolveCodeLanguage("UNKNOWN")).toBe("r");
+  it("defaults unlabeled / unknown code blocks to markdown (neutral, not R)", () => {
+    expect(resolveCodeLanguage("")).toBe("markdown");
+    expect(resolveCodeLanguage(undefined)).toBe("markdown");
+    expect(resolveCodeLanguage("unknown")).toBe("markdown");
+    expect(resolveCodeLanguage("UNKNOWN")).toBe("markdown");
   });
   it("keeps an explicit language untouched", () => {
     expect(resolveCodeLanguage("python")).toBe("python");
