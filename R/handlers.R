@@ -1296,6 +1296,14 @@ make_claude_handler <- function(options       = NULL,
                     destination = sug$destination %||% "localSettings"
                   )
                   client$approve_tool(msg$request_id, updated_permissions = list(perm))
+                } else if (identical(sug$type, "setMode")) {
+                  # CLI 建议切换权限模式(如 acceptEdits)——本会话/项目内起自动批准。
+                  perm <- ClaudeAgentSDK::PermissionUpdate(
+                    type        = "setMode",
+                    mode        = sug$mode,
+                    destination = sug$destination %||% "session"
+                  )
+                  client$approve_tool(msg$request_id, updated_permissions = list(perm))
                 } else {
                   client$approve_tool(msg$request_id)
                 }

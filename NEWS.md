@@ -1,7 +1,20 @@
-# shinyAssistantUI 0.2.0.9002 (development version)
+# shinyAssistantUI 0.2.0.9003 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Tool approval: "Always allow" + deny-with-feedback
+
+- The approval card now surfaces Claude Code's **permission suggestions** as
+  **"Always allow …"** buttons (e.g. *Always allow edits*, *Always allow this folder*,
+  *Always allow Bash(git status:\*)*). Clicking one approves the call **and** adds the
+  suggested permission rule / directory / mode for the session, so matching future calls
+  are not re-prompted. Handler now maps `setMode` suggestions (in addition to the existing
+  `addRules` / `addDirectories`).
+- New **"Deny & tell Claude…"** action: reveals a text box so a denial can carry a
+  free-text reason back to Claude (via `deny_tool(message=…)`) instead of a bare refusal.
+- Plain **Allow** / **Deny** remain; when the backend sends no suggestions the card is
+  unchanged.
 
 ## Markdown / rendering polish
 

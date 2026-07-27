@@ -31,6 +31,39 @@ const _regKey = (inputId: string | undefined, id: string) => `${inputId ?? "_"}:
 // 重渲染/重挂载时不丢失"✓ Approved"指示（此前依赖易失的本地 useState 偶发消失）。
 const _decisionRegistry = new Map<string, "approved" | "denied">();
 
+// CLI permission_suggestion → 人性化的 "Always allow …" 按钮标签。
+type PermSuggestion = {
+  type?: string;
+  mode?: string;
+  directories?: string[];
+  rules?: Array<{ toolName?: string; tool_name?: string; ruleContent?: string; rule_content?: string }>;
+};
+function suggestionLabel(sug: PermSuggestion): string {
+  switch (sug?.type) {
+    case "setMode": {
+      const m = String(sug.mode ?? "");
+      if (m === "acceptEdits") return "Always allow edits";
+      if (m === "bypassPermissions") return "Always allow all";
+      if (m === "plan") return "Switch to plan mode";
+      return m ? `Mode: ${m}` : "Always allow";
+    }
+    case "addDirectories": {
+      const d = sug.directories?.[0] ?? "";
+      const base = d.replace(/\/+$/, "").split("/").pop() || d;
+      return base ? `Always allow folder ${base}` : "Always allow folder";
+    }
+    case "addRules": {
+      const r = sug.rules?.[0];
+      const tool = String(r?.toolName ?? r?.tool_name ?? "");
+      const content = r?.ruleContent ?? r?.rule_content;
+      if (!tool) return "Always allow";
+      return content ? `Always allow ${tool}(${content})` : `Always allow ${tool}`;
+    }
+    default:
+      return "Always allow";
+  }
+}
+
 // 工具参数美化：合法 JSON 对象 → 缩进 + json 语法高亮；流式半截/非 JSON → 原样 pre 兜底。
 const ShinyToolArgs: FC<{ argsText?: string }> = ({ argsText }) => {
   const formatted = formatToolArgs(argsText);
@@ -84,6 +117,9 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   const [decision, setDecision] = useState<null | "approved" | "denied">(
     () => _decisionRegistry.get(_regKey(ann?.inputId as string | undefined, toolCallId)) ?? null,
   );
+  const [denyOpen, setDenyOpen] = useState(false);
+  const [denyText, setDenyText] = useState("");
+  const suggestions = (ann?.suggestions as PermSuggestion[] | undefined) ?? [];
   // 待审批时强制展开该卡：流式(on_tool_call_start)先折叠挂载，之后 requiresApproval 到达，
   // 非受控 defaultOpen 不会重开 → 审批按钮被折叠藏起。改用受控 open，pending+needsApproval
   // 时强制打开，确保审批按钮可见。用户仍可在非待审批时自由折叠/展开。
@@ -120,8 +156,8 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
     return computeToolDepth(toolCallId, scoped);
   })();
 
-  const decide = (approved: boolean) => {
-    resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved);
+  const decide = (approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => {
+    resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
     _decisionRegistry.set(_regKey(ann?.inputId as string | undefined, toolCallId), approved ? "approved" : "denied");
     setDecision(approved ? "approved" : "denied");
   };
@@ -206,10 +242,56 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
               )}
             </div>
           )}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" onClick={() => decide(true)}>Approve</Button>
-            <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
-          </div>
+          {denyOpen ? (
+            <div className="aui-approval-deny flex flex-col gap-2">
+              <textarea
+                data-approval-deny-input
+                className="aui-approval-deny-input min-h-[3.5rem] w-full resize-y rounded-md border border-input bg-background px-2 py-1 text-sm"
+                rows={2}
+                autoFocus
+                placeholder="Tell Claude what to do differently (optional)"
+                value={denyText}
+                onChange={(e) => setDenyText(e.target.value)}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  data-approval-deny-send
+                  onClick={() => decide(false, { customMessage: denyText.trim() || undefined })}
+                >
+                  Send &amp; deny
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setDenyOpen(false)}>
+                  Back
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => decide(true)}>Approve</Button>
+              {suggestions.map((sug, i) => (
+                <Button
+                  key={i}
+                  size="sm"
+                  variant="secondary"
+                  data-approval-always={i}
+                  onClick={() => decide(true, { suggestionIdx: i })}
+                >
+                  {suggestionLabel(sug)}
+                </Button>
+              ))}
+              <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                data-approval-deny-with-msg
+                onClick={() => setDenyOpen(true)}
+              >
+                Deny &amp; tell Claude&#8230;
+              </Button>
+            </div>
+          )}
         </div>
       )}
       {/* 审批结果指示放在折叠内容【外面】，折叠状态下也始终可见（回归修复）。 */}
