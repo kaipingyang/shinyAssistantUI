@@ -35,6 +35,7 @@ assistantUIServer(
   on_toggle_files_pane_follow = NULL,
   auto_run = NULL,
   on_toggle_auto_run = NULL,
+  thread_max_width = NULL,
   code_theme = "one-light",
   strings = NULL,
   assistant_avatar = list(fallback = "AI"),
@@ -214,6 +215,12 @@ sessions stay hidden across reopens (the Claude addin stores this per project).}
 confirms deleting a session. This is destructive: the Claude addin wires it to
 \code{ClaudeAgentSDK::delete_session()}, permanently removing the transcript from
 disk. The UI requires an explicit confirmation before invoking it.}
+
+\item{thread_max_width}{Optional CSS length capping the chat content width
+(e.g. \code{"44rem"}, \code{"800px"}). Default \code{NULL} = \strong{full width} (fills the
+pane, like the Claude Code CLI / VS Code). Pass a length to center the
+conversation in a fixed-width column (assistant-ui's classic readable
+layout). Applies to messages, composer and the pinned-question bar together.}
 
 \item{code_theme}{Character string selecting the syntax-highlighting theme
 for code blocks. Available light themes: \code{"one-light"} (default),

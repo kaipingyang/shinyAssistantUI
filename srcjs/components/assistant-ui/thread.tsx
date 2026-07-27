@@ -122,7 +122,7 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  const { historyHasMore, loadingOlder, loadOlderHistory } = useShinyConfig();
+  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
@@ -171,7 +171,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root bg-background @container flex h-full flex-col"
       style={{
-        ["--thread-max-width" as string]: "44rem",
+        ["--thread-max-width" as string]: threadMaxWidth || "none",
         ["--composer-bg" as string]:
           "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
         ["--composer-radius" as string]: "1.5rem",

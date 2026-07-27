@@ -83,6 +83,8 @@ export interface ShinyConfigCtx {
   setFilesPaneFollow?: (value: boolean) => void;
   autoRunEnabled?: boolean;
   setAutoRunEnabled?: (value: boolean) => void;
+  /** CSS length capping chat content width; undefined = full width (default). */
+  threadMaxWidth?: string;
 }
 
 export const ShinyConfigContext = createContext<ShinyConfigCtx>({

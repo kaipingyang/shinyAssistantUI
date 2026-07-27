@@ -1657,6 +1657,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setAutoRunEnabledState(value);
       bridge.current.sendAutoRunEnabled(value);
     },
+    threadMaxWidth:
+      typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
     historyHasMore: historyPageStates[currentThreadId]?.hasMore ?? false,
     historyCursor: historyPageStates[currentThreadId]?.cursor ?? null,

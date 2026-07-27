@@ -157,6 +157,11 @@
 #'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
 #' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
 #'   instead of an inline panel.
+#' @param thread_max_width Optional CSS length capping the chat content width
+#'   (e.g. `"44rem"`, `"800px"`). Default `NULL` = **full width** (fills the
+#'   pane, like the Claude Code CLI / VS Code). Pass a length to center the
+#'   conversation in a fixed-width column (assistant-ui's classic readable
+#'   layout). Applies to messages, composer and the pinned-question bar together.
 #' @param prewarm Logical (default `FALSE`). If `TRUE` and the `handler` exposes a
 #'   `warmup` attribute (e.g. [make_claude_handler()]), pre-connect the initial
 #'   thread's client on mount so the **first** message on that thread isn't slowed
@@ -246,6 +251,7 @@ assistantUIServer <- function(id, handler,
                               on_toggle_files_pane_follow = NULL,
                               auto_run = NULL,
                               on_toggle_auto_run = NULL,
+                              thread_max_width = NULL,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -333,6 +339,11 @@ assistantUIServer <- function(id, handler,
   if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
   # 角度 B:自动批准 run_r 开关(仅当能力存在,即 on_toggle_auto_run 提供时暴露)。
   if (!is.null(auto_run)) config$auto_run <- isTRUE(auto_run)
+  # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
+  # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
+  if (!is.null(thread_max_width)) {
+    config$thread_max_width <- as.character(thread_max_width)[[1L]]
+  }
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
 

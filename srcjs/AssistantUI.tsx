@@ -101,6 +101,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     setFilesPaneFollow: rt.setFilesPaneFollow,
     autoRunEnabled: rt.autoRunEnabled,
     setAutoRunEnabled: rt.setAutoRunEnabled,
+    threadMaxWidth: rt.threadMaxWidth,
   };
 
   const threadEl = (
