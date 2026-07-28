@@ -1,7 +1,17 @@
-# shinyAssistantUI 0.2.0.9014 (development version)
+# shinyAssistantUI 0.2.0.9015 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## AskUserQuestion — interactive question card
+
+- Claude Code's **AskUserQuestion** tool (used e.g. during planning when it needs your input)
+  is now an **interactive card** instead of a silent JSON approval: each question shows its
+  header + options as **radio** (single-select) or **checkboxes** (multi-select) plus a
+  free-text **"Other"** box and a **Skip**. Your answers are sent back to Claude via the
+  permission channel (`approve_tool(updated_input=…)`), with the exact schema reverse-engineered
+  against the CLI: `answers` is a record keyed by each question's text, value = the chosen
+  option label (string) or, for multi-select, an array of labels.
 
 ## History: real tool results (not "Session ended")
 

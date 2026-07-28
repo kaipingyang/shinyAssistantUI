@@ -1323,6 +1323,13 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
+            # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
+            if (!is.null(decision$answers) && length(decision$answers)) {
+              ui <- msg$tool_input %||% list()
+              ui$answers <- decision$answers
+              client$approve_tool(msg$request_id, updated_input = ui)
+              pending_tool_ids <- c(pending_tool_ids, tuid)
+            } else {
             # "Always allow" 多选:suggestionIdxs 数组(新);兼容单个 suggestionIdx。
             idxs <- decision$suggestionIdxs
             if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
@@ -1337,6 +1344,7 @@ make_claude_handler <- function(options       = NULL,
               client$approve_tool(msg$request_id)
             }
             pending_tool_ids <- c(pending_tool_ids, tuid)
+            }
           } else {
             deny_msg <- decision$customMessage %||% "Denied by user"
             client$deny_tool(msg$request_id, deny_msg)

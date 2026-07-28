@@ -3,6 +3,7 @@ import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { Button } from "@/components/ui/button";
 import { resolveApprovalHandler } from "./approval-registry";
+import { AskQuestionCard, type AskQuestion } from "./ask-question-card";
 import { ShinyToolResult } from "./shiny-tool-result";
 import { computeToolDepth, toolHistoryDefaultOpen, toolCallSummary } from "./helpers";
 import { resolveToolView } from "./tool-views/resolve";
@@ -131,7 +132,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
     return computeToolDepth(toolCallId, scoped);
   })();
 
-  const decide = (approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string }) => {
+  const decide = (approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]> }) => {
     resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
     _decisionRegistry.set(_regKey(ann?.inputId as string | undefined, toolCallId), approved ? "approved" : "denied");
     setDecision(approved ? "approved" : "denied");
@@ -207,7 +208,13 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
               )}
             </div>
           )}
-          {denyOpen ? (
+          {toolName === "AskUserQuestion" ? (
+            <AskQuestionCard
+              questions={((args as { questions?: AskQuestion[] } | undefined)?.questions) ?? []}
+              onSubmit={(answers) => decide(true, { answers })}
+              onSkip={() => decide(false, { customMessage: "Skipped" })}
+            />
+          ) : denyOpen ? (
             <div className="aui-approval-deny flex flex-col gap-2">
               <textarea
                 data-approval-deny-input

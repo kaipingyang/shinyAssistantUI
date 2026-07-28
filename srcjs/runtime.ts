@@ -1534,7 +1534,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   );
 
   const sendToolApproval = useCallback(
-    (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string }) => {
+    (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]> }) => {
       bridge.current.sendToolApproval(toolCallId, approved, opts);
     },
     [] // eslint-disable-line react-hooks/exhaustive-deps
