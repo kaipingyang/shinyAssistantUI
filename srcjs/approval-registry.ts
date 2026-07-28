@@ -6,7 +6,7 @@
 export type ToolApprovalFn = (
   id: string,
   approved: boolean,
-  opts?: { suggestionIdx?: number; customMessage?: string },
+  opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string },
 ) => void;
 
 const _handlers = new Map<string, ToolApprovalFn>();

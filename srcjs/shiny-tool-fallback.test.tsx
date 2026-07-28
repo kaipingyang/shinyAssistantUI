@@ -34,19 +34,44 @@ function renderCard(inputId: string, toolCallId: string) {
   return render(<ShinyToolFallback {...props} />);
 }
 
-describe("ShinyToolFallback approval — always-allow & deny feedback", () => {
-  it("renders one Always-allow button per suggestion with human labels", () => {
-    const { getByText } = renderCard("chatA", "tc-labels");
+describe("ShinyToolFallback approval — always-allow (multi-select) & deny feedback", () => {
+  it("shows an 'Always allow…' toggle (suggestions hidden until opened)", () => {
+    const { getByText, queryByText } = renderCard("chatA", "tc-labels");
+    // 默认收起:建议标签不直接可见,只有 ▾ 触发器。
+    expect(getByText(/Always allow/)).toBeTruthy();
+    expect(queryByText("Always allow edits")).toBeNull();
+    fireEvent.click(getByText(/Always allow/));
+    // 展开后每条建议一个复选项,带人性化标签。
     expect(getByText("Always allow edits")).toBeTruthy();
     expect(getByText("Always allow Bash(git status:*)")).toBeTruthy();
   });
 
-  it("clicking Always-allow sends approved=true with the suggestionIdx", () => {
+  it("checking one suggestion + Approve&remember sends suggestionIdxs=[i]", () => {
     const spy = vi.fn();
     registerApprovalHandler("chatA", spy);
-    const { getByText } = renderCard("chatA", "tc-always");
-    fireEvent.click(getByText("Always allow Bash(git status:*)"));
-    expect(spy).toHaveBeenCalledWith("tc-always", true, { suggestionIdx: 1 });
+    const { getByText, getByLabelText } = renderCard("chatA", "tc-one");
+    fireEvent.click(getByText(/Always allow…/));
+    fireEvent.click(getByLabelText("Always allow Bash(git status:*)"));
+    fireEvent.click(getByText(/Approve & remember/));
+    expect(spy).toHaveBeenCalledWith("tc-one", true, { suggestionIdxs: [1] });
+  });
+
+  it("checking multiple suggestions applies them all in one approve", () => {
+    const spy = vi.fn();
+    registerApprovalHandler("chatA", spy);
+    const { getByText, getByLabelText } = renderCard("chatA", "tc-multi");
+    fireEvent.click(getByText(/Always allow…/));
+    fireEvent.click(getByLabelText("Always allow edits"));
+    fireEvent.click(getByLabelText("Always allow Bash(git status:*)"));
+    fireEvent.click(getByText(/Approve & remember/));
+    expect(spy).toHaveBeenCalledWith("tc-multi", true, { suggestionIdxs: [0, 1] });
+  });
+
+  it("Approve & remember is disabled until at least one is checked", () => {
+    const { getByText } = renderCard("chatA", "tc-disabled");
+    fireEvent.click(getByText(/Always allow…/));
+    const apply = getByText(/Approve & remember/).closest("button")!;
+    expect(apply.disabled).toBe(true);
   });
 
   it("plain Approve sends approved=true with no opts", () => {
@@ -82,7 +107,7 @@ describe("ShinyToolFallback approval — always-allow & deny feedback", () => {
     });
   });
 
-  it("renders no Always-allow button when there are no suggestions", () => {
+  it("renders no 'Always allow' toggle when there are no suggestions", () => {
     const props = {
       toolName: "Bash",
       toolCallId: "tc-none",

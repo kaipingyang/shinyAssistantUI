@@ -1,7 +1,17 @@
-# shinyAssistantUI 0.2.0.9011 (development version)
+# shinyAssistantUI 0.2.0.9012 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Approval card: multi-select "Always allow"
+
+- The per-suggestion "Always allow …" buttons are now collected under a single
+  **"Always allow… ▾"** control that opens a checkbox list, so you can **select several rules
+  at once** (e.g. *Always allow this folder* **and** *Always allow edits*) and apply them
+  together with one **"Approve & remember (N)"** click. Previously each suggestion was a
+  separate single-click button, making it impossible to pick more than one. Multiple
+  `PermissionUpdate`s are sent in a single `approve_tool()` call. Plain **Approve** / **Deny** /
+  **Deny & tell Claude…** are unchanged.
 
 ## Tool card display
 

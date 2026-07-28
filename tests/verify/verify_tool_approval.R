@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9331L
+port <- 9333L
 unlink(c("/tmp/aui-appr.out", "/tmp/aui-appr.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -46,17 +46,22 @@ chk("widget mounted", wait_for("!!document.querySelector('.aui-root')", 15))
 
 # ── Round 1: Always-allow(点权限建议 → suggestionIdx)─────────────────────────
 send_msg("round one")
-chk("approval card shows Always-allow buttons", wait_for("!!document.querySelector('[data-approval-always]')", 15))
-chk("two suggestion buttons rendered",
-    isTRUE(value("document.querySelectorAll('[data-approval-always]').length===2")),
-    value("document.querySelectorAll('[data-approval-always]').length+''"))
-chk("setMode suggestion labelled 'Always allow edits'",
-    isTRUE(value("Array.from(document.querySelectorAll('[data-approval-always]')).some(e=>(e.textContent||'').trim()==='Always allow edits')")))
-chk("addRules suggestion labelled 'Always allow Bash(git status:*)'",
-    isTRUE(value("Array.from(document.querySelectorAll('[data-approval-always]')).some(e=>(e.textContent||'').includes('Always allow Bash(git status:*)'))")))
-click_sel("[data-approval-always='1']")
-chk("clicking Always-allow sends approved=true + suggestionIdx=1",
-    wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\"approved\":true') && t.includes('\"suggestionIdx\":1');})()", 12),
+# 默认收起:先看到 "Always allow… ▾" 触发器,不直接显示建议。
+chk("approval card shows an 'Always allow' toggle", wait_for("!!document.querySelector('[data-approval-always-toggle]')", 15))
+chk("suggestion checkboxes are hidden until opened",
+    isTRUE(value("document.querySelectorAll('[data-always-check]').length===0")))
+click_sel("[data-approval-always-toggle]"); Sys.sleep(0.3)
+chk("opening reveals a checkbox per suggestion (2)",
+    wait_for("document.querySelectorAll('[data-always-check]').length===2", 8),
+    value("document.querySelectorAll('[data-always-check]').length+''"))
+chk("suggestion labels present (edits + Bash rule)",
+    isTRUE(value("(function(){var t=document.querySelector('[data-approval-always-panel]')?.textContent||'';return t.includes('Always allow edits') && t.includes('Always allow Bash(git status:*)');})()")))
+# 勾选两个建议 → 一次 Approve & remember → suggestionIdxs=[0,1]
+click_sel("[data-always-check='0']"); Sys.sleep(0.15)
+click_sel("[data-always-check='1']"); Sys.sleep(0.15)
+click_sel("[data-approval-always-apply]")
+chk("multi-select Approve&remember sends approved=true + suggestionIdxs=[0,1]",
+    wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\"approved\":true') && t.includes('\"suggestionIdxs\":[0,1]');})()", 12),
     value("document.getElementById('decision')?.textContent"))
 
 # ── Round 2: Deny 并反馈文本(customMessage)───────────────────────────────────

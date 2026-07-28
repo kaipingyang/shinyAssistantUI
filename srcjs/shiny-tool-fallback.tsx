@@ -95,7 +95,11 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   );
   const [denyOpen, setDenyOpen] = useState(false);
   const [denyText, setDenyText] = useState("");
+  const [alwaysOpen, setAlwaysOpen] = useState(false);
+  const [checkedIdxs, setCheckedIdxs] = useState<number[]>([]);
   const suggestions = (ann?.suggestions as PermSuggestion[] | undefined) ?? [];
+  const toggleChecked = (i: number) =>
+    setCheckedIdxs((c) => (c.includes(i) ? c.filter((x) => x !== i) : [...c, i]));
   // 待审批时强制展开该卡：流式(on_tool_call_start)先折叠挂载，之后 requiresApproval 到达，
   // 非受控 defaultOpen 不会重开 → 审批按钮被折叠藏起。改用受控 open，pending+needsApproval
   // 时强制打开，确保审批按钮可见。用户仍可在非待审批时自由折叠/展开。
@@ -127,7 +131,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
     return computeToolDepth(toolCallId, scoped);
   })();
 
-  const decide = (approved: boolean, opts?: { suggestionIdx?: number; customMessage?: string }) => {
+  const decide = (approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string }) => {
     resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
     _decisionRegistry.set(_regKey(ann?.inputId as string | undefined, toolCallId), approved ? "approved" : "denied");
     setDecision(approved ? "approved" : "denied");
@@ -228,20 +232,58 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
                 </Button>
               </div>
             </div>
+          ) : alwaysOpen ? (
+            <div className="aui-approval-always flex flex-col gap-2" data-approval-always-panel>
+              <p className="text-muted-foreground text-xs">
+                Select rule(s) to remember, then approve:
+              </p>
+              {suggestions.map((sug, i) => (
+                <label
+                  key={i}
+                  data-always-option={i}
+                  className="aui-always-option flex cursor-pointer items-start gap-2 text-xs"
+                >
+                  <input
+                    type="checkbox"
+                    data-always-check={i}
+                    className="mt-0.5"
+                    checked={checkedIdxs.includes(i)}
+                    onChange={() => toggleChecked(i)}
+                  />
+                  <span>{suggestionLabel(sug)}</span>
+                </label>
+              ))}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  data-approval-always-apply
+                  disabled={checkedIdxs.length === 0}
+                  onClick={() => decide(true, { suggestionIdxs: checkedIdxs })}
+                >
+                  Approve &amp; remember{checkedIdxs.length ? ` (${checkedIdxs.length})` : ""}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => { setAlwaysOpen(false); setCheckedIdxs([]); }}
+                >
+                  Back
+                </Button>
+              </div>
+            </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={() => decide(true)}>Approve</Button>
-              {suggestions.map((sug, i) => (
+              {suggestions.length > 0 && (
                 <Button
-                  key={i}
                   size="sm"
                   variant="secondary"
-                  data-approval-always={i}
-                  onClick={() => decide(true, { suggestionIdx: i })}
+                  data-approval-always-toggle
+                  onClick={() => setAlwaysOpen(true)}
                 >
-                  {suggestionLabel(sug)}
+                  Always allow&#8230; &#9662;
                 </Button>
-              ))}
+              )}
               <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
               <Button
                 size="sm"

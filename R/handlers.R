@@ -706,6 +706,37 @@ make_ellmer_session_loader <- function(store) {
 #' }
 #'
 #' @export
+# 把一条 CLI permission_suggestion 转成 PermissionUpdate(未知类型 → NULL)。
+# addRules / addDirectories / setMode 三类,供审批"Always allow"(单选/多选)复用。
+.claude_suggestion_to_perm <- function(sug) {
+  if (!is.list(sug) || is.null(sug$type)) return(NULL)
+  if (identical(sug$type, "addRules")) {
+    ClaudeAgentSDK::PermissionUpdate(
+      type        = "addRules",
+      rules       = lapply(sug$rules %||% list(), function(r)
+        ClaudeAgentSDK::PermissionRuleValue(
+          tool_name    = r$toolName %||% r$tool_name %||% "",
+          rule_content = r$ruleContent %||% r$rule_content %||% NULL)),
+      behavior    = sug$behavior %||% "allow",
+      destination = sug$destination %||% "localSettings"
+    )
+  } else if (identical(sug$type, "addDirectories")) {
+    ClaudeAgentSDK::PermissionUpdate(
+      type        = "addDirectories",
+      directories = sug$directories,
+      destination = sug$destination %||% "localSettings"
+    )
+  } else if (identical(sug$type, "setMode")) {
+    ClaudeAgentSDK::PermissionUpdate(
+      type        = "setMode",
+      mode        = sug$mode,
+      destination = sug$destination %||% "session"
+    )
+  } else {
+    NULL
+  }
+}
+
 make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
                                 thinking_provider = NULL,
@@ -1286,42 +1317,19 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
-            sidx <- decision$suggestionIdx
-            if (!is.null(sidx) && is.numeric(sidx) &&
-                sidx >= 0 && sidx < length(msg$suggestions)) {
-              sug <- msg$suggestions[[sidx + 1L]]
-              if (!is.null(sug)) {
-                if (identical(sug$type, "addRules")) {
-                  perm <- ClaudeAgentSDK::PermissionUpdate(
-                    type        = "addRules",
-                    rules       = lapply(sug$rules %||% list(), function(r)
-                      ClaudeAgentSDK::PermissionRuleValue(
-                        tool_name    = r$toolName %||% r$tool_name %||% "",
-                        rule_content = r$ruleContent %||% r$rule_content %||% NULL)),
-                    behavior    = sug$behavior %||% "allow",
-                    destination = sug$destination %||% "localSettings"
-                  )
-                  client$approve_tool(msg$request_id, updated_permissions = list(perm))
-                } else if (identical(sug$type, "addDirectories")) {
-                  perm <- ClaudeAgentSDK::PermissionUpdate(
-                    type        = "addDirectories",
-                    directories = sug$directories,
-                    destination = sug$destination %||% "localSettings"
-                  )
-                  client$approve_tool(msg$request_id, updated_permissions = list(perm))
-                } else if (identical(sug$type, "setMode")) {
-                  # CLI 建议切换权限模式(如 acceptEdits)——本会话/项目内起自动批准。
-                  perm <- ClaudeAgentSDK::PermissionUpdate(
-                    type        = "setMode",
-                    mode        = sug$mode,
-                    destination = sug$destination %||% "session"
-                  )
-                  client$approve_tool(msg$request_id, updated_permissions = list(perm))
-                } else {
-                  client$approve_tool(msg$request_id)
-                }
-              } else { client$approve_tool(msg$request_id) }
-            } else { client$approve_tool(msg$request_id) }
+            # "Always allow" 多选:suggestionIdxs 数组(新);兼容单个 suggestionIdx。
+            idxs <- decision$suggestionIdxs
+            if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
+            idxs <- suppressWarnings(as.integer(unlist(idxs)))
+            n_sug <- length(msg$suggestions)
+            idxs <- unique(idxs[!is.na(idxs) & idxs >= 0 & idxs < n_sug])
+            perms <- Filter(Negate(is.null), lapply(idxs, function(i)
+              .claude_suggestion_to_perm(msg$suggestions[[i + 1L]])))
+            if (length(perms)) {
+              client$approve_tool(msg$request_id, updated_permissions = perms)
+            } else {
+              client$approve_tool(msg$request_id)
+            }
             pending_tool_ids <- c(pending_tool_ids, tuid)
           } else {
             deny_msg <- decision$customMessage %||% "Denied by user"

@@ -24,6 +24,7 @@ handler <- coro::async(function(message, on_chunk, on_done, on_tool_call,
   decrec(list(
     approved      = isTRUE(decision$approved),
     suggestionIdx = if (is.null(decision$suggestionIdx)) NA else decision$suggestionIdx,
+    suggestionIdxs = decision$suggestionIdxs %||% NA,
     customMessage = decision$customMessage %||% NA
   ))
   on_chunk("done")

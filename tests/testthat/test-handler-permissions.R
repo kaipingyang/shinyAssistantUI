@@ -121,3 +121,24 @@ test_that("clear action requests a new UI thread after backend success", {
   expect_identical(result$status, "ok")
   expect_identical(result$value, list(effect = "new-thread"))
 })
+
+test_that(".claude_suggestion_to_perm maps the three suggestion types", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  r <- shinyAssistantUI:::.claude_suggestion_to_perm(list(
+    type = "addRules",
+    rules = list(list(toolName = "Bash", ruleContent = "rm:*")),
+    behavior = "allow", destination = "session"))
+  expect_identical(r$type, "addRules")
+
+  d <- shinyAssistantUI:::.claude_suggestion_to_perm(list(
+    type = "addDirectories", directories = list("/tmp/x"), destination = "session"))
+  expect_identical(d$type, "addDirectories")
+
+  m <- shinyAssistantUI:::.claude_suggestion_to_perm(list(
+    type = "setMode", mode = "acceptEdits", destination = "session"))
+  expect_identical(m$type, "setMode")
+  expect_identical(m$mode, "acceptEdits")
+
+  expect_null(shinyAssistantUI:::.claude_suggestion_to_perm(list(type = "unknownKind")))
+  expect_null(shinyAssistantUI:::.claude_suggestion_to_perm(NULL))
+})
