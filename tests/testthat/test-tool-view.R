@@ -44,3 +44,30 @@ test_that("result merges cleanly into an annotations list", {
   expect_equal(ann$argsView$kind, "code")
   expect_equal(ann$argsView$lang, "r")
 })
+
+
+test_that(".tool_edit_start_line finds the 1-based line of old_string", {
+  f <- tempfile(fileext = ".R")
+  writeLines(c("a <- 1", "b <- 2", "mean(x)", "c <- 3"), f)
+  on.exit(unlink(f), add = TRUE)
+  expect_equal(shinyAssistantUI:::.tool_edit_start_line(f, "mean(x)"), 3L)
+  # 多行块
+  expect_equal(shinyAssistantUI:::.tool_edit_start_line(f, "b <- 2\nmean(x)"), 2L)
+})
+
+test_that(".tool_edit_start_line returns NULL when not found or bad input", {
+  f <- tempfile(fileext = ".R")
+  writeLines(c("a <- 1"), f)
+  on.exit(unlink(f), add = TRUE)
+  expect_null(shinyAssistantUI:::.tool_edit_start_line(f, "not_present"))
+  expect_null(shinyAssistantUI:::.tool_edit_start_line("/no/such/file", "x"))
+  expect_null(shinyAssistantUI:::.tool_edit_start_line(f, ""))
+  expect_null(shinyAssistantUI:::.tool_edit_start_line(NULL, "x"))
+})
+
+test_that(".tool_edit_start_line resolves relative path against base_dir", {
+  d <- tempfile(); dir.create(d)
+  on.exit(unlink(d, recursive = TRUE), add = TRUE)
+  writeLines(c("x", "target_line", "y"), file.path(d, "rel.R"))
+  expect_equal(shinyAssistantUI:::.tool_edit_start_line("rel.R", "target_line", d), 2L)
+})

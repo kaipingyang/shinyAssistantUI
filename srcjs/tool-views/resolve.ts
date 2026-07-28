@@ -50,6 +50,10 @@ export function resolveToolView(
   annotations?: Record<string, unknown>,
 ): ToolView {
   const a = (args ?? {}) as Record<string, unknown>;
+  const startLine =
+    typeof annotations?.diffStartLine === "number"
+      ? (annotations.diffStartLine as number)
+      : undefined;
 
   // 1) 扩展点:R / MCP 工具声明的 argsView(最高优先级)。
   const hint = annotations?.argsView as ArgsViewHint | undefined;
@@ -62,13 +66,13 @@ export function resolveToolView(
     const newC = asString(a[hint.newField ?? "new_string"]);
     if (oldC !== undefined && newC !== undefined) {
       const fileName = asString(a[hint.fileField ?? "file_path"]) ?? fileNameOf(a);
-      return { kind: "diff", oldContent: oldC, newContent: newC, fileName };
+      return { kind: "diff", oldContent: oldC, newContent: newC, fileName, startLine };
     }
   }
 
   // 2) 内建 diff:Edit / MultiEdit(复用现有 helper)。
   const diff = getEditDiff(toolName, args);
-  if (diff) return { kind: "diff", ...diff };
+  if (diff) return { kind: "diff", ...diff, startLine };
 
   // 3) 内建 code 工具。
   if (toolName === "Bash") {

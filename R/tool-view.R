@@ -73,3 +73,35 @@ assistant_tool_view <- function(kind = c("code", "diff"),
   }
   list(argsView = view)
 }
+
+
+# 计算 Edit 工具 old_string 在文件中的 1-based 起始行,供工具卡 diff 显示真实行号。
+# 找不到(如历史 edit 已应用、文件缺失)→ NULL,前端退回从 1 计数。内部函数,不导出。
+.tool_edit_start_line <- function(file_path, old_string, base_dir = NULL) {
+  if (!is.character(file_path) || length(file_path) != 1L || !nzchar(file_path)) return(NULL)
+  if (!is.character(old_string) || length(old_string) != 1L || !nzchar(old_string)) return(NULL)
+  path <- file_path
+  if (!file.exists(path) && !is.null(base_dir) && nzchar(base_dir)) {
+    cand <- file.path(base_dir, file_path)
+    if (file.exists(cand)) path <- cand
+  }
+  if (!file.exists(path)) return(NULL)
+  info <- tryCatch(file.info(path), error = function(e) NULL)
+  if (is.null(info) || is.na(info$size) || info$size > 5e6) return(NULL)  # 5MB 守卫
+  flines <- tryCatch(readLines(path, warn = FALSE), error = function(e) NULL)
+  if (is.null(flines) || !length(flines)) return(NULL)
+  olines <- strsplit(old_string, "\n", fixed = TRUE)[[1]]
+  n <- length(olines)
+  if (!n || n > length(flines)) {
+    # 单行退化匹配
+    hit <- which(flines == olines[[1]])
+    return(if (length(hit)) hit[[1]] else NULL)
+  }
+  # 滑窗匹配整段 old_string
+  for (i in seq_len(length(flines) - n + 1L)) {
+    if (identical(flines[i:(i + n - 1L)], olines)) return(i)
+  }
+  # 退化:匹配首行
+  hit <- which(flines == olines[[1]])
+  if (length(hit)) hit[[1]] else NULL
+}

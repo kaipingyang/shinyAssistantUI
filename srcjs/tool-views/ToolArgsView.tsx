@@ -21,6 +21,7 @@ export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
           oldFile={{ content: view.oldContent, name: view.fileName }}
           newFile={{ content: view.newContent, name: view.fileName }}
           viewMode="unified"
+          startLine={view.startLine}
         />
       </div>
     );

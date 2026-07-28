@@ -5,7 +5,7 @@ export type TodoItem = { content: string; status: string; activeForm?: string };
 export type QueryField = { label: string; value: string; href?: string };
 
 export type ToolView =
-  | { kind: "diff"; oldContent: string; newContent: string; fileName?: string }
+  | { kind: "diff"; oldContent: string; newContent: string; fileName?: string; startLine?: number }
   | { kind: "code"; code: string; lang: string; fileName?: string }
   | { kind: "todos"; items: TodoItem[] }
   | { kind: "query"; fields: QueryField[] }

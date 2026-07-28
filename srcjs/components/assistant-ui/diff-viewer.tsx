@@ -66,11 +66,12 @@ function parseLooseDiff(text: string): ParsedFile[] {
 function computeDiff(
   oldContent: string,
   newContent: string,
+  startLine = 1,
 ): { lines: ParsedLine[]; additions: number; deletions: number } {
   const changes = diffLines(oldContent, newContent);
   const lines: ParsedLine[] = [];
-  let oldLine = 1;
-  let newLine = 1;
+  let oldLine = startLine;
+  let newLine = startLine;
   let additions = 0;
   let deletions = 0;
 
@@ -432,6 +433,7 @@ export type DiffViewerProps = Partial<SyntaxHighlighterProps> &
     showIcon?: boolean;
     showStats?: boolean;
     className?: string;
+    startLine?: number;
   };
 
 function DiffViewer({
@@ -446,6 +448,7 @@ function DiffViewer({
   variant,
   size,
   className,
+  startLine = 1,
 }: DiffViewerProps) {
   const diffPatch = patch ?? code;
 
@@ -457,6 +460,7 @@ function DiffViewer({
       const { lines, additions, deletions } = computeDiff(
         oldFile.content,
         newFile.content,
+        startLine,
       );
       return [
         {
@@ -469,7 +473,7 @@ function DiffViewer({
       ];
     }
     return [];
-  }, [diffPatch, oldFile, newFile]);
+  }, [diffPatch, oldFile, newFile, startLine]);
 
   if (parsedFiles.length === 0) {
     return (

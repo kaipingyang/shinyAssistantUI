@@ -5,7 +5,7 @@ import {
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
   matchSlashAction, mergeSlashCommands, rankMentionItems, mentionInsertText,
-  toolHistoryDefaultOpen,
+  toolHistoryDefaultOpen, toolCallSummary,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -458,5 +458,37 @@ describe("toolHistoryDefaultOpen", () => {
     expect(toolHistoryDefaultOpen({ defaultOpen: true }, false)).toBe(true);
     expect(toolHistoryDefaultOpen({ defaultOpen: false }, true)).toBe(false);
     expect(toolHistoryDefaultOpen(undefined, true)).toBe(true);
+  });
+});
+
+
+describe("toolCallSummary", () => {
+  it("uses file_path basename for Edit (not a leading boolean like replace_all)", () => {
+    const args = { replace_all: false, file_path: "/mnt/x/R_dev/bgtm_download_all.R",
+                    old_string: "a", new_string: "b" };
+    expect(toolCallSummary("Edit", args)).toBe("bgtm_download_all.R");
+  });
+  it("uses command for Bash", () => {
+    expect(toolCallSummary("Bash", { command: "ls -la" })).toBe("ls -la");
+  });
+  it("uses path basename for Read", () => {
+    expect(toolCallSummary("Read", { path: "/a/b/config.yml" })).toBe("config.yml");
+  });
+  it("uses pattern/query/url when present", () => {
+    expect(toolCallSummary("Grep", { pattern: "TODO", path: "src" })).toBe("src"); // path wins (file field)
+    expect(toolCallSummary("WebSearch", { query: "shiny" })).toBe("shiny");
+    expect(toolCallSummary("WebFetch", { url: "https://x.com" })).toBe("https://x.com");
+  });
+  it("falls back to first non-empty string, skipping booleans/numbers", () => {
+    expect(toolCallSummary("X", { flag: false, n: 3, name: "hello" })).toBe("hello");
+  });
+  it("returns undefined when no string arg (only booleans)", () => {
+    expect(toolCallSummary("X", { a: false, b: 1 })).toBeUndefined();
+  });
+  it("clips long values to 50 chars with ellipsis", () => {
+    const long = "x".repeat(80);
+    const out = toolCallSummary("Bash", { command: long })!;
+    expect(out.length).toBe(51);
+    expect(out.endsWith("\u2026")).toBe(true);
   });
 });

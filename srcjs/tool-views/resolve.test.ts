@@ -35,6 +35,19 @@ describe("resolveToolView", () => {
     expect(v.kind).toBe("diff");
   });
 
+  it("Edit diff picks up annotations.diffStartLine (real file line numbers)", () => {
+    const args = { file_path: "a.R", old_string: "x<-1", new_string: "x<-2" };
+    const v = resolveToolView("Edit", args, at(args), { diffStartLine: 42 });
+    expect(v.kind).toBe("diff");
+    if (v.kind === "diff") expect(v.startLine).toBe(42);
+  });
+
+  it("diff startLine is undefined without the annotation", () => {
+    const args = { file_path: "a.R", old_string: "x<-1", new_string: "x<-2" };
+    const v = resolveToolView("Edit", args, at(args));
+    if (v.kind === "diff") expect(v.startLine).toBeUndefined();
+  });
+
   it("Bash -> code (bash) using command", () => {
     const args = { command: "ls -la", description: "list" };
     const v = resolveToolView("Bash", args, at(args));

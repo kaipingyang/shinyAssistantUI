@@ -391,6 +391,15 @@ assistantUIServer <- function(id, handler,
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
         # （多 widget 同页时模块级单例会串台，靠 inputId 路由隔离）。
         annotations$inputId <- input_id
+        # Edit 工具：算 old_string 在文件里的真实起始行 → 前端 diff 显示真实行号(非从 1)。
+        # 仅单个 Edit;MultiEdit 多段不同起始行,暂不注入(前端退回 1-based)。
+        if (identical(tool_name, "Edit") && is.null(annotations$diffStartLine)) {
+          sl <- tryCatch(
+            .tool_edit_start_line(args$file_path, args$old_string, working_dir),
+            error = function(e) NULL
+          )
+          if (!is.null(sl)) annotations$diffStartLine <- sl
+        }
         edit_reveal$note_call(tool_call_id, tool_name, args)
         session$sendCustomMessage(
           paste0(input_id, ":tool-call"),

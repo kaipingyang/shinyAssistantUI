@@ -1,7 +1,17 @@
-# shinyAssistantUI 0.2.0.9008 (development version)
+# shinyAssistantUI 0.2.0.9009 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Tool card display fixes
+
+- **Tool title** now shows a meaningful argument (file name for `Edit`/`Write`/`Read`,
+  command for `Bash`, etc.) instead of whatever key happened to be first — fixes titles like
+  `Edit(false)` (a leading boolean `replace_all`) now showing `Edit(app.R)`.
+- **Edit diff line numbers** now reflect the **real file line numbers** instead of always
+  starting at 1: the server locates `old_string` in the file and passes the start line, so
+  the on-screen diff matches what you see when you open the file. (Single `Edit`; `MultiEdit`
+  keeps 1-based numbering for now.)
 
 ## `assistant_tool_view()` — declare a tool's argument rendering from R
 

@@ -4,7 +4,7 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { Button } from "@/components/ui/button";
 import { resolveApprovalHandler } from "./approval-registry";
 import { ShinyToolResult } from "./shiny-tool-result";
-import { computeToolDepth, toolHistoryDefaultOpen } from "./helpers";
+import { computeToolDepth, toolHistoryDefaultOpen, toolCallSummary } from "./helpers";
 import { resolveToolView } from "./tool-views/resolve";
 import { ToolArgsView } from "./tool-views/ToolArgsView";
 import { useShinyConfig } from "./shiny-config-context";
@@ -102,15 +102,10 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
     if (pending && needsApproval && decision === null) setOpen(true);
   }, [pending, needsApproval, decision]);
 
-  // ── v0.1.0 标题:toolName(首个参数摘要),如 get_weather(Paris)/Read(/etc/hostname) ──
+  // ── v0.1.0 标题:toolName(参数摘要),经 toolCallSummary 取有意义字段(不再盲取首值)──
   const displayTitle = (() => {
-    const a = args as Record<string, unknown> | undefined;
-    const firstVal = a && typeof a === "object" ? Object.values(a)[0] : undefined;
-    if (firstVal != null && typeof firstVal !== "object") {
-      const s = String(firstVal).replace(/\s+/g, " ").trim();
-      if (s) return `${toolName}(${s.length > 50 ? s.slice(0, 50) + "\u2026" : s})`;
-    }
-    return toolName;
+    const s = toolCallSummary(toolName, args);
+    return s ? `${toolName}(${s})` : toolName;
   })();
 
   // ── per-tool 图标(opt-in via annotations.icon)──

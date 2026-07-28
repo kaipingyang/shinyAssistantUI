@@ -481,3 +481,34 @@ export function toolHistoryDefaultOpen(
   if (typeof options?.defaultOpen === "boolean") return options.defaultOpen;
   return requiresAction;
 }
+
+
+// 工具卡标题里的参数摘要:优先取有意义的主字段(文件名走 basename),跳过布尔/数字,
+// 回退到第一个非空字符串值。修复 `Edit(false)`(旧逻辑盲取 Object.values()[0])。
+function clipSummary(s: string): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > 50 ? t.slice(0, 50) + "\u2026" : t;
+}
+export function toolCallSummary(
+  _toolName: string | undefined,
+  args: unknown,
+): string | undefined {
+  if (args == null || typeof args !== "object") return undefined;
+  const a = args as Record<string, unknown>;
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v : undefined;
+  const basename = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+
+  const file = str(a.file_path) ?? str(a.path);
+  if (file) return clipSummary(basename(file));
+
+  const primary =
+    str(a.command) ?? str(a.pattern) ?? str(a.query) ?? str(a.url) ?? str(a.code);
+  if (primary) return clipSummary(primary);
+
+  for (const v of Object.values(a)) {
+    const s = str(v);
+    if (s) return clipSummary(s);
+  }
+  return undefined;
+}
