@@ -20,6 +20,7 @@ import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
+import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -556,6 +557,7 @@ const ComposerAction: FC = () => {
       <div className="flex min-w-0 items-center gap-1.5">
         <ComposerAddAttachment />
         <PermissionModeControl compact />
+        <ShinyContextDisplay />
       </div>
       <div className="flex items-center gap-1.5">
         <AuiIf condition={(s) => s.thread.capabilities.dictation}>

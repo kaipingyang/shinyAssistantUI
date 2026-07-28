@@ -61,6 +61,10 @@ export interface ShinyConfigCtx {
   loadOlderHistory?: () => void;
   // ── ClaudeAgentSDK 能力对齐 ──
   usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  /** Token-usage display (Plan 33): opt-in via assistantUIServer(show_usage=). */
+  showUsage?: boolean;
+  contextWindow?: number;
+  usageStyle?: "ring" | "bar" | "text";
   tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;

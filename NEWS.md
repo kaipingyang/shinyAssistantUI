@@ -1,4 +1,14 @@
-# shinyAssistantUI 0.2.1.9001 (development version)
+# shinyAssistantUI 0.2.1.9002 (development version)
+
+## Token usage display (Plan 33)
+
+- New opt-in token-usage indicator in the composer bar: `assistantUIServer(show_usage = TRUE,
+  context_window = 200000, usage_style = c("ring","bar","text"))`. Renders a colour-coded ring/
+  bar/text (green<65%, amber 65-85%, red>85%) with a tooltip breakdown, fed by the live
+  `on_usage` token count vs the model context window. Rewired the previously-orphaned
+  `context-display.tsx` off `-ui/react-ai-sdk` (a no-op under the Shiny runtime) to
+  `useShinyConfig().usage`.
+
 
 ## Cleanup (Plan 37)
 

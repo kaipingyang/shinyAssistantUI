@@ -1,14 +1,22 @@
 "use client";
 
 import { useAuiState } from "@assistant-ui/react";
-import { useThreadTokenUsage } from "@assistant-ui/react-ai-sdk";
-import type { ThreadTokenUsage } from "@assistant-ui/react-ai-sdk";
+// Token usage type (was @assistant-ui/react-ai-sdk's ThreadTokenUsage — which is a no-op
+// under the Shiny runtime). Data comes from ShinyConfig().usage (R `on_usage`) instead.
+type ThreadTokenUsage = {
+  totalTokens?: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+};
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useShinyConfig } from "@/shiny-config-context";
 import {
   createContext,
   useContext,
@@ -143,39 +151,14 @@ function ContextDisplayRootBase({
   );
 }
 
-function ContextDisplayRootInternal({
-  modelContextWindow,
-  children,
-}: {
-  modelContextWindow: number;
-  children: ReactNode;
-}) {
-  const usage = useThreadTokenUsage();
+function ContextDisplayRoot(props: ContextDisplayRootProps) {
   return (
     <ContextDisplayRootBase
-      modelContextWindow={modelContextWindow}
-      usage={usage}
+      modelContextWindow={props.modelContextWindow}
+      usage={props.usage}
     >
-      {children}
-    </ContextDisplayRootBase>
-  );
-}
-
-function ContextDisplayRoot(props: ContextDisplayRootProps) {
-  if (props.usage !== undefined) {
-    return (
-      <ContextDisplayRootBase
-        modelContextWindow={props.modelContextWindow}
-        usage={props.usage}
-      >
-        {props.children}
-      </ContextDisplayRootBase>
-    );
-  }
-  return (
-    <ContextDisplayRootInternal modelContextWindow={props.modelContextWindow}>
       {props.children}
-    </ContextDisplayRootInternal>
+    </ContextDisplayRootBase>
   );
 }
 
@@ -426,4 +409,24 @@ export {
   ContextDisplayRing,
   ContextDisplayBar,
   ContextDisplayText,
+};
+
+
+// Shiny wrapper: reads ShinyConfig (show_usage / context_window / usage_style + live usage)
+// and renders the chosen preset, or nothing. usage.tokens is the latest turn's token count
+// (a rough gauge against the context window; cumulative context tracking is a future R-side
+// enhancement — see .claude/plans/33-token-usage-display.md).
+export const ShinyContextDisplay: FC = () => {
+  const { showUsage, contextWindow, usageStyle, usage } = useShinyConfig();
+  if (!showUsage || !contextWindow) return null;
+  const tokenUsage =
+    typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+  const props = {
+    modelContextWindow: contextWindow,
+    usage: tokenUsage,
+    side: "top" as const,
+  };
+  if (usageStyle === "bar") return <ContextDisplayBar {...props} />;
+  if (usageStyle === "text") return <ContextDisplayText {...props} />;
+  return <ContextDisplayRing {...props} />;
 };

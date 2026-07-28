@@ -252,6 +252,9 @@ assistantUIServer <- function(id, handler,
                               auto_run = NULL,
                               on_toggle_auto_run = NULL,
                               thread_max_width = NULL,
+                              show_usage        = FALSE,
+                              context_window    = NULL,
+                              usage_style       = c("ring", "bar", "text"),
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -343,6 +346,12 @@ assistantUIServer <- function(id, handler,
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
     config$thread_max_width <- as.character(thread_max_width)[[1L]]
+  }
+  # Token 用量显示(Plan 33,opt-in)。context_window 由调用方按模型给(Claude 200k 等)。
+  if (isTRUE(show_usage) && !is.null(context_window)) {
+    config$show_usage     <- TRUE
+    config$context_window <- as.integer(context_window)[[1L]]
+    config$usage_style    <- match.arg(usage_style)
   }
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
