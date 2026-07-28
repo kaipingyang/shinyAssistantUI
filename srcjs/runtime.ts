@@ -104,7 +104,7 @@ function deleteMessages(inputId: string, enabled: boolean, threadId: string) {
 type CommandDef = { name: string; description: string; prompt: string; category?: string };
 type ActionItemDef = { id: string; command?: string; label?: string; section?: string; description?: string };
 const AVAILABLE_PERMISSION_MODES = new Set([
-  "default", "plan", "acceptEdits", "bypassPermissions", "askAll",
+  "default", "plan", "acceptEdits", "bypassPermissions", "askAll", "yolo",
 ]);
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {

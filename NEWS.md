@@ -1,7 +1,17 @@
-# shinyAssistantUI 0.2.0.9012 (development version)
+# shinyAssistantUI 0.2.0.9013 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Permission modes: Strict first + new YOLO
+
+- **Strict** is now the **first** option in the permission-mode selector.
+- New **YOLO** mode — truly never prompts. Unlike **Bypass** (which keeps the stdio
+  permission-prompt channel wired for the approval card and so can still ask, e.g. for
+  out-of-working-directory access), YOLO runs with `bypassPermissions` **and drops
+  `--permission-prompt-tool` entirely**, matching the CLI's `--dangerously-skip-permissions`
+  (no prompt channel → nothing to ask). Switching into/out of YOLO reconnects the session.
+  Use only in fully trusted environments.
 
 ## Approval card: multi-select "Always allow"
 

@@ -154,8 +154,10 @@ same per-thread permission mode in two places: a compact selector below the comp
 (`bypassPermissions`), and **Strict** (`askAll`). Bypass runs all tools without permission
 prompts and should only be used in trusted environments. Strict is the opposite — it prompts
 for approval on **every** tool call (injecting `{"permissions":{"ask":["*"]}}`), keeping the
-full approval card so you can "Always allow" safe tools as you go. Permission changes are
-submitted silently and do not add chat bubbles.
+full approval card so you can "Always allow" safe tools as you go. **YOLO** (`yolo`) goes
+further than Bypass: it drops the permission-prompt channel entirely (like the CLI's
+`--dangerously-skip-permissions`) so **nothing** is ever asked — use only in fully trusted
+environments. Permission changes are submitted silently and do not add chat bubbles.
 
 ### `assistantUIOutput(outputId, width, height, ...)`
 

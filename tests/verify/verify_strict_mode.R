@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9370L
+port <- 9372L
 unlink(c("/tmp/aui-strict.out", "/tmp/aui-strict.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -36,10 +36,25 @@ chk("Strict (askAll) option present with label 'Strict'",
     isTRUE(value("(function(){var o=document.querySelector('select[aria-label=\"Permission mode\"] option[value=\"askAll\"]');return !!o && (o.textContent||'').trim()==='Strict';})()")),
     value("Array.from(document.querySelectorAll('select[aria-label=\"Permission mode\"] option')).map(o=>o.value).join(',')"))
 
-# 选中 Strict → 触发 React onChange → sendAction → R claude_action → 回传 value=askAll → 选择器值变 askAll
+# Strict 置于第一
+chk("Strict is the FIRST option",
+    isTRUE(value("document.querySelector('select[aria-label=\"Permission mode\"] option')?.value==='askAll'")),
+    value("document.querySelector('select[aria-label=\"Permission mode\"] option')?.value"))
+
+# YOLO 选项存在
+chk("YOLO (yolo) option present with label 'YOLO'",
+    isTRUE(value("(function(){var o=document.querySelector('select[aria-label=\"Permission mode\"] option[value=\"yolo\"]');return !!o && (o.textContent||'').trim()==='YOLO';})()")))
+
+# 选中 Strict → 往返
 value("(function(){var s=document.querySelector('select[aria-label=\"Permission mode\"]');s.value='askAll';s.dispatchEvent(new Event('change',{bubbles:true}));return true;})()")
 chk("selecting Strict round-trips to value 'askAll'",
     wait_for("document.querySelector('select[aria-label=\"Permission mode\"]').value==='askAll'", 12),
+    value("document.querySelector('select[aria-label=\"Permission mode\"]').value"))
+
+# 选中 YOLO → 往返(客户端 Set 放行 + R action 回传)
+value("(function(){var s=document.querySelector('select[aria-label=\"Permission mode\"]');s.value='yolo';s.dispatchEvent(new Event('change',{bubbles:true}));return true;})()")
+chk("selecting YOLO round-trips to value 'yolo'",
+    wait_for("document.querySelector('select[aria-label=\"Permission mode\"]').value==='yolo'", 12),
     value("document.querySelector('select[aria-label=\"Permission mode\"]').value"))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")

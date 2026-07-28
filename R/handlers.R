@@ -762,6 +762,8 @@ make_claude_handler <- function(options       = NULL,
          ifnotfound = initial_permission_mode, inherits = FALSE)
   }
   permission_options <- list(
+    list(value = "askAll", label = "Strict",
+         description = "Ask before every tool (approve each action)"),
     list(value = "default", label = "Manual",
          description = "Ask before edits and risky commands"),
     list(value = "plan", label = "Plan",
@@ -770,8 +772,8 @@ make_claude_handler <- function(options       = NULL,
          description = "Automatically accept file edits"),
     list(value = "bypassPermissions", label = "Bypass",
          description = "Run all tools without permission prompts (use with care)"),
-    list(value = "askAll", label = "Strict",
-         description = "Ask before every tool (approve each action)")
+    list(value = "yolo", label = "YOLO",
+         description = "Never ask \u2014 run everything, no prompt channel (like --dangerously-skip-permissions)")
   )
 
   # 思考强度（thinking）：连接时 option，改后经 reset_clients 重连生效（Plan 14 B3）。
@@ -850,12 +852,15 @@ make_claude_handler <- function(options       = NULL,
     stored_sid <- read_session_id(thread_id)
 
     make_opts <- function(resume_sid = NULL) {
-      # "Strict"(askAll)是伪模式:映射为 default + 注入 ask:["*"] settings(保留 stdio 富审批流)。
-      .pm     <- permission_mode_for(thread_id)
+      # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
+      #        "YOLO"(yolo)  = bypassPermissions + 丢弃 --permission-prompt-tool
+      #        (无提问通道 → 彻底不弹,等价终端 --dangerously-skip-permissions)。
+      .pm      <- permission_mode_for(thread_id)
       .ask_all <- identical(.pm, "askAll")
+      .yolo    <- identical(.pm, "yolo")
       .new_claude_options(
-        permission_mode             = if (.ask_all) "default" else .pm,
-        permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
+        permission_mode             = if (.ask_all) "default" else if (.yolo) "bypassPermissions" else .pm,
+        permission_prompt_tool_name = if (.yolo) NULL else (options$permission_prompt_tool_name %||% "stdio"),
         include_partial_messages    = options$include_partial_messages %||% TRUE,
         # cwd：优先动态 cwd_provider()（工作目录选择器），否则静态 options$cwd。
         # 之前漏传 → CLI 只继承 R 进程 getwd()（Plan 16/18）。
@@ -971,16 +976,17 @@ make_claude_handler <- function(options       = NULL,
         ok(paste0("Switched model to ", model), value = model)
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)
-        # askAll("Strict")经 settings 注入,不是真实 SDK permission_mode,单独放行。
-        selectable <- c(available_permission_modes, "askAll")
+        # askAll/yolo 是伪模式(经 settings / 丢 prompt-tool 注入),单独放行。
+        pseudo <- c("askAll", "yolo")
+        selectable <- c(available_permission_modes, pseudo)
         if (!mode %in% selectable) {
           err(paste0("Permission mode is not available for dynamic selection: ", mode))
           return(invisible(NULL))
         }
         current <- permission_mode_for(thread_id)
         assign(thread_id, mode, envir = permission_modes)
-        # 切到/切出 Strict 改的是连接时 settings → 需重连;真实模式之间热切换。
-        if (identical(mode, "askAll") || identical(current, "askAll")) {
+        # 切到/切出伪模式改的是连接时选项(settings / prompt-tool)→ 需重连;真实模式之间热切换。
+        if (mode %in% pseudo || current %in% pseudo) {
           reset_clients()
         } else if (!is.null(cl)) {
           cl$set_permission_mode(mode)

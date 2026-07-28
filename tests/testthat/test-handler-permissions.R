@@ -11,10 +11,27 @@ test_that("make_claude_handler advertises all permission modes", {
   expect_identical(capability$value, "plan")
   expect_identical(
     vapply(capability$options, `[[`, character(1), "value"),
-    c("default", "plan", "acceptEdits", "bypassPermissions", "askAll")
+    c("askAll", "default", "plan", "acceptEdits", "bypassPermissions", "yolo")
   )
-  bypass <- capability$options[[4L]]
+  bypass <- Filter(function(x) identical(x$value, "bypassPermissions"), capability$options)[[1L]]
   expect_false(isTRUE(bypass$disabled))
+})
+
+test_that("YOLO (yolo) mode is advertised and dynamically selectable", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  handler <- make_claude_handler(session_map_path = tempfile(fileext = ".rds"))
+  cap <- attr(handler, "ui_capabilities")$permission_mode
+  yolo <- Filter(function(x) identical(x$value, "yolo"), cap$options)
+  expect_length(yolo, 1L)
+  expect_identical(yolo[[1L]]$label, "YOLO")
+
+  act <- attr(handler, "action_handler")
+  captured <- new.env()
+  act("permissions:yolo", "t1", send_action_result = function(message, status = "ok", value = NULL) {
+    captured$status <- status; captured$value <- value
+  })
+  expect_identical(captured$status, "ok")
+  expect_identical(captured$value, "yolo")
 })
 
 test_that("Strict (askAll) mode is advertised and dynamically selectable", {
