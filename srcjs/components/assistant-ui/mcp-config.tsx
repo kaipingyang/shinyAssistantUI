@@ -1,3 +1,6 @@
+// NOTE: Orphaned (not wired into live code). Kept for a future MCP-management UI.
+// To activate: install @assistant-ui/react-mcp, add an `mcp_servers` param to
+// assistantUIServer(), and wire the McpManager resource in useShinyRuntime.
 "use client";
 
 import { type FC, type ReactNode, useState } from "react";

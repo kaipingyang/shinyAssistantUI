@@ -1,4 +1,11 @@
-# shinyAssistantUI 0.2.1.9000 (development version)
+# shinyAssistantUI 0.2.1.9001 (development version)
+
+## Cleanup (Plan 37)
+
+- Removed the orphaned `shiki-highlighter.tsx` (depended on the uninstalled `react-shiki`;
+  incompatible with the IIFE build). Annotated `mcp-config.tsx` as an orphaned future-MCP UI.
+  (The npm dependency cleanup landed with the 0.15.0 upgrade above.)
+
 
 ## Upgrade to @assistant-ui/react 0.15.0
 
