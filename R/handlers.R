@@ -1684,6 +1684,28 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
 .claude_msgs_to_thread <- function(msgs) {
   result <- list()
+  # 预扫:收集 user 轮里的 tool_result(按 tool_use_id),供历史工具卡显示真实结果/审批态
+  # (之前一律写死 "Session ended",看不出跑了什么/是否被拒)。
+  tool_results <- new.env(parent = emptyenv())
+  for (m in msgs) {
+    if (identical(m$type, "user") && is.list(m$message$content)) {
+      for (b in m$message$content) {
+        if (identical(b[["type"]], "tool_result")) {
+          tuid <- b[["tool_use_id"]]
+          if (is.null(tuid) || !nzchar(tuid)) next
+          cc <- b[["content"]]
+          txt <- if (is.character(cc)) paste(cc, collapse = "\n")
+                 else if (is.list(cc))
+                   paste(vapply(cc, function(x)
+                     if (is.list(x)) (x[["text"]] %||% "") else as.character(x %||% ""),
+                     character(1)), collapse = "\n")
+                 else ""
+          assign(tuid, list(text = txt, is_error = isTRUE(b[["is_error"]])),
+                 envir = tool_results)
+        }
+      }
+    }
+  }
   for (m in msgs) {
     if (m$type == "user") {
       raw  <- m$message$content
@@ -1714,6 +1736,12 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
             parts[[length(parts) + 1L]] <- list(type = "text", text = blk[["text"]])
           else if (identical(blk[["type"]], "tool_use")) {
             args_val <- if (is.list(blk[["input"]])) blk[["input"]] else list()
+            # 查真实 tool_result;缺失(会话中途结束)→ 回退 "Session ended"。
+            tuid_h <- blk[["id"]]
+            tr <- if (is.character(tuid_h) && length(tuid_h) == 1L && nzchar(tuid_h))
+              get0(tuid_h, envir = tool_results, inherits = FALSE, ifnotfound = NULL) else NULL
+            res_txt <- if (!is.null(tr) && nzchar(tr$text)) tr$text else "Session ended"
+            is_err  <- if (!is.null(tr)) isTRUE(tr$is_error) else FALSE
             parts[[length(parts) + 1L]] <- list(
               type       = "tool-call",
               toolCallId = blk[["id"]] %||% paste0("h-tool-", length(parts)),
@@ -1723,8 +1751,8 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               # sendCustomMessage 会被 Shiny 当【原样 JSON】序列化 → 浏览器收到的是
               # 对象而非字符串 → ToolFallback.Args 渲染 {argsText} 触发 React #31。
               argsText   = tryCatch(as.character(jsonlite::toJSON(args_val, auto_unbox=TRUE)), error=function(e) "{}"),
-              result     = "Session ended",
-              isError    = FALSE
+              result     = res_txt,
+              isError    = is_err
             )
           }
         }

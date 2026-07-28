@@ -101,6 +101,31 @@ test_that(".claude_msgs_to_thread assistant text + tool_use 块", {
   expect_equal(out[[1]]$content[[2]]$result, "Session ended")
 })
 
+test_that(".claude_msgs_to_thread 用后续 user 轮的 tool_result 填真实结果/审批态", {
+  f <- shinyAssistantUI:::.claude_msgs_to_thread
+  msgs <- list(
+    list(type = "assistant", uuid = "a1", message = list(content = list(
+      list(type = "tool_use", id = "t1", name = "Bash", input = list(command = "ls")),
+      list(type = "tool_use", id = "t2", name = "Bash", input = list(command = "rm x"))
+    ))),
+    list(type = "user", uuid = "u1", message = list(content = list(
+      list(type = "tool_result", tool_use_id = "t1",
+           content = "file1.txt\nfile2.txt", is_error = FALSE),
+      list(type = "tool_result", tool_use_id = "t2",
+           content = list(list(type = "text", text = "User denied tool execution")),
+           is_error = TRUE)
+    )))
+  )
+  out <- f(msgs)
+  # user 轮只含 tool_result(无 text)→ 不渲染成 user 气泡,只剩 assistant 一条。
+  expect_length(out, 1)
+  parts <- out[[1]]$content
+  expect_equal(parts[[1]]$result, "file1.txt\nfile2.txt")
+  expect_false(parts[[1]]$isError)
+  expect_equal(parts[[2]]$result, "User denied tool execution")
+  expect_true(parts[[2]]$isError)
+})
+
 test_that(".claude_msgs_to_thread assistant tool_use 缺 id/name 用默认", {
   f <- shinyAssistantUI:::.claude_msgs_to_thread
   msgs <- list(list(type = "assistant", uuid = "a2", message = list(content = list(

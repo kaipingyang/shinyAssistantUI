@@ -1,7 +1,15 @@
-# shinyAssistantUI 0.2.0.9013 (development version)
+# shinyAssistantUI 0.2.0.9014 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## History: real tool results (not "Session ended")
+
+- When re-opening a past Claude session, tool cards now show the **actual tool result**
+  (matched from the transcript's `tool_result` blocks by `tool_use_id`) instead of a
+  placeholder `"Session ended"`, and carry the real **error state** — so a **denied** tool
+  shows its red "User denied…" result and a **successful** one shows its output. Tool calls
+  with no recorded result (session truly cut off mid-run) still fall back to `"Session ended"`.
 
 ## Permission modes: Strict first + new YOLO
 
