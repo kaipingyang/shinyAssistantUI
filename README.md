@@ -150,9 +150,12 @@ embedding inside an existing bslib app, keep using the host page layout instead.
 Handlers that advertise permission capabilities (including `make_claude_handler()`) show the
 same per-thread permission mode in two places: a compact selector below the composer and a
 **Settings** panel at the bottom of the thread sidebar. Dynamic choices are **Manual**
-(`default`), **Plan** (`plan`), **Auto-edit** (`acceptEdits`), and **Bypass**
-(`bypassPermissions`). Bypass runs all tools without permission prompts and should only be used
-in trusted environments. Permission changes are submitted silently and do not add chat bubbles.
+(`default`), **Plan** (`plan`), **Auto-edit** (`acceptEdits`), **Bypass**
+(`bypassPermissions`), and **Strict** (`askAll`). Bypass runs all tools without permission
+prompts and should only be used in trusted environments. Strict is the opposite — it prompts
+for approval on **every** tool call (injecting `{"permissions":{"ask":["*"]}}`), keeping the
+full approval card so you can "Always allow" safe tools as you go. Permission changes are
+submitted silently and do not add chat bubbles.
 
 ### `assistantUIOutput(outputId, width, height, ...)`
 

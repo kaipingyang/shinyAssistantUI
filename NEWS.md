@@ -1,7 +1,16 @@
-# shinyAssistantUI 0.2.0.9009 (development version)
+# shinyAssistantUI 0.2.0.9010 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## "Strict" permission mode — ask before every tool
+
+- New **Strict** option in the permission-mode selector: prompts for approval on **every**
+  tool call (not just edits/risky commands), so nothing runs without your say-so. Implemented
+  by injecting `{"permissions":{"ask":["*"]}}` into the session settings, which keeps the full
+  approval card (permission suggestions, "Always allow …", "Deny & tell Claude…") intact —
+  pair it with "Always allow" to whitelist safe tools as you go. Switching into or out of
+  Strict reconnects the session (like the thinking/model controls).
 
 ## Tool card display fixes
 

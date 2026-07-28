@@ -738,7 +738,9 @@ make_claude_handler <- function(options       = NULL,
     list(value = "acceptEdits", label = "Auto-edit",
          description = "Automatically accept file edits"),
     list(value = "bypassPermissions", label = "Bypass",
-         description = "Run all tools without permission prompts (use with care)")
+         description = "Run all tools without permission prompts (use with care)"),
+    list(value = "askAll", label = "Strict",
+         description = "Ask before every tool (approve each action)")
   )
 
   # 思考强度（thinking）：连接时 option，改后经 reset_clients 重连生效（Plan 14 B3）。
@@ -817,8 +819,11 @@ make_claude_handler <- function(options       = NULL,
     stored_sid <- read_session_id(thread_id)
 
     make_opts <- function(resume_sid = NULL) {
+      # "Strict"(askAll)是伪模式:映射为 default + 注入 ask:["*"] settings(保留 stdio 富审批流)。
+      .pm     <- permission_mode_for(thread_id)
+      .ask_all <- identical(.pm, "askAll")
       .new_claude_options(
-        permission_mode             = permission_mode_for(thread_id),
+        permission_mode             = if (.ask_all) "default" else .pm,
         permission_prompt_tool_name = options$permission_prompt_tool_name %||% "stdio",
         include_partial_messages    = options$include_partial_messages %||% TRUE,
         # cwd：优先动态 cwd_provider()（工作目录选择器），否则静态 options$cwd。
@@ -828,6 +833,8 @@ make_claude_handler <- function(options       = NULL,
         # thinking（思考强度）为连接时 options；内部选择器 > 外部 provider > options$thinking。
         thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
         model                       = internal_model() %||% options$model,
+        # 全审批("Strict"):注入 ask:["*"](覆盖只读放行);否则沿用用户 options$settings。
+        settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
         # 角度 B:透传进程内 MCP servers(含 run_r);autorun 开且 run_r 已注册 →
         # 把 run_r 加进 allowed_tools 免审批,否则走审批卡。
         mcp_servers                 = options$mcp_servers,
@@ -933,14 +940,20 @@ make_claude_handler <- function(options       = NULL,
         ok(paste0("Switched model to ", model), value = model)
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)
-        if (!mode %in% available_permission_modes) {
+        # askAll("Strict")经 settings 注入,不是真实 SDK permission_mode,单独放行。
+        selectable <- c(available_permission_modes, "askAll")
+        if (!mode %in% selectable) {
           err(paste0("Permission mode is not available for dynamic selection: ", mode))
           return(invisible(NULL))
         }
-        # 尚未连接时只记录 intended mode；首条消息创建 client 时应用，避免设置 UI
-        # 本身触发 CLI 冷启动。已有 client 则提交 control request 后更新 intended mode。
-        if (!is.null(cl)) cl$set_permission_mode(mode)
+        current <- permission_mode_for(thread_id)
         assign(thread_id, mode, envir = permission_modes)
+        # 切到/切出 Strict 改的是连接时 settings → 需重连;真实模式之间热切换。
+        if (identical(mode, "askAll") || identical(current, "askAll")) {
+          reset_clients()
+        } else if (!is.null(cl)) {
+          cl$set_permission_mode(mode)
+        }
         ok(paste0("Permission mode submitted: ", mode), value = mode)
       } else if (grepl("^thinking:", id)) {
         tv <- sub("^thinking:", "", id)
