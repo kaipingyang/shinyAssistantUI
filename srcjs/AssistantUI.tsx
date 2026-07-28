@@ -79,6 +79,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     loadingOlder: rt.loadingOlder,
     loadOlderHistory: rt.loadOlderHistory,
     usage: rt.usage,
+    agentState: rt.agentState,
     showUsage: config?.show_usage === true,
     contextWindow: typeof config?.context_window === "number" ? config.context_window : undefined,
     usageStyle: (config?.usage_style as "ring" | "bar" | "text" | undefined) ?? "ring",

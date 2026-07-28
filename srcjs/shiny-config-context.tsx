@@ -61,6 +61,8 @@ export interface ShinyConfigCtx {
   loadOlderHistory?: () => void;
   // ── ClaudeAgentSDK 能力对齐 ──
   usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  /** Plan 36: per-thread agent state pushed from R via on_state(). */
+  agentState?: unknown;
   /** Token-usage display (Plan 33): opt-in via assistantUIServer(show_usage=). */
   showUsage?: boolean;
   contextWindow?: number;

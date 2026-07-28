@@ -503,6 +503,12 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":warming"),
                                   list(active = isTRUE(active), resuming = isTRUE(resuming),
                                        threadId = thread_id))
+      },
+      # Agent 共享状态(Plan 36):handler 调 on_state(list) 推送任意 per-thread 状态快照,
+      # 前端 useShinyAgentState() 订阅。
+      on_state = function(state) {
+        session$sendCustomMessage(paste0(input_id, ":state-snapshot"),
+                                  list(state = state, threadId = thread_id))
       }
     )
   }
@@ -762,6 +768,7 @@ assistantUIServer <- function(id, handler,
         on_rate_limit     = cbs$on_rate_limit,
         on_status         = cbs$on_status,
         on_warming        = cbs$on_warming,
+        on_state          = cbs$on_state,
         on_commands       = cbs$on_commands,
         attachments       = attachments,
         is_reload         = is_reload,

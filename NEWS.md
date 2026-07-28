@@ -1,4 +1,13 @@
-# shinyAssistantUI 0.2.1.9003 (development version)
+# shinyAssistantUI 0.2.1.9004 (development version)
+
+## Agent shared state (Plan 36)
+
+- Handlers can push arbitrary per-thread state to the UI via a new `on_state(list(...))`
+  callback (e.g. `on_state(list(progress = i/n, current = file))` while looping over files).
+  Front-end `useShinyAgentState()` subscribes; a built-in `ShinyAgentProgress` bar renders
+  above the composer when `progress` is numeric. State is per-thread and session-scoped
+  (STATE_SNAPSHOT-style full replacement).
+
 
 ## Fix
 

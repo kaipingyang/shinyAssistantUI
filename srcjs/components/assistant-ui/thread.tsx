@@ -21,6 +21,7 @@ import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistan
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
+import { ShinyAgentProgress } from "@/hooks/use-agent-state";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -402,6 +403,7 @@ const Composer: FC = () => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ModelPickerDialog />
+      <ShinyAgentProgress />
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"

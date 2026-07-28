@@ -383,6 +383,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
   type TaskInfo = { taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string };
   const [usageMap, setUsageMap] = useState<Record<string, UsageInfo>>({});          // #1 每线程最新用量
+  const [agentStateMap, setAgentStateMap] = useState<Record<string, unknown>>({});   // Plan 36 每线程 agent 状态
   const [tasksMap, setTasksMap] = useState<Record<string, Record<string, TaskInfo>>>({}); // #2 每线程 taskId→info
   // run 结束（done/error）时把该线程未收到终止状态的任务标记为终止，避免任务卡（带 Stop）
   // 永久浮在 composer 上方（CLI 有时漏发 task_updated 终态，尤其子代理/bypass 场景）。
@@ -595,6 +596,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setUsageMap((prev) => ({ ...prev, [tid]: {
         costUsd: d.costUsd, tokens: d.tokens, turns: d.turns, durationMs: d.durationMs, model: d.model,
       } }));
+    });
+    // ── Plan 36 Agent 共享状态(per-thread 快照)───────────────────────────────
+    bridge.current.onStateSnapshot((d) => {
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      setAgentStateMap((prev) => ({ ...prev, [tid]: d.state }));
     });
     // ── #2 子agent/Task 进度 ──────────────────────────────────────────────────
     bridge.current.onTask((d) => {
@@ -1669,6 +1675,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     closeArtifact: () => setActiveArtifactId(null),
     // ── ClaudeAgentSDK 能力对齐(当前线程视图)────────────────────────────────
     usage: usageMap[currentThreadId],                                    // #1
+    agentState: agentStateMap[currentThreadId],                          // Plan 36
     tasks: Object.values(tasksMap[currentThreadId] ?? {}),               // #2
     rateLimit,                                                           // #3
     statusText,                                                          // #4
