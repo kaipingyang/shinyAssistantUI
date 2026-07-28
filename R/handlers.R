@@ -676,36 +676,6 @@ make_ellmer_session_loader <- function(store) {
   )
 }
 
-#' Create a ClaudeAgentSDK handler for assistantUIServer
-#'
-#' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
-#' Supports streaming, tool approval UI, thinking output, attachments,
-#' and session persistence across R restarts.
-#'
-#' @param options A `ClaudeAgentOptions` object. Defaults to
-#'   `ClaudeAgentOptions(permission_mode = "default", permission_prompt_tool_name = "stdio", include_partial_messages = TRUE)`.
-#' @param session_map_path Path to the `.rds` file used to persist
-#'   `thread_id -> session_id` mappings. Defaults to
-#'   `".claude_session_map.rds"` in the current working directory.
-#'
-#' @return A `coro::async` handler function compatible with [assistantUIServer()].
-#'
-#' @examples
-#' \dontrun{
-#' handler <- make_claude_handler()
-#'
-#' server <- function(input, output, session) {
-#'   ctrl <- assistantUIServer("chat", handler = handler,
-#'                             show_thread_list = TRUE)
-#'   # inject sessions into sidebar
-#'   shiny::observe({
-#'     sessions <- list_claude_sessions()
-#'     ctrl$send_sessions(list(sessions = sessions))
-#'   })
-#' }
-#' }
-#'
-#' @export
 # 把一条 CLI permission_suggestion 转成 PermissionUpdate(未知类型 → NULL)。
 # addRules / addDirectories / setMode 三类,供审批"Always allow"(单选/多选)复用。
 .claude_suggestion_to_perm <- function(sug) {
@@ -737,6 +707,36 @@ make_ellmer_session_loader <- function(store) {
   }
 }
 
+#' Create a ClaudeAgentSDK handler for assistantUIServer
+#'
+#' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
+#' Supports streaming, tool approval UI, thinking output, attachments,
+#' and session persistence across R restarts.
+#'
+#' @param options A `ClaudeAgentOptions` object. Defaults to
+#'   `ClaudeAgentOptions(permission_mode = "default", permission_prompt_tool_name = "stdio", include_partial_messages = TRUE)`.
+#' @param session_map_path Path to the `.rds` file used to persist
+#'   `thread_id -> session_id` mappings. Defaults to
+#'   `".claude_session_map.rds"` in the current working directory.
+#'
+#' @return A `coro::async` handler function compatible with [assistantUIServer()].
+#'
+#' @examples
+#' \dontrun{
+#' handler <- make_claude_handler()
+#'
+#' server <- function(input, output, session) {
+#'   ctrl <- assistantUIServer("chat", handler = handler,
+#'                             show_thread_list = TRUE)
+#'   # inject sessions into sidebar
+#'   shiny::observe({
+#'     sessions <- list_claude_sessions()
+#'     ctrl$send_sessions(list(sessions = sessions))
+#'   })
+#' }
+#' }
+#'
+#' @export
 make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
                                 thinking_provider = NULL,

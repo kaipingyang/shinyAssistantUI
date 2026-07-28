@@ -1,4 +1,11 @@
-# shinyAssistantUI 0.2.1.9002 (development version)
+# shinyAssistantUI 0.2.1.9003 (development version)
+
+## Fix
+
+- Restore the `make_claude_handler()` export. An internal helper had been placed between
+  its roxygen block and definition, so a docs regeneration reattached `@export` to the
+  helper and dropped `make_claude_handler` from NAMESPACE. Moved the helper above the block.
+
 
 ## Token usage display (Plan 33)
 
