@@ -61,7 +61,7 @@ describe("ShinyToolFallback approval — always-allow & deny feedback", () => {
     const spy = vi.fn();
     registerApprovalHandler("chatA", spy);
     const { getByText, getByPlaceholderText } = renderCard("chatA", "tc-deny");
-    fireEvent.click(getByText(/tell Claude what to do differently/));
+    fireEvent.click(getByText(/Deny & tell Claude/));
     fireEvent.change(getByPlaceholderText(/Tell Claude/), {
       target: { value: "use grep instead" },
     });
@@ -75,7 +75,7 @@ describe("ShinyToolFallback approval — always-allow & deny feedback", () => {
     const spy = vi.fn();
     registerApprovalHandler("chatA", spy);
     const { getByText } = renderCard("chatA", "tc-deny-empty");
-    fireEvent.click(getByText(/tell Claude what to do differently/));
+    fireEvent.click(getByText(/Deny & tell Claude/));
     fireEvent.click(getByText(/Send & deny/));
     expect(spy).toHaveBeenCalledWith("tc-deny-empty", false, {
       customMessage: undefined,

@@ -1,4 +1,4 @@
-# shinyAssistantUI 0.2.0.9004 (development version)
+# shinyAssistantUI 0.2.0.9005 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
@@ -11,9 +11,9 @@ for the agentic R tool).
   suggested permission rule / directory / mode for the session, so matching future calls
   are not re-prompted. Handler now maps `setMode` suggestions (in addition to the existing
   `addRules` / `addDirectories`).
-- New **"No, and tell Claude what to do differently"** action (matching Claude Code's own
-  prompt wording): reveals a text box so a denial can carry a free-text reason back to
-  Claude (via `deny_tool(message=…)`) instead of a bare refusal.
+- New **"Deny & tell Claude…"** action: reveals a text box (placeholder *"Tell Claude what
+  to do differently"*, echoing Claude Code's own prompt) so a denial can carry a free-text
+  reason back to Claude (via `deny_tool(message=…)`) instead of a bare refusal.
 - Plain **Allow** / **Deny** remain; when the backend sends no suggestions the card is
   unchanged.
 
