@@ -1,7 +1,17 @@
-# shinyAssistantUI 0.2.0.9007 (development version)
+# shinyAssistantUI 0.2.0.9008 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## `assistant_tool_view()` — declare a tool's argument rendering from R
+
+- New exported helper `assistant_tool_view(kind, field, lang, ...)` builds the `argsView`
+  tool-call annotation, so **R-authored tools** (ellmer tools — forwarded automatically by
+  `make_ellmer_handler()` — and any custom `handler` calling `on_tool_call(annotations = ...)`)
+  can declare how their arguments render (`code` block with a language, or a `diff`) instead
+  of the raw-JSON fallback. Pure metadata (no `ellmer`/`curl` dependency; `ellmer` stays in
+  Suggests). Fixed built-in tools keep their client-side rules; this is the server-side
+  extension point for tools whose semantics only the author knows.
 
 ## Tool cards: rich argument rendering
 
