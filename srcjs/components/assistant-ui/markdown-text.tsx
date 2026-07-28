@@ -9,7 +9,9 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
-import { type FC, memo, useState } from "react";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { type FC, memo, useState, useMemo } from "react";
 import { CheckIcon, CopyIcon, PlayIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -20,9 +22,21 @@ import { safeUrl, parseFileRef } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
 
 const MarkdownTextImpl = () => {
+  // LaTeX 数学(Plan 34,opt-in via assistantUIServer(latex=TRUE))。默认关。
+  const { latex } = useShinyConfig();
+  const remarkPlugins = useMemo(
+    () => (latex ? [remarkGfm, remarkMath] : [remarkGfm]),
+    [latex],
+  );
+  const rehypePlugins = useMemo(
+    () => (latex ? [[rehypeKatex, { strict: false }]] : []),
+    [latex],
+  );
   return (
     <MarkdownTextPrimitive
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={remarkPlugins}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rehypePlugins={rehypePlugins as any}
       className="aui-md"
       components={defaultComponents}
       componentsByLanguage={{

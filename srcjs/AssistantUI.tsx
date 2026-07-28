@@ -40,6 +40,20 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     return () => unregisterApprovalHandler(inputId);
   }, [inputId, rt.sendToolApproval]);
 
+  // Plan 34: when LaTeX is enabled, load KaTeX stylesheet from CDN once (fonts served by CDN;
+  // avoids bundling ~150KB of fonts into the IIFE build). Opt-in, so no CDN dep unless used.
+  useEffect(() => {
+    if (config?.latex !== true) return;
+    const id = "aui-katex-css";
+    if (document.getElementById(id)) return;
+    const link = document.createElement("link");
+    link.id = id;
+    link.rel = "stylesheet";
+    link.href = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css";
+    link.crossOrigin = "anonymous";
+    document.head.appendChild(link);
+  }, [config?.latex]);
+
   const activeArtifact = rt.artifacts.find((a) => a.id === rt.activeArtifactId) ?? null;
   const showThreadList = config?.show_thread_list === true;
   const isModal = config?.modal === true;
@@ -80,6 +94,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     loadOlderHistory: rt.loadOlderHistory,
     usage: rt.usage,
     agentState: rt.agentState,
+    latex: config?.latex === true,
     showUsage: config?.show_usage === true,
     contextWindow: typeof config?.context_window === "number" ? config.context_window : undefined,
     usageStyle: (config?.usage_style as "ring" | "bar" | "text" | undefined) ?? "ring",

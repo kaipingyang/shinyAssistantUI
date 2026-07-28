@@ -255,6 +255,7 @@ assistantUIServer <- function(id, handler,
                               show_usage        = FALSE,
                               context_window    = NULL,
                               usage_style       = c("ring", "bar", "text"),
+                              latex             = FALSE,
                               code_theme        = "one-light",
                               strings           = NULL,
                               assistant_avatar  = list(fallback = "AI"),
@@ -353,6 +354,8 @@ assistantUIServer <- function(id, handler,
     config$context_window <- as.integer(context_window)[[1L]]
     config$usage_style    <- match.arg(usage_style)
   }
+  # LaTeX 数学(Plan 34,opt-in)。开启后前端加载 KaTeX CSS(CDN)并启用 remark-math/rehype-katex。
+  if (isTRUE(latex)) config$latex <- TRUE
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
 

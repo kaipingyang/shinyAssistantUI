@@ -1,4 +1,12 @@
-# shinyAssistantUI 0.2.1.9004 (development version)
+# shinyAssistantUI 0.2.1.9005 (development version)
+
+## LaTeX math (Plan 34, opt-in)
+
+- New `assistantUIServer(latex = TRUE)` enables KaTeX rendering of `$...$` (inline) and
+  `$$...$$` (display) math via remark-math + rehype-katex — useful for statistical/DS output.
+  The KaTeX stylesheet is loaded from CDN only when enabled (fonts served by CDN; avoids
+  bundling ~150KB into the widget). Default off.
+
 
 ## Agent shared state (Plan 36)
 

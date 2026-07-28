@@ -39,6 +39,7 @@ assistantUIServer(
   show_usage = FALSE,
   context_window = NULL,
   usage_style = c("ring", "bar", "text"),
+  latex = FALSE,
   code_theme = "one-light",
   strings = NULL,
   assistant_avatar = list(fallback = "AI"),
