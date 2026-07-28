@@ -1,3 +1,15 @@
+# shinyAssistantUI 0.2.1.9000 (development version)
+
+## Upgrade to @assistant-ui/react 0.15.0
+
+- Upgraded `@assistant-ui/react` 0.14.27 → **0.15.0** (and `@assistant-ui/react-lexical` →
+  0.2.7, `@assistant-ui/react-markdown` → 0.14.8, `@lexical/*` → 0.48.0 to match). Migrated the
+  removed/renamed APIs: `useThreadListItem()` → `useAuiState(s => s.threadListItem.*)`;
+  `aui.composer()` → `aui.composer` (property). Dropped the legacy-only deps
+  `@assistant-ui/react-ui` and `@assistant-ui/react-syntax-highlighter`, and promoted native
+  `react-syntax-highlighter` to a direct dependency (it was previously only transitive).
+  Full test suite (240 vitest) + headless composer/approval verifies pass with 0 console errors.
+
 # shinyAssistantUI 0.2.1
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`

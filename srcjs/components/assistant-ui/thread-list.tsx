@@ -11,7 +11,6 @@ import {
   ThreadListItemPrimitive,
   ThreadListPrimitive,
   useAuiState,
-  useThreadListItem,
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
@@ -243,7 +242,8 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const { id, title } = useThreadListItem();
+  const id = useAuiState((s) => s.threadListItem.id);
+  const title = useAuiState((s) => s.threadListItem.title as string | undefined);
   const { onRename } = useShinyConfig();
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");

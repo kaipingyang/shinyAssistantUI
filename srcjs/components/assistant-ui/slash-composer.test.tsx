@@ -74,7 +74,7 @@ async function setEditorText(editorElement: HTMLElement, text: string, cursor = 
 
 function composerText(id: string): string {
   const aui = runtimes[id] as unknown as ReturnType<typeof useAui>;
-  return aui.composer().getState().text;
+  return aui.composer.getState().text;
 }
   it("keeps the contenteditable borderless and overlays the placeholder inside one input surface", () => {
     const { getByTestId } = render(<Widget id="layout" context={{}} />);
@@ -280,7 +280,7 @@ describe("Lexical slash composer", () => {
     await waitFor(() => expect(widget.querySelector("[data-directive-id='github']")).not.toBeNull());
     await act(async () => {
       const aui = runtimes.literal as unknown as ReturnType<typeof useAui>;
-      aui.composer().setText("/github issue 42");
+      aui.composer.setText("/github issue 42");
     });
     await waitFor(() => expect(composerText("literal")).toBe("/github issue 42"));
     expect(widget.querySelector("[data-directive-id='github']")).not.toBeNull();

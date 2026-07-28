@@ -46,8 +46,8 @@ function Seed({ text }: { text?: string }) {
     if (!text || done.current) return;
     done.current = true;
     void (async () => {
-      await aui.composer().setText(text);
-      await aui.composer().send();
+      await aui.composer.setText(text);
+      await aui.composer.send();
     })();
   }, [aui, text]);
   return null;

@@ -523,10 +523,10 @@ const ComposerQueue: FC = () => {
       className="aui-composer-queue-btn size-7 rounded-full"
       aria-label="Queue message"
       onClick={() => {
-        const t = (aui.composer().getState().text as string) ?? "";
+        const t = (aui.composer.getState().text as string) ?? "";
         if (t.trim()) {
           onEnqueue(t);
-          aui.composer().setText("");
+          aui.composer.setText("");
         }
       }}
     >
