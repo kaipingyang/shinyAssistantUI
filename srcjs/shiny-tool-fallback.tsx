@@ -1,12 +1,12 @@
-import { useEffect, useState, type FC } from "react";
+import { useEffect, useState } from "react";
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { Button } from "@/components/ui/button";
 import { resolveApprovalHandler } from "./approval-registry";
 import { ShinyToolResult } from "./shiny-tool-result";
-import { computeToolDepth, toolHistoryDefaultOpen, getEditDiff, formatToolArgs } from "./helpers";
-import { DiffViewer } from "@/components/assistant-ui/diff-viewer";
-import { JsonHighlighter } from "@/components/assistant-ui/syntax-highlighter";
+import { computeToolDepth, toolHistoryDefaultOpen } from "./helpers";
+import { resolveToolView } from "./tool-views/resolve";
+import { ToolArgsView } from "./tool-views/ToolArgsView";
 import { useShinyConfig } from "./shiny-config-context";
 import {
   SearchIcon, DatabaseIcon, CodeIcon, FileTextIcon, GlobeIcon, TerminalIcon,
@@ -64,37 +64,11 @@ function suggestionLabel(sug: PermSuggestion): string {
   }
 }
 
-// 工具参数美化：合法 JSON 对象 → 缩进 + json 语法高亮；流式半截/非 JSON → 原样 pre 兜底。
-const ShinyToolArgs: FC<{ argsText?: string }> = ({ argsText }) => {
-  const formatted = formatToolArgs(argsText);
-  if (!formatted) return null;
-  if (formatted.kind === "json") {
-    return (
-      <div
-        data-slot="tool-fallback-args"
-        data-args-format="json"
-        className="aui-tool-fallback-args bg-muted/50 overflow-x-auto rounded-md p-2.5 text-xs"
-      >
-        <JsonHighlighter code={formatted.text} />
-      </div>
-    );
-  }
-  return (
-    <div data-slot="tool-fallback-args" data-args-format="raw" className="aui-tool-fallback-args">
-      <pre className="aui-tool-fallback-args-value bg-muted/50 text-foreground/90 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {formatted.text}
-      </pre>
-    </div>
-  );
-};
-
 // 组合官方 ToolFallback 的 chrome(Root/Trigger/Content/Args)+ Shiny 富结果 + 审批
 // + v0.1.0 观感回归(toolName(参数摘要) 标题 / per-tool 图标 / 子agent嵌套缩进)。
 export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, args, argsText, result, status, artifact, toolCallId } = props;
   const ann = artifact as Record<string, unknown> | undefined;
-  // Edit/MultiEdit：用 old_string→new_string 渲染 git 式 diff（替代裸参数 JSON）。
-  const editDiff = getEditDiff(toolName, args);
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
   const defaultOpen = toolHistoryDefaultOpen(
@@ -197,17 +171,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
         <ToolFallback.Trigger toolName={displayTitle} status={status} />
         <ToolFallback.Content>
-          {editDiff ? (
-            <div data-slot="aui_edit_diff" className="mt-1 max-h-96 overflow-y-auto">
-              <DiffViewer
-                oldFile={{ content: editDiff.oldContent, name: editDiff.fileName }}
-                newFile={{ content: editDiff.newContent, name: editDiff.fileName }}
-                viewMode="unified"
-              />
-            </div>
-          ) : (
-            <ShinyToolArgs argsText={argsText} />
-          )}
+          <ToolArgsView view={resolveToolView(toolName, args, argsText, ann)} />
 
           {!pending && (
             <div className="aui-shiny-tool-result">
