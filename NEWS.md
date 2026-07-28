@@ -1,20 +1,22 @@
-# shinyAssistantUI 0.2.0.9006 (development version)
+# shinyAssistantUI 0.2.0.9007 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
 
 ## Tool cards: rich argument rendering
 
-- Tool-call cards now render their **arguments** by tool semantics instead of raw JSON.
-  Phase 1: **Bash** → shell code block, **Write** → code block (language by file
-  extension), **run_r** (`mcp__r_session__run_r`) → **R code block** (so you approve clean
-  R, not a JSON string), **Edit/MultiEdit** → diff (as before). Unknown tools keep the JSON
-  fallback (no regression).
-- Extensible & decoupled: a pure `resolveToolView()` (tested) maps a tool call to a
-  `ToolView` (`diff` | `code` | `json`); a dumb `ToolArgsView` renders it by reusing the
-  existing diff/code/JSON components. Any MCP tool can declare its own view from R via
-  `on_tool_call(annotations = list(argsView = list(kind = "code", field = "code",
-  lang = "r")))` — the server-side extension point.
+- Tool-call cards render their **arguments** by tool semantics instead of raw JSON:
+  **Bash** → shell code block, **Write** → code block (language by file extension),
+  **run_r** (`mcp__r_session__run_r`) → **R code block**, **Edit/MultiEdit** → diff,
+  **TodoWrite** → a status **checklist**, and **Grep / Glob / WebSearch / WebFetch** →
+  a compact **query summary** (labelled fields; URLs as links). Unknown tools keep the
+  JSON fallback (no regression). Text tool **results** (e.g. `run_r` / Bash output) render
+  as a monospace **console** block, not JSON.
+- Extensible & decoupled: a pure `resolveToolView()` (16 unit tests) maps a tool call to a
+  `ToolView` (`diff` | `code` | `todos` | `query` | `json`); a dumb `ToolArgsView` renders
+  it by reusing existing diff/code/JSON components. Any MCP tool can declare its own view
+  from R via `on_tool_call(annotations = list(argsView = list(kind = "code",
+  field = "code", lang = "r")))` — the server-side extension point.
 
 ## Tool approval: "Always allow" + deny-with-feedback
 

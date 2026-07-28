@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9340L
+port <- 9341L
 unlink(c("/tmp/aui-tv.out", "/tmp/aui-tv.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -70,6 +70,22 @@ chk("unknown tool falls back to JSON view", isTRUE(value("!!document.querySelect
 chk("code views count == 3 (bash+python+r)",
     isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===3")),
     value("document.querySelectorAll('[data-arg-view=\"code\"]').length+''"))
+
+# Phase 2: TodoWrite -> checklist
+chk("TodoWrite renders a todos checklist", isTRUE(value("!!document.querySelector('[data-arg-view=\"todos\"]')")))
+chk("todo items carry status", isTRUE(value("!!document.querySelector('[data-todo-status=\"completed\"]') && !!document.querySelector('[data-todo-status=\"in_progress\"]')")))
+chk("todo shows content text", isTRUE(value("(document.querySelector('[data-arg-view=\"todos\"]')?.textContent||'').includes('write tests')")))
+
+# Phase 2: Grep -> query summary
+chk("Grep renders a query view", isTRUE(value("!!document.querySelector('[data-arg-view=\"query\"]')")))
+chk("Grep query has pattern field", isTRUE(value("(document.querySelector('[data-query-field=\"pattern\"]')?.textContent||'').includes('TODO')")))
+
+# Phase 2: WebFetch -> query with url link
+chk("WebFetch url renders as a link", isTRUE(value("(function(){var e=document.querySelector('[data-query-field=\"url\"] a');return !!e && (e.getAttribute('href')||'').includes('example.com') && e.getAttribute('target')==='_blank';})()")))
+
+# Phase 3: run_r text result -> console (monospace, plain text, not JSON)
+chk("run_r result renders as console text (not JSON)",
+    isTRUE(value("(function(){var els=document.querySelectorAll('[data-result-view=\"console\"]');for(var i=0;i<els.length;i++){var t=els[i].textContent||'';if(t.includes('[1] 2') && !t.includes('{'))return true;}return false;})()")))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)

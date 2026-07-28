@@ -69,6 +69,48 @@ describe("resolveToolView", () => {
     expect(v).toMatchObject({ kind: "code", lang: "markdown", code: "custom" });
   });
 
+  it("TodoWrite -> todos checklist", () => {
+    const args = { todos: [
+      { content: "write tests", status: "completed", activeForm: "writing tests" },
+      { content: "ship it", status: "pending", activeForm: "shipping" },
+    ] };
+    const v = resolveToolView("TodoWrite", args, at(args));
+    expect(v.kind).toBe("todos");
+    if (v.kind === "todos") {
+      expect(v.items).toHaveLength(2);
+      expect(v.items[0]).toMatchObject({ content: "write tests", status: "completed" });
+      expect(v.items[1].status).toBe("pending");
+    }
+  });
+
+  it("Grep -> query with pattern/path fields", () => {
+    const args = { pattern: "TODO", path: "src", output_mode: "content" };
+    const v = resolveToolView("Grep", args, at(args));
+    expect(v.kind).toBe("query");
+    if (v.kind === "query") {
+      const labels = v.fields.map((f) => f.label);
+      expect(labels).toContain("pattern");
+      expect(v.fields.find((f) => f.label === "pattern")?.value).toBe("TODO");
+    }
+  });
+
+  it("WebFetch -> query with url as href + prompt", () => {
+    const args = { url: "https://example.com/x", prompt: "summarize" };
+    const v = resolveToolView("WebFetch", args, at(args));
+    expect(v.kind).toBe("query");
+    if (v.kind === "query") {
+      const url = v.fields.find((f) => f.label === "url");
+      expect(url?.href).toBe("https://example.com/x");
+      expect(v.fields.some((f) => f.label === "prompt")).toBe(true);
+    }
+  });
+
+  it("WebSearch -> query with query field", () => {
+    const args = { query: "r shiny htmlwidget" };
+    const v = resolveToolView("WebSearch", args, at(args));
+    expect(v).toMatchObject({ kind: "query" });
+  });
+
   it("unknown tool -> json", () => {
     const args = { foo: 1, bar: [2, 3] };
     const v = resolveToolView("SomethingElse", args, at(args));

@@ -1,6 +1,6 @@
 // 纯函数:把 (toolName, args, argsText, annotations) 解析成一个 ToolView。
 // 无 React 依赖 → 可直接单测。渲染由 ToolArgsView 负责(dumb)。
-import type { ArgsViewHint, ToolView } from "./types";
+import type { ArgsViewHint, ToolView, TodoItem, QueryField } from "./types";
 import { getEditDiff, formatToolArgs } from "../helpers";
 
 // 文件扩展名 → 已在 syntax-highlighter 注册的 prism 语言;未知 → "markdown"(中性,
@@ -87,6 +87,57 @@ export function resolveToolView(
     if (code !== undefined) return { kind: "code", code, lang: "r" };
   }
 
-  // 4) 兜底:JSON(保留 raw/json 双态)。
+  // 4) 内建 checklist:TodoWrite。
+  if (toolName === "TodoWrite" && Array.isArray(a.todos)) {
+    const items: TodoItem[] = a.todos.map((t) => {
+      const o = (t ?? {}) as Record<string, unknown>;
+      return {
+        content: asString(o.content) ?? asString(o.activeForm) ?? "",
+        status: asString(o.status) ?? "pending",
+        activeForm: asString(o.activeForm),
+      };
+    });
+    if (items.length) return { kind: "todos", items };
+  }
+
+  // 5) 内建 query 摘要:Grep / Glob / WebSearch / WebFetch。
+  const q = queryFieldsFor(toolName, a);
+  if (q && q.length) return { kind: "query", fields: q };
+
+  // 6) 兜底:JSON(保留 raw/json 双态)。
   return jsonFallback(argsText);
+}
+
+function queryFieldsFor(
+  toolName: string | undefined,
+  a: Record<string, unknown>,
+): QueryField[] | null {
+  const fields: QueryField[] = [];
+  const push = (label: string, v: unknown, href?: string) => {
+    const s = asString(v);
+    if (s) fields.push(href ? { label, value: s, href } : { label, value: s });
+    else if (typeof v === "number" || typeof v === "boolean")
+      fields.push({ label, value: String(v) });
+  };
+  switch (toolName) {
+    case "Grep":
+    case "Glob":
+      push("pattern", a.pattern);
+      push("path", a.path);
+      push("glob", a.glob);
+      push("type", a.type);
+      push("output", a.output_mode);
+      return fields.length ? fields : null;
+    case "WebSearch":
+      push("query", a.query);
+      return fields.length ? fields : null;
+    case "WebFetch": {
+      const url = asString(a.url);
+      if (url) fields.push({ label: "url", value: url, href: url });
+      push("prompt", a.prompt);
+      return fields.length ? fields : null;
+    }
+    default:
+      return null;
+  }
 }

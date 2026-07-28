@@ -39,6 +39,77 @@ export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
     );
   }
 
+  if (view.kind === "todos") {
+    return (
+      <ul
+        data-arg-view="todos"
+        className="aui-tool-todos bg-muted/50 mt-1 flex flex-col gap-1 rounded-md p-2.5 text-xs"
+      >
+        {view.items.map((t, i) => {
+          const done = t.status === "completed";
+          const active = t.status === "in_progress";
+          return (
+            <li
+              key={i}
+              data-todo-status={t.status}
+              className="aui-tool-todo flex items-start gap-2"
+            >
+              <span
+                aria-hidden
+                className={
+                  done
+                    ? "text-green-600"
+                    : active
+                      ? "text-blue-600"
+                      : "text-muted-foreground"
+                }
+              >
+                {done ? "\u2713" : active ? "\u25D0" : "\u25CB"}
+              </span>
+              <span className={done ? "text-muted-foreground line-through" : ""}>
+                {(active && t.activeForm) || t.content}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+
+  if (view.kind === "query") {
+    return (
+      <div
+        data-arg-view="query"
+        className="aui-tool-query bg-muted/50 mt-1 flex flex-col gap-1 rounded-md p-2.5 text-xs"
+      >
+        {view.fields.map((f, i) => {
+          const link = !!f.href && /^https?:\/\//i.test(f.href);
+          return (
+            <div key={i} data-query-field={f.label} className="flex gap-2">
+              <span className="text-muted-foreground min-w-[4rem] shrink-0 font-medium">
+                {f.label}
+              </span>
+              {link ? (
+                <a
+                  href={f.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="break-all text-blue-700 underline dark:text-blue-300"
+                >
+                  {f.value}
+                </a>
+              ) : (
+                <span className="text-foreground/90 font-mono break-all">
+                  {f.value}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   // json 兜底:保留原 ShinyToolArgs 的 raw/json 双态。
   if (view.raw) {
     return (

@@ -12,7 +12,16 @@ handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ..
   emit("e1", "Edit", list(file_path = "a.R", old_string = "x <- 1", new_string = "x <- 2"))
   emit("b1", "Bash", list(command = "ls -la /tmp"))
   emit("w1", "Write", list(file_path = "f.py", content = "print(1)"))
-  emit("r1", "mcp__r_session__run_r", list(code = "y <- 2\nmean(y)"))
+  # run_r:给一段文本结果,验证结果区 console 化(纯文本、非 JSON)。
+  on_tool_call("r1", "mcp__r_session__run_r", list(code = "y <- 2\nmean(y)"),
+               annotations = list(defaultOpen = TRUE))
+  on_tool_result("r1", "[1] 2\n", is_error = FALSE)
+  emit("t1", "TodoWrite", list(todos = list(
+    list(content = "write tests", status = "completed", activeForm = "writing tests"),
+    list(content = "ship it", status = "in_progress", activeForm = "shipping it")
+  )))
+  emit("g1", "Grep", list(pattern = "TODO", path = "src", output_mode = "content"))
+  emit("wf1", "WebFetch", list(url = "https://example.com/guide", prompt = "summarize"))
   emit("u1", "Mystery", list(foo = 1, bar = list(2, 3)))
   on_done()
 }

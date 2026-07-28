@@ -94,7 +94,7 @@ export function ShinyToolResult({
   annotations?: Record<string, unknown>;
 }) {
   const display = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-  if (isError) return <pre className="text-destructive bg-destructive/5 rounded-md p-2 text-xs whitespace-pre-wrap">{display}</pre>;
+  if (isError) return <pre data-result-view="console" className="text-destructive bg-destructive/5 rounded-md p-2 font-mono text-xs whitespace-pre-wrap">{display}</pre>;
   switch (resultType) {
     case "markdown": return <SimpleMarkdown text={display} />;
     case "table": return <TableResult data={result} />;
@@ -112,6 +112,6 @@ export function ShinyToolResult({
       if (sandboxed) return <iframe className="aui-html-sandbox w-full rounded-md border bg-white" data-sandboxed="true" sandbox="" srcDoc={display} title="tool result" style={{ height }} />;
       return <div className="aui-html-trusted text-sm" dangerouslySetInnerHTML={{ __html: display }} />;
     }
-    default: return <pre className="bg-muted/50 rounded-md p-2 text-xs whitespace-pre-wrap">{display}</pre>;
+    default: return <pre data-result-view="console" className="bg-muted/50 rounded-md p-2 font-mono text-xs whitespace-pre-wrap">{display}</pre>;
   }
 }
