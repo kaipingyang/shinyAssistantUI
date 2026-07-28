@@ -288,7 +288,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
                 data-approval-deny-with-msg
                 onClick={() => setDenyOpen(true)}
               >
-                Deny &amp; tell Claude&#8230;
+                No, and tell Claude what to do differently
               </Button>
             </div>
           )}
