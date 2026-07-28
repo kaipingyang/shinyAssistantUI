@@ -1,7 +1,15 @@
-# shinyAssistantUI 0.2.0.9010 (development version)
+# shinyAssistantUI 0.2.0.9011 (development version)
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
+
+## Tool card display
+
+- **Edit / MultiEdit / Write** tool cards now **expand by default** so the diff / new content
+  is visible without a click.
+- The clickable **file-path** shown on file tools (`Read`/`Edit`/`Write`/…) is no longer
+  truncated — the **full path** is displayed (wraps if long), so a collapsed card still shows
+  where the change lands.
 
 ## "Strict" permission mode — ask before every tool
 

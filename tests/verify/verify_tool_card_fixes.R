@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9360L
+port <- 9362L
 unlink(c("/tmp/aui-tcf.out", "/tmp/aui-tcf.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -43,6 +43,15 @@ browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
 
 chk("diff view rendered", wait_for("!!document.querySelector('[data-arg-view=\"diff\"]')", 15))
+
+# C: Edit 未设 defaultOpen 也自动展开(diff 内容可见,无需点开)
+chk("Edit card is expanded by default (diff visible without click)",
+    isTRUE(value("(function(){var e=document.querySelector('[data-arg-view=\"diff\"]');if(!e)return false;var r=e.getBoundingClientRect();return r.height>0 && r.width>0;})()")))
+
+# D: 文件路径按钮显示完整路径(不截断)
+chk("file path button shows the FULL path (not truncated basename)",
+    isTRUE(value("(function(){var b=document.querySelector('[data-open-file]');if(!b)return false;var t=(b.textContent||'');return t.includes('/edit_target_demo.R') && t.includes(document.querySelector('[data-open-file]').getAttribute('data-open-file'));})()")),
+    value("(document.querySelector('[data-open-file]')?.textContent||'').slice(-60)"))
 
 # ③ 标题:显示文件名,不再 Edit(false)
 chk("title shows file basename (not Edit(false))",

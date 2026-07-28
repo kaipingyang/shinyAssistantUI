@@ -16,11 +16,11 @@ handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ..
   on_chunk("editing:\n")
   # ③ 复现:布尔字段 replace_all 放首位(旧逻辑会把标题显示成 Edit(false))。
   # ④ old_string 在第 4 行 → diff 应显示行号 4。
+  # 不设 defaultOpen → 依赖 Edit 自动展开(editLikeTool)。
   on_tool_call(
     "e1", "Edit",
     list(replace_all = FALSE, file_path = tmp,
-         old_string = "old_target <- 1", new_string = "old_target <- 2"),
-    annotations = list(defaultOpen = TRUE)
+         old_string = "old_target <- 1", new_string = "old_target <- 2")
   )
   on_tool_result("e1", "ok", is_error = FALSE)
   on_done()

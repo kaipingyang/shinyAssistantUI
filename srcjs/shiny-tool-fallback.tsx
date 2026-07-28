@@ -71,9 +71,11 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   const ann = artifact as Record<string, unknown> | undefined;
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
+  // Edit/MultiEdit/Write 默认展开(用户改动值得一眼看到 diff/内容,不必点开)。
+  const editLikeTool = toolName === "Edit" || toolName === "MultiEdit" || toolName === "Write";
   const defaultOpen = toolHistoryDefaultOpen(
     ann as { defaultOpen?: boolean } | undefined,
-    status?.type === "requires-action" || (pending && needsApproval),
+    status?.type === "requires-action" || (pending && needsApproval) || editLikeTool,
   );
   const resultType = (ann?.resultType as string | undefined) ?? "auto";
   const { onOpenFile } = useShinyConfig();
@@ -157,8 +159,8 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
               onClick={() => onOpenFile(filePath)}
               className="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex w-fit items-center gap-1 rounded px-1 py-0.5 text-[11px] transition-colors"
             >
-              <ExternalLinkIcon className="size-3" />
-              <span className="max-w-[16rem] truncate">{filePath}</span>
+              <ExternalLinkIcon className="size-3 shrink-0" />
+              <span className="aui-tool-file-path break-all text-start">{filePath}</span>
             </button>
           )}
         </div>
