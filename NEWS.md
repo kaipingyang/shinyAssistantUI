@@ -1,4 +1,4 @@
-# shinyAssistantUI 0.3.0
+# shinyAssistantUI 0.2.1
 
 RStudio Claude Code addin enhancements (additive; requires `ClaudeAgentSDK >= 0.2.2`
 for the agentic R tool).
