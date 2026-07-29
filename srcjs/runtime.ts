@@ -380,7 +380,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
 
   // ── ClaudeAgentSDK 能力对齐状态 ────────────────────────────────────────────
-  type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number };
   type TaskInfo = { taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string };
   const [usageMap, setUsageMap] = useState<Record<string, UsageInfo>>({});          // #1 每线程最新用量
   const [agentStateMap, setAgentStateMap] = useState<Record<string, unknown>>({});   // Plan 36 每线程 agent 状态
@@ -595,6 +595,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const tid = d.threadId ?? currentThreadIdRef.current;
       setUsageMap((prev) => ({ ...prev, [tid]: {
         costUsd: d.costUsd, tokens: d.tokens, turns: d.turns, durationMs: d.durationMs, model: d.model,
+        contextWindow: d.contextWindow,
       } }));
     });
     // ── Plan 36 Agent 共享状态(per-thread 快照)───────────────────────────────

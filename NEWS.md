@@ -1,4 +1,16 @@
-# shinyAssistantUI 0.2.2.9004 (dev branch)
+# shinyAssistantUI 0.2.2.9005 (dev branch)
+
+## Fix: accurate context-usage ring (dev)
+
+- The composer context-usage ring was wrong: it used a hard-coded 200k window and summed
+  input+output+cache tokens (double-counting). Now:
+  - **Window is per-model**: the CLI reports the model (e.g. `claude-sonnet-4.6[1m]`); a `[1m]`
+    tag → 1,000,000, else 200,000. Sent via on_usage(context_window=) and used by the ring
+    (falls back to the static config only until the first usage arrives).
+  - **Count = input + cache_read + cache_creation** (the disjoint input-side total = current
+    context), **excluding output**. Now matches Claude Code's `/context` (e.g. 59.2k / 1.0M = 6%).
+- (Also fixed another coro `x <- if(...)` that had silently broken on_usage.)
+
 
 ## Fix: Deny now stops the agent (dev)
 

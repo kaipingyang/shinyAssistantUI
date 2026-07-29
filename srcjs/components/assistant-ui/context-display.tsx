@@ -422,7 +422,9 @@ export const ShinyContextDisplay: FC = () => {
   const tokenUsage =
     typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
   const props = {
-    modelContextWindow: contextWindow,
+    // 优先用后端按模型下发的真实窗口(如 sonnet-4.6[1m] → 1,000,000);
+    // 未到达时回落到静态配置 contextWindow。
+    modelContextWindow: usage?.contextWindow ?? contextWindow,
     usage: tokenUsage,
     side: "top" as const,
   };

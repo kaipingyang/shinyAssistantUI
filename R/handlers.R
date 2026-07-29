@@ -1365,12 +1365,23 @@ make_claude_handler <- function(options       = NULL,
           # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
           if (!is.null(on_usage)) {
             u <- msg$usage
+            # 上下文占用 = 输入侧三项之和(互不重叠):新增未缓存 input + 读缓存 + 建缓存。
+            # 【不含 output】——输出是回复,不属于当前上下文占用(此前误加导致翻倍)。
             tokens <- tryCatch(
-              (u[["input_tokens"]] %||% 0) + (u[["output_tokens"]] %||% 0) +
+              (u[["input_tokens"]] %||% 0) +
                 (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
               error = function(e) NULL)
+            # 模型名(msg$model 常为命名 list,名字即模型串,如 "claude-sonnet-4.6[1m]")。
+            model_name <- tryCatch({
+              if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
+            }, error = function(e) NULL)
+            # 上下文窗口:模型串带 [1m] 标记 → 1,000,000;否则默认 200,000。
+            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,用普通语句赋值。
+            cw <- 200000L
+            if (!is.null(model_name) && grepl("\\[1m\\]", model_name, ignore.case = TRUE)) cw <- 1000000L
             on_usage(cost_usd = msg$total_cost_usd, tokens = tokens,
-                     turns = msg$num_turns, duration_ms = msg$duration_ms)
+                     turns = msg$num_turns, duration_ms = msg$duration_ms,
+                     model = model_name, context_window = cw)
           }
           done <- TRUE; break
 

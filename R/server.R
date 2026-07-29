@@ -469,10 +469,11 @@ assistantUIServer <- function(id, handler,
       # ── ClaudeAgentSDK 能力对齐 ────────────────────────────────────────────
       # #1 成本/用量:ResultMessage 的 total_cost_usd / tokens / turns / duration。
       on_usage = function(cost_usd = NULL, tokens = NULL, turns = NULL,
-                          duration_ms = NULL, model = NULL) {
+                          duration_ms = NULL, model = NULL, context_window = NULL) {
         session$sendCustomMessage(paste0(input_id, ":usage"),
                                   list(costUsd = cost_usd, tokens = tokens, turns = turns,
                                        durationMs = duration_ms, model = model,
+                                       contextWindow = context_window,
                                        threadId = thread_id))
       },
       # #2 子agent/Task 进度:kind = "started" | "progress" | "notification"。

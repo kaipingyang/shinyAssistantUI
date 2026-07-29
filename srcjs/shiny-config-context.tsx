@@ -60,7 +60,7 @@ export interface ShinyConfigCtx {
   loadingOlder?: boolean;
   loadOlderHistory?: () => void;
   // ── ClaudeAgentSDK 能力对齐 ──
-  usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number };
   /** Plan 36: per-thread agent state pushed from R via on_state(). */
   agentState?: unknown;
   /** Plan 34: enable KaTeX math rendering (opt-in). */
