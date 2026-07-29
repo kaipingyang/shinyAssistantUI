@@ -1,4 +1,12 @@
-# shinyAssistantUI 0.2.2.9007 (dev branch)
+# shinyAssistantUI 0.2.2.9008 (dev branch)
+
+## Sync-0.15 P2 (start): tool-group -> 0.15.0
+
+- Synced `tool-group.tsx` to its 0.15.0 template (clean overwrite; no local customization).
+  Fixes drift where our copy used the old `data-[state=open/closed]` Tailwind selectors while
+  0.15.0 primitives emit `data-open`/`data-closed` (collapsible rotate/animate would silently
+  not match). P2 continues per-component (reasoning, tool-fallback, thread-list, thread, ...).
+
 
 ## Sync-0.15 P1: trim unused vendored components (dev)
 
