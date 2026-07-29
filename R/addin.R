@@ -187,6 +187,7 @@
       "chat", handler = handler,
       show_thread_list = TRUE,
       persistence      = "server",
+      latex            = TRUE,   # Claude Code 常输出数学公式 → 默认启用 KaTeX 渲染
       working_dir      = cur_dir(),
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,

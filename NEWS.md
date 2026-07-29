@@ -1,4 +1,14 @@
-# shinyAssistantUI 0.2.1.9005 (development version)
+# shinyAssistantUI 0.2.1.9006 (development version)
+
+## Addin: LaTeX on by default + edit-flow verification
+
+- The RStudio Claude Code addin now enables `latex = TRUE` (Claude output is often math-heavy),
+  so `$...$` / `$$...$$` render via KaTeX out of the box.
+- Added headless regression tests for the edit-a-user-message -> Update flow (generic handler
+  `verify_edit.R` and real-Claude `verify_claude_edit.R`), confirming the edited message
+  re-triggers the backend. Note: in v0.15 the user action bar auto-hides the edit pencil
+  until you hover the bubble.
+
 
 ## LaTeX math (Plan 34, opt-in)
 
