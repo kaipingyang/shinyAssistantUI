@@ -1,4 +1,16 @@
-# shinyAssistantUI 0.2.2.9000 (dev branch)
+# shinyAssistantUI 0.2.2.9001 (dev branch)
+
+## Component form: htmlwidget -> Shiny output binding (P1, dev)
+
+- Migrated the mount from an htmlwidget to a native Shiny `OutputBinding` + `htmlDependency`
+  (shinychat-style). `assistantUIOutput()` is now a plain `<div class="assistantUI
+  assistantUI-output">` with the bundled JS/CSS attached as a dependency; `renderAssistantUI()`
+  uses `shiny::createRenderFunction` to send `{inputId, config}` to the binding, which mounts
+  React. All streaming/interaction still flows over sendCustomMessage / setInputValue (unchanged).
+- Dropped the `htmlwidgets` dependency. KaTeX is now a local htmlDependency attached in
+  `assistantUIOutput` (inert when no math renders). Verified: 242 vitest + headless
+  verify_markdown/token_usage/latex/agent_state/askquestion/edit (0 console errors each).
+
 
 ## Official per-tool render registry (P2, dev)
 

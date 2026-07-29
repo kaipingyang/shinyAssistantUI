@@ -1,6 +1,6 @@
 Package: shinyAssistantUI
 Title: AI Assistant Chat UI for Shiny
-Version: 0.2.2.9000
+Version: 0.2.2.9001
 Authors@R: person("Kaiping", "Yang", role = c("aut", "cre"),
                   email = "1260146556@qq.com")
 Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
@@ -14,7 +14,6 @@ Roxygen: list(markdown = TRUE)
 Imports:
     grDevices,
     htmltools,
-    htmlwidgets,
     shiny
 Suggests:
     bslib,
