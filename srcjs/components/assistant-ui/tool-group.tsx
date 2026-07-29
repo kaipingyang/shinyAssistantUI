@@ -146,9 +146,8 @@ function ToolGroupTrigger({
         className={cn(
           "aui-tool-group-trigger-chevron size-3 shrink-0",
           "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-          "-rotate-90",
-          "group-data-open/trigger:rotate-0",
-          "group-data-panel-open/trigger:rotate-0",
+          "group-data-[state=closed]/trigger:-rotate-90",
+          "group-data-[state=open]/trigger:rotate-0",
         )}
       />
     </CollapsibleTrigger>
@@ -166,12 +165,12 @@ function ToolGroupContent({
       className={cn(
         "aui-tool-group-content relative overflow-hidden text-sm outline-none",
         "group/collapsible-content ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:animate-none",
-        "data-closed:animate-collapsible-up",
-        "data-open:animate-collapsible-down",
-        "data-closed:fill-mode-forwards",
-        "data-closed:pointer-events-none",
-        "data-open:duration-(--animation-duration)",
-        "data-closed:duration-(--animation-duration)",
+        "data-[state=closed]:animate-collapsible-up",
+        "data-[state=open]:animate-collapsible-down",
+        "data-[state=closed]:fill-mode-forwards",
+        "data-[state=closed]:pointer-events-none",
+        "data-[state=open]:duration-(--animation-duration)",
+        "data-[state=closed]:duration-(--animation-duration)",
         className,
       )}
       {...props}
