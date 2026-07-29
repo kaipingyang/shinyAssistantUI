@@ -117,7 +117,17 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
   ) : (
     <div className="flex flex-wrap items-center gap-2">
       <Button size="sm" onClick={() => decide(true)}>Approve</Button>
-      {suggestions.length > 0 && (
+      {suggestions.length === 1 ? (
+        // 只有一个规则:直接一个按钮,不用下拉+勾选(简化操作)。
+        <Button
+          size="sm"
+          variant="secondary"
+          data-approval-always-single
+          onClick={() => decide(true, { suggestionIdxs: [0] })}
+        >
+          {suggestionLabel(suggestions[0]!)}
+        </Button>
+      ) : suggestions.length > 1 ? (
         <Button
           size="sm"
           variant="secondary"
@@ -126,7 +136,7 @@ export const ShinyToolFallback: ToolCallMessagePartComponent = (props) => {
         >
           Always allow&#8230; &#9662;
         </Button>
-      )}
+      ) : null}
       <Button size="sm" variant="outline" onClick={() => decide(false)}>Deny</Button>
       <Button
         size="sm"

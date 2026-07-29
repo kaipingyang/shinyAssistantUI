@@ -1,4 +1,11 @@
-# shinyAssistantUI 0.2.2.9001 (dev branch)
+# shinyAssistantUI 0.2.2.9002 (dev branch)
+
+## Fix: single-suggestion always-allow (dev)
+
+- When a tool approval offers only ONE "always allow" suggestion, show it as a direct button
+  (`data-approval-always-single`) instead of the dropdown + checkbox + apply flow (which is
+  needless friction for a single option). Multi-suggestion still uses the dropdown.
+
 
 ## Component form: htmlwidget -> Shiny output binding (P1, dev)
 
