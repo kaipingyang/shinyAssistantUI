@@ -1,3 +1,16 @@
+# shinyAssistantUI 0.2.2.9000 (dev branch)
+
+## Official per-tool render registry (P2, dev)
+
+- Introduced an official per-tool UI dispatch: `tool-ui/registry.tsx` maps tool names to
+  `ToolCallMessagePartComponent`s at the message render site (the non-deprecated "inline tool
+  render override" pattern; replaces the deprecated makeAssistantToolUI/useAssistantToolUI).
+- Extracted a shared `ToolCardFrame` + `useToolCard` (chrome/args/result/approval-gating/depth/
+  decision) so `ShinyToolFallback` and per-tool UIs compose it instead of one monolith.
+- Migrated **AskUserQuestion** to its own registry entry (`AskUserQuestionToolUI`) as the first
+  generative-ui pilot; transport unchanged (approve_tool(updated_input=answers)). Verified:
+  240 vitest + headless verify_askquestion + verify_tool_approval (0 console errors).
+
 # shinyAssistantUI 0.2.2
 
 Stable release consolidating the 0.2.1.900x development line: upgrade to `@assistant-ui/react`

@@ -19,6 +19,7 @@ import {
 import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { renderToolPart } from "@/tool-ui/registry";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import { ShinyAgentProgress } from "@/hooks/use-agent-state";
@@ -707,7 +708,7 @@ const AssistantMessage: FC = () => {
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
               case "data":
                 return part.dataRendererUI;
               case "indicator":
