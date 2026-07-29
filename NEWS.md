@@ -1,4 +1,13 @@
-# shinyAssistantUI 0.2.2.9008 (dev branch)
+# shinyAssistantUI 0.2.2.9009 (dev branch)
+
+## Sync-0.15 P2: bump @assistant-ui/react 0.15.0 -> 0.15.1 (latest)
+
+- Bumped to `@assistant-ui/react@0.15.1` (GitHub main) — a safe patch: only mermaid/shiki
+  templates + useToolCallElapsed internals changed (none of our used components differ between
+  0.15.0 and 0.15.1). react-lexical 0.2.7 / react-markdown 0.14.8 dedupe cleanly (no peer
+  conflict). Reference source assistant-ui-src also on 0.15.1. build + tsc 0 + 242 vitest +
+  verify_markdown/tool_approval green.
+
 
 ## Sync-0.15 P2 (start): tool-group -> 0.15.0
 
