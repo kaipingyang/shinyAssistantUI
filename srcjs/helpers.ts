@@ -294,7 +294,12 @@ export function applyEdit(
     cutIdx = 0;
   } else {
     const idx = threadMsgs.findIndex((m) => m.id === parentId);
-    if (idx < 0) return { updated: threadMsgs, aborted: true };
+    if (idx < 0) {
+      // parentId 找不到(如历史加载 / 工具轮次后消息 id 方案不一致):不再静默丢弃整个
+      // 编辑(那会导致"编辑后 Update 无反应")。改为把编辑后的消息追加到末尾并照常重发,
+      // 保证既有用户气泡、又触发后端。
+      return { updated: [...threadMsgs, newUserMessage], aborted: false };
+    }
     cutIdx = idx + 1;
   }
   return { updated: [...threadMsgs.slice(0, cutIdx), newUserMessage], aborted: false };

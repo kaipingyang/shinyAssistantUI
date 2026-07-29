@@ -1,4 +1,16 @@
-# shinyAssistantUI 0.2.2.9002 (dev branch)
+# shinyAssistantUI 0.2.2.9003 (dev branch)
+
+## Fixes (dev)
+
+- **Edit -> Update no-op**: `applyEdit` used to silently drop the whole edit when the edited
+  message's `parentId` was not found in the current message list (can happen in the addin after
+  history load / tool-call turns due to id-scheme differences), so nothing was sent to the
+  backend. It now appends the edited message and resends instead of aborting — edit always
+  triggers a re-run.
+- **Addin usage ring**: the RStudio addin now enables `show_usage = TRUE`, `context_window =
+  200000`, `usage_style = "ring"`, so the context-usage ring shows below the composer
+  (fed by make_claude_handler's on_usage). Verified end-to-end with real Claude.
+
 
 ## Fix: single-suggestion always-allow (dev)
 

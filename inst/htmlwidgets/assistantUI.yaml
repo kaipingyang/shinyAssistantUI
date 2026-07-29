@@ -1,6 +1,6 @@
 dependencies:
   - name: shinyAssistantUI
-    version: 0.0.29755166
+    version: 0.0.29755234
     src: www
     script: shinyAssistantUI.js
     stylesheet: style.css

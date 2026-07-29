@@ -256,11 +256,11 @@ describe("applyEdit", () => {
     expect(updated.map((m: any) => m.id)).toEqual(["u1", "a1", "new-user"]);
   });
 
-  it("parentId 找不到：aborted=true，不动原数组", () => {
+  it("parentId 找不到:追加到末尾并重发(不丢弃)", () => {
     const msgs = [mk("u1"), mk("a1", "assistant")];
     const { updated, aborted } = applyEdit(msgs, "ghost", newMsg);
-    expect(aborted).toBe(true);
-    expect(updated).toBe(msgs); // 同引用，未截断未插入
+    expect(aborted).toBe(false); // 不再丢弃:追加到末尾并重发(修复"编辑后 Update 无反应")
+    expect(updated).toEqual([...msgs, newMsg]);
   });
 
   it("空 thread + parentId=null：仅追加新消息", () => {

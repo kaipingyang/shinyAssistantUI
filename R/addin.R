@@ -188,6 +188,9 @@
       show_thread_list = TRUE,
       persistence      = "server",
       latex            = TRUE,   # Claude Code 常输出数学公式 → 默认启用 KaTeX 渲染
+      show_usage       = TRUE,   # 组合框下方环形显示上下文用量
+      context_window   = 200000L, # Claude 默认上下文窗口
+      usage_style      = "ring",
       working_dir      = cur_dir(),
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
