@@ -1,4 +1,23 @@
-# shinyAssistantUI 0.2.2.9005 (dev branch)
+# shinyAssistantUI 0.2.2.9007 (dev branch)
+
+## Sync-0.15 P1: trim unused vendored components (dev)
+
+- Refreshed the reference source `assistant-ui-src` from 0.14.26 to `@assistant-ui/react@0.15.0`.
+- Deleted 18 unused vendored official components (accordion, tabs, select, image, quote, sources,
+  voice, assistant-modal/sidebar, threadlist-sidebar, directive-text, dot-matrix, flow,
+  heat-graph, mermaid-diagram, message-timing, number-roll, follow-up-suggestions). They were
+  imported by nothing (0 refs) and remain in the official 0.15.0 registry — re-vendor fresh when
+  a feature needs them. (model-selector kept pending a keep-vs-official decision.)
+  tsc 0 errors + 242 vitest + verify_markdown/askquestion green.
+
+
+## Cleanup (dev)
+
+- Deleted `AssistantUI.legacy.tsx` (2311 lines) — the pre-registry-migration UI backup, not
+  imported by the build entry or any test (dead since the "vendored official Thread" migration).
+- Simplified `applyEdit`/`onEdit`: dropped the vestigial `aborted` path (since applyEdit now
+  always appends on a not-found parentId, it never aborted) — returns the updated array directly.
+
 
 ## Fix: accurate context-usage ring (dev)
 
