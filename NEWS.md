@@ -1,4 +1,11 @@
-# shinyAssistantUI 0.2.2.9009 (dev branch)
+# shinyAssistantUI 0.2.2.9010 (dev branch)
+
+## Sync-0.15 P2: react-devtools (dev-only, opt-in)
+
+- Wired official `@assistant-ui/react-devtools@1.2.11` as a dev aid, opt-in via `?aui-devtools=1`
+  URL param (or config.devtools). Off by default. NOTE: adds ~200KB to the IIFE bundle even when
+  off (single-bundle can't tree-shake it) — exclude via a build define before the 0.3.0 merge.
+
 
 ## Sync-0.15 P2: bump @assistant-ui/react 0.15.0 -> 0.15.1 (latest)
 

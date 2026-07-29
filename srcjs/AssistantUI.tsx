@@ -1,5 +1,6 @@
 import { useEffect, forwardRef, type ReactNode } from "react";
 import { AssistantRuntimeProvider, AssistantModalPrimitive } from "@assistant-ui/react";
+import { DevToolsModal } from "@assistant-ui/react-devtools";
 import { BotIcon } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
@@ -12,6 +13,18 @@ import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { ArtifactPanel } from "./artifact-panel";
 import { registerApprovalHandler, unregisterApprovalHandler } from "./approval-registry";
 import { ShinyConfigContext } from "./shiny-config-context";
+
+// Dev-only(默认关):在浏览器加 `?aui-devtools=1`(或 config.devtools=TRUE)时,挂载官方
+// @assistant-ui/react-devtools 的浮层 modal,便于迁移期检查 ExternalStore 运行时/消息 parts。
+// 必须在 AssistantRuntimeProvider 内渲染。默认不启用,不影响正常使用。
+function ShinyDevTools({ config }: { config: Record<string, unknown> }) {
+  const enabled =
+    config?.devtools === true ||
+    (typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).has("aui-devtools"));
+  if (!enabled) return null;
+  return <DevToolsModal />;
+}
 
 interface AssistantUIProps {
   inputId: string;
@@ -156,6 +169,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               <div className="flex h-full flex-col">{threadEl}</div>
             </AssistantModalPrimitive.Content>
           </AssistantModalPrimitive.Root>
+          <ShinyDevTools config={config ?? {}} />
         </ShinyConfigContext.Provider>
       </AssistantRuntimeProvider>
     );
@@ -190,6 +204,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             </div>
           )}
         </div>
+        <ShinyDevTools config={config ?? {}} />
       </ShinyConfigContext.Provider>
     </AssistantRuntimeProvider>
   );
