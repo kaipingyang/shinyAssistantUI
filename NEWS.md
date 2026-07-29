@@ -1,22 +1,24 @@
-# shinyAssistantUI 0.2.1.9006 (development version)
+# shinyAssistantUI 0.2.2
 
-## Addin: LaTeX on by default + edit-flow verification
+Stable release consolidating the 0.2.1.900x development line: upgrade to `@assistant-ui/react`
+0.15.0, opt-in token-usage indicator, agent shared state (`on_state()`), LaTeX math, and the
+RStudio addin enabling LaTeX by default. Highlights below.
 
-- The RStudio Claude Code addin now enables `latex = TRUE` (Claude output is often math-heavy),
-  so `$...$` / `$$...$$` render via KaTeX out of the box.
-- Added headless regression tests for the edit-a-user-message -> Update flow (generic handler
-  `verify_edit.R` and real-Claude `verify_claude_edit.R`), confirming the edited message
-  re-triggers the backend. Note: in v0.15 the user action bar auto-hides the edit pencil
-  until you hover the bubble.
+## LaTeX math (Plan 34) — now bundled locally, no flicker
 
+- New `assistantUIServer(latex = TRUE)` renders `$...$` (inline) and `$$...$$` (display) math
+  via remark-math + rehype-katex. The RStudio Claude Code addin enables it by default (Claude
+  output is often math-heavy).
+- **KaTeX CSS + woff2 fonts are bundled in the package** (`inst/www/katex/`, attached via a
+  local `htmlDependency` only when `latex = TRUE`) instead of a CDN — works offline and, together
+  with proactive font preloading at mount, fixes the "formula resizes for a few seconds"
+  (font-swap reflow) seen when opening history with many formulas.
 
-## LaTeX math (Plan 34, opt-in)
+## Edit-flow verification
 
-- New `assistantUIServer(latex = TRUE)` enables KaTeX rendering of `$...$` (inline) and
-  `$$...$$` (display) math via remark-math + rehype-katex — useful for statistical/DS output.
-  The KaTeX stylesheet is loaded from CDN only when enabled (fonts served by CDN; avoids
-  bundling ~150KB into the widget). Default off.
-
+- Added headless regression tests for edit-a-user-message -> Update (generic `verify_edit.R`
+  and real-Claude `verify_claude_edit.R`), confirming the edited message re-triggers the backend.
+  Note: in v0.15 the user action bar auto-hides the edit pencil until you hover the bubble.
 
 ## Agent shared state (Plan 36)
 

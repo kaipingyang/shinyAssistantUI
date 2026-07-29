@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { visualizer } from "rollup-plugin-visualizer";
 import { resolve } from "path";
-import { writeFileSync } from "fs";
+import { writeFileSync, mkdirSync, copyFileSync, readdirSync } from "fs";
 
 export default defineConfig({
   resolve: {
@@ -22,6 +22,19 @@ export default defineConfig({
         const version = `0.0.${Math.floor(Date.now() / 60000)}`;
         const yaml = `dependencies:\n  - name: shinyAssistantUI\n    version: ${version}\n    src: www\n    script: shinyAssistantUI.js\n    stylesheet: style.css\n`;
         writeFileSync("inst/htmlwidgets/assistantUI.yaml", yaml);
+
+        // Plan 34 (fix): bundle KaTeX CSS + woff2 fonts LOCALLY into inst/www/katex/ so LaTeX
+        // renders from same-origin assets (no CDN → no font-load reflow / "忽大忽小", offline-ok).
+        // Only woff2 is copied: KaTeX @font-face lists woff2 first, so browsers never request
+        // the woff/ttf fallbacks. Served on demand via an htmlDependency attached when latex=TRUE.
+        const katexSrc = "node_modules/katex/dist";
+        mkdirSync("inst/www/katex/fonts", { recursive: true });
+        copyFileSync(`${katexSrc}/katex.min.css`, "inst/www/katex/katex.min.css");
+        for (const f of readdirSync(`${katexSrc}/fonts`)) {
+          if (f.endsWith(".woff2")) {
+            copyFileSync(`${katexSrc}/fonts/${f}`, `inst/www/katex/fonts/${f}`);
+          }
+        }
       },
     },
     {

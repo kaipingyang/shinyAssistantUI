@@ -39,6 +39,16 @@ assistantUIOutput <- function(outputId, width = "100%", height = "600px",
 renderAssistantUI <- function(config = list(), outputId = NULL) {
   force(outputId)
   force(config)
+  # Plan 34 (fix): 当 latex 开启时,附加本地 KaTeX 依赖(css + woff2 字体从包内 www/katex 提供,
+  # 非 CDN)——消除字体异步加载导致的公式"忽大忽小"重排,且离线可用。
+  katex_dep <- if (isTRUE(config$latex)) {
+    list(htmltools::htmlDependency(
+      name       = "katex",
+      version    = "0.16.47",
+      src        = c(file = system.file("www/katex", package = "shinyAssistantUI")),
+      stylesheet = "katex.min.css"
+    ))
+  } else NULL
   # bquote 将 outputId / config 的值直接内联进表达式，
   # 避免通过 env 传递自由变量（shinyRenderWidget 内部 cacheHint="auto"
   # 会检索 env 里的 id，导致 "object 'id' not found" 错误）。
@@ -49,7 +59,8 @@ renderAssistantUI <- function(config = list(), outputId = NULL) {
         inputId = paste0(.(outputId), "_input"),
         config  = .(config)
       ),
-      package = "shinyAssistantUI"
+      package = "shinyAssistantUI",
+      dependencies = .(katex_dep)
     )
   )
   htmlwidgets::shinyRenderWidget(expr, assistantUIOutput, baseenv(), quoted = TRUE)

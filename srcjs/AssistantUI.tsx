@@ -40,18 +40,23 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     return () => unregisterApprovalHandler(inputId);
   }, [inputId, rt.sendToolApproval]);
 
-  // Plan 34: when LaTeX is enabled, load KaTeX stylesheet from CDN once (fonts served by CDN;
-  // avoids bundling ~150KB of fonts into the IIFE build). Opt-in, so no CDN dep unless used.
+  // Plan 34 (fix): 当 LaTeX 开启,mount 时主动预载 KaTeX 字体(本地 woff2,~170KB),
+  // 使字体在公式绘制前就绪 → 消除"忽大忽小"重排(尤其打开历史一次渲染多条公式时)。
+  // fire-and-forget:document.fonts.load 触发浏览器立即取字体,不阻塞渲染。
   useEffect(() => {
     if (config?.latex !== true) return;
-    const id = "aui-katex-css";
-    if (document.getElementById(id)) return;
-    const link = document.createElement("link");
-    link.id = id;
-    link.rel = "stylesheet";
-    link.href = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css";
-    link.crossOrigin = "anonymous";
-    document.head.appendChild(link);
+    const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+    if (!fonts?.load) return;
+    const families = [
+      "KaTeX_Main", "KaTeX_Math", "KaTeX_Size1", "KaTeX_Size2", "KaTeX_Size3",
+      "KaTeX_Size4", "KaTeX_AMS", "KaTeX_Caligraphic", "KaTeX_Fraktur",
+      "KaTeX_SansSerif", "KaTeX_Script", "KaTeX_Typewriter",
+    ];
+    for (const f of families) {
+      for (const style of ["", "italic ", "bold "]) {
+        try { void fonts.load(`${style}16px "${f}"`); } catch { /* ignore */ }
+      }
+    }
   }, [config?.latex]);
 
   const activeArtifact = rt.artifacts.find((a) => a.id === rt.activeArtifactId) ?? null;

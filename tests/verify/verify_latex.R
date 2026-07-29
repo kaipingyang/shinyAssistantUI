@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9399L
+port <- 9413L
 unlink(c("/tmp/aui-latex.out", "/tmp/aui-latex.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -38,7 +38,8 @@ press_key <- function(key, code, vk) {
 
 browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port)); browser$Page$loadEventFired()
 chk("widget mounted", wait_for("!!document.querySelector('.aui-root')", 15))
-chk("KaTeX CSS link injected (latex=TRUE)", wait_for("!!document.getElementById('aui-katex-css')", 8))
+chk("KaTeX local stylesheet present (latex=TRUE)", wait_for("!!Array.from(document.querySelectorAll('link[rel=stylesheet]')).find(l=>/katex\\.min\\.css/.test(l.href))", 8),
+    value("(Array.from(document.querySelectorAll('link[rel=stylesheet]')).map(l=>l.href).find(h=>/katex/.test(h))||'none')"))
 click_sel(".aui-lexical-input[contenteditable='true']"); Sys.sleep(0.35)
 browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
