@@ -1346,8 +1346,14 @@ make_claude_handler <- function(options       = NULL,
             pending_tool_ids <- c(pending_tool_ids, tuid)
             }
           } else {
-            deny_msg <- decision$customMessage %||% "Denied by user"
-            client$deny_tool(msg$request_id, deny_msg)
+            # 纯 Deny(无留言)= 拒绝并【中断】agent —— 用户说"不",就停下,避免 Claude
+            # 自行继续 / 反复用别的工具重问审批(interrupt=TRUE)。
+            # "Deny & tell Claude…"(有留言)= 带指引的拒绝,让 Claude 据此调整,不中断。
+            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,故用普通语句赋值。
+            has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
+            deny_msg <- "Denied by user"
+            if (has_msg) deny_msg <- decision$customMessage
+            client$deny_tool(msg$request_id, deny_msg, interrupt = !has_msg)
             on_tool_result(tuid, deny_msg, is_error = TRUE)
           }
 

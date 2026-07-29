@@ -1,4 +1,14 @@
-# shinyAssistantUI 0.2.2.9003 (dev branch)
+# shinyAssistantUI 0.2.2.9004 (dev branch)
+
+## Fix: Deny now stops the agent (dev)
+
+- Plain **Deny** on a tool approval now interrupts the agent (`deny_tool(interrupt = TRUE)`),
+  so Claude actually stops instead of continuing / repeatedly re-requesting approval via other
+  tools. **Deny & tell Claude2026** (with a message) keeps `interrupt = FALSE` so Claude adjusts
+  per your guidance (its purpose). Use plain Deny or Stop to halt.
+- Verified end-to-end (real Claude, forced approvals): plain Deny -> 2717 Denied + no new approval
+  card / no re-ask loop, file not written.
+
 
 ## Fixes (dev)
 
