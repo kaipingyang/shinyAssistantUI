@@ -403,19 +403,37 @@ const IdeContextIndicator: FC = () => {
 };
 
 const Composer: FC = () => {
-  const { refreshIdeContext } = useShinyConfig();
+  const { refreshIdeContext, composerDensity } = useShinyConfig();
+  const compact = composerDensity === "compact";
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ShinyAgentProgress />
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"
+          data-density={composerDensity ?? "comfortable"}
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerAttachments />
           <IdeContextIndicator />
-          <ShinyComposerInput onFocus={refreshIdeContext} />
-          <ComposerAction />
+          {compact ? (
+            // 扁平单行(≈shinychat):附件按钮 + 输入(flex-1)+ 权限选择 + 发送/停止内联同一行。
+            // 附件预览 / IDE 上下文条在上方按需出现;model/context/dictate 在 compact 下省略
+            // (仍可经 /model 等命令);comfortable 保留完整两行布局。
+            <div className="aui-composer-compact-row flex items-end gap-1.5">
+              <ComposerAddAttachment />
+              <div className="min-w-0 flex-1">
+                <ShinyComposerInput onFocus={refreshIdeContext} />
+              </div>
+              <PermissionModeControl compact />
+              <ComposerSendGroup />
+            </div>
+          ) : (
+            <>
+              <ShinyComposerInput onFocus={refreshIdeContext} />
+              <ComposerAction />
+            </>
+          )}
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
@@ -556,6 +574,74 @@ const ShinyTimestamp: FC = () => {
   );
 };
 
+const ComposerSendGroup: FC = () => {
+  return (
+    <div className="flex items-center gap-1.5">
+      <AuiIf condition={(s) => s.thread.capabilities.dictation}>
+        <AuiIf condition={(s) => s.composer.dictation == null}>
+          <ComposerPrimitive.Dictate asChild>
+            <TooltipIconButton
+              tooltip="Voice input"
+              side="bottom"
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="aui-composer-dictate size-7 rounded-full"
+              aria-label="Start voice input"
+            >
+              <MicIcon className="aui-composer-dictate-icon size-4" />
+            </TooltipIconButton>
+          </ComposerPrimitive.Dictate>
+        </AuiIf>
+        <AuiIf condition={(s) => s.composer.dictation != null}>
+          <ComposerPrimitive.StopDictation asChild>
+            <TooltipIconButton
+              tooltip="Stop dictation"
+              side="bottom"
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
+              aria-label="Stop voice input"
+            >
+              <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
+            </TooltipIconButton>
+          </ComposerPrimitive.StopDictation>
+        </AuiIf>
+      </AuiIf>
+      <AuiIf condition={(s) => !s.thread.isRunning}>
+        <ComposerPrimitive.Send asChild>
+          <TooltipIconButton
+            tooltip="Send message"
+            side="bottom"
+            type="button"
+            variant="default"
+            size="icon"
+            className="aui-composer-send size-7 rounded-full"
+            aria-label="Send message"
+          >
+            <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Send>
+      </AuiIf>
+      <AuiIf condition={(s) => s.thread.isRunning}>
+        <ComposerQueue />
+        <ComposerPrimitive.Cancel asChild>
+          <Button
+            type="button"
+            variant="default"
+            size="icon"
+            className="aui-composer-cancel size-7 rounded-full"
+            aria-label="Stop generating"
+          >
+            <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
+          </Button>
+        </ComposerPrimitive.Cancel>
+      </AuiIf>
+    </div>
+  );
+};
+
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
@@ -565,69 +651,7 @@ const ComposerAction: FC = () => {
         <ModelPickerDialog />
         <ShinyContextDisplay />
       </div>
-      <div className="flex items-center gap-1.5">
-        <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-          <AuiIf condition={(s) => s.composer.dictation == null}>
-            <ComposerPrimitive.Dictate asChild>
-              <TooltipIconButton
-                tooltip="Voice input"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-dictate size-7 rounded-full"
-                aria-label="Start voice input"
-              >
-                <MicIcon className="aui-composer-dictate-icon size-4" />
-              </TooltipIconButton>
-            </ComposerPrimitive.Dictate>
-          </AuiIf>
-          <AuiIf condition={(s) => s.composer.dictation != null}>
-            <ComposerPrimitive.StopDictation asChild>
-              <TooltipIconButton
-                tooltip="Stop dictation"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="Stop voice input"
-              >
-                <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-              </TooltipIconButton>
-            </ComposerPrimitive.StopDictation>
-          </AuiIf>
-        </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send asChild>
-            <TooltipIconButton
-              tooltip="Send message"
-              side="bottom"
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-send size-7 rounded-full"
-              aria-label="Send message"
-            >
-              <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
-            </TooltipIconButton>
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerQueue />
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label="Stop generating"
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
-      </div>
+      <ComposerSendGroup />
     </div>
   );
 };
