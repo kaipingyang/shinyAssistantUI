@@ -1,4 +1,16 @@
-# shinyAssistantUI 0.2.2.9016 (dev branch)
+# shinyAssistantUI 0.2.2.9017 (dev branch)
+
+## Settings & permission-mode UX (Plan 45)
+
+- Permission-mode switching is now two-tier: de-escalation (to a stricter mode) hot-switches
+  instantly; escalation (to a more permissive mode) and the pseudo modes (Strict/YOLO) reconnect so
+  the mode is applied at connect (runtime escalation is not honored by the CLI). Safe by construction.
+- Settings panel repurposed (no longer duplicates the composer's live mode switch): new-conversation
+  default mode + risky-mode visibility (hide Bypass/YOLO), both persisted.
+- Composer height preset (Comfortable default / Compact flat single-line, ~shinychat); auto-grow kept.
+- run_r MCP tool can be toggled off in Settings (drops it from the connection on reconnect).
+- All new prefs persist under ~/.claude_addin/.
+
 
 ## Bug fix
 
