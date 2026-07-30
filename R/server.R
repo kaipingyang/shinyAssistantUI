@@ -251,6 +251,10 @@ assistantUIServer <- function(id, handler,
                               on_toggle_files_pane_follow = NULL,
                               auto_run = NULL,
                               on_toggle_auto_run = NULL,
+                              default_permission_mode = NULL,
+                              on_set_default_permission_mode = NULL,
+                              mode_visibility = NULL,
+                              on_set_mode_visibility = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -343,6 +347,15 @@ assistantUIServer <- function(id, handler,
   if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
   # 角度 B:自动批准 run_r 开关(仅当能力存在,即 on_toggle_auto_run 提供时暴露)。
   if (!is.null(auto_run)) config$auto_run <- isTRUE(auto_run)
+  # Settings 偏好(Plan 45):新会话默认权限模式 + 危险模式可见性(隐藏 Bypass/YOLO)。
+  # 仅当 addin 提供对应回调时暴露(非 addin 用法 config 不含 → 前端行为不变)。
+  if (!is.null(default_permission_mode))
+    config$default_permission_mode <- as.character(default_permission_mode)[[1L]]
+  if (!is.null(mode_visibility))
+    config$mode_visibility <- list(
+      showBypass = isTRUE(mode_visibility$showBypass %||% mode_visibility$show_bypass),
+      showYolo   = isTRUE(mode_visibility$showYolo   %||% mode_visibility$show_yolo)
+    )
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -577,6 +590,25 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_toggle_auto_run(isTRUE(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # Plan 45:Settings 偏好回调 —— 新会话默认模式 / 危险模式可见性。
+  if (is.function(on_set_default_permission_mode)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_default_permission_mode")]], {
+      msg <- session$input[[paste0(input_id, "_default_permission_mode")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_set_default_permission_mode(as.character(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_set_mode_visibility)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_mode_visibility")]], {
+      msg <- session$input[[paste0(input_id, "_mode_visibility")]]
+      if (is.null(msg)) return()
+      tryCatch(on_set_mode_visibility(list(
+        showBypass = isTRUE(msg$showBypass), showYolo = isTRUE(msg$showYolo)
+      )), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

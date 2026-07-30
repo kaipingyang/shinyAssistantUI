@@ -108,6 +108,8 @@ export interface ShinyBridge {
   sendSetWorkingDir: (path: string) => void;
   sendFilesPaneFollow: (value: boolean) => void;
   sendAutoRunEnabled: (value: boolean) => void;
+  sendDefaultPermissionMode: (value: string) => void;
+  sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
@@ -461,6 +463,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendAutoRunEnabled(value) {
       Shiny.setInputValue(`${inputId}_auto_run_enabled`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendDefaultPermissionMode(value) {
+      Shiny.setInputValue(`${inputId}_default_permission_mode`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendModeVisibility(value) {
+      Shiny.setInputValue(`${inputId}_mode_visibility`, { showBypass: value.showBypass, showYolo: value.showYolo, ts: Date.now() }, { priority: "event" });
     },
     onProjects(handler) {
       projectsHandler = handler;

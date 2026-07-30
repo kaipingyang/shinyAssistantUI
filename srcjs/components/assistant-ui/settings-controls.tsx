@@ -2,12 +2,29 @@ import { useEffect, useId, useRef, useState } from "react";
 import { SettingsIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "../../shiny-config-context";
 import { ModelSelector } from "@/components/assistant-ui/model-selector";
+import type { PermissionModeOption } from "../../shiny-config-context";
+
+// 危险模式可见性过滤(Plan 45):关掉 Show Bypass/YOLO 时从选择器隐藏对应项,
+// 但【当前选中值】永不隐藏(否则 select 显示错乱)。
+function visibleModeOptions(
+  options: PermissionModeOption[],
+  visibility: { showBypass: boolean; showYolo: boolean } | undefined,
+  currentValue?: string,
+): PermissionModeOption[] {
+  if (!visibility) return options;
+  return options.filter(
+    (o) =>
+      (o.value !== "bypassPermissions" || visibility.showBypass || o.value === currentValue) &&
+      (o.value !== "yolo" || visibility.showYolo || o.value === currentValue),
+  );
+}
 
 export function PermissionModeControl({ compact = false }: { compact?: boolean }) {
-  const { permissionMode } = useShinyConfig();
+  const { permissionMode, modeVisibility } = useShinyConfig();
   const selectId = useId();
   if (!permissionMode) return null;
 
+  const opts = visibleModeOptions(permissionMode.options, modeVisibility, permissionMode.value);
   const selected = permissionMode.options.find((option) => option.value === permissionMode.value);
   return (
     <div className={compact ? "aui-permission-mode flex min-w-0 items-center" : "aui-permission-mode space-y-1.5"}>
@@ -32,7 +49,7 @@ export function PermissionModeControl({ compact = false }: { compact?: boolean }
         title={permissionMode.error ?? selected?.description}
         onChange={(event) => permissionMode.setValue(event.target.value)}
       >
-        {permissionMode.options.map((option) => (
+        {opts.map((option) => (
           <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
@@ -108,6 +125,65 @@ export function ModelPickerDialog() {
   );
 }
 
+// Plan 45:新会话默认权限模式(持久化偏好,和 composer 内联的"本会话即时切换"不同)。
+function DefaultModeControl() {
+  const { permissionMode, defaultPermissionMode, setDefaultPermissionMode, modeVisibility } = useShinyConfig();
+  const selectId = useId();
+  if (!permissionMode || defaultPermissionMode === undefined || !setDefaultPermissionMode) return null;
+  const opts = visibleModeOptions(permissionMode.options, modeVisibility, defaultPermissionMode);
+  const selected = permissionMode.options.find((o) => o.value === defaultPermissionMode);
+  return (
+    <div className="aui-default-mode space-y-1.5">
+      <div>
+        <label className="text-foreground text-xs font-medium" htmlFor={selectId}>New-conversation default</label>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          {selected?.description ?? "Permission mode new conversations start in."}
+        </p>
+      </div>
+      <select
+        id={selectId}
+        aria-label="Default permission mode"
+        data-slot="aui_default_permission_mode"
+        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+        value={defaultPermissionMode}
+        onChange={(e) => setDefaultPermissionMode(e.target.value)}
+      >
+        {opts.map((o) => (
+          <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// Plan 45:危险模式可见性 —— 关掉后 Bypass/YOLO 不出现在选择器(受限环境防误触)。
+function ModeVisibilityControl() {
+  const { modeVisibility, setModeVisibility } = useShinyConfig();
+  if (!modeVisibility || !setModeVisibility) return null;
+  const row = (label: string, key: "showBypass" | "showYolo") => (
+    <label className="flex cursor-pointer items-center gap-2 text-xs" data-mode-vis={key}>
+      <input
+        type="checkbox"
+        checked={modeVisibility[key]}
+        onChange={(e) => setModeVisibility({ ...modeVisibility, [key]: e.target.checked })}
+      />
+      <span>{label}</span>
+    </label>
+  );
+  return (
+    <div className="aui-mode-visibility mt-3 space-y-1.5">
+      <div>
+        <span className="text-foreground text-xs font-medium">Available modes</span>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          Show these risky modes in the mode selector.
+        </p>
+      </div>
+      {row("Show Bypass", "showBypass")}
+      {row("Show YOLO", "showYolo")}
+    </div>
+  );
+}
+
 export function SidebarSettings() {
   const { permissionMode, thinking } = useShinyConfig();
   const [open, setOpen] = useState(false);
@@ -153,7 +229,8 @@ export function SidebarSettings() {
               <XIcon className="size-3.5" />
             </button>
           </div>
-          <PermissionModeControl />
+          <DefaultModeControl />
+          <ModeVisibilityControl />
           <ThinkingControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.

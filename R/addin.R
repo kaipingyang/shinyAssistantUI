@@ -115,6 +115,21 @@
     )
   }
   .migrate_addin_storage()
+  # Plan 45:持久化偏好 —— 新会话默认权限模式 + 危险模式可见性(隐藏 Bypass/YOLO)。
+  perm_pref <- new.env(parent = emptyenv())
+  perm_pref$default_mode <- {
+    p <- .claude_addin_path("default_permission_mode.rds")
+    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
+    if (is.character(v) && length(v) == 1L && nzchar(v)) v else permission_mode
+  }
+  options$permission_mode <- perm_pref$default_mode   # handler 初始 + 新线程默认用它
+  mode_vis_pref <- new.env(parent = emptyenv())
+  mode_vis_pref$v <- {
+    p <- .claude_addin_path("mode_visibility.rds")
+    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
+    if (is.list(v)) list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
+    else list(showBypass = TRUE, showYolo = TRUE)
+  }
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -198,6 +213,21 @@
       projects          = .read_saved_projects(.claude_addin_path("projects.rds")),
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
+      # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
+      default_permission_mode = perm_pref$default_mode,
+      on_set_default_permission_mode = function(m) {
+        perm_pref$default_mode <- as.character(m)[[1L]]
+        tryCatch(saveRDS(perm_pref$default_mode, .claude_addin_path("default_permission_mode.rds")),
+                 error = function(e) NULL)
+        tryCatch(attr(handler, "set_default_permission_mode")(perm_pref$default_mode),
+                 error = function(e) NULL)
+      },
+      mode_visibility = mode_vis_pref$v,
+      on_set_mode_visibility = function(v) {
+        mode_vis_pref$v <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
+        tryCatch(saveRDS(mode_vis_pref$v, .claude_addin_path("mode_visibility.rds")),
+                 error = function(e) NULL)
+      },
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)

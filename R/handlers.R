@@ -795,10 +795,14 @@ make_claude_handler <- function(options       = NULL,
     "default", "plan", "acceptEdits", "bypassPermissions"
   )
   initial_permission_mode <- options$permission_mode %||% "default"
+  # 可变 ref:Settings 改"新会话默认模式"时更新它 → 之后新线程(permission_mode_for 未存值)
+  # 用新默认。经 attr(handler,"set_default_permission_mode") 由 addin 回调驱动。
+  default_mode_ref <- new.env(parent = emptyenv())
+  default_mode_ref$value <- initial_permission_mode
   permission_modes <- new.env(parent = emptyenv())
   permission_mode_for <- function(thread_id) {
     get0(thread_id, envir = permission_modes,
-         ifnotfound = initial_permission_mode, inherits = FALSE)
+         ifnotfound = default_mode_ref$value, inherits = FALSE)
   }
   permission_options <- list(
     list(value = "askAll", label = "Strict",
@@ -1511,6 +1515,11 @@ make_claude_handler <- function(options       = NULL,
     autorun_state$on <- isTRUE(on)
     reset_clients()
     invisible(autorun_state$on)
+  }
+  # Plan 45:Settings 改"新会话默认模式" → 更新 ref(影响之后新线程的初始模式,不动已有线程)。
+  attr(handler_fn, "set_default_permission_mode") <- function(mode) {
+    default_mode_ref$value <- as.character(mode)[[1L]]
+    invisible(default_mode_ref$value)
   }
   handler_fn
 }

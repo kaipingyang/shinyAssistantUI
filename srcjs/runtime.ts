@@ -256,6 +256,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [autoRunEnabled, setAutoRunEnabledState] = useState<boolean | undefined>(
     () => (typeof config?.auto_run === "boolean" ? config.auto_run : undefined),
   );
+  const [defaultPermissionMode, setDefaultPermissionModeState] = useState<string | undefined>(
+    () => (typeof config?.default_permission_mode === "string" ? config.default_permission_mode : undefined),
+  );
+  const [modeVisibility, setModeVisibilityState] = useState<{ showBypass: boolean; showYolo: boolean } | undefined>(
+    () => {
+      const mv = config?.mode_visibility as { showBypass?: boolean; showYolo?: boolean } | undefined;
+      return mv ? { showBypass: mv.showBypass !== false, showYolo: mv.showYolo !== false } : undefined;
+    },
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -1660,6 +1669,16 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setAutoRunEnabled: (value: boolean) => {
       setAutoRunEnabledState(value);
       bridge.current.sendAutoRunEnabled(value);
+    },
+    defaultPermissionMode,
+    setDefaultPermissionMode: (value: string) => {
+      setDefaultPermissionModeState(value);
+      bridge.current.sendDefaultPermissionMode(value);
+    },
+    modeVisibility,
+    setModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => {
+      setModeVisibilityState(value);
+      bridge.current.sendModeVisibility(value);
     },
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,

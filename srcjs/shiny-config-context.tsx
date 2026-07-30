@@ -91,6 +91,12 @@ export interface ShinyConfigCtx {
   setFilesPaneFollow?: (value: boolean) => void;
   autoRunEnabled?: boolean;
   setAutoRunEnabled?: (value: boolean) => void;
+  /** Plan 45: persisted default permission mode for NEW conversations (addin). */
+  defaultPermissionMode?: string;
+  setDefaultPermissionMode?: (value: string) => void;
+  /** Plan 45: which risky modes appear in the mode selector (hide Bypass/YOLO). */
+  modeVisibility?: { showBypass: boolean; showYolo: boolean };
+  setModeVisibility?: (value: { showBypass: boolean; showYolo: boolean }) => void;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

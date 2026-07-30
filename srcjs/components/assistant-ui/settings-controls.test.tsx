@@ -105,24 +105,54 @@ describe("ModelPickerDialog", () => {
 });
 
 describe("SidebarSettings", () => {
-  it("opens an inline non-Portal settings panel sharing the permission control", () => {
-    const { container } = renderWithContext(<SidebarSettings />, {
+  const ctxWith = (over: Partial<ShinyConfigCtx> = {}): ShinyConfigCtx => ({
+    ...baseContext,
+    permissionMode: {
       value: "default",
-      options: [{ value: "default", label: "Manual", description: "Ask before edits" }],
-      pending: false,
-      error: null,
-      setValue: () => {},
-    });
+      options: [
+        { value: "default", label: "Manual", description: "Ask before edits" },
+        { value: "bypassPermissions", label: "Bypass" },
+        { value: "yolo", label: "YOLO" },
+      ],
+      pending: false, error: null, setValue: () => {},
+    },
+    defaultPermissionMode: "default",
+    setDefaultPermissionMode: vi.fn(),
+    modeVisibility: { showBypass: true, showYolo: true },
+    setModeVisibility: vi.fn(),
+    ...over,
+  });
+
+  it("opens an inline non-Portal panel with default-mode + visibility controls", () => {
+    const { container } = render(
+      <ShinyConfigContext.Provider value={ctxWith()}><SidebarSettings /></ShinyConfigContext.Provider>,
+    );
     const settingsButton = screen.getByRole("button", { name: "Settings" });
     fireEvent.click(settingsButton);
     const panel = screen.getByRole("dialog", { name: "Settings" });
     expect(container.contains(panel)).toBe(true);
-    expect(panel.querySelector('select[aria-label="Permission mode"]')).toBeTruthy();
+    // 重定位后:Settings 放"新会话默认模式" + 可见性开关(不再是 composer 的即时 Permission mode)
+    expect(panel.querySelector('select[aria-label="Default permission mode"]')).toBeTruthy();
+    expect(panel.querySelector('[data-mode-vis="showBypass"]')).toBeTruthy();
+    expect(panel.querySelector('[data-mode-vis="showYolo"]')).toBeTruthy();
     expect(document.activeElement).toBe(panel);
 
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     expect(document.activeElement).toBe(settingsButton);
+  });
+
+  it("hides YOLO from the default-mode select when visibility is off", () => {
+    render(
+      <ShinyConfigContext.Provider value={ctxWith({ modeVisibility: { showBypass: true, showYolo: false } })}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const sel = screen.getByLabelText("Default permission mode") as HTMLSelectElement;
+    const values = Array.from(sel.options).map((o) => o.value);
+    expect(values).toContain("bypassPermissions");
+    expect(values).not.toContain("yolo");
   });
 });
 
