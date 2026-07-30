@@ -257,6 +257,8 @@ assistantUIServer <- function(id, handler,
                               on_set_mode_visibility = NULL,
                               composer_density = NULL,
                               on_set_composer_density = NULL,
+                              run_r_enabled = NULL,
+                              on_toggle_run_r = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -361,6 +363,8 @@ assistantUIServer <- function(id, handler,
   # Plan 45:输入框高度预设(comfortable/compact)。
   if (!is.null(composer_density))
     config$composer_density <- as.character(composer_density)[[1L]]
+  # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
+  if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -622,6 +626,14 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_set_composer_density(as.character(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_toggle_run_r)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_run_r_enabled")]], {
+      msg <- session$input[[paste0(input_id, "_run_r_enabled")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_toggle_run_r(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

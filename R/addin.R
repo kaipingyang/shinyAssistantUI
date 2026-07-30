@@ -136,6 +136,12 @@
     v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
     if (is.character(v) && length(v) == 1L && v %in% c("comfortable", "compact")) v else "comfortable"
   }
+  run_r_enabled_pref <- new.env(parent = emptyenv())
+  run_r_enabled_pref$on <- {
+    p <- .claude_addin_path("run_r_enabled.rds")
+    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) TRUE) else TRUE
+    if (is.logical(v) && length(v) == 1L && !is.na(v)) v else TRUE
+  }
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -167,6 +173,9 @@
     models           = models,
     session_map_path = session_map_path
   )
+  # 应用持久化的 run_r 开关(仅当 run_r 可用;首次连接前设置,reset_clients 无 client 时无副作用)。
+  if (!is.null(run_r_server))
+    tryCatch(attr(handler, "set_run_r_enabled")(run_r_enabled_pref$on), error = function(e) NULL)
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
   workspace_search <- .make_addin_workspace_search_provider(cur_dir)
 
@@ -240,6 +249,13 @@
         tryCatch(saveRDS(composer_density_pref$v, .claude_addin_path("composer_density.rds")),
                  error = function(e) NULL)
       },
+      run_r_enabled = if (!is.null(run_r_server)) run_r_enabled_pref$on else NULL,
+      on_toggle_run_r = if (!is.null(run_r_server)) function(v) {
+        run_r_enabled_pref$on <- isTRUE(v)
+        tryCatch(saveRDS(run_r_enabled_pref$on, .claude_addin_path("run_r_enabled.rds")),
+                 error = function(e) NULL)
+        tryCatch(attr(handler, "set_run_r_enabled")(run_r_enabled_pref$on), error = function(e) NULL)
+      } else NULL,
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)

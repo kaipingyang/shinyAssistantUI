@@ -868,6 +868,10 @@ make_claude_handler <- function(options       = NULL,
   # 免审批;切换经 set_autorun 触发 reset_clients(allowed_tools 是连接时 option)。
   autorun_state <- new.env(parent = emptyenv())
   autorun_state$on <- FALSE
+  # run_r MCP 开关(Plan 45,默认开)。关 → 连接时从 mcp_servers 摘掉 r_session + 不加进
+  # allowed_tools;切换经 set_run_r_enabled 触发 reset_clients(mcp_servers 是连接时 option)。
+  run_r_state <- new.env(parent = emptyenv())
+  run_r_state$enabled <- TRUE
 
   # Disk is the source of truth because the historical loader and handler own
   # independent closures. Every mutation re-reads and atomically replaces the
@@ -917,9 +921,10 @@ make_claude_handler <- function(options       = NULL,
         settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
         # 角度 B:透传进程内 MCP servers(含 run_r);autorun 开且 run_r 已注册 →
         # 把 run_r 加进 allowed_tools 免审批,否则走审批卡。
-        mcp_servers                 = options$mcp_servers,
+        mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
         allowed_tools               = .addin_run_r_allowed_tools(
-          isTRUE(autorun_state$on) && ("r_session" %in% names(options$mcp_servers)),
+          isTRUE(autorun_state$on) && isTRUE(run_r_state$enabled) &&
+            ("r_session" %in% names(options$mcp_servers)),
           options$allowed_tools),
         resume                      = resume_sid
       )
@@ -1520,6 +1525,12 @@ make_claude_handler <- function(options       = NULL,
   attr(handler_fn, "set_default_permission_mode") <- function(mode) {
     default_mode_ref$value <- as.character(mode)[[1L]]
     invisible(default_mode_ref$value)
+  }
+  # Plan 45:run_r MCP 开关(本会话)。设状态 + 重连(mcp_servers 是连接时 option)。
+  attr(handler_fn, "set_run_r_enabled") <- function(on) {
+    run_r_state$enabled <- isTRUE(on)
+    reset_clients()
+    invisible(run_r_state$enabled)
   }
   handler_fn
 }

@@ -212,6 +212,22 @@ function ComposerDensityControl() {
   );
 }
 
+// Plan 45:run_r MCP 工具开关(默认开;关掉后 Claude 无法在你的 R 会话执行代码)。
+function RunRToggle() {
+  const { runREnabled, setRunREnabled } = useShinyConfig();
+  if (runREnabled === undefined || !setRunREnabled) return null;
+  return (
+    <label className="aui-run-r-toggle mt-3 flex cursor-pointer items-center gap-2 text-xs" data-slot="aui_run_r_toggle">
+      <input
+        type="checkbox"
+        checked={runREnabled}
+        onChange={(e) => setRunREnabled(e.target.checked)}
+      />
+      <span className="text-foreground font-medium">Enable R console tool (run_r)</span>
+    </label>
+  );
+}
+
 export function SidebarSettings() {
   const { permissionMode, thinking, composerDensity } = useShinyConfig();
   const [open, setOpen] = useState(false);
@@ -261,6 +277,7 @@ export function SidebarSettings() {
           <ModeVisibilityControl />
           <ThinkingControl />
           <ComposerDensityControl />
+          <RunRToggle />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>

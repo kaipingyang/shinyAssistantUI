@@ -100,6 +100,9 @@ export interface ShinyConfigCtx {
   /** Plan 45: composer height preset — "comfortable" (default) | "compact" (flat, ~shinychat). */
   composerDensity?: "comfortable" | "compact";
   setComposerDensity?: (value: "comfortable" | "compact") => void;
+  /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
+  runREnabled?: boolean;
+  setRunREnabled?: (value: boolean) => void;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

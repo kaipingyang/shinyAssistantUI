@@ -160,6 +160,13 @@
   c(base, tool)
 }
 
+# run_r 开关(Plan 45):关掉时从连接选项的 mcp_servers 摘除 r_session(纯函数,可测)。
+.filter_run_r_mcp <- function(mcp_servers, enabled) {
+  if (!isTRUE(enabled) && is.list(mcp_servers) && "r_session" %in% names(mcp_servers))
+    mcp_servers[["r_session"]] <- NULL
+  mcp_servers
+}
+
 # Build the in-process "r_session" MCP server exposing run_r. Returns NULL when
 # the installed ClaudeAgentSDK lacks in-process MCP support (older versions) —
 # callers then simply don't register it.

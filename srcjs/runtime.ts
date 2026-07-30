@@ -269,6 +269,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => (config?.composer_density === "compact" || config?.composer_density === "comfortable"
       ? config.composer_density : undefined),
   );
+  const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
+    () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -1688,6 +1691,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setComposerDensity: (value: "comfortable" | "compact") => {
       setComposerDensityState(value);
       bridge.current.sendComposerDensity(value);
+    },
+    runREnabled,
+    setRunREnabled: (value: boolean) => {
+      setRunREnabledState(value);
+      bridge.current.sendRunREnabled(value);
     },
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,

@@ -2,7 +2,7 @@
 # 切换可见性回调触发(stderr SET_VIS);0 console error。
 suppressMessages({library(chromote); library(callr)})
 `%||%` <- function(x, y) if (is.null(x)) y else x
-PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 9785L
+PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 9787L
 p <- callr::r_bg(function(proj, port){setwd(proj);suppressMessages(library(shiny));shiny::runApp("tests/verify/settings_ux_app.R",host="127.0.0.1",port=port,launch.browser=FALSE)}, args=list(proj=PROJ,port=PORT), stdout="/tmp/su.o", stderr="/tmp/su.e")
 on.exit(try(p$kill(),silent=TRUE),add=TRUE); Sys.sleep(10)
 if(!p$is_alive()){cat("BOOT FAIL\n");cat(tail(readLines("/tmp/su.e"),8),sep="\n");quit(status=1)}
@@ -31,6 +31,12 @@ cat(sprintf("[%s] default-mode select hides YOLO\n", if(!is.na(dvals)&&!grepl("y
 ev("(function(){var c=document.querySelector('[data-mode-vis=showYolo] input');if(c)c.click();return !!c})()"); Sys.sleep(1)
 sv <- any(grepl("SET_VIS", tryCatch(readLines("/tmp/su.e"), error=function(e) character())))
 cat(sprintf("[%s] toggling visibility fires persistence callback (SET_VIS)\n", if(sv)"PASS" else "FAIL"))
+# run_r 开关渲染 + 切换回调
+has_runr <- ev("!!document.querySelector('[data-slot=aui_run_r_toggle]')")
+cat(sprintf("[%s] Settings has run_r toggle\n", if(isTRUE(has_runr))"PASS" else "FAIL"))
+ev("(function(){var c=document.querySelector('[data-slot=aui_run_r_toggle] input');if(c)c.click();return !!c})()"); Sys.sleep(1)
+srr <- any(grepl("SET_RUNR", tryCatch(readLines("/tmp/su.e"), error=function(e) character())))
+cat(sprintf("[%s] toggling run_r fires callback (SET_RUNR)\n", if(srr)"PASS" else "FAIL"))
 cat(sprintf("[%s] no console errors (%d)\n", if(length(errs)==0)"PASS" else "FAIL", length(errs)))
 if(length(errs)) cat(head(unique(errs),3),sep="\n")
 b$close(); p$kill(); system("rm -f /tmp/su.*")

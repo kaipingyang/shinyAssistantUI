@@ -158,6 +158,8 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     setModeVisibility: rt.setModeVisibility,
     composerDensity: rt.composerDensity,
     setComposerDensity: rt.setComposerDensity,
+    runREnabled: rt.runREnabled,
+    setRunREnabled: rt.setRunREnabled,
     threadMaxWidth: rt.threadMaxWidth,
   };
 
