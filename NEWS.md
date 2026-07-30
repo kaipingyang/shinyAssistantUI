@@ -1,3 +1,10 @@
+# shinyAssistantUI 0.2.2.9015 (dev branch)
+
+## UX
+
+- Moved the ModelSelector into the composer bottom action row (next to the permission-mode
+  selector), instead of above the composer. /model still opens it (controlled popover).
+
 # shinyAssistantUI 0.2.2.9014 (dev branch)
 
 ## Bug fixes (real-machine feedback)

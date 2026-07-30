@@ -403,7 +403,6 @@ const Composer: FC = () => {
   const { refreshIdeContext } = useShinyConfig();
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ModelPickerDialog />
       <ShinyAgentProgress />
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
@@ -560,6 +559,7 @@ const ComposerAction: FC = () => {
       <div className="flex min-w-0 items-center gap-1.5">
         <ComposerAddAttachment />
         <PermissionModeControl compact />
+        <ModelPickerDialog />
         <ShinyContextDisplay />
       </div>
       <div className="flex items-center gap-1.5">
