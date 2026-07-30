@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { SettingsIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "../../shiny-config-context";
+import { ModelSelector } from "@/components/assistant-ui/model-selector";
 
 export function PermissionModeControl({ compact = false }: { compact?: boolean }) {
   const { permissionMode } = useShinyConfig();
@@ -84,78 +85,26 @@ export function ThinkingControl() {
 // model.pickerOpen 控制显隐；渲染在 composer 附近（见 thread.tsx）。
 export function ModelPickerDialog() {
   const { model } = useShinyConfig();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
-  const open = model?.pickerOpen ?? false;
-  const options = model?.options ?? [];
-  const [highlighted, setHighlighted] = useState(0);
-  // 打开时把高亮定位到当前模型并聚焦弹窗（以接收方向键/Enter）。
-  useEffect(() => {
-    if (!open) return;
-    const idx = options.findIndex((o) => o.value === model?.value);
-    setHighlighted(idx >= 0 ? idx : 0);
-    dialogRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-  // 键盘移动高亮时让其滚入可视区（models= 自定义可能较长）。
-  useEffect(() => {
-    if (open) itemRefs.current.get(highlighted)?.scrollIntoView?.({ block: "nearest" });
-  }, [highlighted, open]);
-  if (!model || !open) return null;
-  const close = () => model.setPickerOpen(false);
-  const pick = (value: string) => { model.setValue(value); close(); };
+  if (!model) return null;
+  // 用官方 @assistant-ui ModelSelector(base-ui)渲染,喂 R 的 model 配置。保留 /model 命令触发
+  // (受控 open=pickerOpen);trigger 常驻显示当前模型(相比旧的纯命令弹窗,多了一个可见入口)。
+  const models = model.options.map((o) => ({
+    id: o.value,
+    name: o.label,
+    ...(o.description ? { description: o.description } : {}),
+    ...(o.disabled ? { disabled: true } : {}),
+  }));
   return (
-    <div
-      className="aui-model-picker-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/20"
-      onClick={close}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-label="Select model"
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") { event.preventDefault(); close(); }
-          else if (event.key === "ArrowDown") { event.preventDefault(); setHighlighted((h) => (h + 1) % options.length); }
-          else if (event.key === "ArrowUp") { event.preventDefault(); setHighlighted((h) => (h - 1 + options.length) % options.length); }
-          else if (event.key === "Enter") { event.preventDefault(); const opt = options[highlighted]; if (opt) pick(opt.value); }
-        }}
-        className="bg-popover text-popover-foreground w-72 rounded-lg border p-2 shadow-lg outline-none"
-      >
-        <div className="flex items-center justify-between px-2 py-1">
-          <h2 className="text-sm font-semibold">Select model</h2>
-          <button type="button" className="hover:bg-accent rounded p-1"
-                  aria-label="Close model picker" onClick={close}>
-            <XIcon className="size-3.5" />
-          </button>
-        </div>
-        <div className="mt-1 flex flex-col">
-          {options.map((option, index) => {
-            const active = option.value === model.value;
-            const isHighlighted = index === highlighted;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                ref={(node) => { if (node) itemRefs.current.set(index, node); else itemRefs.current.delete(index); }}
-                data-model-option={option.value}
-                data-highlighted={isHighlighted || undefined}
-                aria-current={active}
-                onMouseEnter={() => setHighlighted(index)}
-                className={`flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-start text-sm outline-none ${isHighlighted ? "bg-accent" : ""}`}
-                onClick={() => pick(option.value)}
-              >
-                <span className="font-medium">{option.label}{active ? " ✓" : ""}</span>
-                {option.description && (
-                  <span className="text-muted-foreground text-[11px] leading-4">{option.description}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+    <ModelSelector
+      models={models}
+      value={model.value}
+      onValueChange={(v) => model.setValue(v)}
+      open={model.pickerOpen}
+      onOpenChange={model.setPickerOpen}
+      searchable={models.length > 8}
+      variant="ghost"
+      size="sm"
+    />
   );
 }
 

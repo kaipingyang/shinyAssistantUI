@@ -94,41 +94,14 @@ describe("ModelPickerDialog", () => {
     { value: "sonnet", label: "Sonnet" },
     { value: "opus", label: "Opus" },
   ];
-  const mk = (over = {}) => ({ value: "default", options: modelOpts, setValue: vi.fn(), pickerOpen: true, setPickerOpen: vi.fn(), ...over });
-  it("renders nothing when closed", () => {
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ pickerOpen: false }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
-  });
-  it("renders nothing without capability", () => {
+  const mk = (over = {}) => ({ value: "default", options: modelOpts, setValue: vi.fn(), pickerOpen: false, setPickerOpen: vi.fn(), ...over });
+  it("renders nothing without model capability", () => {
     render(<ShinyConfigContext.Provider value={baseContext}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
-  it("lists options and applies + closes on pick", () => {
-    const setValue = vi.fn(); const setPickerOpen = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.getByRole("dialog", { name: "Select model" })).toBeTruthy();
-    expect(screen.getByText("Opus")).toBeTruthy();
-    fireEvent.click(screen.getByText("Sonnet"));
-    expect(setValue).toHaveBeenCalledWith("sonnet");
-    expect(setPickerOpen).toHaveBeenCalledWith(false);
-  });
-  it("arrow keys move the highlight and Enter confirms", () => {
-    const setValue = vi.fn(); const setPickerOpen = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    const dialog = screen.getByRole("dialog", { name: "Select model" });
-    fireEvent.keyDown(dialog, { key: "ArrowDown" });   // default(0) → haiku(1)
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(setValue).toHaveBeenCalledWith("haiku");
-    expect(setPickerOpen).toHaveBeenCalledWith(false);
-  });
-  it("ArrowUp from the first option wraps to the last", () => {
-    const setValue = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    const dialog = screen.getByRole("dialog", { name: "Select model" });
-    fireEvent.keyDown(dialog, { key: "ArrowUp" });     // default(0) → opus(3)
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(setValue).toHaveBeenCalledWith("opus");
-  });
+  // ModelPickerDialog 现在渲染官方 @assistant-ui ModelSelector(需 AssistantRuntimeProvider 的
+  // useAui;渲染 combobox trigger + 受控 popover)。trigger 显示当前模型、打开/选择交互由 headless
+  // verify(真实 runtime)覆盖,不在此 jsdom 单测里重复(base-ui popover + portal 不适合 jsdom)。
 });
 
 describe("SidebarSettings", () => {
