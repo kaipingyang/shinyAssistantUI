@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useShinyConfig } from "@/shiny-config-context";
-import { AlertDialog } from "radix-ui";
+import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -354,30 +354,24 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
         </ThreadListItemMorePrimitive.Item>
       </ThreadListItemMorePrimitive.Content>
     </ThreadListItemMorePrimitive.Root>
-    <AlertDialog.Root open={confirmOpen} onOpenChange={setConfirmOpen}>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
-        <AlertDialog.Content
-          data-slot="aui_delete_confirm"
-          className="bg-popover text-popover-foreground fixed left-1/2 top-1/2 z-50 w-[min(24rem,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border p-5 shadow-lg data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
-        >
-          <AlertDialog.Title className="text-base font-semibold">Delete this conversation permanently?</AlertDialog.Title>
-          <AlertDialog.Description className="text-muted-foreground mt-1.5 text-sm">
-            This removes the session transcript from disk and cannot be undone. To just hide it, use Archive instead.
-          </AlertDialog.Description>
-          <div className="mt-4 flex justify-end gap-2">
-            <AlertDialog.Cancel asChild>
-              <Button variant="outline" size="sm" data-cancel-delete>Cancel</Button>
-            </AlertDialog.Cancel>
-            <ThreadListItemPrimitive.Delete asChild>
-              <AlertDialog.Action asChild>
-                <Button variant="destructive" size="sm" data-confirm-delete>Delete permanently</Button>
-              </AlertDialog.Action>
-            </ThreadListItemPrimitive.Delete>
-          </div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+      <DialogContent
+        data-slot="aui_delete_confirm"
+        showCloseButton={false}
+        className="w-[min(24rem,90vw)] gap-0"
+      >
+        <DialogTitle className="text-base font-semibold">Delete this conversation permanently?</DialogTitle>
+        <DialogDescription className="text-muted-foreground mt-1.5 text-sm">
+          This removes the session transcript from disk and cannot be undone. To just hide it, use Archive instead.
+        </DialogDescription>
+        <div className="mt-4 flex justify-end gap-2">
+          <DialogClose render={<Button variant="outline" size="sm" data-cancel-delete>Cancel</Button>} />
+          <ThreadListItemPrimitive.Delete asChild>
+            <Button variant="destructive" size="sm" data-confirm-delete>Delete permanently</Button>
+          </ThreadListItemPrimitive.Delete>
+        </div>
+      </DialogContent>
+    </Dialog>
     </>
   );
 };
