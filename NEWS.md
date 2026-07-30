@@ -1,4 +1,15 @@
-# shinyAssistantUI 0.2.2.9011 (dev branch)
+# shinyAssistantUI 0.2.2.9012 (dev branch)
+
+## Follow-ups: devtools prod-exclusion, official ModelSelector, upstream-delta review
+
+- devtools excluded from the prod bundle via `__AUI_DEVTOOLS__` build define (default off; -201KB).
+- Adopted official `@assistant-ui` ModelSelector (base-ui) in place of the custom ModelPickerDialog
+  (inline combobox trigger, controlled by /model). Needs real-machine UX review.
+- Reviewed every heavy component's upstream 0.14.26->0.15.1 delta: markdown-text unchanged; fixed
+  context-display to the base-ui tooltip (asChild->render + TooltipProvider); thread/thread-list/
+  diff-viewer/syntax-highlighter deltas are minor CSS/perf/optional-feature/alternative-impl and
+  their asChild usages are on assistant-ui npm primitives (still supported) — deferred as low-value.
+
 
 ## radix -> base-ui foundation migration (Plan 44, dev)
 
