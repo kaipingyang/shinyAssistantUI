@@ -1,4 +1,12 @@
-# shinyAssistantUI 0.2.2.9019 (dev branch)
+# shinyAssistantUI 0.2.2.9020 (dev branch)
+
+- addin UI preferences (default permission mode, mode visibility, composer height, run_r toggle) are
+  now stored in a single human-readable ~/.claude_addin/addin_settings.json (was 4 separate .rds).
+  Old .rds prefs are migrated once on startup and removed (transparent for existing users). Data files
+  (session_map, archived, tool_decisions, ...) stay RDS.
+- Deleting a history session now also prunes that session's tool-approval decisions (no orphan
+  entries accumulating in tool_decisions.rds).
+
 
 - Switching working directory now reloads that project's local skills/commands and hot-updates the
   slash menu (previously skills were read once at startup, so a switched-to project's .claude skills

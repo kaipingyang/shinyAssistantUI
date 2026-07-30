@@ -17,6 +17,20 @@ test_that(".record_tool_decision / .read_tool_decisions round-trip", {
   expect_identical(shinyAssistantUI:::.read_tool_decisions(NULL), list())
 })
 
+test_that(".prune_tool_decisions removes given ids, keeps others (Plan 46 delete cleanup)", {
+  path <- tempfile(fileext = ".rds"); on.exit(unlink(path), add = TRUE)
+  shinyAssistantUI:::.record_tool_decision(path, "tu_a", "approved")
+  shinyAssistantUI:::.record_tool_decision(path, "tu_b", "denied")
+  shinyAssistantUI:::.record_tool_decision(path, "tu_c", "approved")
+  shinyAssistantUI:::.prune_tool_decisions(path, c("tu_a", "tu_c"))
+  d <- shinyAssistantUI:::.read_tool_decisions(path)
+  expect_null(d[["tu_a"]]); expect_null(d[["tu_c"]])
+  expect_identical(d[["tu_b"]], "denied")
+  # 空 / NULL 安全
+  expect_null(shinyAssistantUI:::.prune_tool_decisions(path, character(0)))
+  expect_null(shinyAssistantUI:::.prune_tool_decisions(NULL, "x"))
+})
+
 test_that(".claude_decisions_path 由 session_map_path 派生 sibling", {
   p <- shinyAssistantUI:::.claude_decisions_path("/home/u/.claude_addin/session_map.rds")
   expect_identical(basename(p), "tool_decisions.rds")

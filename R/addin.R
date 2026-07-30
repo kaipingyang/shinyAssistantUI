@@ -115,33 +115,12 @@
     )
   }
   .migrate_addin_storage()
-  # Plan 45:持久化偏好 —— 新会话默认权限模式 + 危险模式可见性(隐藏 Bypass/YOLO)。
-  perm_pref <- new.env(parent = emptyenv())
-  perm_pref$default_mode <- {
-    p <- .claude_addin_path("default_permission_mode.rds")
-    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
-    if (is.character(v) && length(v) == 1L && nzchar(v)) v else permission_mode
-  }
-  options$permission_mode <- perm_pref$default_mode   # handler 初始 + 新线程默认用它
-  mode_vis_pref <- new.env(parent = emptyenv())
-  mode_vis_pref$v <- {
-    p <- .claude_addin_path("mode_visibility.rds")
-    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
-    if (is.list(v)) list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
-    else list(showBypass = TRUE, showYolo = TRUE)
-  }
-  composer_density_pref <- new.env(parent = emptyenv())
-  composer_density_pref$v <- {
-    p <- .claude_addin_path("composer_density.rds")
-    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
-    if (is.character(v) && length(v) == 1L && v %in% c("comfortable", "compact")) v else "comfortable"
-  }
-  run_r_enabled_pref <- new.env(parent = emptyenv())
-  run_r_enabled_pref$on <- {
-    p <- .claude_addin_path("run_r_enabled.rds")
-    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) TRUE) else TRUE
-    if (is.logical(v) && length(v) == 1L && !is.na(v)) v else TRUE
-  }
+  # Plan 45/46:持久化 UI 偏好 —— 合并到 ~/.claude_addin/addin_settings.json(JSON,可手改)。
+  # 首次运行若发现旧的 *_.rds 偏好,一次性迁移进 json 并删除旧文件(老用户无感)。
+  .migrate_addin_settings()
+  settings_state <- new.env(parent = emptyenv())
+  settings_state$v <- .read_addin_settings()
+  options$permission_mode <- settings_state$v$defaultPermissionMode  # handler 初始 + 新线程默认
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -175,7 +154,7 @@
   )
   # 应用持久化的 run_r 开关(仅当 run_r 可用;首次连接前设置,reset_clients 无 client 时无副作用)。
   if (!is.null(run_r_server))
-    tryCatch(attr(handler, "set_run_r_enabled")(run_r_enabled_pref$on), error = function(e) NULL)
+    tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
   workspace_search <- .make_addin_workspace_search_provider(cur_dir)
 
@@ -229,32 +208,28 @@
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
       # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
-      default_permission_mode = perm_pref$default_mode,
+      default_permission_mode = settings_state$v$defaultPermissionMode,
       on_set_default_permission_mode = function(m) {
-        perm_pref$default_mode <- as.character(m)[[1L]]
-        tryCatch(saveRDS(perm_pref$default_mode, .claude_addin_path("default_permission_mode.rds")),
-                 error = function(e) NULL)
-        tryCatch(attr(handler, "set_default_permission_mode")(perm_pref$default_mode),
+        settings_state$v$defaultPermissionMode <- as.character(m)[[1L]]
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        tryCatch(attr(handler, "set_default_permission_mode")(settings_state$v$defaultPermissionMode),
                  error = function(e) NULL)
       },
-      mode_visibility = mode_vis_pref$v,
+      mode_visibility = settings_state$v$modeVisibility,
       on_set_mode_visibility = function(v) {
-        mode_vis_pref$v <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
-        tryCatch(saveRDS(mode_vis_pref$v, .claude_addin_path("mode_visibility.rds")),
-                 error = function(e) NULL)
+        settings_state$v$modeVisibility <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
       },
-      composer_density = composer_density_pref$v,
+      composer_density = settings_state$v$composerDensity,
       on_set_composer_density = function(d) {
-        composer_density_pref$v <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
-        tryCatch(saveRDS(composer_density_pref$v, .claude_addin_path("composer_density.rds")),
-                 error = function(e) NULL)
+        settings_state$v$composerDensity <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
       },
-      run_r_enabled = if (!is.null(run_r_server)) run_r_enabled_pref$on else NULL,
+      run_r_enabled = if (!is.null(run_r_server)) settings_state$v$runREnabled else NULL,
       on_toggle_run_r = if (!is.null(run_r_server)) function(v) {
-        run_r_enabled_pref$on <- isTRUE(v)
-        tryCatch(saveRDS(run_r_enabled_pref$on, .claude_addin_path("run_r_enabled.rds")),
-                 error = function(e) NULL)
-        tryCatch(attr(handler, "set_run_r_enabled")(run_r_enabled_pref$on), error = function(e) NULL)
+        settings_state$v$runREnabled <- isTRUE(v)
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
       } else NULL,
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
@@ -373,6 +348,8 @@
                                    archived_path, session_map_path,
                                    on_reappear = function() invisible(NULL)) {
   tryCatch(attr(handler, "release_session")(session_id), error = function(e) NULL)
+  # 删前抓该 session 的 tool_use id(transcript 还在);删成功后清理其审批决策条目(Plan 46)。
+  decision_ids <- tryCatch(.session_tool_use_ids(session_id), error = function(e) character(0))
   ok <- tryCatch({ .delete_claude_session(session_id, directory = project); TRUE },
                  error = function(e) {
                    warning("[CLAUDE] delete_session failed: ", conditionMessage(e), call. = FALSE)
@@ -381,6 +358,8 @@
   if (isTRUE(ok)) {
     .toggle_archived_id(archived_path, project, session_id, FALSE)
     tryCatch(.remove_claude_session_map(session_map_path, session_id), error = function(e) NULL)
+    tryCatch(.prune_tool_decisions(.claude_decisions_path(session_map_path), decision_ids),
+             error = function(e) NULL)
   } else {
     tryCatch(on_reappear(), error = function(e) NULL)
   }

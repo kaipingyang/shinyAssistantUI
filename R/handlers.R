@@ -318,6 +318,31 @@
   tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
   invisible(NULL)
 }
+# 删除 session 时清理其决策条目(Plan 46):按 tool_use id 从决策 map 删掉,避免孤儿累积。
+.prune_tool_decisions <- function(path, tool_call_ids) {
+  if (is.null(path) || !length(tool_call_ids)) return(invisible(NULL))
+  cur <- .read_tool_decisions(path)
+  if (!length(cur)) return(invisible(NULL))
+  cur[as.character(tool_call_ids)] <- NULL
+  tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
+  invisible(NULL)
+}
+# 读某 session 的所有 tool_use id(删除前调用,此时 transcript 还在)。
+.session_tool_use_ids <- function(session_id) {
+  msgs <- tryCatch(.get_claude_session_messages(session_id), error = function(e) list())
+  ids <- character(0)
+  for (m in msgs) {
+    if (identical(m$type, "assistant") && is.list(m$message$content)) {
+      for (blk in m$message$content) {
+        if (identical(blk[["type"]], "tool_use")) {
+          id <- blk[["id"]]
+          if (is.character(id) && length(id) == 1L && nzchar(id)) ids <- c(ids, id)
+        }
+      }
+    }
+  }
+  unique(ids)
+}
 
 # ── 权限模式切换策略 ─────────────────────────────────────────────────────────
 # 实测(hotswitch_test.R):Claude Code CLI 允许运行时【降权】(变严)热切换,但不允许
