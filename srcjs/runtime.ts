@@ -1328,7 +1328,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       // 标志：parentId 陈旧找不到时跳过本次编辑（连 startRun 一起跳过，
       // 避免只发消息给 R 却不插 user 气泡，导致孤儿 assistant 回复 + UI/R 发散）。
-      let aborted = false;
       const newUserMessage: ThreadMessageLike = {
         id: `user-${Date.now()}`,
         role: "user" as const,
@@ -1338,12 +1337,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       };
       setMessagesMap((prev) => {
         const threadMsgs = prev[threadId] ?? [];
-        const { updated, aborted: ab } = applyEdit(threadMsgs, parentId, newUserMessage);
-        if (ab) { aborted = true; return prev; }
+        const updated = applyEdit(threadMsgs, parentId, newUserMessage);
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
         return { ...prev, [threadId]: updated };
       });
-      if (aborted) return; // 不发消息给 R，保持 UI/R 一致
       startRun(threadId, () => {
         requestIdeContextFor(threadId);
         bridge.current.sendUserMessage(

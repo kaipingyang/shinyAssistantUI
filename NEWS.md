@@ -1,4 +1,16 @@
-# shinyAssistantUI 0.2.2.9012 (dev branch)
+# shinyAssistantUI 0.2.2.9013 (dev branch)
+
+## Source is now radix-free (matches upstream 0.15.1 ui/ layer)
+
+- Migrated the last live radix import: thread-list delete-confirmation AlertDialog -> base-ui Dialog.
+- Removed 27 unused leftover shadcn scaffold files (accordion/tabs/select/menubar/dropdown-menu/
+  context-menu/hover-card/checkbox/slider/switch/progress/scroll-area/radio-group/toggle/
+  toggle-group/combobox/textarea/input-group/aspect-ratio/breadcrumb/button-group/form/item/
+  navigation-menu/alert-dialog/direction + assistant-ui/badge) that upstream 0.15.1 does not ship
+  and nothing referenced. No srcjs file imports "radix-ui" anymore.
+- radix-ui stays a dependency because @assistant-ui/react 0.15.1 uses it internally for its own
+  primitives (ActionBarMore/ThreadListItemMore/AssistantModal/Composer) - matches upstream.
+
 
 ## Follow-ups: devtools prod-exclusion, official ModelSelector, upstream-delta review
 
