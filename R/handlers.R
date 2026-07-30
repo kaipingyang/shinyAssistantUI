@@ -1004,14 +1004,14 @@ make_claude_handler <- function(options       = NULL,
           err(paste0("Permission mode is not available for dynamic selection: ", mode))
           return(invisible(NULL))
         }
-        current <- permission_mode_for(thread_id)
         assign(thread_id, mode, envir = permission_modes)
-        # 切到/切出伪模式改的是连接时选项(settings / prompt-tool)→ 需重连;真实模式之间热切换。
-        if (mode %in% pseudo || current %in% pseudo) {
-          reset_clients()
-        } else if (!is.null(cl)) {
-          cl$set_permission_mode(mode)
-        }
+        # 之前:真实模式之间用 cl$set_permission_mode() 热切换。但 Claude Code CLI 不允许
+        # 运行时【升级】到更宽松模式(尤其 bypassPermissions —— 安全限制:不能中途给自己免审批),
+        # 该控制请求会被接受却不生效 → 切到 Bypass 后"啥审批都还在弹"。改为统一 reset_clients():
+        # 下条消息经 resume 重连,并在连接时用 --permission-mode 落地新模式(连接时模式一定被采纳),
+        # 与 askAll/yolo/thinking 的处理一致、确定生效。代价:切换即断开当前 client,下条消息重连
+        # (若切换时正挂着审批卡,请重新发送)。
+        reset_clients()
         ok(paste0("Permission mode submitted: ", mode), value = mode)
       } else if (grepl("^thinking:", id)) {
         tv <- sub("^thinking:", "", id)

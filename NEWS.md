@@ -1,3 +1,16 @@
+# shinyAssistantUI 0.2.2.9016 (dev branch)
+
+## Bug fix
+
+- **Switching permission mode to Bypass (or Auto-edit) had no effect on the live session** — it kept
+  prompting for every tool. Cause: real-mode switches used the runtime `set_permission_mode` control
+  request, but Claude Code will not hot-*escalate* to a more permissive mode mid-session (accepted
+  but not applied). Fix: permission-mode changes now `reset_clients()` so the next message reconnects
+  with the mode applied at connect time (`--permission-mode`), which is always honored — same as the
+  askAll/yolo/thinking paths. Verified with a real CLI test (`verify_permission_mode.R`): default
+  prompts for Bash, bypassPermissions does not. Note: switching disconnects the current client, so
+  if you switch while an approval card is pending, resend the message.
+
 # shinyAssistantUI 0.2.2.9015 (dev branch)
 
 ## UX
