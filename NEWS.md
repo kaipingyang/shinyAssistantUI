@@ -1,4 +1,10 @@
-# shinyAssistantUI 0.2.2.9020 (dev branch)
+# shinyAssistantUI 0.2.2.9021 (dev branch)
+
+- Compact composer keeps all controls (attachment, permission mode, model selector, usage ring) inline
+  on the single flat row (earlier they were dropped/moved).
+- Approval cards now auto-scroll into view when they appear during continuous approvals (the turn is
+  suspended so assistant-ui's stream auto-scroll did not fire).
+
 
 - addin UI preferences (default permission mode, mode visibility, composer height, run_r toggle) are
   now stored in a single human-readable ~/.claude_addin/addin_settings.json (was 4 separate .rds).

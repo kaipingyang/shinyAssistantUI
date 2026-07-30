@@ -12,7 +12,10 @@ attr(handler, "ui_capabilities") <- list(
     list(value = "bypassPermissions", label = "Bypass"),
     list(value = "yolo", label = "YOLO")
   )),
-  thinking = list(value = "default", options = list(list(value = "default", label = "Default")))
+  thinking = list(value = "default", options = list(list(value = "default", label = "Default"))),
+  model = list(value = "sonnet", options = list(
+    list(value = "sonnet", label = "Sonnet"), list(value = "opus", label = "Opus")
+  ))
 )
 # 需 action_handler attr 才会暴露 ui_capabilities(见 server.R .uses_handler_action)。
 attr(handler, "action_handler") <- function(id, thread_id, send_action_result = function(...) {}) {

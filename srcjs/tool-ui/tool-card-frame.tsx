@@ -2,7 +2,7 @@
 // 缩进 + 决策记忆。ShinyToolFallback(默认审批体)和各 per-tool 交互组件(如 AskUserQuestion)
 // 都复用它,交互体经 `approvalBody` 插槽注入 —— 这是官方"per-message inline tool render
 // override"模式的落地(替代已 deprecated 的 makeAssistantToolUI/useAssistantToolUI 注册表)。
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ShinyToolResult } from "@/shiny-tool-result";
@@ -121,6 +121,19 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
 
+  // 连续审批时,新审批框出现要主动滚进视口(轮次挂起时 assistant-ui 的自动滚动不触发)。
+  const showApproval = pending && needsApproval && decision === null;
+  const approvalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (showApproval) {
+      const id = window.setTimeout(
+        () => approvalRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }),
+        50,
+      );
+      return () => window.clearTimeout(id);
+    }
+  }, [showApproval]);
+
   return (
     <div
       className="aui-shiny-tool"
@@ -170,7 +183,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
       </ToolFallback.Root>
       {/* 审批 / 交互体放在折叠内容【外面】：待处理时始终可见,即使卡被折叠也能操作。 */}
       {pending && needsApproval && decision === null && (
-        <div className="aui-shiny-approval mt-1 flex flex-col gap-2">
+        <div ref={approvalRef} className="aui-shiny-approval mt-1 flex flex-col gap-2">
           {Boolean(ann?.title || ann?.description || ann?.displayName) && (
             <div className="aui-approval-meta flex flex-col gap-0.5">
               {ann?.title != null && String(ann.title) !== "" && (
