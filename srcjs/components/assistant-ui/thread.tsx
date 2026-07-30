@@ -417,16 +417,16 @@ const Composer: FC = () => {
           <ComposerAttachments />
           <IdeContextIndicator />
           {compact ? (
-            // 扁平单行(≈shinychat):保留全部左侧控件(附件/权限/模型/用量环)+ 输入(flex-1)+ 发送,
-            // 全在一行;附件预览 / IDE 上下文条在上方按需出现。comfortable 保留完整两行布局。
+            // 扁平单行(≈shinychat):输入框在最左(flex-1,光标贴最左),控件(附件/权限/模型/用量环)
+            // + 发送全在右侧;附件预览 / IDE 上下文条在上方按需出现。comfortable 保留完整两行布局。
             <div className="aui-composer-compact-row flex items-end gap-1.5">
+              <div className="min-w-0 flex-1">
+                <ShinyComposerInput onFocus={refreshIdeContext} />
+              </div>
               <ComposerAddAttachment />
               <PermissionModeControl compact />
               <ModelPickerDialog />
               <ShinyContextDisplay />
-              <div className="min-w-0 flex-1">
-                <ShinyComposerInput onFocus={refreshIdeContext} />
-              </div>
               <ComposerSendGroup />
             </div>
           ) : (

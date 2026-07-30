@@ -1,4 +1,8 @@
-# shinyAssistantUI 0.2.2.9021 (dev branch)
+# shinyAssistantUI 0.2.2.9022 (dev branch)
+
+- Compact composer: input is now first (far-left, flex-1) with controls on the right, so the caret
+  starts at the far left (was pushed to center by the left-side controls).
+
 
 - Compact composer keeps all controls (attachment, permission mode, model selector, usage ring) inline
   on the single flat row (earlier they were dropped/moved).

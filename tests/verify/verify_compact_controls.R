@@ -1,7 +1,7 @@
 # Issue2 验证:compact 单行保留 model/permission/send 控件。
 suppressMessages({library(chromote); library(callr)})
 `%||%`<-function(x,y) if(is.null(x))y else x
-PROJ<-"/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT<-9835L
+PROJ<-"/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT<-9841L
 p<-callr::r_bg(function(proj,port){setwd(proj);Sys.setenv(AUI_TEST_DENSITY="compact");suppressMessages(library(shiny));shiny::runApp("tests/verify/settings_ux_app.R",host="127.0.0.1",port=port,launch.browser=FALSE)},args=list(proj=PROJ,port=PORT),stdout="/tmp/cc.o",stderr="/tmp/cc.e")
 on.exit(try(p$kill(),silent=TRUE),add=TRUE);Sys.sleep(10)
 b<-chromote::ChromoteSession$new();ev<-function(js)tryCatch(b$Runtime$evaluate(js)$result$value,error=function(e)NA)
