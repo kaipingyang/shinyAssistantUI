@@ -1,3 +1,9 @@
+# shinyAssistantUI 0.2.2.9019 (dev branch)
+
+- Switching working directory now reloads that project's local skills/commands and hot-updates the
+  slash menu (previously skills were read once at startup, so a switched-to project's .claude skills
+  were not picked up). New ctrl$send_commands() + :commands message path.
+
 # shinyAssistantUI 0.2.2.9018 (dev branch)
 
 ## Bug fixes & compact flat composer

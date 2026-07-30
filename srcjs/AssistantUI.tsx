@@ -103,7 +103,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   }[]) ?? [];
   const cfgValue = {
     tools: (config?.tools as { name: string; description?: string }[]) ?? [],
-    commands: mergeSlashCommands(configuredCommands, rt.serverCommands, actionItems),
+    commands: mergeSlashCommands(rt.commands ?? configuredCommands, rt.serverCommands, actionItems),
     actionItems,
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,

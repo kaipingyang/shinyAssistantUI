@@ -1004,6 +1004,11 @@ assistantUIServer <- function(id, handler,
       pending_sessions <<- sessions
       session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
     },
+    # 本地 skills / commands 热更新(切换工作目录后重载新项目 .claude 的 skills)。
+    send_commands = function(commands) {
+      session$sendCustomMessage(paste0(input_id, ":commands"),
+                                list(commands = commands))
+    },
     # 推送当前工作目录 + 最近目录列表给 UI（切目录时先发这个，再重推 sessions）。
     send_working_dir = function(dir, recent = list()) {
       session$sendCustomMessage(paste0(input_id, ":working-dir"),

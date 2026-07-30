@@ -114,10 +114,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     : "client";
   const usesClientPersistence = persistence === "client";
 
-  // 从 config 提取 commands，用于 /commandName → cmd.prompt 展开（useMemo 稳定引用）
-  const commands = useMemo(
+  // 从 config 提取 commands（本地 skills），用于 /commandName → cmd.prompt 展开 + slash 菜单。
+  // 用 state 而非 useMemo：切换工作目录时 R 会重载该项目的 skills 并经 :commands 热更新。
+  const [commands, setCommands] = useState<CommandDef[]>(
     () => (config?.commands as CommandDef[] | undefined) ?? [],
-    [config],
   );
   const actionItems = useMemo(
     () => (config?.action_items as ActionItemDef[] | undefined) ?? [],
@@ -677,6 +677,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         "```", body, "```",
       ].join("\n");
       deliverTextRef.current?.(text, threadId);
+    });
+    // 本地 skills 热更新(切换工作目录时 R 重载该项目 .claude 的 skills 并经 :commands 下发)。
+    bridge.current.onCommands((d) => {
+      setCommands(((d.commands ?? []) as CommandDef[]) ?? []);
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     bridge.current.onServerCommands((d) => {
@@ -1715,6 +1719,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     rateLimit,                                                           // #3
     statusText,                                                          // #4
     serverCommands,                                                      // #5
+    commands,                                                            // 本地 skills(可 :commands 热更新)
     warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
     warmingResuming: warmingResumingThreads.has(currentThreadId),        // 该冷启动是否为"恢复历史"
     stopTask: (taskId: string) => invokeAction({ id: `stoptask:${taskId}`, label: `Stop task` }), // #7

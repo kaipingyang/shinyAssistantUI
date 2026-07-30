@@ -351,6 +351,12 @@
       if (identical(nd, dir_state$cwd)) return(invisible(nd))   # cwd 未变 → 跳过重连/收藏/推送
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
+      # 切目录后重载新项目的 skills/commands 并热更新 slash 菜单(之前只在启动读一次 →
+      # 切过去看不到新项目 .claude 的 skills)。
+      tryCatch(
+        ctrl$send_commands(load_claude_skills(project_dir = nd)),
+        error = function(e) NULL
+      )
       recent <- add_recent(nd)
       ctrl$send_working_dir(nd, as.list(recent))
       push_sessions()

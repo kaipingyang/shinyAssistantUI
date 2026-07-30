@@ -136,6 +136,7 @@ export interface ShinyBridge {
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
   onWarming: (handler: (data: { threadId?: string; active?: boolean; resuming?: boolean }) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
+  onCommands: (handler: (data: { commands?: unknown[] }) => void) => void;
   onIdeContext: (handler: (data: IdeContextMeta) => void) => void;
   onWorkspaceResults: (handler: (data: WorkspaceResults) => void) => void;
 }
@@ -434,6 +435,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
+    },
+    onCommands(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:commands`, (data) => handler(data as never));
     },
     onIdeContext(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:ide-context`, (data) => handler(data as IdeContextMeta));
