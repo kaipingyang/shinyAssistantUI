@@ -97,6 +97,9 @@ export interface ShinyConfigCtx {
   /** Plan 45: which risky modes appear in the mode selector (hide Bypass/YOLO). */
   modeVisibility?: { showBypass: boolean; showYolo: boolean };
   setModeVisibility?: (value: { showBypass: boolean; showYolo: boolean }) => void;
+  /** Plan 45: composer height preset — "comfortable" (default) | "compact" (flat, ~shinychat). */
+  composerDensity?: "comfortable" | "compact";
+  setComposerDensity?: (value: "comfortable" | "compact") => void;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

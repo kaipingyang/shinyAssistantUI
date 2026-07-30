@@ -110,6 +110,7 @@ export interface ShinyBridge {
   sendAutoRunEnabled: (value: boolean) => void;
   sendDefaultPermissionMode: (value: string) => void;
   sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
+  sendComposerDensity: (value: string) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
@@ -469,6 +470,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendModeVisibility(value) {
       Shiny.setInputValue(`${inputId}_mode_visibility`, { showBypass: value.showBypass, showYolo: value.showYolo, ts: Date.now() }, { priority: "event" });
+    },
+    sendComposerDensity(value) {
+      Shiny.setInputValue(`${inputId}_composer_density`, { value, ts: Date.now() }, { priority: "event" });
     },
     onProjects(handler) {
       projectsHandler = handler;

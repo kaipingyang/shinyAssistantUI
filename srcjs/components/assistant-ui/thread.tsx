@@ -127,7 +127,7 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth } = useShinyConfig();
+  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth, composerDensity } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
@@ -220,6 +220,9 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
         ["--composer-radius" as string]: "1.5rem",
         ["--composer-padding" as string]: "8px",
+        // Plan 45:输入框高度两档。compact ≈ 单行(shinychat 风格),comfortable = 现状。
+        // 只改【最小/起始】高度;自动增高(max-h-32)不变。
+        ["--composer-min-height" as string]: composerDensity === "compact" ? "1.5rem" : "2.5rem",
       }}
     >
       <ThreadPrimitive.Viewport

@@ -130,6 +130,12 @@
     if (is.list(v)) list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
     else list(showBypass = TRUE, showYolo = TRUE)
   }
+  composer_density_pref <- new.env(parent = emptyenv())
+  composer_density_pref$v <- {
+    p <- .claude_addin_path("composer_density.rds")
+    v <- if (file.exists(p)) tryCatch(readRDS(p), error = function(e) NULL) else NULL
+    if (is.character(v) && length(v) == 1L && v %in% c("comfortable", "compact")) v else "comfortable"
+  }
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -226,6 +232,12 @@
       on_set_mode_visibility = function(v) {
         mode_vis_pref$v <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
         tryCatch(saveRDS(mode_vis_pref$v, .claude_addin_path("mode_visibility.rds")),
+                 error = function(e) NULL)
+      },
+      composer_density = composer_density_pref$v,
+      on_set_composer_density = function(d) {
+        composer_density_pref$v <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
+        tryCatch(saveRDS(composer_density_pref$v, .claude_addin_path("composer_density.rds")),
                  error = function(e) NULL)
       },
       files_pane_follow = if (native_picker) follow_pref$on else NULL,

@@ -265,6 +265,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       return mv ? { showBypass: mv.showBypass !== false, showYolo: mv.showYolo !== false } : undefined;
     },
   );
+  const [composerDensity, setComposerDensityState] = useState<"comfortable" | "compact" | undefined>(
+    () => (config?.composer_density === "compact" || config?.composer_density === "comfortable"
+      ? config.composer_density : undefined),
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -1679,6 +1683,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => {
       setModeVisibilityState(value);
       bridge.current.sendModeVisibility(value);
+    },
+    composerDensity,
+    setComposerDensity: (value: "comfortable" | "compact") => {
+      setComposerDensityState(value);
+      bridge.current.sendComposerDensity(value);
     },
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,

@@ -184,8 +184,36 @@ function ModeVisibilityControl() {
   );
 }
 
+// Plan 45:输入框高度两档(Compact 扁平 ≈ shinychat / Comfortable 现状),只改起始高度。
+function ComposerDensityControl() {
+  const { composerDensity, setComposerDensity } = useShinyConfig();
+  const selectId = useId();
+  if (composerDensity === undefined || !setComposerDensity) return null;
+  return (
+    <div className="aui-composer-density mt-3 space-y-1.5">
+      <div>
+        <label htmlFor={selectId} className="text-foreground text-xs font-medium">Composer height</label>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          Compact keeps a flat single-line input (grows as you type).
+        </p>
+      </div>
+      <select
+        id={selectId}
+        aria-label="Composer height"
+        data-slot="aui_composer_density"
+        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+        value={composerDensity}
+        onChange={(e) => setComposerDensity(e.target.value === "compact" ? "compact" : "comfortable")}
+      >
+        <option value="comfortable">Comfortable</option>
+        <option value="compact">Compact</option>
+      </select>
+    </div>
+  );
+}
+
 export function SidebarSettings() {
-  const { permissionMode, thinking } = useShinyConfig();
+  const { permissionMode, thinking, composerDensity } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -195,7 +223,7 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode && !thinking) return null;
+  if (!permissionMode && !thinking && composerDensity === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -232,6 +260,7 @@ export function SidebarSettings() {
           <DefaultModeControl />
           <ModeVisibilityControl />
           <ThinkingControl />
+          <ComposerDensityControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>

@@ -255,6 +255,8 @@ assistantUIServer <- function(id, handler,
                               on_set_default_permission_mode = NULL,
                               mode_visibility = NULL,
                               on_set_mode_visibility = NULL,
+                              composer_density = NULL,
+                              on_set_composer_density = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -356,6 +358,9 @@ assistantUIServer <- function(id, handler,
       showBypass = isTRUE(mode_visibility$showBypass %||% mode_visibility$show_bypass),
       showYolo   = isTRUE(mode_visibility$showYolo   %||% mode_visibility$show_yolo)
     )
+  # Plan 45:输入框高度预设(comfortable/compact)。
+  if (!is.null(composer_density))
+    config$composer_density <- as.character(composer_density)[[1L]]
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -609,6 +614,14 @@ assistantUIServer <- function(id, handler,
       tryCatch(on_set_mode_visibility(list(
         showBypass = isTRUE(msg$showBypass), showYolo = isTRUE(msg$showYolo)
       )), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_set_composer_density)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_composer_density")]], {
+      msg <- session$input[[paste0(input_id, "_composer_density")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_set_composer_density(as.character(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 

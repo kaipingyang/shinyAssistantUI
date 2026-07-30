@@ -26,7 +26,9 @@ server <- function(input, output, session) {
     default_permission_mode = "default",
     on_set_default_permission_mode = function(m) message("SET_DEFAULT_MODE=", m),
     mode_visibility = list(showBypass = TRUE, showYolo = FALSE),  # YOLO 初始隐藏
-    on_set_mode_visibility = function(v) message("SET_VIS bypass=", isTRUE(v$showBypass), " yolo=", isTRUE(v$showYolo))
+    on_set_mode_visibility = function(v) message("SET_VIS bypass=", isTRUE(v$showBypass), " yolo=", isTRUE(v$showYolo)),
+    composer_density = getOption("AUI_TEST_DENSITY", Sys.getenv("AUI_TEST_DENSITY", "comfortable")),
+    on_set_composer_density = function(d) message("SET_DENSITY=", d)
   )
 }
 shinyApp(ui, server)
