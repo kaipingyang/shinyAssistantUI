@@ -318,6 +318,25 @@
   tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
   invisible(NULL)
 }
+
+# ── 权限模式切换策略 ─────────────────────────────────────────────────────────
+# 实测(hotswitch_test.R):Claude Code CLI 允许运行时【降权】(变严)热切换,但不允许
+# 运行时【提权】(变松,尤其 bypassPermissions)——提权控制请求被接受却不生效。
+# 故:降权/同级 → set_permission_mode 热切换(即时);提权 → 重连(连接时 --permission-mode
+# 一定采纳)。askAll/yolo 是伪模式(改连接时 settings / prompt-tool),恒重连。
+# 安全性:唯一会热切换的是"降权",即便某个降权热切换未生效,最坏也只是"比预期更严"(多问),
+# 绝不会"比预期更松"(少问),不构成安全风险。
+.permission_mode_rank <- function(mode) {
+  switch(as.character(mode %||% "default"),
+    askAll = 0L, plan = 1L, default = 2L, acceptEdits = 3L, bypassPermissions = 4L, yolo = 5L,
+    2L)  # 未知模式按 default 处理
+}
+.permission_switch_strategy <- function(from, to) {
+  pseudo <- c("askAll", "yolo")
+  if ((to %in% pseudo) || (from %in% pseudo)) return("reconnect")
+  if (.permission_mode_rank(to) > .permission_mode_rank(from)) return("reconnect")  # 提权
+  "hot"  # 降权 / 同级
+}
 # 把 text + file 类附件拼成注入用的文本上下文（image 类由各 handler 单独处理）。
 # file 类（PDF/xlsx/二进制等）内容是 base64，无法直接喂文本模型——这里至少把
 # 文件名/类型作为提示注入，让 AI 知道用户上传了文件、能据此回应，而非静默丢弃
@@ -1004,14 +1023,16 @@ make_claude_handler <- function(options       = NULL,
           err(paste0("Permission mode is not available for dynamic selection: ", mode))
           return(invisible(NULL))
         }
+        current <- permission_mode_for(thread_id)
         assign(thread_id, mode, envir = permission_modes)
-        # 之前:真实模式之间用 cl$set_permission_mode() 热切换。但 Claude Code CLI 不允许
-        # 运行时【升级】到更宽松模式(尤其 bypassPermissions —— 安全限制:不能中途给自己免审批),
-        # 该控制请求会被接受却不生效 → 切到 Bypass 后"啥审批都还在弹"。改为统一 reset_clients():
-        # 下条消息经 resume 重连,并在连接时用 --permission-mode 落地新模式(连接时模式一定被采纳),
-        # 与 askAll/yolo/thinking 的处理一致、确定生效。代价:切换即断开当前 client,下条消息重连
-        # (若切换时正挂着审批卡,请重新发送)。
-        reset_clients()
+        # 两级切换(见 .permission_switch_strategy):降权/同级热切换(即时);提权/伪模式重连
+        # (下条消息 resume 重连,连接时 --permission-mode 落地 —— 运行时提权 CLI 不认)。
+        strategy <- .permission_switch_strategy(current, mode)
+        if (identical(strategy, "hot") && !is.null(cl)) {
+          cl$set_permission_mode(mode)
+        } else {
+          reset_clients()
+        }
         ok(paste0("Permission mode submitted: ", mode), value = mode)
       } else if (grepl("^thinking:", id)) {
         tv <- sub("^thinking:", "", id)
