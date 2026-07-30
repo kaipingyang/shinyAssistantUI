@@ -367,7 +367,7 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
         <div className="mt-4 flex justify-end gap-2">
           <DialogClose render={<Button variant="outline" size="sm" data-cancel-delete>Cancel</Button>} />
           <ThreadListItemPrimitive.Delete asChild>
-            <Button variant="destructive" size="sm" data-confirm-delete>Delete permanently</Button>
+            <Button variant="destructive" size="sm" data-confirm-delete onClick={() => setConfirmOpen(false)}>Delete permanently</Button>
           </ThreadListItemPrimitive.Delete>
         </div>
       </DialogContent>
