@@ -13,6 +13,7 @@ type ThreadTokenUsage = {
 import {
   Tooltip,
   TooltipContent,
+  TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -146,7 +147,9 @@ function ContextDisplayRootBase({
 
   return (
     <ContextDisplayContext.Provider value={contextValue}>
-      <Tooltip>{children}</Tooltip>
+      <TooltipProvider>
+        <Tooltip>{children}</Tooltip>
+      </TooltipProvider>
     </ContextDisplayContext.Provider>
   );
 }
@@ -168,18 +171,20 @@ function ContextDisplayTrigger({
   ...props
 }: React.ComponentProps<"button">) {
   return (
-    <TooltipTrigger asChild>
-      <button
-        type="button"
-        data-slot="context-display-trigger"
-        className={cn(
-          "inline-flex items-center rounded-md transition-colors",
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </button>
+    <TooltipTrigger
+      render={
+        <button
+          type="button"
+          data-slot="context-display-trigger"
+          className={cn(
+            "inline-flex items-center rounded-md transition-colors",
+            className,
+          )}
+          {...props}
+        />
+      }
+    >
+      {children}
     </TooltipTrigger>
   );
 }
