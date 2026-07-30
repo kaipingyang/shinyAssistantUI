@@ -2,7 +2,7 @@
 # 切换可见性回调触发(stderr SET_VIS);0 console error。
 suppressMessages({library(chromote); library(callr)})
 `%||%` <- function(x, y) if (is.null(x)) y else x
-PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 9787L
+PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 9799L
 p <- callr::r_bg(function(proj, port){setwd(proj);suppressMessages(library(shiny));shiny::runApp("tests/verify/settings_ux_app.R",host="127.0.0.1",port=port,launch.browser=FALSE)}, args=list(proj=PROJ,port=PORT), stdout="/tmp/su.o", stderr="/tmp/su.e")
 on.exit(try(p$kill(),silent=TRUE),add=TRUE); Sys.sleep(10)
 if(!p$is_alive()){cat("BOOT FAIL\n");cat(tail(readLines("/tmp/su.e"),8),sep="\n");quit(status=1)}
