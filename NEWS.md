@@ -1,4 +1,17 @@
-# shinyAssistantUI 0.2.2.9017 (dev branch)
+# shinyAssistantUI 0.2.2.9018 (dev branch)
+
+## Bug fixes & compact flat composer
+
+- New-conversation default mode now reflected on new chats (composer fell back to the static
+  page-load value; now uses the live default; unswitched threads follow the current default).
+- Delete-confirmation dialog now dismisses immediately on "Delete permanently" (was staying open
+  until an outside click, because the delete is async).
+- Auto-scroll during tool calls fixed: backported 0.15.1 message containment (contain-intrinsic-size
+  auto_24px->auto_200px moved to the message root), so large tool cards/approval boxes below the fold
+  are measured correctly and the viewport follows them.
+- Compact composer height is now a genuinely flat single-row inline layout (input + send on one row,
+  ~shinychat), ~40%% shorter than Comfortable.
+
 
 ## Settings & permission-mode UX (Plan 45)
 
