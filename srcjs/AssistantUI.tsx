@@ -1,6 +1,15 @@
-import { useEffect, forwardRef, type ReactNode } from "react";
+import { useEffect, forwardRef, lazy, Suspense, type ReactNode } from "react";
 import { AssistantRuntimeProvider, AssistantModalPrimitive } from "@assistant-ui/react";
-import { DevToolsModal } from "@assistant-ui/react-devtools";
+
+// Build-time flag (vite define, default false). When false, the devtools dynamic import below
+// is dead-code and tree-shaken OUT of the prod bundle. Build with `AUI_DEVTOOLS=1 npm run build`
+// to include it for debugging (then enable at runtime via ?aui-devtools=1 or config.devtools).
+declare const __AUI_DEVTOOLS__: boolean;
+const DevToolsModalLazy = __AUI_DEVTOOLS__
+  ? lazy(() =>
+      import("@assistant-ui/react-devtools").then((m) => ({ default: m.DevToolsModal })),
+    )
+  : null;
 import { BotIcon } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
@@ -18,12 +27,17 @@ import { ShinyConfigContext } from "./shiny-config-context";
 // @assistant-ui/react-devtools 的浮层 modal,便于迁移期检查 ExternalStore 运行时/消息 parts。
 // 必须在 AssistantRuntimeProvider 内渲染。默认不启用,不影响正常使用。
 function ShinyDevTools({ config }: { config: Record<string, unknown> }) {
+  if (!__AUI_DEVTOOLS__ || !DevToolsModalLazy) return null;
   const enabled =
     config?.devtools === true ||
     (typeof window !== "undefined" &&
       new URLSearchParams(window.location.search).has("aui-devtools"));
   if (!enabled) return null;
-  return <DevToolsModal />;
+  return (
+    <Suspense fallback={null}>
+      <DevToolsModalLazy />
+    </Suspense>
+  );
 }
 
 interface AssistantUIProps {

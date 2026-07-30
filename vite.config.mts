@@ -56,6 +56,8 @@ export default defineConfig({
   ],
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),
+    // 默认排除 devtools;`AUI_DEVTOOLS=1 npm run build` 打包含 devtools 的调试版。
+    __AUI_DEVTOOLS__: process.env.AUI_DEVTOOLS === "1" ? "true" : "false",
   },
   build: {
     lib: {
