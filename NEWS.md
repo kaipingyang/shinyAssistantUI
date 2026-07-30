@@ -1,4 +1,20 @@
-# shinyAssistantUI 0.2.2.9010 (dev branch)
+# shinyAssistantUI 0.2.2.9011 (dev branch)
+
+## radix -> base-ui foundation migration (Plan 44, dev)
+
+- Migrated the vendored UI primitives from radix-ui to **base-ui** (-ui/react), tracking
+  assistant-ui 0.15.x: tooltip, collapsible, button, dialog, avatar, badge, separator, label,
+  input, skeleton. Synced the assistant-ui components that depend on them (tooltip-icon-button,
+  tool-group, tool-fallback, reasoning, attachment) to their 0.15.1 templates.
+- Fixes real drift: the `asChild`->`render` prop change (restored data-*/onClick forwarding, e.g.
+  the Run-in-Console button) and `data-[state=open/closed]`->`data-open/closed` (restored
+  collapsible/arrow animations). Trimmed orphan primitives/components (model-selector, mcp-config,
+  flow-expand, sidebar, command, popover, sheet).
+- Verified: tsc 0 + 242 vitest + 26/26 example gallery + verify_markdown/token_usage/tool_approval/
+  tool_card_fixes/askquestion/latex/agent_state/edit/strict_mode (0 console errors). thread/
+  thread-list/markdown-text/context-display already correct on base-ui (data-attrs match 0.15.1);
+  full template re-sync of those heavy-custom components deferred (high-risk, low-value).
+
 
 ## Sync-0.15 P2: react-devtools (dev-only, opt-in)
 
