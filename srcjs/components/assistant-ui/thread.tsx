@@ -219,9 +219,9 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         ["--composer-bg" as string]:
           "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
         ["--composer-radius" as string]: "1.5rem",
-        ["--composer-padding" as string]: "8px",
-        // Plan 45:输入框高度两档。compact ≈ 单行(shinychat 风格),comfortable = 现状。
-        // 只改【最小/起始】高度;自动增高(max-h-32)不变。
+        // Plan 45:输入框高度两档。compact = 更扁(更矮的起始输入 + 更小内边距,≈shinychat),
+        // comfortable = 现状。只改起始/内边距;自动增高(max-h-32)不变。
+        ["--composer-padding" as string]: composerDensity === "compact" ? "4px" : "8px",
         ["--composer-min-height" as string]: composerDensity === "compact" ? "1.5rem" : "2.5rem",
       }}
     >

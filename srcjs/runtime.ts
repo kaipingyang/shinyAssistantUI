@@ -1622,6 +1622,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     ? {
         value: currentPermissionPending?.requested
           ?? permissionValues[currentThreadId]
+          ?? defaultPermissionMode
           ?? permissionCapability.value,
         options: permissionCapability.options,
         pending: Boolean(currentPermissionPending),
