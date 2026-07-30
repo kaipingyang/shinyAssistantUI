@@ -1,6 +1,6 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9405L
+port <- 9495L
 unlink(c("/tmp/aui-ce.out", "/tmp/aui-ce.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -32,8 +32,11 @@ click_xy <- function(sel) {
   browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L); TRUE
 }
 hover_msg <- function() {
-  j <- value("(function(){const m=document.querySelector('[data-role=\"user\"] .aui-user-message-content')||document.querySelector('[data-role=\"user\"]');if(!m)return null;const r=m.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()")
-  if (is.null(j)) return(FALSE); p <- fromJSON(j); browser$Input$dispatchMouseEvent(type = "mouseMoved", x = p$x, y = p$y); TRUE
+  j <- value("(function(){const m=document.querySelector('[data-role=\"user\"] .aui-user-message-content')||document.querySelector('[data-role=\"user\"]');if(!m)return null;m.scrollIntoView({block:'center'});const r=m.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()")
+  if (is.null(j)) return(FALSE); p <- fromJSON(j)
+  browser$Input$dispatchMouseEvent(type = "mouseMoved", x = p$x, y = p$y)
+  browser$Input$dispatchMouseEvent(type = "mouseMoved", x = p$x, y = p$y + 4)
+  return(TRUE)
 }
 press_key <- function(key, code, vk, mods = 0L) {
   browser$Input$dispatchKeyEvent(type = "keyDown", key = key, code = code, windowsVirtualKeyCode = vk, modifiers = mods)

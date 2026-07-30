@@ -298,6 +298,26 @@
   .atomic_save_rds(current, path)
   invisible(current)
 }
+
+# ── 工具审批决策持久化 ────────────────────────────────────────────────────────
+# 键 = CLI tool_use id（跨会话全局唯一，且会话恢复时 .claude_msgs_to_thread 用同一 id 作
+# toolCallId），故单文件 tool_call_id → "approved"/"denied" 即可,无需按 session 分桶。
+# 用途:打开历史 session 时把用户当时的允许/拒绝状态回填到工具卡(否则重开后丢失)。
+.claude_decisions_path <- function(session_map_path) {
+  if (is.null(session_map_path) || !nzchar(session_map_path %||% "")) return(NULL)
+  file.path(dirname(session_map_path), "tool_decisions.rds")
+}
+.read_tool_decisions <- function(path) {
+  if (is.null(path) || !nzchar(path %||% "") || !file.exists(path)) return(list())
+  tryCatch({ v <- readRDS(path); if (is.list(v)) v else list() }, error = function(e) list())
+}
+.record_tool_decision <- function(path, tool_call_id, decision) {
+  if (is.null(path) || is.null(tool_call_id) || !nzchar(tool_call_id %||% "")) return(invisible(NULL))
+  cur <- .read_tool_decisions(path)
+  cur[[tool_call_id]] <- decision
+  tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
+  invisible(NULL)
+}
 # 把 text + file 类附件拼成注入用的文本上下文（image 类由各 handler 单独处理）。
 # file 类（PDF/xlsx/二进制等）内容是 base64，无法直接喂文本模型——这里至少把
 # 文件名/类型作为提示注入，让 AI 知道用户上传了文件、能据此回应，而非静默丢弃
@@ -830,6 +850,7 @@ make_claude_handler <- function(options       = NULL,
   # independent closures. Every mutation re-reads and atomically replaces the
   # map so one closure cannot publish a stale snapshot over another's entries.
   session_map <- .read_claude_session_map(session_map_path)
+  decisions_path <- .claude_decisions_path(session_map_path)
 
   read_session_id <- function(thread_id) {
     if (file.exists(session_map_path)) {
@@ -1323,6 +1344,7 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
+            .record_tool_decision(decisions_path, tuid, "approved")
             # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
             if (!is.null(decision$answers) && length(decision$answers)) {
               ui <- msg$tool_input %||% list()
@@ -1353,6 +1375,7 @@ make_claude_handler <- function(options       = NULL,
             has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
             deny_msg <- "Denied by user"
             if (has_msg) deny_msg <- decision$customMessage
+            .record_tool_decision(decisions_path, tuid, "denied")
             client$deny_tool(msg$request_id, deny_msg, interrupt = !has_msg)
             on_tool_result(tuid, deny_msg, is_error = TRUE)
           }
@@ -1575,7 +1598,9 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
         .get_claude_session_messages(session_id),
         error = function(e) list()
       )
-      snapshots$set(cache_key, .claude_msgs_to_thread(msgs))
+      snapshots$set(cache_key, .claude_msgs_to_thread(
+        msgs, .read_tool_decisions(.claude_decisions_path(session_map_path))
+      ))
     }
 
     page <- .history_message_page(
@@ -1707,7 +1732,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 }
 
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
-.claude_msgs_to_thread <- function(msgs) {
+.claude_msgs_to_thread <- function(msgs, decisions = list()) {
   result <- list()
   # 预扫:收集 user 轮里的 tool_result(按 tool_use_id),供历史工具卡显示真实结果/审批态
   # (之前一律写死 "Session ended",看不出跑了什么/是否被拒)。
@@ -1767,6 +1792,14 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               get0(tuid_h, envir = tool_results, inherits = FALSE, ifnotfound = NULL) else NULL
             res_txt <- if (!is.null(tr) && nzchar(tr$text)) tr$text else "Session ended"
             is_err  <- if (!is.null(tr)) isTRUE(tr$is_error) else FALSE
+            # 历史审批状态回填:用户当时的允许/拒绝(decisions 按 tool_use id)→ artifact.approvalResult,
+            # 使工具卡重开后仍显示 "✓ Approved / ✕ Denied";isError 也放进 artifact 让前端渲染错误态。
+            dec_h <- if (is.character(tuid_h) && length(tuid_h) == 1L && nzchar(tuid_h))
+              decisions[[tuid_h]] else NULL
+            artifact_h <- c(
+              list(isError = is_err),
+              if (!is.null(dec_h)) list(approvalResult = dec_h) else list()
+            )
             parts[[length(parts) + 1L]] <- list(
               type       = "tool-call",
               toolCallId = blk[["id"]] %||% paste0("h-tool-", length(parts)),
@@ -1777,7 +1810,8 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               # 对象而非字符串 → ToolFallback.Args 渲染 {argsText} 触发 React #31。
               argsText   = tryCatch(as.character(jsonlite::toJSON(args_val, auto_unbox=TRUE)), error=function(e) "{}"),
               result     = res_txt,
-              isError    = is_err
+              isError    = is_err,
+              artifact   = artifact_h
             )
           }
         }

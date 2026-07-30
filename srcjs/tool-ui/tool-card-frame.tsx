@@ -58,7 +58,10 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   const isError = (status?.type === "incomplete") || ann?.isError === true;
 
   const [decision, setDecision] = useState<null | "approved" | "denied">(
-    () => _decisionRegistry.get(_regKey(ann?.inputId as string | undefined, toolCallId)) ?? null,
+    () =>
+      _decisionRegistry.get(_regKey(ann?.inputId as string | undefined, toolCallId)) ??
+      (ann?.approvalResult as "approved" | "denied" | undefined) ??
+      null,
   );
   const [open, setOpen] = useState(defaultOpen);
   useEffect(() => {

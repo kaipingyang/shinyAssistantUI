@@ -1,6 +1,6 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9403L
+port <- 9729L
 unlink(c("/tmp/aui-edit.out", "/tmp/aui-edit.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {

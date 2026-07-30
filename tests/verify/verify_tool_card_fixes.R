@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9362L
+port <- 9596L
 unlink(c("/tmp/aui-tcf.out", "/tmp/aui-tcf.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {

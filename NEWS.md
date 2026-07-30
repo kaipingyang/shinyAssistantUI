@@ -1,3 +1,19 @@
+# shinyAssistantUI 0.2.2.9014 (dev branch)
+
+## Bug fixes (real-machine feedback)
+
+- **Run-in-console captured no output**: `.addin_run_r_capture` only returned the visible value, so
+  `cat()`/`print()` output (which goes to stdout) was lost — Claude saw "(no visible output)" and
+  retried, appearing one step behind. Now wraps eval in `capture.output()` (via an env box to avoid
+  `<<-` scoping) so stdout, the visible value, messages and warnings are all captured.
+- **Run-in-console separator too long**: the `── Claude ran in console ──` header used `cli::rule`,
+  which spans the full console width. Now a fixed-width cyan separator.
+- **History session lost approval/deny state**: tool cards showed "✓ Approved / ✕ Denied" live but
+  not after reopening a session. Decisions are now persisted server-side (`tool_decisions.rds`,
+  keyed by the CLI tool_use id which is stable across reloads), re-emitted by
+  `.claude_msgs_to_thread` as `artifact.approvalResult`, and read back by `useToolCard`. Verified
+  headlessly (`verify_session_decisions.R`).
+
 # shinyAssistantUI 0.2.2.9013 (dev branch)
 
 ## Source is now radix-free (matches upstream 0.15.1 ui/ layer)

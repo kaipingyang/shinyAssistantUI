@@ -4,7 +4,7 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9235L
+port <- 9759L
 failures <- character()
 unlink(c("/tmp/aui-da.out", "/tmp/aui-da.err"))
 
