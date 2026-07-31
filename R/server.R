@@ -216,6 +216,52 @@
 #'       (each a named list with `id`, `role`, `content` fields) to populate the
 #'       thread.
 #'
+#' @param on_edits Optional `function(edits)` called when the assistant proposes
+#'   file edits (used by the addin to show edit markers).
+#' @param working_dir Optional initial working directory shown in the
+#'   working-directory picker (addin).
+#' @param native_picker Logical; whether a native directory chooser is available
+#'   (RStudio addin).
+#' @param on_pick_working_dir Optional `function()` invoked to open the native
+#'   working-directory picker.
+#' @param on_set_working_dir Optional `function(path)` called when the working
+#'   directory changes.
+#' @param projects Optional character vector of saved working-directory favorites.
+#' @param on_save_project Optional `function()` to save the current directory as a
+#'   favorite.
+#' @param on_remove_project Optional `function(path)` to remove a saved favorite.
+#' @param files_pane_follow Optional logical initial state of the "Files pane
+#'   follows working dir" toggle (`NULL` hides it).
+#' @param on_toggle_files_pane_follow Optional `function(value)` called when that
+#'   toggle changes.
+#' @param auto_run Optional logical initial state of the auto-approve `run_r`
+#'   toggle (`NULL` hides it).
+#' @param on_toggle_auto_run Optional `function(value)` called when the auto-run
+#'   toggle changes.
+#' @param default_permission_mode Optional character; default permission mode for
+#'   new conversations (addin preference, persisted).
+#' @param on_set_default_permission_mode Optional `function(mode)` called when the
+#'   default-mode preference changes.
+#' @param mode_visibility Optional named list `list(showBypass=, showYolo=)`
+#'   controlling which risky modes appear in the mode selector.
+#' @param on_set_mode_visibility Optional `function(value)` called when mode
+#'   visibility changes.
+#' @param composer_density Optional character `"comfortable"` (default) or
+#'   `"compact"` composer height preset.
+#' @param on_set_composer_density Optional `function(value)` called when the
+#'   composer height preset changes.
+#' @param run_r_enabled Optional logical initial state of the `run_r` MCP tool
+#'   toggle (`NULL` hides it).
+#' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
+#'   toggle changes.
+#' @param show_usage Logical (default `FALSE`); show the token-usage indicator.
+#' @param context_window Optional integer context-window size for the usage
+#'   indicator.
+#' @param usage_style Character; usage indicator style, one of `"ring"`, `"bar"`,
+#'   `"text"`.
+#' @param latex Logical (default `FALSE`); enable KaTeX math rendering.
+#' @param allow_warmup Logical (default `TRUE`); allow per-thread cold-start
+#'   warmup of the handler.
 #' @return A list with a `clear()` function that creates a new thread in the UI,
 #'   `send_tool_call()` / `send_tool_result()` for manual tool card control, and
 #'   `send_sessions(sessions)` for injecting a list of historical session stubs

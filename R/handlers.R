@@ -782,6 +782,12 @@ make_ellmer_session_loader <- function(store) {
 #' @param session_map_path Path to the `.rds` file used to persist
 #'   `thread_id -> session_id` mappings. Defaults to
 #'   `".claude_session_map.rds"` in the current working directory.
+#' @param cwd_provider Optional zero-argument function returning the current
+#'   working directory to connect the CLI in (used by the addin's dir picker).
+#' @param thinking_provider Optional zero-argument function returning the current
+#'   thinking level to apply on connect.
+#' @param models Optional character vector of model ids to offer in the model
+#'   selector (a "Default" option is always prepended).
 #'
 #' @return A `coro::async` handler function compatible with [assistantUIServer()].
 #'
@@ -1567,6 +1573,8 @@ make_claude_handler <- function(options       = NULL,
 #'
 #' @param directory Project directory to filter sessions. Defaults to `here::here()`.
 #' @param limit Maximum number of sessions to return.
+#' @param archived_ids Character vector of session ids to mark as archived in the
+#'   returned list (so the sidebar can show them under an archived section).
 #'
 #' @return A list suitable for `ctrl$send_sessions(list(sessions = ...))`.
 #'

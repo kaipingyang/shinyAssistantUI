@@ -35,6 +35,14 @@ assistantUIServer(
   on_toggle_files_pane_follow = NULL,
   auto_run = NULL,
   on_toggle_auto_run = NULL,
+  default_permission_mode = NULL,
+  on_set_default_permission_mode = NULL,
+  mode_visibility = NULL,
+  on_set_mode_visibility = NULL,
+  composer_density = NULL,
+  on_set_composer_density = NULL,
+  run_r_enabled = NULL,
+  on_toggle_run_r = NULL,
   thread_max_width = NULL,
   show_usage = FALSE,
   context_window = NULL,
@@ -210,6 +218,9 @@ in browser contexts where no editor is available.}
 live R session (visible, with their objects/packages/plots). When supplied, R code
 blocks show a run button. Leave \code{NULL} (default) outside RStudio.}
 
+\item{on_edits}{Optional \verb{function(edits)} called when the assistant proposes
+file edits (used by the addin to show edit markers).}
+
 \item{on_archive_session}{Optional \verb{function(session_id, archived)} called when
 the user archives (\code{archived = TRUE}) or unarchives (\code{FALSE}) a session in the
 sidebar. Use it to persist a server-authoritative soft-hide list so archived
@@ -220,11 +231,76 @@ confirms deleting a session. This is destructive: the Claude addin wires it to
 \code{ClaudeAgentSDK::delete_session()}, permanently removing the transcript from
 disk. The UI requires an explicit confirmation before invoking it.}
 
+\item{working_dir}{Optional initial working directory shown in the
+working-directory picker (addin).}
+
+\item{native_picker}{Logical; whether a native directory chooser is available
+(RStudio addin).}
+
+\item{on_pick_working_dir}{Optional \verb{function()} invoked to open the native
+working-directory picker.}
+
+\item{on_set_working_dir}{Optional \verb{function(path)} called when the working
+directory changes.}
+
+\item{projects}{Optional character vector of saved working-directory favorites.}
+
+\item{on_save_project}{Optional \verb{function()} to save the current directory as a
+favorite.}
+
+\item{on_remove_project}{Optional \verb{function(path)} to remove a saved favorite.}
+
+\item{files_pane_follow}{Optional logical initial state of the "Files pane
+follows working dir" toggle (\code{NULL} hides it).}
+
+\item{on_toggle_files_pane_follow}{Optional \verb{function(value)} called when that
+toggle changes.}
+
+\item{auto_run}{Optional logical initial state of the auto-approve \code{run_r}
+toggle (\code{NULL} hides it).}
+
+\item{on_toggle_auto_run}{Optional \verb{function(value)} called when the auto-run
+toggle changes.}
+
+\item{default_permission_mode}{Optional character; default permission mode for
+new conversations (addin preference, persisted).}
+
+\item{on_set_default_permission_mode}{Optional \verb{function(mode)} called when the
+default-mode preference changes.}
+
+\item{mode_visibility}{Optional named list \code{list(showBypass=, showYolo=)}
+controlling which risky modes appear in the mode selector.}
+
+\item{on_set_mode_visibility}{Optional \verb{function(value)} called when mode
+visibility changes.}
+
+\item{composer_density}{Optional character \code{"comfortable"} (default) or
+\code{"compact"} composer height preset.}
+
+\item{on_set_composer_density}{Optional \verb{function(value)} called when the
+composer height preset changes.}
+
+\item{run_r_enabled}{Optional logical initial state of the \code{run_r} MCP tool
+toggle (\code{NULL} hides it).}
+
+\item{on_toggle_run_r}{Optional \verb{function(value)} called when the \code{run_r}
+toggle changes.}
+
 \item{thread_max_width}{Optional CSS length capping the chat content width
 (e.g. \code{"44rem"}, \code{"800px"}). Default \code{NULL} = \strong{full width} (fills the
 pane, like the Claude Code CLI / VS Code). Pass a length to center the
 conversation in a fixed-width column (assistant-ui's classic readable
 layout). Applies to messages, composer and the pinned-question bar together.}
+
+\item{show_usage}{Logical (default \code{FALSE}); show the token-usage indicator.}
+
+\item{context_window}{Optional integer context-window size for the usage
+indicator.}
+
+\item{usage_style}{Character; usage indicator style, one of \code{"ring"}, \code{"bar"},
+\code{"text"}.}
+
+\item{latex}{Logical (default \code{FALSE}); enable KaTeX math rendering.}
 
 \item{code_theme}{Character string selecting the syntax-highlighting theme
 for code blocks. Available light themes: \code{"one-light"} (default),
@@ -296,6 +372,9 @@ are the initial thread covered by this one-shot option.
 a backend connection at mount, so a slow/unreachable backend would stall the
 open (the default lazy connect only happens on the first message). Turn on
 only when the backend is reliably available at load.}
+
+\item{allow_warmup}{Logical (default \code{TRUE}); allow per-thread cold-start
+warmup of the handler.}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

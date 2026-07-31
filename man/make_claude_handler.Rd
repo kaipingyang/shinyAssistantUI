@@ -16,6 +16,15 @@ make_claude_handler(
 \item{options}{A \code{ClaudeAgentOptions} object. Defaults to
 \code{ClaudeAgentOptions(permission_mode = "default", permission_prompt_tool_name = "stdio", include_partial_messages = TRUE)}.}
 
+\item{cwd_provider}{Optional zero-argument function returning the current
+working directory to connect the CLI in (used by the addin's dir picker).}
+
+\item{thinking_provider}{Optional zero-argument function returning the current
+thinking level to apply on connect.}
+
+\item{models}{Optional character vector of model ids to offer in the model
+selector (a "Default" option is always prepended).}
+
 \item{session_map_path}{Path to the \code{.rds} file used to persist
 \code{thread_id -> session_id} mappings. Defaults to
 \code{".claude_session_map.rds"} in the current working directory.}

@@ -14,7 +14,8 @@ Roxygen: list(markdown = TRUE)
 Imports:
     grDevices,
     htmltools,
-    shiny
+    shiny,
+    utils
 Suggests:
     bslib,
     testthat (>= 3.0.0),
@@ -28,6 +29,10 @@ Suggests:
     ellmer,
     ClaudeAgentSDK (>= 0.2.2),
     here,
-    rstudioapi
+    rstudioapi,
+    cli,
+    httpuv,
+    nanonext,
+    prettycode
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
