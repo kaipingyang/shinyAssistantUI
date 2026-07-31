@@ -422,15 +422,14 @@ export {
 // (a rough gauge against the context window; cumulative context tracking is a future R-side
 // enhancement — see .claude/plans/33-token-usage-display.md).
 export const ShinyContextDisplay: FC = () => {
-  const { showUsage, contextWindow, usageStyle, usage } = useShinyConfig();
-  if (!showUsage || !contextWindow) return null;
-  const tokenUsage =
-    typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+  const { showUsage, usageStyle, usage } = useShinyConfig();
+  if (!showUsage) return null;
+  // B:环/条/文本只在 get_context_usage() 同时给出【当前占用 + 真实窗口】时显示,二者任一
+  // 缺失即不显示——绝不猜分母(不回落静态 200k / [1m] 启发式),也不显示累计 tokens。
+  if (typeof usage?.contextTokens !== "number" || typeof usage?.contextWindow !== "number") return null;
   const props = {
-    // 优先用后端按模型下发的真实窗口(如 sonnet-4.6[1m] → 1,000,000);
-    // 未到达时回落到静态配置 contextWindow。
-    modelContextWindow: usage?.contextWindow ?? contextWindow,
-    usage: tokenUsage,
+    modelContextWindow: usage.contextWindow,
+    usage: { totalTokens: usage.contextTokens },
     side: "top" as const,
   };
   if (usageStyle === "bar") return <ContextDisplayBar {...props} />;

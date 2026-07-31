@@ -129,7 +129,7 @@ export interface ShinyBridge {
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
-  onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number }) => void) => void;
+  onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; contextTokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number }) => void) => void;
   onStateSnapshot: (handler: (data: { threadId?: string; state?: unknown }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;

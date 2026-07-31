@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9710L
+port <- 9903L
 unlink(c("/tmp/aui-tok.out", "/tmp/aui-tok.err"))
 failures <- character()
 chk <- function(name, cond, detail = "") {
@@ -38,8 +38,7 @@ press_key <- function(key, code, vk) {
 
 browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port)); browser$Page$loadEventFired()
 chk("widget mounted", wait_for("!!document.querySelector('.aui-root')", 15))
-# 未发消息前:usage 尚无,但 show_usage=TRUE + context_window → 环仍渲染(totalTokens=0)
-chk("context-display trigger present (show_usage)", wait_for("!!document.querySelector('[data-slot=\"context-display-trigger\"]')", 12))
+# B:环只在 on_usage(context_tokens+context_window)到达后渲染,故不在发消息前断言 trigger;见下方发消息后的 "ring SVG rendered"。
 click_sel(".aui-lexical-input[contenteditable='true']"); Sys.sleep(0.35)
 browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)

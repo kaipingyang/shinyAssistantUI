@@ -1449,8 +1449,7 @@ make_claude_handler <- function(options       = NULL,
           # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
           if (!is.null(on_usage)) {
             u <- msg$usage
-            # 上下文占用 = 输入侧三项之和(互不重叠):新增未缓存 input + 读缓存 + 建缓存。
-            # 【不含 output】——输出是回复,不属于当前上下文占用(此前误加导致翻倍)。
+            # tokens = ResultMessage.usage 之和 = 本轮累计吞吐(footer 显示;不含 output)。
             tokens <- tryCatch(
               (u[["input_tokens"]] %||% 0) +
                 (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
@@ -1459,13 +1458,30 @@ make_claude_handler <- function(options       = NULL,
             model_name <- tryCatch({
               if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
             }, error = function(e) NULL)
-            # 上下文窗口:模型串带 [1m] 标记 → 1,000,000;否则默认 200,000。
-            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,用普通语句赋值。
-            cw <- 200000L
-            if (!is.null(model_name) && grepl("\\[1m\\]", model_name, ignore.case = TRUE)) cw <- 1000000L
-            on_usage(cost_usd = msg$total_cost_usd, tokens = tokens,
-                     turns = msg$num_turns, duration_ms = msg$duration_ms,
-                     model = model_name, context_window = cw)
+            cw0 <- NULL
+            u_cost <- msg$total_cost_usd; u_turns <- msg$num_turns; u_dur <- msg$duration_ms
+            # 环要显示"当前上下文占用"(≠累计吞吐 tokens),用 get_context_usage()(与 /context 同源)。
+            # 它是同步控制请求,【不能内联】——会把本轮"完成/停转圈"推迟一个往返、短暂卡主循环。
+            # 故用 later 延后一拍在后台拉取并悄悄刷新环:本轮立即 on_done、用户可继续敲字/发送,
+            # 环随后默默更新。get_context_usage 失败(早期/不支持)→ context_tokens 留空,前端回落
+            # 到 tokens。coro async 体内用普通语句(不写 `x <- if`)。
+            refresh_usage <- function() {
+              ctx <- tryCatch(client$get_context_usage(), error = function(e) NULL)
+              context_tokens <- tryCatch(as.numeric(.context_usage_field(ctx, "totalTokens", "total_tokens")),
+                                         error = function(e) NULL)
+              if (length(context_tokens) != 1L || is.na(context_tokens)) context_tokens <- NULL
+              ctx_max <- tryCatch(as.numeric(.context_usage_field(ctx, "rawMaxTokens", "raw_max_tokens") %||%
+                                               .context_usage_field(ctx, "maxTokens", "max_tokens")),
+                                  error = function(e) NULL)
+              # B:窗口只用 get_context_usage 的真实值(rawMaxTokens 优先);拿不到 → NULL,
+              # 前端不显示环(绝不猜 200k/1M)。context_tokens 同理缺失即不显示。
+              cw <- cw0
+              if (length(ctx_max) == 1L && !is.na(ctx_max) && ctx_max > 0) cw <- as.integer(ctx_max)
+              tryCatch(on_usage(cost_usd = u_cost, tokens = tokens, context_tokens = context_tokens,
+                                turns = u_turns, duration_ms = u_dur,
+                                model = model_name, context_window = cw), error = function(e) NULL)
+            }
+            if (requireNamespace("later", quietly = TRUE)) later::later(refresh_usage, 0.05) else refresh_usage()
           }
           done <- TRUE; break
 
