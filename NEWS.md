@@ -1,3 +1,7 @@
+# shinyAssistantUI 0.3.0.9000 (dev branch)
+
+- Development version (post-0.3.0).
+
 # shinyAssistantUI 0.3.0
 
 A large release consolidating the 0.2.2.900x development line.
