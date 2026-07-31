@@ -1,3 +1,44 @@
+# shinyAssistantUI 0.3.0
+
+A large release consolidating the 0.2.2.900x development line.
+
+## Foundation
+
+- **Migrated the vendored UI layer from radix-ui to base-ui** and aligned to
+  `@assistant-ui/react` 0.15.1. The source tree is radix-free (radix-ui remains only a transitive
+  dependency of `@assistant-ui/react`'s own primitives).
+- **Removed the `htmlwidgets` dependency**: the widget now registers as a native Shiny output
+  binding (`assistantUIOutput()` + `renderAssistantUI()` sending `{inputId, config}`). KaTeX is
+  bundled locally (no CDN font reflow).
+
+## Permissions & Settings (addin)
+
+- **Two-tier permission-mode switching**: de-escalation (to a stricter mode) hot-switches instantly;
+  escalation (to a more permissive mode) and the pseudo modes (Strict/YOLO) reconnect so the mode is
+  applied at connect (runtime escalation is not honored by the CLI).
+- **Settings panel repurposed** to persistent preferences: new-conversation default mode + risky-mode
+  visibility (hide Bypass/YOLO), instead of duplicating the composer's live mode switch.
+- UI preferences now live in a single human-readable `~/.claude_addin/addin_settings.json`
+  (migrated once from the old per-preference `.rds` files).
+
+## Composer & UX
+
+- **Composer height preset** (Comfortable default / Compact flat single-row inline, ~shinychat).
+- Official `@assistant-ui` ModelSelector inline in the composer.
+- Approval cards auto-scroll into view during continuous approvals; large tool cards follow the
+  viewport (0.15.1 message containment).
+- Switching the working directory reloads that project's local skills/commands (slash menu hot-update).
+- `run_r` MCP tool can be toggled off in Settings.
+
+## Fixes
+
+- Run-in-console now captures `cat()`/`print()` stdout (was "(no visible output)").
+- Delete-confirmation dialog dismisses immediately on confirm.
+- History sessions restore per-tool approval/deny state; deleting a session prunes its decisions.
+- Devtools excluded from the production bundle (smaller build).
+
+Internal: `R CMD check` clean (0 error/warning/note).
+
 # shinyAssistantUI 0.2.2.9022 (dev branch)
 
 - Compact composer: input is now first (far-left, flex-1) with controls on the right, so the caret
