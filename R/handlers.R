@@ -1406,6 +1406,12 @@ make_claude_handler <- function(options       = NULL,
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
             .record_tool_decision(decisions_path, tuid, "approved")
+            # Plan 47 B:交互表单收集的值合并进 tool_input 经 updated_input 回传(泛化,非 AskUserQuestion 专用)。
+            if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
+              ui <- utils::modifyList(msg$tool_input %||% list(), decision$updatedInput)
+              client$approve_tool(msg$request_id, updated_input = ui)
+              pending_tool_ids <- c(pending_tool_ids, tuid)
+            } else
             # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
             if (!is.null(decision$answers) && length(decision$answers)) {
               ui <- msg$tool_input %||% list()

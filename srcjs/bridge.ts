@@ -99,7 +99,7 @@ export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
-  sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]> }) => void;
+  sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
   sendOpenFile: (path: string, line?: number) => void;
@@ -295,7 +295,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     sendToolApproval(toolCallId, approved, opts) {
       Shiny.setInputValue(
         `${inputId}_tool_approval`,
-        { toolCallId, approved, suggestionIdx: opts?.suggestionIdx ?? null, suggestionIdxs: opts?.suggestionIdxs ?? null, customMessage: opts?.customMessage ?? null, answers: opts?.answers ?? null, ts: Date.now() },
+        { toolCallId, approved, suggestionIdx: opts?.suggestionIdx ?? null, suggestionIdxs: opts?.suggestionIdxs ?? null, customMessage: opts?.customMessage ?? null, answers: opts?.answers ?? null, updatedInput: opts?.updatedInput ?? null, ts: Date.now() },
         { priority: "event" }
       );
     },
