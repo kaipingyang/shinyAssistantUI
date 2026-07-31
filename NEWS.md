@@ -1,6 +1,17 @@
-# shinyAssistantUI 0.3.0.9000 (dev branch)
+# shinyAssistantUI 0.3.1
 
-- Development version (post-0.3.0).
+## Bug fixes
+
+- **Context-usage ring now reflects current context occupancy, not cumulative
+  throughput.** The ring previously summed `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens` from each turn's `ResultMessage`, but cache reads accumulate
+  across a turn's tool iterations (~3×) — so the ring could read ~92% while `/context` reported
+  ~31% for the same session. It now reads the same source as `/context`
+  (`ClaudeSDKClient$get_context_usage()`), shows the true current occupancy against the model's
+  real window (`rawMaxTokens`), and refreshes silently *after* the turn completes (deferred via
+  `later`, so it never delays "done" or blocks typing). When `get_context_usage()` is
+  unavailable, the ring shows nothing rather than a misleading fallback number. The cost/usage
+  footer continues to show cumulative tokens (that metric is intentionally cumulative).
 
 # shinyAssistantUI 0.3.0
 
