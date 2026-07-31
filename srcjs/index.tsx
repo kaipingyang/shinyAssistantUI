@@ -5,82 +5,86 @@ import AssistantUI from "./AssistantUI";
 import { createRemovalWatcher, themeToCssVars } from "./helpers";
 import { ErrorBoundary } from "./error-boundary";
 
-// @ts-ignore — HTMLWidgets is loaded globally by Shiny
-declare const HTMLWidgets: {
-  widget: (def: {
-    name: string;
-    type: string;
-    factory: (
-      el: HTMLElement,
-      width: number,
-      height: number
-    ) => {
-      renderValue: (x: { inputId: string; config: Record<string, unknown> }) => void;
-      resize: (width: number, height: number) => void;
-    };
-  }) => void;
+// P1(组件形态,dev):从 htmlwidget 迁移到原生 Shiny OutputBinding + HTMLDependency
+// (对齐 shinychat)。挂载点是普通 <div class="assistantUI assistantUI-output">;R 侧
+// 通过 htmlDependency 提供本 JS/CSS,通过 createRenderFunction 下发 {inputId, config}。
+// 所有实时双向流量仍走 bridge 的 Shiny.addCustomMessageHandler / setInputValue(不变)。
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const Shiny: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const $: any;
+
+type RenderData = { inputId: string; config: Record<string, unknown> };
+
+type MountState = {
+  root: ReturnType<typeof ReactDOM.createRoot> | null;
+  renderCount: number;
+  disconnect: (() => void) | null;
+  mqCleanup: (() => void) | null;
+};
+const _mounts = new WeakMap<HTMLElement, MountState>();
+
+// 主题注入:把 config.theme 的 token 写成 el 的 inline CSS 变量(scoped 到本实例),
+// 并按 config.dark_mode 切换 `dark` 类("auto" 跟随系统)。
+const applyTheme = (el: HTMLElement, st: MountState, config: Record<string, unknown>) => {
+  if (st.mqCleanup) { st.mqCleanup(); st.mqCleanup = null; }
+  const vars = themeToCssVars(config?.theme as Record<string, unknown> | undefined);
+  for (const [cssVar, value] of vars) el.style.setProperty(cssVar, value);
+  const dm = config?.dark_mode;
+  if (dm === "auto") {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => el.classList.toggle("dark", mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    st.mqCleanup = () => mq.removeEventListener("change", sync);
+  } else {
+    el.classList.toggle("dark", dm === true);
+  }
 };
 
-HTMLWidgets.widget({
-  name: "assistantUI",
-  type: "output",
+const teardown = (el: HTMLElement) => {
+  const st = _mounts.get(el);
+  if (!st) return;
+  if (st.root) { try { st.root.unmount(); } catch { /* already unmounted */ } st.root = null; }
+  if (st.disconnect) { st.disconnect(); st.disconnect = null; }
+  if (st.mqCleanup) { st.mqCleanup(); st.mqCleanup = null; }
+  _mounts.delete(el);
+};
 
-  factory(el, _width, _height) {
-    let root: ReturnType<typeof ReactDOM.createRoot> | null = null;
-    let renderCount = 0;
-    let disconnectWatcher: (() => void) | null = null;
-    let mqCleanup: (() => void) | null = null;
+const mount = (el: HTMLElement, data: RenderData) => {
+  if (!data || typeof data.inputId !== "string") return;
+  let st = _mounts.get(el);
+  if (!st) {
+    st = { root: null, renderCount: 0, disconnect: null, mqCleanup: null };
+    _mounts.set(el, st);
+  }
+  if (!st.root) {
+    el.style.height = "100%";
+    el.style.minHeight = "400px";
+    st.root = ReactDOM.createRoot(el);
+    st.disconnect = createRemovalWatcher(el, () => teardown(el));
+  }
+  const config = data.config ?? {};
+  applyTheme(el, st, config);
+  st.renderCount += 1;
+  st.root.render(
+    <ErrorBoundary resetKey={st.renderCount}>
+      <AssistantUI inputId={data.inputId} config={config} />
+    </ErrorBoundary>
+  );
+};
 
-    // 主题注入:把 config.theme 的 token 写成 el 的 inline CSS 变量（scoped 到本 widget），
-    // 并按 config.dark_mode 切换 `dark` 类（"auto" 跟随系统 prefers-color-scheme）。
-    const applyTheme = (config: Record<string, unknown>) => {
-      // 先清上一次的 matchMedia 监听,避免重渲染累积
-      if (mqCleanup) { mqCleanup(); mqCleanup = null; }
+class AssistantUIOutputBinding extends Shiny.OutputBinding {
+  find(scope: HTMLElement) {
+    return $(scope).find(".assistantUI-output");
+  }
+  renderValue(el: HTMLElement, data: RenderData) {
+    mount(el, data);
+  }
+  // 输出错误时不清空 React 树(保持已挂载 UI);Shiny 默认会加 recalculating 类。
+  renderError() { /* no-op: errors surfaced via bridge on_error */ }
+  clearError() { /* no-op */ }
+}
 
-      const vars = themeToCssVars(config?.theme as Record<string, unknown> | undefined);
-      for (const [cssVar, value] of vars) el.style.setProperty(cssVar, value);
-
-      const dm = config?.dark_mode;
-      if (dm === "auto") {
-        const mq = window.matchMedia("(prefers-color-scheme: dark)");
-        const sync = () => el.classList.toggle("dark", mq.matches);
-        sync();
-        mq.addEventListener("change", sync);
-        mqCleanup = () => mq.removeEventListener("change", sync);
-      } else {
-        el.classList.toggle("dark", dm === true);
-      }
-    };
-
-    // 卸载 React 树释放资源，避免孤儿 root 累积（el 从 DOM 移除时调用）。
-    const teardown = () => {
-      if (root) {
-        try { root.unmount(); } catch { /* already unmounted */ }
-        root = null;
-      }
-      if (disconnectWatcher) { disconnectWatcher(); disconnectWatcher = null; }
-      if (mqCleanup) { mqCleanup(); mqCleanup = null; }
-    };
-
-    return {
-      renderValue(x) {
-        if (!root) {
-          el.style.height = "100%";
-          el.style.minHeight = "400px";
-          root = ReactDOM.createRoot(el);
-          disconnectWatcher = createRemovalWatcher(el, teardown);
-        }
-        applyTheme(x.config ?? {});
-        renderCount += 1;
-        root.render(
-          <ErrorBoundary resetKey={renderCount}>
-            <AssistantUI inputId={x.inputId} config={x.config ?? {}} />
-          </ErrorBoundary>
-        );
-      },
-      resize(_width, _height) {
-        // Layout handled by CSS
-      },
-    };
-  },
-});
+Shiny.outputBindings.register(new AssistantUIOutputBinding(), "shinyAssistantUI.assistantUIOutput");

@@ -19,7 +19,7 @@
   raw <- readBin(path, what = "raw", n = size)
   ends <- which(raw == as.raw(0L))
   if (!length(ends)) return(character(0))
-  starts <- c(1L, head(ends, -1L) + 1L)
+  starts <- c(1L, utils::head(ends, -1L) + 1L)
   keep <- ends > starts
   vapply(which(keep), function(i) rawToChar(raw[starts[[i]]:(ends[[i]] - 1L)]), character(1))
 }
@@ -54,7 +54,7 @@
     sd <- entries[isdir]
     if (length(sd)) queue <- c(queue, sd)  # 入队次数 = 目录数(远少于文件),可接受
   }
-  head(unlist(collected, use.names = FALSE), max(0L, as.integer(max_files)))
+  utils::head(unlist(collected, use.names = FALSE), max(0L, as.integer(max_files)))
 }
 
 .addin_workspace_index <- function(project, max_files = 10000L) {
@@ -95,7 +95,7 @@
   files <- gsub("\\\\", "/", files)
   files <- files[nzchar(files) & !grepl("^(?:/|[A-Za-z]:|\\.\\.(?:/|$))", files)]
   files <- files[!grepl(block_re, files)]
-  files <- head(sort(unique(files)), max(0L, as.integer(max_files)))
+  files <- utils::head(sort(unique(files)), max(0L, as.integer(max_files)))
 
   # 文件夹推导：先收集到 list（避免循环内 c() 的 O(n^2) 累加），最后一次 unique。
   folder_lists <- lapply(files, function(file) {

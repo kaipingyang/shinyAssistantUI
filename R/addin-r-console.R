@@ -11,22 +11,32 @@
   code_str <- paste(as.character(code), collapse = "\n")
   if (!nzchar(trimws(code_str))) return(list(ok = TRUE, output = "", error = NULL))
   messages <- character(); warnings <- character(); error_msg <- NULL
-  res <- tryCatch(
-    withCallingHandlers(
-      withVisible(eval(parse(text = code_str), envir = envir)),
-      message = function(m) {
-        messages <<- c(messages, sub("\n$", "", conditionMessage(m))); invokeRestart("muffleMessage")
-      },
-      warning = function(w) {
-        warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
-      }
+  # box 用引用型环境接住 withVisible 结果:capture.output 在 parent.frame() 里求值,
+  # 用 `<<-`/`<-` 都无法把值可靠地写回本函数的局部变量(作用域问题),改用环境按引用回写。
+  box <- new.env(parent = emptyenv())
+  # 关键:用 capture.output 包住 eval,捕获 cat()/print() 等写到 stdout 的输出
+  # (之前只取 withVisible 的可见返回值 → cat 直接进了真实 console,Claude 收到空 → 显示
+  #  "(no visible output)" 并重试,看起来像"慢一拍/不执行")。
+  printed <- tryCatch(
+    utils::capture.output(
+      box$vis <- withCallingHandlers(
+        withVisible(eval(parse(text = code_str), envir = envir)),
+        message = function(m) {
+          messages <<- c(messages, sub("\n$", "", conditionMessage(m))); invokeRestart("muffleMessage")
+        },
+        warning = function(w) {
+          warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
+        }
+      )
     ),
-    error = function(e) { error_msg <<- conditionMessage(e); NULL }
+    error = function(e) { error_msg <<- conditionMessage(e); character() }
   )
-  if (!is.null(error_msg)) return(list(ok = FALSE, output = "", error = error_msg))
-  out <- character()
-  if (is.list(res) && isTRUE(res$visible) && !is.null(res$value)) {
-    out <- c(out, utils::capture.output(print(res$value)))
+  if (!is.null(error_msg)) return(list(ok = FALSE, output = paste(printed, collapse = "\n"), error = error_msg))
+  out <- printed
+  vis <- box$vis
+  # 可见返回值(且未被上面的 print 自动打印过——eval 不会自动打印,故这里补印)。
+  if (is.list(vis) && isTRUE(vis$visible) && !is.null(vis$value)) {
+    out <- c(out, utils::capture.output(print(vis$value)))
   }
   if (length(messages)) out <- c(out, paste0("Message: ", messages))
   if (length(warnings)) out <- c(out, paste0("Warning: ", warnings))
@@ -78,8 +88,9 @@
 
 # 回显行(可测):青色规则标题 + 提示符代码 + 报错(红)/正常输出(默认)。
 .addin_console_echo_lines <- function(code, cap) {
+  # 固定宽度青色分隔符(之前用 cli::rule 会画满整个 console 宽度 → 超长无意义)。
   header <- if (requireNamespace("cli", quietly = TRUE))
-    as.character(cli::rule(left = "Claude ran in console", col = "cyan"))
+    cli::col_cyan(paste0("\u2500\u2500 Claude ran in console ", strrep("\u2500", 24L)))
   else "\u2500\u2500 Claude ran in console \u2500\u2500"
   lines <- c(header, .addin_console_prompt_code(code))
   if (!is.null(cap$error)) {
@@ -147,6 +158,13 @@
   if (!isTRUE(autorun_on)) return(base)
   if (tool %in% base) return(base)
   c(base, tool)
+}
+
+# run_r 开关(Plan 45):关掉时从连接选项的 mcp_servers 摘除 r_session(纯函数,可测)。
+.filter_run_r_mcp <- function(mcp_servers, enabled) {
+  if (!isTRUE(enabled) && is.list(mcp_servers) && "r_session" %in% names(mcp_servers))
+    mcp_servers[["r_session"]] <- NULL
+  mcp_servers
 }
 
 # Build the in-process "r_session" MCP server exposing run_r. Returns NULL when

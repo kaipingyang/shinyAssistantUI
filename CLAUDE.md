@@ -64,6 +64,31 @@ assistantUIServer()            useShinyRuntime(inputId)
                                    └─ Thread (@assistant-ui/react-ui)
 ```
 
+### Design decisions (why the code looks like this) — 2026-07-30
+
+- **One integrated widget, not per-component Shiny UI.** Only `assistantUIOutput/Server/Page` are
+  exposed (plus config/lifecycle helpers: `assistant_theme`, `make_claude_handler`,
+  `assistant_tool_view`, `claude_addin`, session loaders/stores, `load_claude_skills`). The React
+  UI primitives (button/dialog/thread/model-selector/tool-card…) are **internal** and deliberately
+  NOT exposed as individual R components: the whole chat is one stateful React app (Zustand runtime)
+  whose pieces share live state (streaming, thread list, approval queue, composer, usage). Decomposing
+  them into R-level widgets would break that runtime, create a huge API surface bound to upstream
+  internals, and force needless R↔JS round-trips. This mirrors **shinychat** (Posit), which likewise
+  exposes one `chat_ui()` + module + server helpers (`chat_append/clear/…`) and keeps its Lit web
+  components internal — the only standalone piece it factors out is `markdown_stream()` (streaming
+  markdown outside a chat); we have no such need yet.
+- **base-ui vs radix-ui.** `@base-ui/react` and `radix-ui` are two independent, competing headless
+  libraries (base-ui uses floating-ui, not radix). Our vendored `@/components/ui/*` primitives are
+  migrated to base-ui to match upstream `@assistant-ui/react` 0.15.1's `ui/` layer, and **no srcjs
+  file imports `radix-ui`** anymore. `radix-ui` remains a *dependency* only because
+  `@assistant-ui/react` (the npm package) still uses it internally for its own primitives
+  (ActionBarMore / ThreadListItemMore / AssistantModal / Composer) — same as upstream 0.15.1.
+- **Kept shadcn scaffold.** ~18 unused self-drawn `@/components/ui/*` files (card/table/alert/…) are
+  kept as a component toolbox; they carry no radix (not old-version debt) and tree-shake out of the
+  bundle. The 27 *radix-based* scaffold files that upstream 0.15.1 does not ship were trimmed. When a
+  new control is needed, pull the base-ui version (shadcn base-ui registry / `@base-ui/react`) rather
+  than restoring a radix copy.
+
 ### Key files
 
 ```

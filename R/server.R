@@ -216,6 +216,52 @@
 #'       (each a named list with `id`, `role`, `content` fields) to populate the
 #'       thread.
 #'
+#' @param on_edits Optional `function(edits)` called when the assistant proposes
+#'   file edits (used by the addin to show edit markers).
+#' @param working_dir Optional initial working directory shown in the
+#'   working-directory picker (addin).
+#' @param native_picker Logical; whether a native directory chooser is available
+#'   (RStudio addin).
+#' @param on_pick_working_dir Optional `function()` invoked to open the native
+#'   working-directory picker.
+#' @param on_set_working_dir Optional `function(path)` called when the working
+#'   directory changes.
+#' @param projects Optional character vector of saved working-directory favorites.
+#' @param on_save_project Optional `function()` to save the current directory as a
+#'   favorite.
+#' @param on_remove_project Optional `function(path)` to remove a saved favorite.
+#' @param files_pane_follow Optional logical initial state of the "Files pane
+#'   follows working dir" toggle (`NULL` hides it).
+#' @param on_toggle_files_pane_follow Optional `function(value)` called when that
+#'   toggle changes.
+#' @param auto_run Optional logical initial state of the auto-approve `run_r`
+#'   toggle (`NULL` hides it).
+#' @param on_toggle_auto_run Optional `function(value)` called when the auto-run
+#'   toggle changes.
+#' @param default_permission_mode Optional character; default permission mode for
+#'   new conversations (addin preference, persisted).
+#' @param on_set_default_permission_mode Optional `function(mode)` called when the
+#'   default-mode preference changes.
+#' @param mode_visibility Optional named list `list(showBypass=, showYolo=)`
+#'   controlling which risky modes appear in the mode selector.
+#' @param on_set_mode_visibility Optional `function(value)` called when mode
+#'   visibility changes.
+#' @param composer_density Optional character `"comfortable"` (default) or
+#'   `"compact"` composer height preset.
+#' @param on_set_composer_density Optional `function(value)` called when the
+#'   composer height preset changes.
+#' @param run_r_enabled Optional logical initial state of the `run_r` MCP tool
+#'   toggle (`NULL` hides it).
+#' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
+#'   toggle changes.
+#' @param show_usage Logical (default `FALSE`); show the token-usage indicator.
+#' @param context_window Optional integer context-window size for the usage
+#'   indicator.
+#' @param usage_style Character; usage indicator style, one of `"ring"`, `"bar"`,
+#'   `"text"`.
+#' @param latex Logical (default `FALSE`); enable KaTeX math rendering.
+#' @param allow_warmup Logical (default `TRUE`); allow per-thread cold-start
+#'   warmup of the handler.
 #' @return A list with a `clear()` function that creates a new thread in the UI,
 #'   `send_tool_call()` / `send_tool_result()` for manual tool card control, and
 #'   `send_sessions(sessions)` for injecting a list of historical session stubs
@@ -251,6 +297,14 @@ assistantUIServer <- function(id, handler,
                               on_toggle_files_pane_follow = NULL,
                               auto_run = NULL,
                               on_toggle_auto_run = NULL,
+                              default_permission_mode = NULL,
+                              on_set_default_permission_mode = NULL,
+                              mode_visibility = NULL,
+                              on_set_mode_visibility = NULL,
+                              composer_density = NULL,
+                              on_set_composer_density = NULL,
+                              run_r_enabled = NULL,
+                              on_toggle_run_r = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -343,6 +397,20 @@ assistantUIServer <- function(id, handler,
   if (!is.null(files_pane_follow)) config$files_pane_follow <- isTRUE(files_pane_follow)
   # 角度 B:自动批准 run_r 开关(仅当能力存在,即 on_toggle_auto_run 提供时暴露)。
   if (!is.null(auto_run)) config$auto_run <- isTRUE(auto_run)
+  # Settings 偏好(Plan 45):新会话默认权限模式 + 危险模式可见性(隐藏 Bypass/YOLO)。
+  # 仅当 addin 提供对应回调时暴露(非 addin 用法 config 不含 → 前端行为不变)。
+  if (!is.null(default_permission_mode))
+    config$default_permission_mode <- as.character(default_permission_mode)[[1L]]
+  if (!is.null(mode_visibility))
+    config$mode_visibility <- list(
+      showBypass = isTRUE(mode_visibility$showBypass %||% mode_visibility$show_bypass),
+      showYolo   = isTRUE(mode_visibility$showYolo   %||% mode_visibility$show_yolo)
+    )
+  # Plan 45:输入框高度预设(comfortable/compact)。
+  if (!is.null(composer_density))
+    config$composer_density <- as.character(composer_density)[[1L]]
+  # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
+  if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -469,10 +537,11 @@ assistantUIServer <- function(id, handler,
       # ── ClaudeAgentSDK 能力对齐 ────────────────────────────────────────────
       # #1 成本/用量:ResultMessage 的 total_cost_usd / tokens / turns / duration。
       on_usage = function(cost_usd = NULL, tokens = NULL, turns = NULL,
-                          duration_ms = NULL, model = NULL) {
+                          duration_ms = NULL, model = NULL, context_window = NULL) {
         session$sendCustomMessage(paste0(input_id, ":usage"),
                                   list(costUsd = cost_usd, tokens = tokens, turns = turns,
                                        durationMs = duration_ms, model = model,
+                                       contextWindow = context_window,
                                        threadId = thread_id))
       },
       # #2 子agent/Task 进度:kind = "started" | "progress" | "notification"。
@@ -576,6 +645,41 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_toggle_auto_run(isTRUE(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+
+  # Plan 45:Settings 偏好回调 —— 新会话默认模式 / 危险模式可见性。
+  if (is.function(on_set_default_permission_mode)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_default_permission_mode")]], {
+      msg <- session$input[[paste0(input_id, "_default_permission_mode")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_set_default_permission_mode(as.character(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_set_mode_visibility)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_mode_visibility")]], {
+      msg <- session$input[[paste0(input_id, "_mode_visibility")]]
+      if (is.null(msg)) return()
+      tryCatch(on_set_mode_visibility(list(
+        showBypass = isTRUE(msg$showBypass), showYolo = isTRUE(msg$showYolo)
+      )), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_set_composer_density)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_composer_density")]], {
+      msg <- session$input[[paste0(input_id, "_composer_density")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_set_composer_density(as.character(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_toggle_run_r)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_run_r_enabled")]], {
+      msg <- session$input[[paste0(input_id, "_run_r_enabled")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_toggle_run_r(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -945,6 +1049,11 @@ assistantUIServer <- function(id, handler,
     send_sessions = function(sessions) {
       pending_sessions <<- sessions
       session$sendCustomMessage(paste0(input_id, ":sessions"), sessions)
+    },
+    # 本地 skills / commands 热更新(切换工作目录后重载新项目 .claude 的 skills)。
+    send_commands = function(commands) {
+      session$sendCustomMessage(paste0(input_id, ":commands"),
+                                list(commands = commands))
     },
     # 推送当前工作目录 + 最近目录列表给 UI（切目录时先发这个，再重推 sessions）。
     send_working_dir = function(dir, recent = list()) {

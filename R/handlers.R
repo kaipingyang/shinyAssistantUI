@@ -298,6 +298,70 @@
   .atomic_save_rds(current, path)
   invisible(current)
 }
+
+# ── 工具审批决策持久化 ────────────────────────────────────────────────────────
+# 键 = CLI tool_use id（跨会话全局唯一，且会话恢复时 .claude_msgs_to_thread 用同一 id 作
+# toolCallId），故单文件 tool_call_id → "approved"/"denied" 即可,无需按 session 分桶。
+# 用途:打开历史 session 时把用户当时的允许/拒绝状态回填到工具卡(否则重开后丢失)。
+.claude_decisions_path <- function(session_map_path) {
+  if (is.null(session_map_path) || !nzchar(session_map_path %||% "")) return(NULL)
+  file.path(dirname(session_map_path), "tool_decisions.rds")
+}
+.read_tool_decisions <- function(path) {
+  if (is.null(path) || !nzchar(path %||% "") || !file.exists(path)) return(list())
+  tryCatch({ v <- readRDS(path); if (is.list(v)) v else list() }, error = function(e) list())
+}
+.record_tool_decision <- function(path, tool_call_id, decision) {
+  if (is.null(path) || is.null(tool_call_id) || !nzchar(tool_call_id %||% "")) return(invisible(NULL))
+  cur <- .read_tool_decisions(path)
+  cur[[tool_call_id]] <- decision
+  tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
+  invisible(NULL)
+}
+# 删除 session 时清理其决策条目(Plan 46):按 tool_use id 从决策 map 删掉,避免孤儿累积。
+.prune_tool_decisions <- function(path, tool_call_ids) {
+  if (is.null(path) || !length(tool_call_ids)) return(invisible(NULL))
+  cur <- .read_tool_decisions(path)
+  if (!length(cur)) return(invisible(NULL))
+  cur[as.character(tool_call_ids)] <- NULL
+  tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
+  invisible(NULL)
+}
+# 读某 session 的所有 tool_use id(删除前调用,此时 transcript 还在)。
+.session_tool_use_ids <- function(session_id) {
+  msgs <- tryCatch(.get_claude_session_messages(session_id), error = function(e) list())
+  ids <- character(0)
+  for (m in msgs) {
+    if (identical(m$type, "assistant") && is.list(m$message$content)) {
+      for (blk in m$message$content) {
+        if (identical(blk[["type"]], "tool_use")) {
+          id <- blk[["id"]]
+          if (is.character(id) && length(id) == 1L && nzchar(id)) ids <- c(ids, id)
+        }
+      }
+    }
+  }
+  unique(ids)
+}
+
+# ── 权限模式切换策略 ─────────────────────────────────────────────────────────
+# 实测(hotswitch_test.R):Claude Code CLI 允许运行时【降权】(变严)热切换,但不允许
+# 运行时【提权】(变松,尤其 bypassPermissions)——提权控制请求被接受却不生效。
+# 故:降权/同级 → set_permission_mode 热切换(即时);提权 → 重连(连接时 --permission-mode
+# 一定采纳)。askAll/yolo 是伪模式(改连接时 settings / prompt-tool),恒重连。
+# 安全性:唯一会热切换的是"降权",即便某个降权热切换未生效,最坏也只是"比预期更严"(多问),
+# 绝不会"比预期更松"(少问),不构成安全风险。
+.permission_mode_rank <- function(mode) {
+  switch(as.character(mode %||% "default"),
+    askAll = 0L, plan = 1L, default = 2L, acceptEdits = 3L, bypassPermissions = 4L, yolo = 5L,
+    2L)  # 未知模式按 default 处理
+}
+.permission_switch_strategy <- function(from, to) {
+  pseudo <- c("askAll", "yolo")
+  if ((to %in% pseudo) || (from %in% pseudo)) return("reconnect")
+  if (.permission_mode_rank(to) > .permission_mode_rank(from)) return("reconnect")  # 提权
+  "hot"  # 降权 / 同级
+}
 # 把 text + file 类附件拼成注入用的文本上下文（image 类由各 handler 单独处理）。
 # file 类（PDF/xlsx/二进制等）内容是 base64，无法直接喂文本模型——这里至少把
 # 文件名/类型作为提示注入，让 AI 知道用户上传了文件、能据此回应，而非静默丢弃
@@ -718,6 +782,12 @@ make_ellmer_session_loader <- function(store) {
 #' @param session_map_path Path to the `.rds` file used to persist
 #'   `thread_id -> session_id` mappings. Defaults to
 #'   `".claude_session_map.rds"` in the current working directory.
+#' @param cwd_provider Optional zero-argument function returning the current
+#'   working directory to connect the CLI in (used by the addin's dir picker).
+#' @param thinking_provider Optional zero-argument function returning the current
+#'   thinking level to apply on connect.
+#' @param models Optional character vector of model ids to offer in the model
+#'   selector (a "Default" option is always prepended).
 #'
 #' @return A `coro::async` handler function compatible with [assistantUIServer()].
 #'
@@ -756,10 +826,14 @@ make_claude_handler <- function(options       = NULL,
     "default", "plan", "acceptEdits", "bypassPermissions"
   )
   initial_permission_mode <- options$permission_mode %||% "default"
+  # 可变 ref:Settings 改"新会话默认模式"时更新它 → 之后新线程(permission_mode_for 未存值)
+  # 用新默认。经 attr(handler,"set_default_permission_mode") 由 addin 回调驱动。
+  default_mode_ref <- new.env(parent = emptyenv())
+  default_mode_ref$value <- initial_permission_mode
   permission_modes <- new.env(parent = emptyenv())
   permission_mode_for <- function(thread_id) {
     get0(thread_id, envir = permission_modes,
-         ifnotfound = initial_permission_mode, inherits = FALSE)
+         ifnotfound = default_mode_ref$value, inherits = FALSE)
   }
   permission_options <- list(
     list(value = "askAll", label = "Strict",
@@ -825,11 +899,16 @@ make_claude_handler <- function(options       = NULL,
   # 免审批;切换经 set_autorun 触发 reset_clients(allowed_tools 是连接时 option)。
   autorun_state <- new.env(parent = emptyenv())
   autorun_state$on <- FALSE
+  # run_r MCP 开关(Plan 45,默认开)。关 → 连接时从 mcp_servers 摘掉 r_session + 不加进
+  # allowed_tools;切换经 set_run_r_enabled 触发 reset_clients(mcp_servers 是连接时 option)。
+  run_r_state <- new.env(parent = emptyenv())
+  run_r_state$enabled <- TRUE
 
   # Disk is the source of truth because the historical loader and handler own
   # independent closures. Every mutation re-reads and atomically replaces the
   # map so one closure cannot publish a stale snapshot over another's entries.
   session_map <- .read_claude_session_map(session_map_path)
+  decisions_path <- .claude_decisions_path(session_map_path)
 
   read_session_id <- function(thread_id) {
     if (file.exists(session_map_path)) {
@@ -873,9 +952,10 @@ make_claude_handler <- function(options       = NULL,
         settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
         # 角度 B:透传进程内 MCP servers(含 run_r);autorun 开且 run_r 已注册 →
         # 把 run_r 加进 allowed_tools 免审批,否则走审批卡。
-        mcp_servers                 = options$mcp_servers,
+        mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
         allowed_tools               = .addin_run_r_allowed_tools(
-          isTRUE(autorun_state$on) && ("r_session" %in% names(options$mcp_servers)),
+          isTRUE(autorun_state$on) && isTRUE(run_r_state$enabled) &&
+            ("r_session" %in% names(options$mcp_servers)),
           options$allowed_tools),
         resume                      = resume_sid
       )
@@ -985,11 +1065,13 @@ make_claude_handler <- function(options       = NULL,
         }
         current <- permission_mode_for(thread_id)
         assign(thread_id, mode, envir = permission_modes)
-        # 切到/切出伪模式改的是连接时选项(settings / prompt-tool)→ 需重连;真实模式之间热切换。
-        if (mode %in% pseudo || current %in% pseudo) {
-          reset_clients()
-        } else if (!is.null(cl)) {
+        # 两级切换(见 .permission_switch_strategy):降权/同级热切换(即时);提权/伪模式重连
+        # (下条消息 resume 重连,连接时 --permission-mode 落地 —— 运行时提权 CLI 不认)。
+        strategy <- .permission_switch_strategy(current, mode)
+        if (identical(strategy, "hot") && !is.null(cl)) {
           cl$set_permission_mode(mode)
+        } else {
+          reset_clients()
         }
         ok(paste0("Permission mode submitted: ", mode), value = mode)
       } else if (grepl("^thinking:", id)) {
@@ -1323,6 +1405,7 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
+            .record_tool_decision(decisions_path, tuid, "approved")
             # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
             if (!is.null(decision$answers) && length(decision$answers)) {
               ui <- msg$tool_input %||% list()
@@ -1346,8 +1429,15 @@ make_claude_handler <- function(options       = NULL,
             pending_tool_ids <- c(pending_tool_ids, tuid)
             }
           } else {
-            deny_msg <- decision$customMessage %||% "Denied by user"
-            client$deny_tool(msg$request_id, deny_msg)
+            # 纯 Deny(无留言)= 拒绝并【中断】agent —— 用户说"不",就停下,避免 Claude
+            # 自行继续 / 反复用别的工具重问审批(interrupt=TRUE)。
+            # "Deny & tell Claude…"(有留言)= 带指引的拒绝,让 Claude 据此调整,不中断。
+            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,故用普通语句赋值。
+            has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
+            deny_msg <- "Denied by user"
+            if (has_msg) deny_msg <- decision$customMessage
+            .record_tool_decision(decisions_path, tuid, "denied")
+            client$deny_tool(msg$request_id, deny_msg, interrupt = !has_msg)
             on_tool_result(tuid, deny_msg, is_error = TRUE)
           }
 
@@ -1359,12 +1449,23 @@ make_claude_handler <- function(options       = NULL,
           # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
           if (!is.null(on_usage)) {
             u <- msg$usage
+            # 上下文占用 = 输入侧三项之和(互不重叠):新增未缓存 input + 读缓存 + 建缓存。
+            # 【不含 output】——输出是回复,不属于当前上下文占用(此前误加导致翻倍)。
             tokens <- tryCatch(
-              (u[["input_tokens"]] %||% 0) + (u[["output_tokens"]] %||% 0) +
+              (u[["input_tokens"]] %||% 0) +
                 (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
               error = function(e) NULL)
+            # 模型名(msg$model 常为命名 list,名字即模型串,如 "claude-sonnet-4.6[1m]")。
+            model_name <- tryCatch({
+              if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
+            }, error = function(e) NULL)
+            # 上下文窗口:模型串带 [1m] 标记 → 1,000,000;否则默认 200,000。
+            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,用普通语句赋值。
+            cw <- 200000L
+            if (!is.null(model_name) && grepl("\\[1m\\]", model_name, ignore.case = TRUE)) cw <- 1000000L
             on_usage(cost_usd = msg$total_cost_usd, tokens = tokens,
-                     turns = msg$num_turns, duration_ms = msg$duration_ms)
+                     turns = msg$num_turns, duration_ms = msg$duration_ms,
+                     model = model_name, context_window = cw)
           }
           done <- TRUE; break
 
@@ -1451,6 +1552,17 @@ make_claude_handler <- function(options       = NULL,
     reset_clients()
     invisible(autorun_state$on)
   }
+  # Plan 45:Settings 改"新会话默认模式" → 更新 ref(影响之后新线程的初始模式,不动已有线程)。
+  attr(handler_fn, "set_default_permission_mode") <- function(mode) {
+    default_mode_ref$value <- as.character(mode)[[1L]]
+    invisible(default_mode_ref$value)
+  }
+  # Plan 45:run_r MCP 开关(本会话)。设状态 + 重连(mcp_servers 是连接时 option)。
+  attr(handler_fn, "set_run_r_enabled") <- function(on) {
+    run_r_state$enabled <- isTRUE(on)
+    reset_clients()
+    invisible(run_r_state$enabled)
+  }
   handler_fn
 }
 
@@ -1461,6 +1573,8 @@ make_claude_handler <- function(options       = NULL,
 #'
 #' @param directory Project directory to filter sessions. Defaults to `here::here()`.
 #' @param limit Maximum number of sessions to return.
+#' @param archived_ids Character vector of session ids to mark as archived in the
+#'   returned list (so the sidebar can show them under an archived section).
 #'
 #' @return A list suitable for `ctrl$send_sessions(list(sessions = ...))`.
 #'
@@ -1558,7 +1672,9 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
         .get_claude_session_messages(session_id),
         error = function(e) list()
       )
-      snapshots$set(cache_key, .claude_msgs_to_thread(msgs))
+      snapshots$set(cache_key, .claude_msgs_to_thread(
+        msgs, .read_tool_decisions(.claude_decisions_path(session_map_path))
+      ))
     }
 
     page <- .history_message_page(
@@ -1690,7 +1806,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 }
 
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
-.claude_msgs_to_thread <- function(msgs) {
+.claude_msgs_to_thread <- function(msgs, decisions = list()) {
   result <- list()
   # 预扫:收集 user 轮里的 tool_result(按 tool_use_id),供历史工具卡显示真实结果/审批态
   # (之前一律写死 "Session ended",看不出跑了什么/是否被拒)。
@@ -1750,6 +1866,14 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               get0(tuid_h, envir = tool_results, inherits = FALSE, ifnotfound = NULL) else NULL
             res_txt <- if (!is.null(tr) && nzchar(tr$text)) tr$text else "Session ended"
             is_err  <- if (!is.null(tr)) isTRUE(tr$is_error) else FALSE
+            # 历史审批状态回填:用户当时的允许/拒绝(decisions 按 tool_use id)→ artifact.approvalResult,
+            # 使工具卡重开后仍显示 "✓ Approved / ✕ Denied";isError 也放进 artifact 让前端渲染错误态。
+            dec_h <- if (is.character(tuid_h) && length(tuid_h) == 1L && nzchar(tuid_h))
+              decisions[[tuid_h]] else NULL
+            artifact_h <- c(
+              list(isError = is_err),
+              if (!is.null(dec_h)) list(approvalResult = dec_h) else list()
+            )
             parts[[length(parts) + 1L]] <- list(
               type       = "tool-call",
               toolCallId = blk[["id"]] %||% paste0("h-tool-", length(parts)),
@@ -1760,7 +1884,8 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
               # 对象而非字符串 → ToolFallback.Args 渲染 {argsText} 触发 React #31。
               argsText   = tryCatch(as.character(jsonlite::toJSON(args_val, auto_unbox=TRUE)), error=function(e) "{}"),
               result     = res_txt,
-              isError    = is_err
+              isError    = is_err,
+              artifact   = artifact_h
             )
           }
         }

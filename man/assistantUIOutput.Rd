@@ -19,11 +19,18 @@ assistantUIOutput(
 
 \item{modal}{Logical. If \code{TRUE}, sizes the widget for floating modal use.}
 
-\item{...}{Additional arguments passed to \code{\link[htmlwidgets:shinyWidgetOutput]{htmlwidgets::shinyWidgetOutput()}}.}
+\item{...}{Additional attributes passed to the container \verb{<div>}.}
 }
 \value{
-An HTML output element.
+An HTML output element with its JS/CSS dependency attached.
 }
 \description{
-Creates an htmlwidget output placeholder for the assistant UI chat component.
+Creates a Shiny output placeholder for the assistant UI chat component.
+}
+\details{
+The component is a native Shiny output binding (not an htmlwidget): a plain
+\verb{<div class="assistantUI assistantUI-output">} plus an \code{\link[htmltools:htmlDependency]{htmltools::htmlDependency()}}
+that provides the bundled JS/CSS. The React app mounts into the div when the
+server sends its value via \code{\link[=renderAssistantUI]{renderAssistantUI()}}; all streaming/interaction
+then flows over \code{session$sendCustomMessage()} and \code{Shiny.setInputValue()}.
 }

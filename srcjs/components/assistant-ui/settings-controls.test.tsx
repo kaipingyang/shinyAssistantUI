@@ -94,62 +94,65 @@ describe("ModelPickerDialog", () => {
     { value: "sonnet", label: "Sonnet" },
     { value: "opus", label: "Opus" },
   ];
-  const mk = (over = {}) => ({ value: "default", options: modelOpts, setValue: vi.fn(), pickerOpen: true, setPickerOpen: vi.fn(), ...over });
-  it("renders nothing when closed", () => {
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ pickerOpen: false }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
-  });
-  it("renders nothing without capability", () => {
+  const mk = (over = {}) => ({ value: "default", options: modelOpts, setValue: vi.fn(), pickerOpen: false, setPickerOpen: vi.fn(), ...over });
+  it("renders nothing without model capability", () => {
     render(<ShinyConfigContext.Provider value={baseContext}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.queryByRole("dialog", { name: "Select model" })).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
-  it("lists options and applies + closes on pick", () => {
-    const setValue = vi.fn(); const setPickerOpen = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    expect(screen.getByRole("dialog", { name: "Select model" })).toBeTruthy();
-    expect(screen.getByText("Opus")).toBeTruthy();
-    fireEvent.click(screen.getByText("Sonnet"));
-    expect(setValue).toHaveBeenCalledWith("sonnet");
-    expect(setPickerOpen).toHaveBeenCalledWith(false);
-  });
-  it("arrow keys move the highlight and Enter confirms", () => {
-    const setValue = vi.fn(); const setPickerOpen = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue, setPickerOpen }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    const dialog = screen.getByRole("dialog", { name: "Select model" });
-    fireEvent.keyDown(dialog, { key: "ArrowDown" });   // default(0) → haiku(1)
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(setValue).toHaveBeenCalledWith("haiku");
-    expect(setPickerOpen).toHaveBeenCalledWith(false);
-  });
-  it("ArrowUp from the first option wraps to the last", () => {
-    const setValue = vi.fn();
-    render(<ShinyConfigContext.Provider value={{ ...baseContext, model: mk({ setValue }) }}><ModelPickerDialog /></ShinyConfigContext.Provider>);
-    const dialog = screen.getByRole("dialog", { name: "Select model" });
-    fireEvent.keyDown(dialog, { key: "ArrowUp" });     // default(0) → opus(3)
-    fireEvent.keyDown(dialog, { key: "Enter" });
-    expect(setValue).toHaveBeenCalledWith("opus");
-  });
+  // ModelPickerDialog 现在渲染官方 @assistant-ui ModelSelector(需 AssistantRuntimeProvider 的
+  // useAui;渲染 combobox trigger + 受控 popover)。trigger 显示当前模型、打开/选择交互由 headless
+  // verify(真实 runtime)覆盖,不在此 jsdom 单测里重复(base-ui popover + portal 不适合 jsdom)。
 });
 
 describe("SidebarSettings", () => {
-  it("opens an inline non-Portal settings panel sharing the permission control", () => {
-    const { container } = renderWithContext(<SidebarSettings />, {
+  const ctxWith = (over: Partial<ShinyConfigCtx> = {}): ShinyConfigCtx => ({
+    ...baseContext,
+    permissionMode: {
       value: "default",
-      options: [{ value: "default", label: "Manual", description: "Ask before edits" }],
-      pending: false,
-      error: null,
-      setValue: () => {},
-    });
+      options: [
+        { value: "default", label: "Manual", description: "Ask before edits" },
+        { value: "bypassPermissions", label: "Bypass" },
+        { value: "yolo", label: "YOLO" },
+      ],
+      pending: false, error: null, setValue: () => {},
+    },
+    defaultPermissionMode: "default",
+    setDefaultPermissionMode: vi.fn(),
+    modeVisibility: { showBypass: true, showYolo: true },
+    setModeVisibility: vi.fn(),
+    ...over,
+  });
+
+  it("opens an inline non-Portal panel with default-mode + visibility controls", () => {
+    const { container } = render(
+      <ShinyConfigContext.Provider value={ctxWith()}><SidebarSettings /></ShinyConfigContext.Provider>,
+    );
     const settingsButton = screen.getByRole("button", { name: "Settings" });
     fireEvent.click(settingsButton);
     const panel = screen.getByRole("dialog", { name: "Settings" });
     expect(container.contains(panel)).toBe(true);
-    expect(panel.querySelector('select[aria-label="Permission mode"]')).toBeTruthy();
+    // 重定位后:Settings 放"新会话默认模式" + 可见性开关(不再是 composer 的即时 Permission mode)
+    expect(panel.querySelector('select[aria-label="Default permission mode"]')).toBeTruthy();
+    expect(panel.querySelector('[data-mode-vis="showBypass"]')).toBeTruthy();
+    expect(panel.querySelector('[data-mode-vis="showYolo"]')).toBeTruthy();
     expect(document.activeElement).toBe(panel);
 
     fireEvent.keyDown(panel, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
     expect(document.activeElement).toBe(settingsButton);
+  });
+
+  it("hides YOLO from the default-mode select when visibility is off", () => {
+    render(
+      <ShinyConfigContext.Provider value={ctxWith({ modeVisibility: { showBypass: true, showYolo: false } })}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const sel = screen.getByLabelText("Default permission mode") as HTMLSelectElement;
+    const values = Array.from(sel.options).map((o) => o.value);
+    expect(values).toContain("bypassPermissions");
+    expect(values).not.toContain("yolo");
   });
 });
 

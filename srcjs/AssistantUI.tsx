@@ -1,5 +1,15 @@
-import { useEffect, forwardRef, type ReactNode } from "react";
+import { useEffect, forwardRef, lazy, Suspense, type ReactNode } from "react";
 import { AssistantRuntimeProvider, AssistantModalPrimitive } from "@assistant-ui/react";
+
+// Build-time flag (vite define, default false). When false, the devtools dynamic import below
+// is dead-code and tree-shaken OUT of the prod bundle. Build with `AUI_DEVTOOLS=1 npm run build`
+// to include it for debugging (then enable at runtime via ?aui-devtools=1 or config.devtools).
+declare const __AUI_DEVTOOLS__: boolean;
+const DevToolsModalLazy = __AUI_DEVTOOLS__
+  ? lazy(() =>
+      import("@assistant-ui/react-devtools").then((m) => ({ default: m.DevToolsModal })),
+    )
+  : null;
 import { BotIcon } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { ThreadList } from "@/components/assistant-ui/thread-list";
@@ -12,6 +22,23 @@ import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { ArtifactPanel } from "./artifact-panel";
 import { registerApprovalHandler, unregisterApprovalHandler } from "./approval-registry";
 import { ShinyConfigContext } from "./shiny-config-context";
+
+// Dev-only(默认关):在浏览器加 `?aui-devtools=1`(或 config.devtools=TRUE)时,挂载官方
+// @assistant-ui/react-devtools 的浮层 modal,便于迁移期检查 ExternalStore 运行时/消息 parts。
+// 必须在 AssistantRuntimeProvider 内渲染。默认不启用,不影响正常使用。
+function ShinyDevTools({ config }: { config: Record<string, unknown> }) {
+  if (!__AUI_DEVTOOLS__ || !DevToolsModalLazy) return null;
+  const enabled =
+    config?.devtools === true ||
+    (typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).has("aui-devtools"));
+  if (!enabled) return null;
+  return (
+    <Suspense fallback={null}>
+      <DevToolsModalLazy />
+    </Suspense>
+  );
+}
 
 interface AssistantUIProps {
   inputId: string;
@@ -76,7 +103,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   }[]) ?? [];
   const cfgValue = {
     tools: (config?.tools as { name: string; description?: string }[]) ?? [],
-    commands: mergeSlashCommands(configuredCommands, rt.serverCommands, actionItems),
+    commands: mergeSlashCommands(rt.commands ?? configuredCommands, rt.serverCommands, actionItems),
     actionItems,
     showTimestamps: config?.show_timestamps === true,
     onEnqueue: rt.enqueueMessage,
@@ -125,6 +152,14 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     setFilesPaneFollow: rt.setFilesPaneFollow,
     autoRunEnabled: rt.autoRunEnabled,
     setAutoRunEnabled: rt.setAutoRunEnabled,
+    defaultPermissionMode: rt.defaultPermissionMode,
+    setDefaultPermissionMode: rt.setDefaultPermissionMode,
+    modeVisibility: rt.modeVisibility,
+    setModeVisibility: rt.setModeVisibility,
+    composerDensity: rt.composerDensity,
+    setComposerDensity: rt.setComposerDensity,
+    runREnabled: rt.runREnabled,
+    setRunREnabled: rt.setRunREnabled,
     threadMaxWidth: rt.threadMaxWidth,
   };
 
@@ -156,6 +191,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               <div className="flex h-full flex-col">{threadEl}</div>
             </AssistantModalPrimitive.Content>
           </AssistantModalPrimitive.Root>
+          <ShinyDevTools config={config ?? {}} />
         </ShinyConfigContext.Provider>
       </AssistantRuntimeProvider>
     );
@@ -190,6 +226,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
             </div>
           )}
         </div>
+        <ShinyDevTools config={config ?? {}} />
       </ShinyConfigContext.Provider>
     </AssistantRuntimeProvider>
   );

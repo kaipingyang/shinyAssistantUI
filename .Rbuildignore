@@ -15,6 +15,9 @@
 .*\.png$
 ^\.ellmer_sessions$
 ^\.claude$
+^\.codegraph$
+^\.kiro$
+^inst/www/bundle-stats\.html$
 ^\.claude_session_map.*\.rds$
 ^\.Renviron.*$
 ^test\.txt$

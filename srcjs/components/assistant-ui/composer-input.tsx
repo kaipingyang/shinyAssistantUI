@@ -360,7 +360,7 @@ const ShinyLexicalInput: FC<{
     <LexicalComposerInput
       ref={shellRef}
       placeholder="Send a message..."
-      className="aui-composer-input caret-primary max-h-32 min-h-10 w-full overflow-y-auto bg-transparent px-2.5 py-1 text-base outline-none"
+      className="aui-composer-input caret-primary max-h-32 min-h-[var(--composer-min-height,2.5rem)] w-full overflow-y-auto bg-transparent px-2.5 py-1 text-base outline-none"
       autoFocus
       submitMode="enter"
       formatter={formatter}

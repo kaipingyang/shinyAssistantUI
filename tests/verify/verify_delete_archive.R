@@ -4,7 +4,7 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9235L
+port <- 9809L
 failures <- character()
 unlink(c("/tmp/aui-da.out", "/tmp/aui-da.err"))
 
@@ -143,6 +143,8 @@ click_item_more("sess-del")
 value("(function(){const its=[...document.querySelectorAll('[data-slot=aui_thread-list-item-more-item]')];const d=its.find(x=>x.innerText.trim()==='Delete');if(d)d.click();return !!d})()")
 check("delete confirmation dialog appears again", wait_for("!!document.querySelector('[data-slot=aui_delete_confirm]')", 4))
 click_sel("[data-confirm-delete]")
+check("confirm dialog dismisses immediately after clicking Delete (Bug: stayed open)",
+      wait_for("!document.querySelector('[data-slot=aui_delete_confirm]')", 4))
 check("confirm calls backend real delete", wait_for("document.getElementById('deleted-probe').textContent==='sess-del'", 6),
       value("document.getElementById('deleted-probe').textContent"))
 check("deleted session removed from list and does not reappear",

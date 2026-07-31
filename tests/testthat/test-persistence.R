@@ -5,8 +5,7 @@ test_that("assistantUIServer sends explicit persistence in the initial config", 
     shiny::testServer(function(input, output, session) {
       assistantUIServer("chat", handler = handler, persistence = mode)
     }, {
-      widget <- jsonlite::fromJSON(output$chat, simplifyVector = FALSE)
-      expect_identical(widget$x$config$persistence, mode)
+      expect_identical(widget_config(output$chat)$persistence, mode)
     })
   }
 })
@@ -17,8 +16,7 @@ test_that("assistantUIServer defaults persistence to client", {
   shiny::testServer(function(input, output, session) {
     assistantUIServer("chat", handler = handler)
   }, {
-    widget <- jsonlite::fromJSON(output$chat, simplifyVector = FALSE)
-    expect_identical(widget$x$config$persistence, "client")
+    expect_identical(widget_config(output$chat)$persistence, "client")
   })
 })
 

@@ -115,6 +115,12 @@
     )
   }
   .migrate_addin_storage()
+  # Plan 45/46:持久化 UI 偏好 —— 合并到 ~/.claude_addin/addin_settings.json(JSON,可手改)。
+  # 首次运行若发现旧的 *_.rds 偏好,一次性迁移进 json 并删除旧文件(老用户无感)。
+  .migrate_addin_settings()
+  settings_state <- new.env(parent = emptyenv())
+  settings_state$v <- .read_addin_settings()
+  options$permission_mode <- settings_state$v$defaultPermissionMode  # handler 初始 + 新线程默认
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -146,6 +152,9 @@
     models           = models,
     session_map_path = session_map_path
   )
+  # 应用持久化的 run_r 开关(仅当 run_r 可用;首次连接前设置,reset_clients 无 client 时无副作用)。
+  if (!is.null(run_r_server))
+    tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
   workspace_search <- .make_addin_workspace_search_provider(cur_dir)
 
@@ -188,6 +197,9 @@
       show_thread_list = TRUE,
       persistence      = "server",
       latex            = TRUE,   # Claude Code 常输出数学公式 → 默认启用 KaTeX 渲染
+      show_usage       = TRUE,   # 组合框下方环形显示上下文用量
+      context_window   = 200000L, # Claude 默认上下文窗口
+      usage_style      = "ring",
       working_dir      = cur_dir(),
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
@@ -195,6 +207,30 @@
       projects          = .read_saved_projects(.claude_addin_path("projects.rds")),
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
+      # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
+      default_permission_mode = settings_state$v$defaultPermissionMode,
+      on_set_default_permission_mode = function(m) {
+        settings_state$v$defaultPermissionMode <- as.character(m)[[1L]]
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        tryCatch(attr(handler, "set_default_permission_mode")(settings_state$v$defaultPermissionMode),
+                 error = function(e) NULL)
+      },
+      mode_visibility = settings_state$v$modeVisibility,
+      on_set_mode_visibility = function(v) {
+        settings_state$v$modeVisibility <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      },
+      composer_density = settings_state$v$composerDensity,
+      on_set_composer_density = function(d) {
+        settings_state$v$composerDensity <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      },
+      run_r_enabled = if (!is.null(run_r_server)) settings_state$v$runREnabled else NULL,
+      on_toggle_run_r = if (!is.null(run_r_server)) function(v) {
+        settings_state$v$runREnabled <- isTRUE(v)
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
+      } else NULL,
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)
@@ -290,6 +326,12 @@
       if (identical(nd, dir_state$cwd)) return(invisible(nd))   # cwd 未变 → 跳过重连/收藏/推送
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
+      # 切目录后重载新项目的 skills/commands 并热更新 slash 菜单(之前只在启动读一次 →
+      # 切过去看不到新项目 .claude 的 skills)。
+      tryCatch(
+        ctrl$send_commands(load_claude_skills(project_dir = nd)),
+        error = function(e) NULL
+      )
       recent <- add_recent(nd)
       ctrl$send_working_dir(nd, as.list(recent))
       push_sessions()
@@ -306,6 +348,8 @@
                                    archived_path, session_map_path,
                                    on_reappear = function() invisible(NULL)) {
   tryCatch(attr(handler, "release_session")(session_id), error = function(e) NULL)
+  # 删前抓该 session 的 tool_use id(transcript 还在);删成功后清理其审批决策条目(Plan 46)。
+  decision_ids <- tryCatch(.session_tool_use_ids(session_id), error = function(e) character(0))
   ok <- tryCatch({ .delete_claude_session(session_id, directory = project); TRUE },
                  error = function(e) {
                    warning("[CLAUDE] delete_session failed: ", conditionMessage(e), call. = FALSE)
@@ -314,6 +358,8 @@
   if (isTRUE(ok)) {
     .toggle_archived_id(archived_path, project, session_id, FALSE)
     tryCatch(.remove_claude_session_map(session_map_path, session_id), error = function(e) NULL)
+    tryCatch(.prune_tool_decisions(.claude_decisions_path(session_map_path), decision_ids),
+             error = function(e) NULL)
   } else {
     tryCatch(on_reappear(), error = function(e) NULL)
   }

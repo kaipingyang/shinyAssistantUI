@@ -25,6 +25,20 @@ test_that(".addin_run_r_capture captures value / message / warning / error / inv
   expect_true(shinyAssistantUI:::.addin_run_r_capture("")$ok)
 })
 
+test_that(".addin_run_r_capture captures cat/print stdout (Bug: run-in-console 报 no visible output)", {
+  e <- new.env(parent = globalenv())
+  # cat 直接写 stdout —— 之前只捕获可见返回值,cat 文本丢失 → Claude 看到 (no visible output)
+  r <- shinyAssistantUI:::.addin_run_r_capture('cat("Hello, World!\n")', envir = e)
+  expect_true(r$ok); expect_match(r$output, "Hello, World!", fixed = TRUE)
+  # print 也走 stdout
+  r <- shinyAssistantUI:::.addin_run_r_capture('print("abc")', envir = e)
+  expect_match(r$output, "abc", fixed = TRUE)
+  # cat + 可见返回值 混合:两者都在
+  r <- shinyAssistantUI:::.addin_run_r_capture('cat("line1\n"); 7 * 6', envir = e)
+  expect_match(r$output, "line1", fixed = TRUE)
+  expect_match(r$output, "42", fixed = TRUE)
+})
+
 test_that(".addin_run_r_remote 无 server 时安全返回错误(不抛)", {
   skip_if_not_installed("nanonext")
   r <- shinyAssistantUI:::.addin_run_r_remote("ipc:///tmp/nonexistent-claude-xyz.sock", "1+1", timeout = 800)

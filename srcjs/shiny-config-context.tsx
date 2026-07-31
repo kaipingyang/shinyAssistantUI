@@ -60,7 +60,7 @@ export interface ShinyConfigCtx {
   loadingOlder?: boolean;
   loadOlderHistory?: () => void;
   // ── ClaudeAgentSDK 能力对齐 ──
-  usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  usage?: { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number };
   /** Plan 36: per-thread agent state pushed from R via on_state(). */
   agentState?: unknown;
   /** Plan 34: enable KaTeX math rendering (opt-in). */
@@ -91,6 +91,18 @@ export interface ShinyConfigCtx {
   setFilesPaneFollow?: (value: boolean) => void;
   autoRunEnabled?: boolean;
   setAutoRunEnabled?: (value: boolean) => void;
+  /** Plan 45: persisted default permission mode for NEW conversations (addin). */
+  defaultPermissionMode?: string;
+  setDefaultPermissionMode?: (value: string) => void;
+  /** Plan 45: which risky modes appear in the mode selector (hide Bypass/YOLO). */
+  modeVisibility?: { showBypass: boolean; showYolo: boolean };
+  setModeVisibility?: (value: { showBypass: boolean; showYolo: boolean }) => void;
+  /** Plan 45: composer height preset — "comfortable" (default) | "compact" (flat, ~shinychat). */
+  composerDensity?: "comfortable" | "compact";
+  setComposerDensity?: (value: "comfortable" | "compact") => void;
+  /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
+  runREnabled?: boolean;
+  setRunREnabled?: (value: boolean) => void;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

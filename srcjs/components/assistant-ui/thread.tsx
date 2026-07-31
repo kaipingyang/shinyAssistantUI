@@ -19,6 +19,7 @@ import {
 import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { renderToolPart } from "@/tool-ui/registry";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import { ShinyAgentProgress } from "@/hooks/use-agent-state";
@@ -126,7 +127,7 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth } = useShinyConfig();
+  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth, composerDensity } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
@@ -218,7 +219,10 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
         ["--composer-bg" as string]:
           "color-mix(in oklab, var(--color-muted) 30%, var(--color-background))",
         ["--composer-radius" as string]: "1.5rem",
-        ["--composer-padding" as string]: "8px",
+        // Plan 45:输入框高度两档。compact = 更扁(更矮的起始输入 + 更小内边距,≈shinychat),
+        // comfortable = 现状。只改起始/内边距;自动增高(max-h-32)不变。
+        ["--composer-padding" as string]: composerDensity === "compact" ? "4px" : "8px",
+        ["--composer-min-height" as string]: composerDensity === "compact" ? "1.5rem" : "2.5rem",
       }}
     >
       <ThreadPrimitive.Viewport
@@ -399,20 +403,38 @@ const IdeContextIndicator: FC = () => {
 };
 
 const Composer: FC = () => {
-  const { refreshIdeContext } = useShinyConfig();
+  const { refreshIdeContext, composerDensity } = useShinyConfig();
+  const compact = composerDensity === "compact";
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ModelPickerDialog />
       <ShinyAgentProgress />
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"
+          data-density={composerDensity ?? "comfortable"}
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerAttachments />
           <IdeContextIndicator />
-          <ShinyComposerInput onFocus={refreshIdeContext} />
-          <ComposerAction />
+          {compact ? (
+            // 扁平单行(≈shinychat):输入框在最左(flex-1,光标贴最左),控件(附件/权限/模型/用量环)
+            // + 发送全在右侧;附件预览 / IDE 上下文条在上方按需出现。comfortable 保留完整两行布局。
+            <div className="aui-composer-compact-row flex items-end gap-1.5">
+              <div className="min-w-0 flex-1">
+                <ShinyComposerInput onFocus={refreshIdeContext} />
+              </div>
+              <ComposerAddAttachment />
+              <PermissionModeControl compact />
+              <ModelPickerDialog />
+              <ShinyContextDisplay />
+              <ComposerSendGroup />
+            </div>
+          ) : (
+            <>
+              <ShinyComposerInput onFocus={refreshIdeContext} />
+              <ComposerAction />
+            </>
+          )}
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
@@ -553,77 +575,84 @@ const ShinyTimestamp: FC = () => {
   );
 };
 
+const ComposerSendGroup: FC = () => {
+  return (
+    <div className="flex items-center gap-1.5">
+      <AuiIf condition={(s) => s.thread.capabilities.dictation}>
+        <AuiIf condition={(s) => s.composer.dictation == null}>
+          <ComposerPrimitive.Dictate asChild>
+            <TooltipIconButton
+              tooltip="Voice input"
+              side="bottom"
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="aui-composer-dictate size-7 rounded-full"
+              aria-label="Start voice input"
+            >
+              <MicIcon className="aui-composer-dictate-icon size-4" />
+            </TooltipIconButton>
+          </ComposerPrimitive.Dictate>
+        </AuiIf>
+        <AuiIf condition={(s) => s.composer.dictation != null}>
+          <ComposerPrimitive.StopDictation asChild>
+            <TooltipIconButton
+              tooltip="Stop dictation"
+              side="bottom"
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
+              aria-label="Stop voice input"
+            >
+              <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
+            </TooltipIconButton>
+          </ComposerPrimitive.StopDictation>
+        </AuiIf>
+      </AuiIf>
+      <AuiIf condition={(s) => !s.thread.isRunning}>
+        <ComposerPrimitive.Send asChild>
+          <TooltipIconButton
+            tooltip="Send message"
+            side="bottom"
+            type="button"
+            variant="default"
+            size="icon"
+            className="aui-composer-send size-7 rounded-full"
+            aria-label="Send message"
+          >
+            <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Send>
+      </AuiIf>
+      <AuiIf condition={(s) => s.thread.isRunning}>
+        <ComposerQueue />
+        <ComposerPrimitive.Cancel asChild>
+          <Button
+            type="button"
+            variant="default"
+            size="icon"
+            className="aui-composer-cancel size-7 rounded-full"
+            aria-label="Stop generating"
+          >
+            <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
+          </Button>
+        </ComposerPrimitive.Cancel>
+      </AuiIf>
+    </div>
+  );
+};
+
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <div className="flex min-w-0 items-center gap-1.5">
         <ComposerAddAttachment />
         <PermissionModeControl compact />
+        <ModelPickerDialog />
         <ShinyContextDisplay />
       </div>
-      <div className="flex items-center gap-1.5">
-        <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-          <AuiIf condition={(s) => s.composer.dictation == null}>
-            <ComposerPrimitive.Dictate asChild>
-              <TooltipIconButton
-                tooltip="Voice input"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-dictate size-7 rounded-full"
-                aria-label="Start voice input"
-              >
-                <MicIcon className="aui-composer-dictate-icon size-4" />
-              </TooltipIconButton>
-            </ComposerPrimitive.Dictate>
-          </AuiIf>
-          <AuiIf condition={(s) => s.composer.dictation != null}>
-            <ComposerPrimitive.StopDictation asChild>
-              <TooltipIconButton
-                tooltip="Stop dictation"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="Stop voice input"
-              >
-                <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-              </TooltipIconButton>
-            </ComposerPrimitive.StopDictation>
-          </AuiIf>
-        </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send asChild>
-            <TooltipIconButton
-              tooltip="Send message"
-              side="bottom"
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-send size-7 rounded-full"
-              aria-label="Send message"
-            >
-              <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
-            </TooltipIconButton>
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerQueue />
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label="Stop generating"
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
-      </div>
+      <ComposerSendGroup />
     </div>
   );
 };
@@ -649,18 +678,18 @@ const AssistantMessage: FC = () => {
   // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
   // for pt-[n] use -mb-[n + 6] & min-h-[n + 6] to preserve compensation
   const ACTION_BAR_PT = "pt-1.5";
-  const ACTION_BAR_HEIGHT = `-mb-7.5 min-h-7.5 ${ACTION_BAR_PT}`;
+  // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
+  const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative duration-150"
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
     >
       <div
         data-slot="aui_assistant-message-content"
-        // [contain-intrinsic-size:auto_24px] fixes issue #4104, don't change without checking for regressions
-        className="text-foreground px-2 leading-relaxed wrap-break-word [contain-intrinsic-size:auto_24px] [content-visibility:auto]"
+        className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
           groupBy={groupPartByType({
@@ -707,7 +736,7 @@ const AssistantMessage: FC = () => {
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                return part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
               case "data":
                 return part.dataRendererUI;
               case "indicator":
@@ -807,7 +836,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_60px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />

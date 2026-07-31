@@ -114,10 +114,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     : "client";
   const usesClientPersistence = persistence === "client";
 
-  // 从 config 提取 commands，用于 /commandName → cmd.prompt 展开（useMemo 稳定引用）
-  const commands = useMemo(
+  // 从 config 提取 commands（本地 skills），用于 /commandName → cmd.prompt 展开 + slash 菜单。
+  // 用 state 而非 useMemo：切换工作目录时 R 会重载该项目的 skills 并经 :commands 热更新。
+  const [commands, setCommands] = useState<CommandDef[]>(
     () => (config?.commands as CommandDef[] | undefined) ?? [],
-    [config],
   );
   const actionItems = useMemo(
     () => (config?.action_items as ActionItemDef[] | undefined) ?? [],
@@ -256,6 +256,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [autoRunEnabled, setAutoRunEnabledState] = useState<boolean | undefined>(
     () => (typeof config?.auto_run === "boolean" ? config.auto_run : undefined),
   );
+  const [defaultPermissionMode, setDefaultPermissionModeState] = useState<string | undefined>(
+    () => (typeof config?.default_permission_mode === "string" ? config.default_permission_mode : undefined),
+  );
+  const [modeVisibility, setModeVisibilityState] = useState<{ showBypass: boolean; showYolo: boolean } | undefined>(
+    () => {
+      const mv = config?.mode_visibility as { showBypass?: boolean; showYolo?: boolean } | undefined;
+      return mv ? { showBypass: mv.showBypass !== false, showYolo: mv.showYolo !== false } : undefined;
+    },
+  );
+  const [composerDensity, setComposerDensityState] = useState<"comfortable" | "compact" | undefined>(
+    () => (config?.composer_density === "compact" || config?.composer_density === "comfortable"
+      ? config.composer_density : undefined),
+  );
+  const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
+    () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
+  );
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -380,7 +396,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
 
   // ── ClaudeAgentSDK 能力对齐状态 ────────────────────────────────────────────
-  type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string };
+  type UsageInfo = { costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number };
   type TaskInfo = { taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string };
   const [usageMap, setUsageMap] = useState<Record<string, UsageInfo>>({});          // #1 每线程最新用量
   const [agentStateMap, setAgentStateMap] = useState<Record<string, unknown>>({});   // Plan 36 每线程 agent 状态
@@ -595,6 +611,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const tid = d.threadId ?? currentThreadIdRef.current;
       setUsageMap((prev) => ({ ...prev, [tid]: {
         costUsd: d.costUsd, tokens: d.tokens, turns: d.turns, durationMs: d.durationMs, model: d.model,
+        contextWindow: d.contextWindow,
       } }));
     });
     // ── Plan 36 Agent 共享状态(per-thread 快照)───────────────────────────────
@@ -660,6 +677,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         "```", body, "```",
       ].join("\n");
       deliverTextRef.current?.(text, threadId);
+    });
+    // 本地 skills 热更新(切换工作目录时 R 重载该项目 .claude 的 skills 并经 :commands 下发)。
+    bridge.current.onCommands((d) => {
+      setCommands(((d.commands ?? []) as CommandDef[]) ?? []);
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     bridge.current.onServerCommands((d) => {
@@ -1327,7 +1348,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       // 标志：parentId 陈旧找不到时跳过本次编辑（连 startRun 一起跳过，
       // 避免只发消息给 R 却不插 user 气泡，导致孤儿 assistant 回复 + UI/R 发散）。
-      let aborted = false;
       const newUserMessage: ThreadMessageLike = {
         id: `user-${Date.now()}`,
         role: "user" as const,
@@ -1337,12 +1357,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       };
       setMessagesMap((prev) => {
         const threadMsgs = prev[threadId] ?? [];
-        const { updated, aborted: ab } = applyEdit(threadMsgs, parentId, newUserMessage);
-        if (ab) { aborted = true; return prev; }
+        const updated = applyEdit(threadMsgs, parentId, newUserMessage);
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
         return { ...prev, [threadId]: updated };
       });
-      if (aborted) return; // 不发消息给 R，保持 UI/R 一致
       startRun(threadId, () => {
         requestIdeContextFor(threadId);
         bridge.current.sendUserMessage(
@@ -1608,6 +1626,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     ? {
         value: currentPermissionPending?.requested
           ?? permissionValues[currentThreadId]
+          ?? defaultPermissionMode
           ?? permissionCapability.value,
         options: permissionCapability.options,
         pending: Boolean(currentPermissionPending),
@@ -1663,6 +1682,26 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setAutoRunEnabledState(value);
       bridge.current.sendAutoRunEnabled(value);
     },
+    defaultPermissionMode,
+    setDefaultPermissionMode: (value: string) => {
+      setDefaultPermissionModeState(value);
+      bridge.current.sendDefaultPermissionMode(value);
+    },
+    modeVisibility,
+    setModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => {
+      setModeVisibilityState(value);
+      bridge.current.sendModeVisibility(value);
+    },
+    composerDensity,
+    setComposerDensity: (value: "comfortable" | "compact") => {
+      setComposerDensityState(value);
+      bridge.current.sendComposerDensity(value);
+    },
+    runREnabled,
+    setRunREnabled: (value: boolean) => {
+      setRunREnabledState(value);
+      bridge.current.sendRunREnabled(value);
+    },
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
@@ -1680,6 +1719,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     rateLimit,                                                           // #3
     statusText,                                                          // #4
     serverCommands,                                                      // #5
+    commands,                                                            // 本地 skills(可 :commands 热更新)
     warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
     warmingResuming: warmingResumingThreads.has(currentThreadId),        // 该冷启动是否为"恢复历史"
     stopTask: (taskId: string) => invokeAction({ id: `stoptask:${taskId}`, label: `Stop task` }), // #7

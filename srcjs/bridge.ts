@@ -108,6 +108,10 @@ export interface ShinyBridge {
   sendSetWorkingDir: (path: string) => void;
   sendFilesPaneFollow: (value: boolean) => void;
   sendAutoRunEnabled: (value: boolean) => void;
+  sendDefaultPermissionMode: (value: string) => void;
+  sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
+  sendComposerDensity: (value: string) => void;
+  sendRunREnabled: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string) => void;
@@ -125,13 +129,14 @@ export interface ShinyBridge {
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
-  onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string }) => void) => void;
+  onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number }) => void) => void;
   onStateSnapshot: (handler: (data: { threadId?: string; state?: unknown }) => void) => void;
   onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
   onWarming: (handler: (data: { threadId?: string; active?: boolean; resuming?: boolean }) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
+  onCommands: (handler: (data: { commands?: unknown[] }) => void) => void;
   onIdeContext: (handler: (data: IdeContextMeta) => void) => void;
   onWorkspaceResults: (handler: (data: WorkspaceResults) => void) => void;
 }
@@ -431,6 +436,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
     },
+    onCommands(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:commands`, (data) => handler(data as never));
+    },
     onIdeContext(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:ide-context`, (data) => handler(data as IdeContextMeta));
     },
@@ -461,6 +469,18 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendAutoRunEnabled(value) {
       Shiny.setInputValue(`${inputId}_auto_run_enabled`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendDefaultPermissionMode(value) {
+      Shiny.setInputValue(`${inputId}_default_permission_mode`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendModeVisibility(value) {
+      Shiny.setInputValue(`${inputId}_mode_visibility`, { showBypass: value.showBypass, showYolo: value.showYolo, ts: Date.now() }, { priority: "event" });
+    },
+    sendComposerDensity(value) {
+      Shiny.setInputValue(`${inputId}_composer_density`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendRunREnabled(value) {
+      Shiny.setInputValue(`${inputId}_run_r_enabled`, { value, ts: Date.now() }, { priority: "event" });
     },
     onProjects(handler) {
       projectsHandler = handler;

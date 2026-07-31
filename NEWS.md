@@ -1,3 +1,277 @@
+# shinyAssistantUI 0.3.0
+
+A large release consolidating the 0.2.2.900x development line.
+
+## Foundation
+
+- **Migrated the vendored UI layer from radix-ui to base-ui** and aligned to
+  `@assistant-ui/react` 0.15.1. The source tree is radix-free (radix-ui remains only a transitive
+  dependency of `@assistant-ui/react`'s own primitives).
+- **Removed the `htmlwidgets` dependency**: the widget now registers as a native Shiny output
+  binding (`assistantUIOutput()` + `renderAssistantUI()` sending `{inputId, config}`). KaTeX is
+  bundled locally (no CDN font reflow).
+
+## Permissions & Settings (addin)
+
+- **Two-tier permission-mode switching**: de-escalation (to a stricter mode) hot-switches instantly;
+  escalation (to a more permissive mode) and the pseudo modes (Strict/YOLO) reconnect so the mode is
+  applied at connect (runtime escalation is not honored by the CLI).
+- **Settings panel repurposed** to persistent preferences: new-conversation default mode + risky-mode
+  visibility (hide Bypass/YOLO), instead of duplicating the composer's live mode switch.
+- UI preferences now live in a single human-readable `~/.claude_addin/addin_settings.json`
+  (migrated once from the old per-preference `.rds` files).
+
+## Composer & UX
+
+- **Composer height preset** (Comfortable default / Compact flat single-row inline, ~shinychat).
+- Official `@assistant-ui` ModelSelector inline in the composer.
+- Approval cards auto-scroll into view during continuous approvals; large tool cards follow the
+  viewport (0.15.1 message containment).
+- Switching the working directory reloads that project's local skills/commands (slash menu hot-update).
+- `run_r` MCP tool can be toggled off in Settings.
+
+## Fixes
+
+- Run-in-console now captures `cat()`/`print()` stdout (was "(no visible output)").
+- Delete-confirmation dialog dismisses immediately on confirm.
+- History sessions restore per-tool approval/deny state; deleting a session prunes its decisions.
+- Devtools excluded from the production bundle (smaller build).
+
+Internal: `R CMD check` clean (0 error/warning/note).
+
+# shinyAssistantUI 0.2.2.9022 (dev branch)
+
+- Compact composer: input is now first (far-left, flex-1) with controls on the right, so the caret
+  starts at the far left (was pushed to center by the left-side controls).
+
+
+- Compact composer keeps all controls (attachment, permission mode, model selector, usage ring) inline
+  on the single flat row (earlier they were dropped/moved).
+- Approval cards now auto-scroll into view when they appear during continuous approvals (the turn is
+  suspended so assistant-ui's stream auto-scroll did not fire).
+
+
+- addin UI preferences (default permission mode, mode visibility, composer height, run_r toggle) are
+  now stored in a single human-readable ~/.claude_addin/addin_settings.json (was 4 separate .rds).
+  Old .rds prefs are migrated once on startup and removed (transparent for existing users). Data files
+  (session_map, archived, tool_decisions, ...) stay RDS.
+- Deleting a history session now also prunes that session's tool-approval decisions (no orphan
+  entries accumulating in tool_decisions.rds).
+
+
+- Switching working directory now reloads that project's local skills/commands and hot-updates the
+  slash menu (previously skills were read once at startup, so a switched-to project's .claude skills
+  were not picked up). New ctrl$send_commands() + :commands message path.
+
+# shinyAssistantUI 0.2.2.9018 (dev branch)
+
+## Bug fixes & compact flat composer
+
+- New-conversation default mode now reflected on new chats (composer fell back to the static
+  page-load value; now uses the live default; unswitched threads follow the current default).
+- Delete-confirmation dialog now dismisses immediately on "Delete permanently" (was staying open
+  until an outside click, because the delete is async).
+- Auto-scroll during tool calls fixed: backported 0.15.1 message containment (contain-intrinsic-size
+  auto_24px->auto_200px moved to the message root), so large tool cards/approval boxes below the fold
+  are measured correctly and the viewport follows them.
+- Compact composer height is now a genuinely flat single-row inline layout (input + send on one row,
+  ~shinychat), ~40%% shorter than Comfortable.
+
+
+## Settings & permission-mode UX (Plan 45)
+
+- Permission-mode switching is now two-tier: de-escalation (to a stricter mode) hot-switches
+  instantly; escalation (to a more permissive mode) and the pseudo modes (Strict/YOLO) reconnect so
+  the mode is applied at connect (runtime escalation is not honored by the CLI). Safe by construction.
+- Settings panel repurposed (no longer duplicates the composer's live mode switch): new-conversation
+  default mode + risky-mode visibility (hide Bypass/YOLO), both persisted.
+- Composer height preset (Comfortable default / Compact flat single-line, ~shinychat); auto-grow kept.
+- run_r MCP tool can be toggled off in Settings (drops it from the connection on reconnect).
+- All new prefs persist under ~/.claude_addin/.
+
+
+## Bug fix
+
+- **Switching permission mode to Bypass (or Auto-edit) had no effect on the live session** — it kept
+  prompting for every tool. Cause: real-mode switches used the runtime `set_permission_mode` control
+  request, but Claude Code will not hot-*escalate* to a more permissive mode mid-session (accepted
+  but not applied). Fix: permission-mode changes now `reset_clients()` so the next message reconnects
+  with the mode applied at connect time (`--permission-mode`), which is always honored — same as the
+  askAll/yolo/thinking paths. Verified with a real CLI test (`verify_permission_mode.R`): default
+  prompts for Bash, bypassPermissions does not. Note: switching disconnects the current client, so
+  if you switch while an approval card is pending, resend the message.
+
+# shinyAssistantUI 0.2.2.9015 (dev branch)
+
+## UX
+
+- Moved the ModelSelector into the composer bottom action row (next to the permission-mode
+  selector), instead of above the composer. /model still opens it (controlled popover).
+
+# shinyAssistantUI 0.2.2.9014 (dev branch)
+
+## Bug fixes (real-machine feedback)
+
+- **Run-in-console captured no output**: `.addin_run_r_capture` only returned the visible value, so
+  `cat()`/`print()` output (which goes to stdout) was lost — Claude saw "(no visible output)" and
+  retried, appearing one step behind. Now wraps eval in `capture.output()` (via an env box to avoid
+  `<<-` scoping) so stdout, the visible value, messages and warnings are all captured.
+- **Run-in-console separator too long**: the `── Claude ran in console ──` header used `cli::rule`,
+  which spans the full console width. Now a fixed-width cyan separator.
+- **History session lost approval/deny state**: tool cards showed "✓ Approved / ✕ Denied" live but
+  not after reopening a session. Decisions are now persisted server-side (`tool_decisions.rds`,
+  keyed by the CLI tool_use id which is stable across reloads), re-emitted by
+  `.claude_msgs_to_thread` as `artifact.approvalResult`, and read back by `useToolCard`. Verified
+  headlessly (`verify_session_decisions.R`).
+
+# shinyAssistantUI 0.2.2.9013 (dev branch)
+
+## Source is now radix-free (matches upstream 0.15.1 ui/ layer)
+
+- Migrated the last live radix import: thread-list delete-confirmation AlertDialog -> base-ui Dialog.
+- Removed 27 unused leftover shadcn scaffold files (accordion/tabs/select/menubar/dropdown-menu/
+  context-menu/hover-card/checkbox/slider/switch/progress/scroll-area/radio-group/toggle/
+  toggle-group/combobox/textarea/input-group/aspect-ratio/breadcrumb/button-group/form/item/
+  navigation-menu/alert-dialog/direction + assistant-ui/badge) that upstream 0.15.1 does not ship
+  and nothing referenced. No srcjs file imports "radix-ui" anymore.
+- radix-ui stays a dependency because @assistant-ui/react 0.15.1 uses it internally for its own
+  primitives (ActionBarMore/ThreadListItemMore/AssistantModal/Composer) - matches upstream.
+
+
+## Follow-ups: devtools prod-exclusion, official ModelSelector, upstream-delta review
+
+- devtools excluded from the prod bundle via `__AUI_DEVTOOLS__` build define (default off; -201KB).
+- Adopted official `@assistant-ui` ModelSelector (base-ui) in place of the custom ModelPickerDialog
+  (inline combobox trigger, controlled by /model). Needs real-machine UX review.
+- Reviewed every heavy component's upstream 0.14.26->0.15.1 delta: markdown-text unchanged; fixed
+  context-display to the base-ui tooltip (asChild->render + TooltipProvider); thread/thread-list/
+  diff-viewer/syntax-highlighter deltas are minor CSS/perf/optional-feature/alternative-impl and
+  their asChild usages are on assistant-ui npm primitives (still supported) — deferred as low-value.
+
+
+## radix -> base-ui foundation migration (Plan 44, dev)
+
+- Migrated the vendored UI primitives from radix-ui to **base-ui** (-ui/react), tracking
+  assistant-ui 0.15.x: tooltip, collapsible, button, dialog, avatar, badge, separator, label,
+  input, skeleton. Synced the assistant-ui components that depend on them (tooltip-icon-button,
+  tool-group, tool-fallback, reasoning, attachment) to their 0.15.1 templates.
+- Fixes real drift: the `asChild`->`render` prop change (restored data-*/onClick forwarding, e.g.
+  the Run-in-Console button) and `data-[state=open/closed]`->`data-open/closed` (restored
+  collapsible/arrow animations). Trimmed orphan primitives/components (model-selector, mcp-config,
+  flow-expand, sidebar, command, popover, sheet).
+- Verified: tsc 0 + 242 vitest + 26/26 example gallery + verify_markdown/token_usage/tool_approval/
+  tool_card_fixes/askquestion/latex/agent_state/edit/strict_mode (0 console errors). thread/
+  thread-list/markdown-text/context-display already correct on base-ui (data-attrs match 0.15.1);
+  full template re-sync of those heavy-custom components deferred (high-risk, low-value).
+
+
+## Sync-0.15 P2: react-devtools (dev-only, opt-in)
+
+- Wired official `@assistant-ui/react-devtools@1.2.11` as a dev aid, opt-in via `?aui-devtools=1`
+  URL param (or config.devtools). Off by default. NOTE: adds ~200KB to the IIFE bundle even when
+  off (single-bundle can't tree-shake it) — exclude via a build define before the 0.3.0 merge.
+
+
+## Sync-0.15 P2: bump @assistant-ui/react 0.15.0 -> 0.15.1 (latest)
+
+- Bumped to `@assistant-ui/react@0.15.1` (GitHub main) — a safe patch: only mermaid/shiki
+  templates + useToolCallElapsed internals changed (none of our used components differ between
+  0.15.0 and 0.15.1). react-lexical 0.2.7 / react-markdown 0.14.8 dedupe cleanly (no peer
+  conflict). Reference source assistant-ui-src also on 0.15.1. build + tsc 0 + 242 vitest +
+  verify_markdown/tool_approval green.
+
+
+## Sync-0.15 P2 (start): tool-group -> 0.15.0
+
+- Synced `tool-group.tsx` to its 0.15.0 template (clean overwrite; no local customization).
+  Fixes drift where our copy used the old `data-[state=open/closed]` Tailwind selectors while
+  0.15.0 primitives emit `data-open`/`data-closed` (collapsible rotate/animate would silently
+  not match). P2 continues per-component (reasoning, tool-fallback, thread-list, thread, ...).
+
+
+## Sync-0.15 P1: trim unused vendored components (dev)
+
+- Refreshed the reference source `assistant-ui-src` from 0.14.26 to `@assistant-ui/react@0.15.0`.
+- Deleted 18 unused vendored official components (accordion, tabs, select, image, quote, sources,
+  voice, assistant-modal/sidebar, threadlist-sidebar, directive-text, dot-matrix, flow,
+  heat-graph, mermaid-diagram, message-timing, number-roll, follow-up-suggestions). They were
+  imported by nothing (0 refs) and remain in the official 0.15.0 registry — re-vendor fresh when
+  a feature needs them. (model-selector kept pending a keep-vs-official decision.)
+  tsc 0 errors + 242 vitest + verify_markdown/askquestion green.
+
+
+## Cleanup (dev)
+
+- Deleted `AssistantUI.legacy.tsx` (2311 lines) — the pre-registry-migration UI backup, not
+  imported by the build entry or any test (dead since the "vendored official Thread" migration).
+- Simplified `applyEdit`/`onEdit`: dropped the vestigial `aborted` path (since applyEdit now
+  always appends on a not-found parentId, it never aborted) — returns the updated array directly.
+
+
+## Fix: accurate context-usage ring (dev)
+
+- The composer context-usage ring was wrong: it used a hard-coded 200k window and summed
+  input+output+cache tokens (double-counting). Now:
+  - **Window is per-model**: the CLI reports the model (e.g. `claude-sonnet-4.6[1m]`); a `[1m]`
+    tag → 1,000,000, else 200,000. Sent via on_usage(context_window=) and used by the ring
+    (falls back to the static config only until the first usage arrives).
+  - **Count = input + cache_read + cache_creation** (the disjoint input-side total = current
+    context), **excluding output**. Now matches Claude Code's `/context` (e.g. 59.2k / 1.0M = 6%).
+- (Also fixed another coro `x <- if(...)` that had silently broken on_usage.)
+
+
+## Fix: Deny now stops the agent (dev)
+
+- Plain **Deny** on a tool approval now interrupts the agent (`deny_tool(interrupt = TRUE)`),
+  so Claude actually stops instead of continuing / repeatedly re-requesting approval via other
+  tools. **Deny & tell Claude2026** (with a message) keeps `interrupt = FALSE` so Claude adjusts
+  per your guidance (its purpose). Use plain Deny or Stop to halt.
+- Verified end-to-end (real Claude, forced approvals): plain Deny -> 2717 Denied + no new approval
+  card / no re-ask loop, file not written.
+
+
+## Fixes (dev)
+
+- **Edit -> Update no-op**: `applyEdit` used to silently drop the whole edit when the edited
+  message's `parentId` was not found in the current message list (can happen in the addin after
+  history load / tool-call turns due to id-scheme differences), so nothing was sent to the
+  backend. It now appends the edited message and resends instead of aborting — edit always
+  triggers a re-run.
+- **Addin usage ring**: the RStudio addin now enables `show_usage = TRUE`, `context_window =
+  200000`, `usage_style = "ring"`, so the context-usage ring shows below the composer
+  (fed by make_claude_handler's on_usage). Verified end-to-end with real Claude.
+
+
+## Fix: single-suggestion always-allow (dev)
+
+- When a tool approval offers only ONE "always allow" suggestion, show it as a direct button
+  (`data-approval-always-single`) instead of the dropdown + checkbox + apply flow (which is
+  needless friction for a single option). Multi-suggestion still uses the dropdown.
+
+
+## Component form: htmlwidget -> Shiny output binding (P1, dev)
+
+- Migrated the mount from an htmlwidget to a native Shiny `OutputBinding` + `htmlDependency`
+  (shinychat-style). `assistantUIOutput()` is now a plain `<div class="assistantUI
+  assistantUI-output">` with the bundled JS/CSS attached as a dependency; `renderAssistantUI()`
+  uses `shiny::createRenderFunction` to send `{inputId, config}` to the binding, which mounts
+  React. All streaming/interaction still flows over sendCustomMessage / setInputValue (unchanged).
+- Dropped the `htmlwidgets` dependency. KaTeX is now a local htmlDependency attached in
+  `assistantUIOutput` (inert when no math renders). Verified: 242 vitest + headless
+  verify_markdown/token_usage/latex/agent_state/askquestion/edit (0 console errors each).
+
+
+## Official per-tool render registry (P2, dev)
+
+- Introduced an official per-tool UI dispatch: `tool-ui/registry.tsx` maps tool names to
+  `ToolCallMessagePartComponent`s at the message render site (the non-deprecated "inline tool
+  render override" pattern; replaces the deprecated makeAssistantToolUI/useAssistantToolUI).
+- Extracted a shared `ToolCardFrame` + `useToolCard` (chrome/args/result/approval-gating/depth/
+  decision) so `ShinyToolFallback` and per-tool UIs compose it instead of one monolith.
+- Migrated **AskUserQuestion** to its own registry entry (`AskUserQuestionToolUI`) as the first
+  generative-ui pilot; transport unchanged (approve_tool(updated_input=answers)). Verified:
+  240 vitest + headless verify_askquestion + verify_tool_approval (0 console errors).
+
 # shinyAssistantUI 0.2.2
 
 Stable release consolidating the 0.2.1.900x development line: upgrade to `@assistant-ui/react`

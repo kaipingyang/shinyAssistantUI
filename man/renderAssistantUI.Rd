@@ -9,7 +9,7 @@ renderAssistantUI(config = list(), outputId = NULL)
 \arguments{
 \item{config}{Optional named list of configuration options.}
 
-\item{outputId}{The output ID used in \code{\link[=assistantUIOutput]{assistantUIOutput()}}.  The widget
+\item{outputId}{The output ID used in \code{\link[=assistantUIOutput]{assistantUIOutput()}}. The widget
 uses this to derive the Shiny input name that carries user messages.}
 }
 \value{
@@ -17,5 +17,6 @@ A render function suitable for assigning to \code{output[[outputId]]}.
 }
 \description{
 Server-side render function for \code{\link[=assistantUIOutput]{assistantUIOutput()}}. Typically used inside
-\code{\link[=assistantUIServer]{assistantUIServer()}} rather than called directly.
+\code{\link[=assistantUIServer]{assistantUIServer()}} rather than called directly. Sends \verb{\{inputId, config\}}
+to the client-side output binding, which mounts the React app.
 }

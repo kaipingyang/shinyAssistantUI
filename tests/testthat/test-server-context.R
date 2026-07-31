@@ -16,8 +16,7 @@ test_that("server merges IDE capabilities without replacing permission capabilit
       workspace_search_provider = function(...) list()
     )
   }, {
-    widget <- jsonlite::fromJSON(output$chat, simplifyVector = FALSE)
-    caps <- widget$x$config$ui_capabilities
+    caps <- widget_config(output$chat)$ui_capabilities
     expect_identical(caps$contract_version, 1L)
     expect_true(caps$ide_context$submit)
     expect_true(caps$workspace_mentions$search)

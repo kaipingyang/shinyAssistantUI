@@ -14,6 +14,9 @@ list_claude_sessions(
 \item{directory}{Project directory to filter sessions. Defaults to \code{here::here()}.}
 
 \item{limit}{Maximum number of sessions to return.}
+
+\item{archived_ids}{Character vector of session ids to mark as archived in the
+returned list (so the sidebar can show them under an archived section).}
 }
 \value{
 A list suitable for \code{ctrl$send_sessions(list(sessions = ...))}.
