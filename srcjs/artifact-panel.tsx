@@ -1,3 +1,7 @@
+import { TextMessagePartProvider } from "@assistant-ui/react";
+import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { SyntaxHighlighter } from "@/components/assistant-ui/syntax-highlighter";
+
 export interface Artifact {
   id: string;
   title: string;
@@ -25,16 +29,23 @@ export function ArtifactPanel({
       />
     );
   } else if (artifact.type === "code") {
+    // A3: real syntax highlighting via the same PrismLight highlighter as chat code blocks,
+    // honoring the artifact's `lang` (previously a plain <pre>, lang ignored).
     body = (
-      <pre className="aui-artifact-code bg-muted text-foreground/90 overflow-auto rounded-md p-3 text-xs">
-        <code>{artifact.content}</code>
-      </pre>
+      <div className="aui-artifact-code overflow-auto rounded-md">
+        <SyntaxHighlighter language={artifact.lang || "text"} code={artifact.content} />
+      </div>
     );
   } else if (artifact.type === "markdown") {
+    // A3: real Markdown rendering (headings/tables/lists/highlighted code) via the SAME
+    // MarkdownText used in chat, fed an arbitrary string through TextMessagePartProvider
+    // (MarkdownTextPrimitive is message-context-bound; the provider supplies that context).
     body = (
-      <pre className="aui-artifact-markdown text-foreground/90 whitespace-pre-wrap text-sm leading-relaxed">
-        {artifact.content}
-      </pre>
+      <div className="aui-artifact-markdown aui-md">
+        <TextMessagePartProvider text={artifact.content} isRunning={false}>
+          <MarkdownText />
+        </TextMessagePartProvider>
+      </div>
     );
   } else {
     body = (
