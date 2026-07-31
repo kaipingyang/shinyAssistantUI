@@ -1,10 +1,10 @@
-# Fixture:验证 token 用量显示(Plan 33)。handler 发 on_usage(tokens),show_usage=TRUE。
+# Fixture:验证 token 用量环(Plan 33)。环用 context_tokens(当前占用),show_usage=TRUE。
 library(shiny)
 library(shinyAssistantUI)
 
 handler <- function(message, on_chunk, on_done, on_usage = NULL, ...) {
   on_chunk("hello\n")
-  if (!is.null(on_usage)) on_usage(tokens = 50000L)  # 50k / 200k = 25%
+  if (!is.null(on_usage)) on_usage(tokens = 50000L, context_tokens = 50000L)  # 50k / 200k = 25%
   on_done()
 }
 
