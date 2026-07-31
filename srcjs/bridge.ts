@@ -67,6 +67,7 @@ export type RunCallbacks = {
   onSource?: (source: { url: string; title?: string; id?: string }) => void;
   onImage?: (image: string) => void;
   onData?: (d: { name: string; data: unknown }) => void;
+  onGenerativeUi?: (d: { spec: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
   onDone: (suggestions?: Array<{prompt: string}>) => void;
   onError: (message: string) => void;
@@ -204,6 +205,11 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:data-ui`, (data) => {
     const d = data as { name: string; data: unknown; threadId?: string };
     routeCallback(d.threadId)?.onData?.({ name: d.name, data: d.data });
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:generative-ui`, (data) => {
+    const d = data as { spec: unknown; threadId?: string };
+    routeCallback(d.threadId)?.onGenerativeUi?.({ spec: d.spec });
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:artifact`, (data) => {

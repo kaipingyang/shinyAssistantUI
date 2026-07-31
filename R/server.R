@@ -536,6 +536,12 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":data-ui"),
                                   list(name = name, data = data, threadId = thread_id))
       },
+      # Plan 47 A1 — Generative-UI primitive:下发一个 {root:{component,props,children}} 布局
+      # spec 为当前消息的 generative-ui part(前端用 shinyAllowlist 渲染,未知组件走 Fallback)。
+      on_generative_ui = function(spec) {
+        session$sendCustomMessage(paste0(input_id, ":generative-ui"),
+                                  list(spec = spec, threadId = thread_id))
+      },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
         session$sendCustomMessage(paste0(input_id, ":artifact"),
                                   list(id = id, title = title, type = type,
@@ -878,6 +884,7 @@ assistantUIServer <- function(id, handler,
         on_source         = cbs$on_source,
         on_image          = cbs$on_image,
         on_data_ui        = cbs$on_data_ui,
+        on_generative_ui  = cbs$on_generative_ui,
         on_artifact       = cbs$on_artifact,
         on_usage          = cbs$on_usage,
         on_task           = cbs$on_task,

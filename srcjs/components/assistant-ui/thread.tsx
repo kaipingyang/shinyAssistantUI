@@ -21,6 +21,7 @@ import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistan
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
 import { renderDataPart } from "@/generative/data-ui";
+import { shinyAllowlist, GenerativeUiFallback } from "@/generative/allowlist";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import { ShinyAgentProgress } from "@/hooks/use-agent-state";
@@ -742,6 +743,15 @@ const AssistantMessage: FC = () => {
                 // Plan 47 A0 — R-driven Data UI: look up our own component table by
                 // the data-event name (NOT part.dataRendererUI, which needs an unwired scope).
                 return renderDataPart(part as unknown as { name?: string; data?: unknown });
+              case "generative-ui":
+                // Plan 47 A1 — model/R-composed layout from a JSON spec + our allowlist
+                // (allowlist is the security boundary; unknown names → GenerativeUiFallback).
+                return (
+                  <MessagePrimitive.GenerativeUI
+                    components={shinyAllowlist as never}
+                    Fallback={GenerativeUiFallback}
+                  />
+                );
               case "indicator":
                 return (
                   <span
