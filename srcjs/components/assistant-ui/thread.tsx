@@ -20,6 +20,7 @@ import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
+import { renderDataPart } from "@/generative/data-ui";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import { ShinyAgentProgress } from "@/hooks/use-agent-state";
@@ -738,7 +739,9 @@ const AssistantMessage: FC = () => {
               case "tool-call":
                 return part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
               case "data":
-                return part.dataRendererUI;
+                // Plan 47 A0 — R-driven Data UI: look up our own component table by
+                // the data-event name (NOT part.dataRendererUI, which needs an unwired scope).
+                return renderDataPart(part as unknown as { name?: string; data?: unknown });
               case "indicator":
                 return (
                   <span

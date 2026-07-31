@@ -66,6 +66,7 @@ export type RunCallbacks = {
   onToolResult: (toolCallId: string, result: unknown, isError: boolean) => void;
   onSource?: (source: { url: string; title?: string; id?: string }) => void;
   onImage?: (image: string) => void;
+  onData?: (d: { name: string; data: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
   onDone: (suggestions?: Array<{prompt: string}>) => void;
   onError: (message: string) => void;
@@ -198,6 +199,11 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:image`, (data) => {
     const d = data as { image: string; threadId?: string };
     routeCallback(d.threadId)?.onImage?.(d.image);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:data-ui`, (data) => {
+    const d = data as { name: string; data: unknown; threadId?: string };
+    routeCallback(d.threadId)?.onData?.({ name: d.name, data: d.data });
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:artifact`, (data) => {

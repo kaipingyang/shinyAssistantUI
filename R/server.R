@@ -529,6 +529,13 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":image"),
                                   list(image = image, threadId = thread_id))
       },
+      # Plan 47 A0 — Data UI:把一个具名数据事件下发为当前 assistant 消息的一个
+      # `data-<name>` part(前端 DATA_UI_BY_NAME[name] 渲染)。`data` 为任意 R 列表
+      # (经 Shiny 序列化);表格/流程图用 gui_table()/gui_flow() 构造更省心。
+      on_data_ui = function(name, data = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":data-ui"),
+                                  list(name = name, data = data, threadId = thread_id))
+      },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
         session$sendCustomMessage(paste0(input_id, ":artifact"),
                                   list(id = id, title = title, type = type,
@@ -870,6 +877,7 @@ assistantUIServer <- function(id, handler,
         on_thinking       = cbs$on_thinking,
         on_source         = cbs$on_source,
         on_image          = cbs$on_image,
+        on_data_ui        = cbs$on_data_ui,
         on_artifact       = cbs$on_artifact,
         on_usage          = cbs$on_usage,
         on_task           = cbs$on_task,

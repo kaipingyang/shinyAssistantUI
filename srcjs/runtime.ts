@@ -1122,6 +1122,24 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
+        onData: ({ name, data }) => {
+          // Plan 47 A0 — append a `data-<name>` part; ThreadMessageLike auto-converts it to
+          // {type:"data", name, data}, which thread.tsx's case "data" → renderDataPart renders.
+          if (!streamingIdRef.current) streamingIdRef.current = `assistant-${Date.now()}`;
+          const msgId = streamingIdRef.current;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const part: any = { type: `data-${name}`, data };
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
+            const updated = existing
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
+              : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
         onArtifact: (artifact) => {
           setArtifacts((prev) => {
             const idx = prev.findIndex((a) => a.id === artifact.id);
