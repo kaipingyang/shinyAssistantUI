@@ -1847,7 +1847,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
     }
   }
   for (m in msgs) {
-    if (m$type == "user") {
+    if (identical(m$type, "user")) {
       raw  <- m$message$content
       text <- if (is.character(raw)) raw
               else {
@@ -1865,7 +1865,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
         role    = "user",
         content = list(list(type = "text", text = text))
       )
-    } else if (m$type == "assistant") {
+    } else if (identical(m$type, "assistant")) {
       raw   <- m$message$content
       parts <- list()
       if (is.character(raw) && nzchar(raw)) {

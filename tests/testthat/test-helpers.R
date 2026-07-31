@@ -57,6 +57,18 @@ test_that(".attachment_text_sections text data 为 NULL 退化为空串", {
 
 # ── .claude_msgs_to_thread（session 历史转 ThreadMessageLike）───────────────────
 
+test_that(".claude_msgs_to_thread 不因缺 type 字段的消息崩溃(NULL==... 修复)", {
+  f <- shinyAssistantUI:::.claude_msgs_to_thread
+  # JSONL 里可能有不带 `type` 的行;旧代码 `m$type == "user"/"assistant"` 会得
+  # logical(0) → if 抛 "argument is of length zero"。改用 identical 后应安全跳过。
+  msgs <- list(
+    list(uuid = "x0", message = list(content = "no type here")),          # 缺 type
+    list(type = "user", uuid = "u1", message = list(content = "hi there")) # 正常
+  )
+  expect_no_error(res <- f(msgs))
+  expect_equal(length(res), 1L)  # 缺 type 的被跳过,只剩正常 user 消息
+})
+
 test_that(".claude_msgs_to_thread 用户字符串 content", {
   f <- shinyAssistantUI:::.claude_msgs_to_thread
   msgs <- list(list(type = "user", uuid = "u1", message = list(content = "hi there")))

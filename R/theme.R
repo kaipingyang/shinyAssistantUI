@@ -1,11 +1,13 @@
 #' Construct a theme for the assistant UI
 #'
 #' Builds a named list of theme tokens for [assistantUIServer()]'s `theme`
-#' argument. Colors may be given in any format R understands (hex like
-#' `"#2563eb"`, named colors like `"steelblue"`, or `rgb()` strings) and are
-#' converted to the HSL-component format assistant-ui expects
-#' (`"H S% L%"`, e.g. `"217 91% 60%"`). Values that are already in
-#' HSL-component form are passed through unchanged.
+#' argument. Colors may be given as any color R understands (hex like
+#' `"#2563eb"`, named colors like `"steelblue"`, or `rgb()` strings) — these are
+#' converted to `#rrggbb`. CSS color functions (`hsl()`, `oklch()`, `lab()`, …)
+#' and `var(...)` are passed through unchanged. Each value is injected verbatim
+#' as a CSS custom property, so it must be a complete CSS color: for HSL, wrap
+#' the components in `hsl(...)` (e.g. `hsl(217 91% 60%)`) — a bare `"217 91% 60%"`
+#' is not a valid CSS value and is rejected.
 #'
 #' assistant-ui uses shadcn-style semantic color tokens. Each token has a
 #' matching `*_foreground` companion used for text drawn on top of it.
@@ -77,7 +79,14 @@ assistant_theme <- function(background = NULL, foreground = NULL,
             color, ignore.case = TRUE)) {
     return(trimws(color))
   }
-  rgb <- grDevices::col2rgb(color)[, 1]
+  rgb <- tryCatch(
+    grDevices::col2rgb(color)[, 1],
+    error = function(e) stop(sprintf(
+      paste0("invalid theme color \"%s\": use a hex (\"#2563eb\"), named (\"steelblue\"), ",
+             "rgb()/hsl()/oklch() color, or var(...). For HSL, wrap the components in ",
+             "hsl(...), e.g. hsl(217 91%% 60%%)."),
+      color), call. = FALSE)
+  )
   sprintf("#%02x%02x%02x", rgb[[1]], rgb[[2]], rgb[[3]])
 }
 
