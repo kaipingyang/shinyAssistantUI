@@ -424,8 +424,14 @@ export {
 export const ShinyContextDisplay: FC = () => {
   const { showUsage, contextWindow, usageStyle, usage } = useShinyConfig();
   if (!showUsage || !contextWindow) return null;
+  // 环/条/文本显示"当前上下文占用"。优先用 R 经 get_context_usage() 下发的 contextTokens
+  // (与 /context 一致);缺失时回落到 tokens(ResultMessage 累计吞吐,粗略)。
+  const ctxTokens =
+    typeof usage?.contextTokens === "number" ? usage.contextTokens
+      : typeof usage?.tokens === "number" ? usage.tokens
+        : undefined;
   const tokenUsage =
-    typeof usage?.tokens === "number" ? { totalTokens: usage.tokens } : undefined;
+    typeof ctxTokens === "number" ? { totalTokens: ctxTokens } : undefined;
   const props = {
     // 优先用后端按模型下发的真实窗口(如 sonnet-4.6[1m] → 1,000,000);
     // 未到达时回落到静态配置 contextWindow。

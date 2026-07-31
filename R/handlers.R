@@ -1463,7 +1463,19 @@ make_claude_handler <- function(options       = NULL,
             # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,用普通语句赋值。
             cw <- 200000L
             if (!is.null(model_name) && grepl("\\[1m\\]", model_name, ignore.case = TRUE)) cw <- 1000000L
-            on_usage(cost_usd = msg$total_cost_usd, tokens = tokens,
+            # tokens(上)是 ResultMessage.usage 之和 = 本轮累计吞吐(一轮多次工具调用时 cache_read
+            # 会累加),【不等于】当前上下文窗口占用。环形/百分比要显示真实"当前占用",改用
+            # get_context_usage()(与 /context 同源)。失败(早期/不支持)→ context_tokens 留空,
+            # 前端回落到 tokens。coro async 体内不写 `x <- if(...)`,用普通语句赋值。
+            ctx <- tryCatch(client$get_context_usage(), error = function(e) NULL)
+            context_tokens <- tryCatch(as.numeric(.context_usage_field(ctx, "totalTokens", "total_tokens")),
+                                       error = function(e) NULL)
+            if (length(context_tokens) != 1L || is.na(context_tokens)) context_tokens <- NULL
+            ctx_max <- tryCatch(as.numeric(.context_usage_field(ctx, "rawMaxTokens", "raw_max_tokens") %||%
+                                             .context_usage_field(ctx, "maxTokens", "max_tokens")),
+                                error = function(e) NULL)
+            if (length(ctx_max) == 1L && !is.na(ctx_max) && ctx_max > 0) cw <- as.integer(ctx_max)
+            on_usage(cost_usd = msg$total_cost_usd, tokens = tokens, context_tokens = context_tokens,
                      turns = msg$num_turns, duration_ms = msg$duration_ms,
                      model = model_name, context_window = cw)
           }
