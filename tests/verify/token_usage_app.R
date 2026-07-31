@@ -4,7 +4,7 @@ library(shinyAssistantUI)
 
 handler <- function(message, on_chunk, on_done, on_usage = NULL, ...) {
   on_chunk("hello\n")
-  if (!is.null(on_usage)) on_usage(tokens = 50000L, context_tokens = 50000L)  # 50k / 200k = 25%
+  if (!is.null(on_usage)) on_usage(tokens = 50000L, context_tokens = 50000L, context_window = 200000L)  # 50k / 200k = 25%
   on_done()
 }
 

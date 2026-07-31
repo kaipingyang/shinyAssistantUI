@@ -1458,8 +1458,7 @@ make_claude_handler <- function(options       = NULL,
             model_name <- tryCatch({
               if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
             }, error = function(e) NULL)
-            cw0 <- 200000L
-            if (!is.null(model_name) && grepl("\\[1m\\]", model_name, ignore.case = TRUE)) cw0 <- 1000000L
+            cw0 <- NULL
             u_cost <- msg$total_cost_usd; u_turns <- msg$num_turns; u_dur <- msg$duration_ms
             # 环要显示"当前上下文占用"(≠累计吞吐 tokens),用 get_context_usage()(与 /context 同源)。
             # 它是同步控制请求,【不能内联】——会把本轮"完成/停转圈"推迟一个往返、短暂卡主循环。
@@ -1474,6 +1473,8 @@ make_claude_handler <- function(options       = NULL,
               ctx_max <- tryCatch(as.numeric(.context_usage_field(ctx, "rawMaxTokens", "raw_max_tokens") %||%
                                                .context_usage_field(ctx, "maxTokens", "max_tokens")),
                                   error = function(e) NULL)
+              # B:窗口只用 get_context_usage 的真实值(rawMaxTokens 优先);拿不到 → NULL,
+              # 前端不显示环(绝不猜 200k/1M)。context_tokens 同理缺失即不显示。
               cw <- cw0
               if (length(ctx_max) == 1L && !is.na(ctx_max) && ctx_max > 0) cw <- as.integer(ctx_max)
               tryCatch(on_usage(cost_usd = u_cost, tokens = tokens, context_tokens = context_tokens,
