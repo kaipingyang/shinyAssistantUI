@@ -116,8 +116,7 @@ test_that("overriding the handler action dispatcher hides its UI capabilities", 
   shiny::testServer(function(input, output, session) {
     assistantUIServer("chat", handler = handler, on_action = function(id) NULL)
   }, {
-    widget_json <- jsonlite::fromJSON(output$chat, simplifyVector = FALSE)
-    expect_null(widget_json$x$config$ui_capabilities)
+    expect_null(widget_config(output$chat)$ui_capabilities)
   })
 })
 
