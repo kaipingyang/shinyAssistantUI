@@ -390,7 +390,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   const [isRunning, setIsRunning] = useState(false);
-  const [suggestions, setSuggestions] = useState<Array<{prompt: string}>>([]);
+  // Static starter suggestions from assistantUIServer(suggestions=) show on the welcome
+  // screen; on_done(suggestions=) replaces them after a turn. Accepts strings or {prompt, text}.
+  const initialSuggestions = (((config?.suggestions as unknown[]) ?? [])
+    .map((x) => {
+      if (typeof x === "string") return { prompt: x, text: x };
+      const o = x as { prompt?: unknown; text?: unknown };
+      const prompt = String(o?.prompt ?? o?.text ?? "");
+      return { prompt, text: String(o?.text ?? prompt) };
+    })
+    .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  const [suggestions, setSuggestions] = useState<Array<{prompt: string; text?: string}>>(initialSuggestions);
   // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
   const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);

@@ -64,6 +64,11 @@ server <- function(input, output, session) {
   # prewarm = TRUE: build the codeagent client in the background right after the
   # UI loads (codeagent_client construction ~a few seconds) so the first message
   # isn't blocked by it. A brief cold-start "warming" indicator shows meanwhile.
-  assistantUIServer("chat", handler = handler, prewarm = TRUE)
+  assistantUIServer(
+    "chat", handler = handler,
+    prewarm         = TRUE,
+    warming_label   = "Starting codeagent\u2026",
+    welcome_message = "codeagent is ready \u2014 ask it to run R, make plots, or search the web."
+  )
 }
 shinyApp(ui, server)

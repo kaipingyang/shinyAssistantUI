@@ -371,17 +371,17 @@ describe("historical thread paging controls", () => {
       <Widget id="history-status" context={{ warming: true } as Partial<ShinyConfigCtx>} />,
     );
     expect(widget.querySelector("[data-slot='aui_history_reading']")).toBeNull();
-    // 新对话（无 resuming）显示冷启动文案
+    // 新对话（无 resuming）显示通用冷启动文案(默认;可经 warming_label 覆盖)
     expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
-      .toContain("Starting Claude Code…");
+      .toContain("Starting…");
 
     rerender(
       <Widget id="history-status" context={{ warming: true, warmingResuming: true } as Partial<ShinyConfigCtx>} />,
     );
-    // 恢复历史（resuming）显示恢复文案
+    // 恢复历史（resuming）显示通用恢复文案
     expect(widget.querySelector("[data-slot='aui_warming']")?.getAttribute("data-resuming")).toBe("true");
     expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
-      .toContain("Resuming Claude Code session…");
+      .toContain("Resuming session…");
   });
 
   it("offers a top load-older control and guards repeated loads", () => {

@@ -74,6 +74,10 @@ export interface ShinyConfigCtx {
   statusText?: string | null;
   warming?: boolean;
   warmingResuming?: boolean;
+  /** Cold-start indicator text (English default "Starting…"); backend-specific override. */
+  warmingLabel?: string;
+  /** Empty-state welcome greeting (default "How can I help you today?"). */
+  welcomeMessage?: string;
   stopTask?: (taskId: string) => void;
   forkThread?: () => void;
   /** 侧栏折叠且展开按钮浮在主面板左上角时为真 → 顶部"当前提问"框需左侧留白避让按钮 */

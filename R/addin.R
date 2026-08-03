@@ -279,6 +279,7 @@
         .addin_editor_context(cur_dir())
       },
       workspace_search_provider = workspace_search,
+      warming_label    = "Starting Claude Code\u2026",
       prewarm          = prewarm
     )
 

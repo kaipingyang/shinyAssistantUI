@@ -334,10 +334,11 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  const { welcomeMessage } = useShinyConfig();
   return (
     <div className="aui-thread-welcome-root mb-6 flex flex-col items-center px-4 text-center">
       <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
-        How can I help you today?
+        {welcomeMessage || "How can I help you today?"}
       </h1>
     </div>
   );
@@ -445,8 +446,10 @@ const Composer: FC = () => {
 
 // Per-thread Claude CLI connection indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming, warmingResuming } = useShinyConfig();
+  const { warming, warmingResuming, warmingLabel } = useShinyConfig();
   if (!warming) return null;
+  // Backend-agnostic English default; consumers (addin / codeagent example) override via warmingLabel.
+  const label = warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…");
   return (
     <div
       data-slot="aui_warming"
@@ -454,7 +457,7 @@ const ShinyWarmingIndicator: FC = () => {
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
       <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      <span>{warmingResuming ? "Resuming Claude Code session…" : "Starting Claude Code…"}</span>
+      <span>{label}</span>
     </div>
   );
 };

@@ -50,6 +50,8 @@ assistantUIServer(
   latex = FALSE,
   code_theme = "one-light",
   strings = NULL,
+  warming_label = NULL,
+  welcome_message = NULL,
   assistant_avatar = list(fallback = "AI"),
   theme = NULL,
   dark_mode = FALSE,
@@ -322,6 +324,12 @@ for a Chinese UI:
   )
 )
 }\if{html}{\out{</div>}}}
+
+\item{warming_label}{Optional character; cold-start indicator text (English).
+Defaults to a generic "Starting…". e.g. "Starting codeagent…".}
+
+\item{welcome_message}{Optional character; empty-state greeting. Defaults to
+"How can I help you today?".}
 
 \item{assistant_avatar}{Named list controlling the assistant's avatar.
 Fields: \code{fallback} (1–2 character string or emoji shown when no image is
