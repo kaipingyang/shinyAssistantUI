@@ -20,6 +20,8 @@ import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
+import { renderDataPart } from "@/generative/data-ui";
+import { shinyAllowlist, GenerativeUiFallback } from "@/generative/allowlist";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
 import { ShinyAgentProgress } from "@/hooks/use-agent-state";
@@ -332,10 +334,11 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  const { welcomeMessage } = useShinyConfig();
   return (
     <div className="aui-thread-welcome-root mb-6 flex flex-col items-center px-4 text-center">
       <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-semibold duration-200">
-        How can I help you today?
+        {welcomeMessage || "How can I help you today?"}
       </h1>
     </div>
   );
@@ -443,8 +446,10 @@ const Composer: FC = () => {
 
 // Per-thread Claude CLI connection indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming, warmingResuming } = useShinyConfig();
+  const { warming, warmingResuming, warmingLabel } = useShinyConfig();
   if (!warming) return null;
+  // Backend-agnostic English default; consumers (addin / codeagent example) override via warmingLabel.
+  const label = warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…");
   return (
     <div
       data-slot="aui_warming"
@@ -452,7 +457,7 @@ const ShinyWarmingIndicator: FC = () => {
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
       <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      <span>{warmingResuming ? "Resuming Claude Code session…" : "Starting Claude Code…"}</span>
+      <span>{label}</span>
     </div>
   );
 };
@@ -685,7 +690,7 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"
@@ -738,7 +743,18 @@ const AssistantMessage: FC = () => {
               case "tool-call":
                 return part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
               case "data":
-                return part.dataRendererUI;
+                // Plan 47 A0 — R-driven Data UI: look up our own component table by
+                // the data-event name (NOT part.dataRendererUI, which needs an unwired scope).
+                return renderDataPart(part as unknown as { name?: string; data?: unknown });
+              case "generative-ui":
+                // Plan 47 A1 — model/R-composed layout from a JSON spec + our allowlist
+                // (allowlist is the security boundary; unknown names → GenerativeUiFallback).
+                return (
+                  <MessagePrimitive.GenerativeUI
+                    components={shinyAllowlist as never}
+                    Fallback={GenerativeUiFallback}
+                  />
+                );
               case "indicator":
                 return (
                   <span
@@ -836,7 +852,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />

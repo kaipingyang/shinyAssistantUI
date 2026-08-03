@@ -135,6 +135,8 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     statusText: rt.statusText,
     warming: rt.warming,
     warmingResuming: rt.warmingResuming,
+    warmingLabel: config?.warming_label as string | undefined,
+    welcomeMessage: config?.welcome_message as string | undefined,
     stopTask: rt.stopTask,
     forkThread: rt.forkThread,
     // 折叠时主面板左上角浮着展开按钮 → 让"当前提问"框左侧留白，二者并排不重叠

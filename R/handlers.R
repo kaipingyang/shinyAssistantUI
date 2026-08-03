@@ -1406,6 +1406,12 @@ make_claude_handler <- function(options       = NULL,
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
             .record_tool_decision(decisions_path, tuid, "approved")
+            # Plan 47 B:交互表单收集的值合并进 tool_input 经 updated_input 回传(泛化,非 AskUserQuestion 专用)。
+            if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
+              ui <- utils::modifyList(msg$tool_input %||% list(), decision$updatedInput)
+              client$approve_tool(msg$request_id, updated_input = ui)
+              pending_tool_ids <- c(pending_tool_ids, tuid)
+            } else
             # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
             if (!is.null(decision$answers) && length(decision$answers)) {
               ui <- msg$tool_input %||% list()
@@ -1847,7 +1853,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
     }
   }
   for (m in msgs) {
-    if (m$type == "user") {
+    if (identical(m$type, "user")) {
       raw  <- m$message$content
       text <- if (is.character(raw)) raw
               else {
@@ -1865,7 +1871,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
         role    = "user",
         content = list(list(type = "text", text = text))
       )
-    } else if (m$type == "assistant") {
+    } else if (identical(m$type, "assistant")) {
       raw   <- m$message$content
       parts <- list()
       if (is.character(raw) && nzchar(raw)) {

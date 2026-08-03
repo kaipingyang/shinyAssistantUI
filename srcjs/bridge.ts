@@ -66,6 +66,8 @@ export type RunCallbacks = {
   onToolResult: (toolCallId: string, result: unknown, isError: boolean) => void;
   onSource?: (source: { url: string; title?: string; id?: string }) => void;
   onImage?: (image: string) => void;
+  onData?: (d: { name: string; data: unknown }) => void;
+  onGenerativeUi?: (d: { spec: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
   onDone: (suggestions?: Array<{prompt: string}>) => void;
   onError: (message: string) => void;
@@ -97,7 +99,7 @@ export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
-  sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]> }) => void;
+  sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
   sendOpenFile: (path: string, line?: number) => void;
@@ -200,6 +202,16 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     routeCallback(d.threadId)?.onImage?.(d.image);
   });
 
+  Shiny.addCustomMessageHandler(`${inputId}:data-ui`, (data) => {
+    const d = data as { name: string; data: unknown; threadId?: string };
+    routeCallback(d.threadId)?.onData?.({ name: d.name, data: d.data });
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:generative-ui`, (data) => {
+    const d = data as { spec: unknown; threadId?: string };
+    routeCallback(d.threadId)?.onGenerativeUi?.({ spec: d.spec });
+  });
+
   Shiny.addCustomMessageHandler(`${inputId}:artifact`, (data) => {
     const d = data as { id: string; title: string; type: string; content: string; lang?: string; threadId?: string };
     routeCallback(d.threadId)?.onArtifact?.({ id: d.id, title: d.title, type: d.type, content: d.content, lang: d.lang });
@@ -283,7 +295,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     sendToolApproval(toolCallId, approved, opts) {
       Shiny.setInputValue(
         `${inputId}_tool_approval`,
-        { toolCallId, approved, suggestionIdx: opts?.suggestionIdx ?? null, suggestionIdxs: opts?.suggestionIdxs ?? null, customMessage: opts?.customMessage ?? null, answers: opts?.answers ?? null, ts: Date.now() },
+        { toolCallId, approved, suggestionIdx: opts?.suggestionIdx ?? null, suggestionIdxs: opts?.suggestionIdxs ?? null, customMessage: opts?.customMessage ?? null, answers: opts?.answers ?? null, updatedInput: opts?.updatedInput ?? null, ts: Date.now() },
         { priority: "event" }
       );
     },

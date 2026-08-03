@@ -128,6 +128,10 @@
 #'   for code blocks. Available light themes: `"one-light"` (default),
 #'   `"ghcolors"`, `"vs"`, `"solarized-light"`. Available dark themes:
 #'   `"vsc-dark-plus"`, `"dracula"`, `"nord"`, `"night-owl"`, `"one-dark"`.
+#' @param warming_label Optional character; cold-start indicator text (English).
+#'   Defaults to a generic "Starting…". e.g. "Starting codeagent…".
+#' @param welcome_message Optional character; empty-state greeting. Defaults to
+#'   "How can I help you today?".
 #' @param strings Optional named list for overriding UI text (tooltips, labels,
 #'   placeholders). `NULL` (default) keeps all built-in English strings. Example
 #'   for a Chinese UI:
@@ -312,6 +316,8 @@ assistantUIServer <- function(id, handler,
                               latex             = FALSE,
                               code_theme        = "one-light",
                               strings           = NULL,
+                              warming_label     = NULL,
+                              welcome_message   = NULL,
                               assistant_avatar  = list(fallback = "AI"),
                               theme             = NULL,
                               dark_mode         = FALSE,
@@ -359,6 +365,7 @@ assistantUIServer <- function(id, handler,
   }
   if (!length(.ui_capabilities)) .ui_capabilities <- NULL
   force(code_theme); force(strings); force(assistant_avatar)
+  force(warming_label); force(welcome_message)
   force(theme); force(dark_mode)
   force(show_timestamps)
   session  <- shiny::getDefaultReactiveDomain()
@@ -384,6 +391,8 @@ assistantUIServer <- function(id, handler,
   normalized_theme <- .normalize_theme(theme)
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
+  if (!is.null(warming_label))    config$warming_label    <- as.character(warming_label)[[1L]]
+  if (!is.null(welcome_message))  config$welcome_message  <- as.character(welcome_message)[[1L]]
   if (!is.null(assistant_avatar)) config$assistant_avatar <- assistant_avatar
   if (!is.null(.ui_capabilities)) config$ui_capabilities  <- .ui_capabilities
   # 工作目录选择器（addin）：初始目录 + 是否有原生目录选择弹窗（RStudio）。
@@ -528,6 +537,19 @@ assistantUIServer <- function(id, handler,
       on_image = function(image) {
         session$sendCustomMessage(paste0(input_id, ":image"),
                                   list(image = image, threadId = thread_id))
+      },
+      # Plan 47 A0 — Data UI:把一个具名数据事件下发为当前 assistant 消息的一个
+      # `data-<name>` part(前端 DATA_UI_BY_NAME[name] 渲染)。`data` 为任意 R 列表
+      # (经 Shiny 序列化);表格/流程图用 gui_table()/gui_flow() 构造更省心。
+      on_data_ui = function(name, data = NULL) {
+        session$sendCustomMessage(paste0(input_id, ":data-ui"),
+                                  list(name = name, data = data, threadId = thread_id))
+      },
+      # Plan 47 A1 — Generative-UI primitive:下发一个 {root:{component,props,children}} 布局
+      # spec 为当前消息的 generative-ui part(前端用 shinyAllowlist 渲染,未知组件走 Fallback)。
+      on_generative_ui = function(spec) {
+        session$sendCustomMessage(paste0(input_id, ":generative-ui"),
+                                  list(spec = spec, threadId = thread_id))
       },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
         session$sendCustomMessage(paste0(input_id, ":artifact"),
@@ -870,6 +892,8 @@ assistantUIServer <- function(id, handler,
         on_thinking       = cbs$on_thinking,
         on_source         = cbs$on_source,
         on_image          = cbs$on_image,
+        on_data_ui        = cbs$on_data_ui,
+        on_generative_ui  = cbs$on_generative_ui,
         on_artifact       = cbs$on_artifact,
         on_usage          = cbs$on_usage,
         on_task           = cbs$on_task,

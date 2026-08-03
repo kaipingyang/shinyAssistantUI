@@ -6,8 +6,14 @@ proc <- callr::r_bg(function(proj, port) {
   shiny::runApp("tests/verify/artifacts_app.R", host="127.0.0.1", port=port, launch.browser=FALSE)
 }, args=list(proj=PROJ, port=PORT), stdout="/tmp/af.log", stderr="/tmp/af.err")
 on.exit({ try(proc$kill(), silent=TRUE) }, add=TRUE)
+`%||%` <- function(x,y) if (is.null(x)) y else x
 Sys.sleep(9); if (!proc$is_alive()) { cat(readLines("/tmp/af.err"), sep="\n"); quit(status=1) }
-b <- ChromoteSession$new(); b$Page$navigate(sprintf("http://127.0.0.1:%d/", PORT)); b$Page$loadEventFired(); Sys.sleep(4)
+b <- ChromoteSession$new()
+errs <- c()
+b$Runtime$enable()
+b$Runtime$consoleAPICalled(callback_=function(m) if(identical(m$type,"error")) errs<<-c(errs, paste(sapply(m$args,function(a)a$value %||% a$description %||% ""),collapse=" ")))
+b$Runtime$exceptionThrown(callback_=function(m) errs<<-c(errs, m$exceptionDetails$exception$description %||% "exception"))
+b$Page$navigate(sprintf("http://127.0.0.1:%d/", PORT)); b$Page$loadEventFired(); Sys.sleep(4)
 ev <- function(js) tryCatch(b$Runtime$evaluate(js)$result$value, error=function(e) NA)
 chk <- function(n,c,d="") cat(sprintf("[%s] %-24s %s\n", if(isTRUE(c))"PASS" else "FAIL", n, d))
 ev("document.querySelector('[contenteditable=true]').focus()"); Sys.sleep(0.5)
@@ -21,9 +27,15 @@ title <- ev("(function(){var t=document.querySelector('.aui-artifact-title');ret
 chk("artifact_title", identical(title, "Project Plan"), title)
 body_has <- ev("(function(){var p=document.querySelector('.aui-artifact-panel');return p?/Phase 1|Deadline/.test(p.innerText):false})()")
 chk("artifact_content_rendered", isTRUE(body_has), "")
+# A3:markdown 真渲染 —— 有标题元素 + 列表项,且没有残留的裸 "# " 语法
+md_heading <- ev("(function(){var p=document.querySelector('.aui-artifact-markdown');return p?!!p.querySelector('h1,h2,h3'):false})()")
+md_list    <- ev("(function(){var p=document.querySelector('.aui-artifact-markdown');return p?!!p.querySelector('ul li'):false})()")
+md_no_raw  <- ev("(function(){var p=document.querySelector('.aui-artifact-markdown');return p?p.innerText.indexOf('# Project')===-1:false})()")
+chk("artifact_markdown_real_render", isTRUE(md_heading) && isTRUE(md_list) && isTRUE(md_no_raw), "heading+list, no raw '#'")
 # 点关闭
 ev("(function(){var b=document.querySelector('.aui-artifact-close');if(b){b.click();return true}return false})()")
 Sys.sleep(1)
 chk("artifact_panel_closed", !isTRUE(ev("!!document.querySelector('.aui-artifact-panel')")), "")
+chk("no_console_errors", length(errs) == 0, if (length(errs)) paste(utils::head(errs,2),collapse=" | ") else "0 errors")
 b$close(); proc$kill(); system("rm -f /tmp/af.log /tmp/af.err")
 cat("DONE\n")

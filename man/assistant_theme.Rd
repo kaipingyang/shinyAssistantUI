@@ -57,11 +57,13 @@ argument of \code{\link[=assistantUIServer]{assistantUIServer()}}.
 }
 \description{
 Builds a named list of theme tokens for \code{\link[=assistantUIServer]{assistantUIServer()}}'s \code{theme}
-argument. Colors may be given in any format R understands (hex like
-\code{"#2563eb"}, named colors like \code{"steelblue"}, or \code{rgb()} strings) and are
-converted to the HSL-component format assistant-ui expects
-(\code{"H S\% L\%"}, e.g. \code{"217 91\% 60\%"}). Values that are already in
-HSL-component form are passed through unchanged.
+argument. Colors may be given as any color R understands (hex like
+\code{"#2563eb"}, named colors like \code{"steelblue"}, or \code{rgb()} strings) — these are
+converted to \verb{#rrggbb}. CSS color functions (\code{hsl()}, \code{oklch()}, \code{lab()}, …)
+and \code{var(...)} are passed through unchanged. Each value is injected verbatim
+as a CSS custom property, so it must be a complete CSS color: for HSL, wrap
+the components in \code{hsl(...)} (e.g. \verb{hsl(217 91\% 60\%)}) — a bare \code{"217 91\% 60\%"}
+is not a valid CSS value and is rejected.
 }
 \details{
 assistant-ui uses shadcn-style semantic color tokens. Each token has a

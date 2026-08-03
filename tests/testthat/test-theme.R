@@ -17,6 +17,14 @@ test_that(".color_to_css rejects invalid input", {
   expect_error(shinyAssistantUI:::.color_to_css("not-a-color"))
 })
 
+test_that(".color_to_css: bare HSL components are rejected with a helpful hsl() hint", {
+  # Bare shadcn-style "H S% L%" is NOT a valid CSS value here (injected raw as
+  # `--primary: <value>`), so it must error clearly and point at hsl(...).
+  expect_error(shinyAssistantUI:::.color_to_css("217 91% 60%"), "hsl", ignore.case = TRUE)
+  # The wrapped form is the supported way and passes through unchanged.
+  expect_equal(shinyAssistantUI:::.color_to_css("hsl(217 91% 60%)"), "hsl(217 91% 60%)")
+})
+
 test_that("assistant_theme drops NULLs and normalizes colors", {
   th <- assistant_theme(primary = "#2563eb", radius = "0.75rem")
   expect_named(th, c("primary", "radius"))

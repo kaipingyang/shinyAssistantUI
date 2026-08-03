@@ -35,6 +35,7 @@ export const _regKey = (inputId: string | undefined, id: string) => `${inputId ?
 const _decisionRegistry = new Map<string, "approved" | "denied">();
 
 export type ToolDecideOpts = {
+  updatedInput?: Record<string, unknown>;
   suggestionIdx?: number;
   suggestionIdxs?: number[];
   customMessage?: string;

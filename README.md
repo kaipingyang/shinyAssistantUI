@@ -186,11 +186,17 @@ handler = function(message, on_chunk, on_done,
   on_chunk("Based on the sources, the answer is 42. ")
   on_source("https://en.wikipedia.org/wiki/42", title = "Wikipedia: 42")  # citation footnote
   on_image("data:image/png;base64,...")                                   # inline image
+  on_image(plot_data_uri(hist(rnorm(1000))))                              # inline chart (ggplot/base → PNG)
   on_artifact(id = "doc-1", title = "Report", type = "markdown",          # side panel
               content = "# Report\n...")                                  # type: markdown|code|html|text
   on_done()
 }
 ```
+
+`plot_data_uri(expr, width, height, res)` renders a plotting expression (base graphics, or a
+ggplot2/lattice object — auto-printed) to a PNG `data:` URI for `on_image()`, so charts show inline
+using R's own plotting (no client-side charting library is bundled). Interactive charts can go
+through an `on_artifact(type = "html")` iframe (e.g. a plotly/htmlwidget snapshot).
 
 `assistantUIServer()` also accepts:
 

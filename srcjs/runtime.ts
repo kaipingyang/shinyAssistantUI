@@ -390,7 +390,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   const [isRunning, setIsRunning] = useState(false);
-  const [suggestions, setSuggestions] = useState<Array<{prompt: string}>>([]);
+  // Static starter suggestions from assistantUIServer(suggestions=) show on the welcome
+  // screen; on_done(suggestions=) replaces them after a turn. Accepts strings or {prompt, text}.
+  const initialSuggestions = (((config?.suggestions as unknown[]) ?? [])
+    .map((x) => {
+      if (typeof x === "string") return { prompt: x, text: x };
+      const o = x as { prompt?: unknown; text?: unknown };
+      const prompt = String(o?.prompt ?? o?.text ?? "");
+      return { prompt, text: String(o?.text ?? prompt) };
+    })
+    .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  const [suggestions, setSuggestions] = useState<Array<{prompt: string; text?: string}>>(initialSuggestions);
   // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
   const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
@@ -1122,6 +1132,42 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
+        onData: ({ name, data }) => {
+          // Plan 47 A0 — append a `data-<name>` part; ThreadMessageLike auto-converts it to
+          // {type:"data", name, data}, which thread.tsx's case "data" → renderDataPart renders.
+          if (!streamingIdRef.current) streamingIdRef.current = `assistant-${Date.now()}`;
+          const msgId = streamingIdRef.current;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const part: any = { type: `data-${name}`, data };
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
+            const updated = existing
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
+              : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
+        onGenerativeUi: ({ spec }) => {
+          // Plan 47 A1 — append a `generative-ui` part; thread.tsx case "generative-ui" renders
+          // it via MessagePrimitive.GenerativeUI + shinyAllowlist.
+          if (!streamingIdRef.current) streamingIdRef.current = `assistant-${Date.now()}`;
+          const msgId = streamingIdRef.current;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const part: any = { type: "generative-ui", spec };
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const existing = threadMsgs.find((m) => m.id === msgId);
+            const updated = existing
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? threadMsgs.map((m): ThreadMessageLike => m.id === msgId ? ({ ...m, content: [...(m.content as any[]), part] } as any) : m)
+              : [...threadMsgs, { id: msgId, role: "assistant" as const, content: [part] }];
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+        },
         onArtifact: (artifact) => {
           setArtifacts((prev) => {
             const idx = prev.findIndex((a) => a.id === artifact.id);
@@ -1559,7 +1605,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   );
 
   const sendToolApproval = useCallback(
-    (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]> }) => {
+    (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => {
       bridge.current.sendToolApproval(toolCallId, approved, opts);
     },
     [] // eslint-disable-line react-hooks/exhaustive-deps
