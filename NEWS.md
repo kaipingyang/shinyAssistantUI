@@ -1,6 +1,47 @@
-# shinyAssistantUI 0.3.1.9000 (dev branch)
+# shinyAssistantUI 0.4.0
 
-- Development version (post-0.3.1).
+## Generative UI (Plan 47) — all opt-in, no new hard dependencies
+
+- **R-driven Data UI**: `on_data_ui(name, data)` streams a `data-<name>` message part rendered by a
+  small in-repo component table (`table` / `stat` / `flow`) — analysis results (tables, metrics,
+  flow diagrams) appear inline in the conversation. The previously-orphaned `FlowCanvas` is now a
+  real `flow` component.
+- **Generative-UI primitive**: `on_generative_ui(spec)` renders a `{root:{component,props,children}}`
+  layout via `MessagePrimitive.GenerativeUI` against a consumer component allowlist (the security
+  boundary). Uses `@assistant-ui/react` core — no extra dependency.
+- **Interactive parameter form**: a `PromptUser` tool UI (radio/select/slider/text/checkbox) collects
+  input and returns it via a new generic `updated_input` approval-transport path.
+- **Artifact panel real rendering**: markdown artifacts now render as Markdown (headings/tables/
+  lists/highlighted code) and code artifacts are syntax-highlighted (honoring `lang`) — previously
+  raw `<pre>`.
+- **`plot_data_uri(expr, width, height, res)`**: capture a base/ggplot2/lattice plot to a PNG
+  `data:` URI for `on_image()`, so charts show inline via R's own plotting.
+
+## codeagent backend (Plan 51, phase A)
+
+- **`make_codeagent_handler(client_factory, ...)`**: drive the chat with a full
+  [codeagent](https://github.com/kaipingyang/codeagent) agent (harness: self-heal, compaction,
+  skills/hooks, tools) instead of a bare ellmer chat. `codeagent` is a **Suggests** (guarded) — it is
+  never loaded unless you opt into this backend, so the Claude addin / bare install stay lean. Phase A
+  = streaming + typed tool-display forwarding + background client pre-warm (no white-screen cold start);
+  permission gating is a follow-up.
+
+## Fixes
+
+- **Real-time auto-scroll**: the viewport lagged 200–2000px behind during rapid streaming (tool
+  chains / approvals not visible in real time) because `content-visibility:auto` +
+  `contain-intrinsic-size` on message roots corrupted `scrollHeight`, which the built-in autoScroll
+  depends on. Removed that CSS — the viewport now tracks the bottom in real time.
+- **`assistant_theme()` doc-contract crash**: the roxygen falsely promised HSL-component output +
+  bare-`"217 91% 60%"` passthrough; corrected to match actual behavior, and `.color_to_css()` now
+  errors clearly (pointing at `hsl(...)`) instead of a cryptic `col2rgb` crash.
+- **Session-load crash** on JSONL lines lacking a `type` field (`NULL == "user"` → length-zero error);
+  now uses `identical()` on both branches.
+
+## Config
+
+- **`warming_label`** and **`welcome_message`** (`assistantUIServer()`): backend-agnostic English
+  defaults ("Starting…" / "How can I help you today?"), overridable per app.
 
 # shinyAssistantUI 0.3.1
 
