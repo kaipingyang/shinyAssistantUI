@@ -134,7 +134,9 @@ make_codeagent_handler <- function(client_factory,
     imgs <- payload$images %||% list()
     if (length(imgs)) {
       im  <- imgs[[1]]
-      uri <- if (!is.null(im$b64)) paste0("data:", im$mime %||% "image/png", ";base64,", im$b64) else (im$src %||% value)
+      mime <- im$mime %||% im$type %||% "image/png"
+      if (!grepl("/", mime)) mime <- paste0("image/", mime)  # "png" -> "image/png"
+      uri <- if (!is.null(im$b64)) paste0("data:", mime, ";base64,", im$b64) else (im$src %||% value)
       tryCatch(on_image(uri), error = function(e) NULL)
       return(invisible())
     }

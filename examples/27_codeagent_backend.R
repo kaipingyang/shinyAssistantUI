@@ -1,21 +1,33 @@
 # examples/27_codeagent_backend.R
 # ─────────────────────────────────────────────────────────────────────────────
-# codeagent as the backend engine (Plan 51, Phase A).
+# codeagent as the backend engine (Plan 51, Phase A) — FULL built-in tools.
 #
-# Uses make_codeagent_handler() so the chat is driven by a full `codeagent`
-# agent (harness: multi-turn self-heal, compaction, skills/hooks, lossless
-# session) instead of a bare ellmer Chat. Phase A = streaming + tool display
-# forwarding; no permission gating / no concurrent sub-agents yet.
+# make_codeagent_handler() drives a full `codeagent` agent. With
+# `register_tools = TRUE` (default) codeagent brings its whole toolset:
+# run_r (executes R — plots stream back INLINE as images), Read/Glob/Grep/LS,
+# WebFetch/WebSearch, Write/Edit/Bash, etc. Ask it to "plot mtcars hp vs mpg and
+# run it" and the chart appears in the conversation.
 #
-# PREREQUISITES
-#   1. install.packages-equivalent: the `codeagent` package must be installed.
-#   2. A `.Renviron` at the repo root with an OpenAI-compatible endpoint:
-#        OPENAI_BASE_URL=...      OPENAI_MODEL=...      OPENAI_API_KEY=...
-#      (same convention as examples/09 and 10).
+# ⚠️ PERMISSIONS (Phase A has no approval bridge yet — that's Phase B):
+#   * permission_mode = "default": reads + WebFetch/WebSearch auto-allow, but
+#     run_r / Write / Bash need confirmation → with no approval bridge they are
+#     DENIED (so "execute this" won't run). Good for read-only Q&A.
+#   * permission_mode = "bypass": almost everything auto-runs UNSUPERVISED
+#     (run_r, Bash, Write...). Powerful for a demo, but the agent can execute
+#     code and touch files without asking. Only use in a trusted, throwaway dir.
+#   This example uses "bypass" + a scratch cwd so run_r/plots work out of the
+#   box. Phase B will add the in-app approval card so you can use "default".
 #
-# RUN
-#   shiny::runApp("examples/27_codeagent_backend.R")
-#   then ask e.g.  "What is 12 * 13?"  (the model calls the calculate tool)
+# For the *embed-your-own-domain-tools* pattern (no coding tools), instead use
+# codeagent_client(register_tools = FALSE) and register your tools on the chat
+# (see the spike examples/codeagent-backend-spike.R).
+#
+# PREREQUISITES: `codeagent` installed; repo-root .Renviron with
+#   OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY (as in examples/09,10).
+#
+# RUN:  shiny::runApp("examples/27_codeagent_backend.R")
+#   try: "Plot mtcars hp vs mpg with ggplot2 and run it"   → inline chart
+#        "What is 12 * 13?"                                 → run_r computes it
 # ─────────────────────────────────────────────────────────────────────────────
 library(shiny)
 library(ellmer)
@@ -24,18 +36,9 @@ devtools::load_all(here::here())
 
 readRenviron(here::here(".Renviron"))
 
-# A toy domain tool the host registers on its own chat. codeagent's harness runs
-# it (register_tools = FALSE means codeagent adds NO coding tools of its own).
-calculate <- tool(
-  function(expression) {
-    tryCatch(as.character(eval(parse(text = expression))),
-             error = function(e) stop(conditionMessage(e)))
-  },
-  name        = "calculate",
-  description = "Evaluate a mathematical expression (R syntax)",
-  arguments   = list(expression = type_string("A valid R expression, e.g. 'sqrt(144)'")),
-  annotations = tool_annotations(title = "Calculator", icon = "calculator")
-)
+# Scratch working dir so the agent's file operations stay contained.
+scratch <- file.path(tempdir(), "codeagent-demo")
+dir.create(scratch, showWarnings = FALSE, recursive = TRUE)
 
 client_factory <- function() {
   chat <- chat_openai_compatible(
@@ -43,17 +46,19 @@ client_factory <- function() {
     model       = Sys.getenv("OPENAI_MODEL"),
     credentials = function() Sys.getenv("OPENAI_API_KEY")
   )
-  chat$register_tools(list(calculate))
-  # harness-only client: codeagent registers none of its own coding tools.
-  codeagent::codeagent_client(chat = chat, register_tools = FALSE,
-                              permission_mode = "default")
+  codeagent::codeagent_client(
+    chat            = chat,
+    register_tools  = TRUE,        # bring codeagent's full built-in toolset
+    permission_mode = "bypass",    # Phase A: no approval bridge → auto-run (see warning above)
+    cwd             = scratch
+  )
 }
 
 handler <- make_codeagent_handler(client_factory)
 
 ui <- assistantUIPage(
   assistantUIOutput("chat", height = "100vh"),
-  title = "codeagent backend"
+  title = "codeagent backend (full tools)"
 )
 server <- function(input, output, session) {
   assistantUIServer("chat", handler = handler)
