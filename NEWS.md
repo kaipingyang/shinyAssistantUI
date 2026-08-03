@@ -1,3 +1,7 @@
+# shinyAssistantUI 0.4.0.9000 (dev branch)
+
+- Development version (post-0.4.0).
+
 # shinyAssistantUI 0.4.0
 
 ## Generative UI (Plan 47) — all opt-in, no new hard dependencies
