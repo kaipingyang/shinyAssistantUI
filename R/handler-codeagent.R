@@ -51,7 +51,7 @@ make_codeagent_handler <- function(client_factory,
     cl
   }
 
-  coro::async(function(message, thread_id, attachments,
+  coro_handler <- coro::async(function(message, thread_id, attachments,
                        on_chunk, on_done, on_error,
                        on_tool_call, on_tool_result, on_thinking,
                        on_image, on_artifact,
@@ -116,6 +116,17 @@ make_codeagent_handler <- function(client_factory,
     if (is.function(on_done)) on_done()
     invisible(result)
   })
+
+  # Cold-start optimization: building a codeagent client (system prompt + tool
+  # registration) takes a few seconds. Expose a `warmup` attribute so
+  # assistantUIServer(prewarm=/allow_warmup=) pre-builds it in the background
+  # (via later, off the first-message critical path) with a warming indicator,
+  # so the first message isn't blocked by construction.
+  attr(coro_handler, "warmup") <- function(thread_id) {
+    get_client(thread_id)
+    invisible(NULL)
+  }
+  coro_handler
 }
 
 # Split codeagent's typed tool `display` (toolcard: kind ∈ text/table/image/code/diff/error)
