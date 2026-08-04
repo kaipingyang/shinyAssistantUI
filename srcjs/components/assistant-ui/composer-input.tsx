@@ -146,7 +146,7 @@ function createSlashItems(
       type: "slash",
       label: `/${command.name}`,
       description: command.description,
-      metadata: { section: command.category ?? "Commands" },
+      metadata: { section: command.category ?? "Commands", argumentHint: command.argumentHint },
     })),
   ];
 }
