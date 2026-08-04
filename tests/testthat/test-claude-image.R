@@ -29,3 +29,21 @@ test_that("image content blocks assemble as [text, image] for client$send()", {
   expect_identical(blocks[[2]]$type, "image")
   expect_identical(blocks[[2]]$source$media_type, "image/jpeg")
 })
+
+test_that(".claude_message_content omits the empty text block for image-only sends", {
+  g <- shinyAssistantUI:::.claude_message_content
+  # image-only (empty / whitespace message) -> ONLY image blocks, no empty text block
+  only <- g("", list("data:image/png;base64,AAA"))
+  expect_length(only, 1)
+  expect_identical(only[[1]]$type, "image")
+  only_ws <- g("   ", list("data:image/png;base64,AAA"))
+  expect_length(only_ws, 1)
+  expect_identical(only_ws[[1]]$type, "image")
+  # with text -> [text, image]
+  both <- g("hi", list("data:image/png;base64,AAA"))
+  expect_length(both, 2)
+  expect_identical(both[[1]]$type, "text")
+  expect_identical(both[[2]]$type, "image")
+  # no images -> the plain string (unchanged)
+  expect_identical(g("just text", list()), "just text")
+})

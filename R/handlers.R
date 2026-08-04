@@ -420,6 +420,20 @@
     list(type = "image", source = list(type = "url", url = uri))
 }
 
+# Assemble the ClaudeSDKClient$send() payload for a (possibly image-bearing) message.
+# No images -> the plain text string. With images -> a list of Anthropic content
+# blocks. CRITICAL: when the message text is empty (image-only send), OMIT the text
+# block entirely — an empty {type:"text", text:""} block is rejected by the API and
+# deadlocks the turn (the reported "image + tiny empty bubble, AI never replies").
+.claude_message_content <- function(full_message, img_parts) {
+  if (length(img_parts) == 0) return(full_message)
+  img_blocks <- lapply(img_parts, .claude_image_block)
+  if (nzchar(trimws(full_message %||% "")))
+    c(list(list(type = "text", text = full_message)), img_blocks)
+  else
+    img_blocks
+}
+
 #' Create an ellmer streaming handler for assistantUIServer
 #'
 #' Wraps an `ellmer` chat object into an `assistantUIServer`-compatible
@@ -1241,15 +1255,9 @@ make_claude_handler <- function(options       = NULL,
     if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
     full_message <- .append_ide_context(full_message, ide_context)
 
-    if (length(img_parts) > 0) {
-      # ClaudeAgentSDK has no send_with_images(); images ride as Anthropic content
-      # blocks passed to send() (its `content` accepts a list of blocks).
-      blocks <- c(list(list(type = "text", text = full_message)),
-                  lapply(img_parts, .claude_image_block))
-      client$send(blocks)
-    } else {
-      client$send(full_message)
-    }
+    # Images ride as Anthropic content blocks; image-only sends omit the empty text
+    # block (see .claude_message_content). send() accepts a string OR a block list.
+    client$send(.claude_message_content(full_message, img_parts))
 
     interrupted      <- FALSE
     chunk_count      <- 0L
