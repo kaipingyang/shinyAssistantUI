@@ -31,6 +31,7 @@ import {
   $nodesOfType,
   COMMAND_PRIORITY_HIGH,
   KEY_TAB_COMMAND,
+  PASTE_COMMAND,
 } from "lexical";
 import "@/lexical.css";
 import { useShinyConfig, type ShinyActionItem, type ShinyCommand } from "@/shiny-config-context";
@@ -319,6 +320,45 @@ const TabTriggerPlugin: FC<{
   return null;
 };
 
+// Paste screenshots/images (Ctrl/Cmd+V) straight into the composer as attachments.
+// The custom Lexical input bypasses the stock ComposerPrimitive.Input paste handler,
+// so re-add it here: image files on the clipboard -> composer.addAttachment(),
+// preventing the raw blob from being dumped into the editable text. Text paste is
+// left untouched (return false).
+const PasteAttachmentPlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  const aui = useAui();
+  useEffect(
+    () =>
+      editor.registerCommand(
+        PASTE_COMMAND,
+        (event: ClipboardEvent | InputEvent) => {
+          const cd = (event as ClipboardEvent).clipboardData;
+          if (!cd) return false;
+          let files = Array.from(cd.files ?? []);
+          if (files.length === 0) {
+            files = Array.from(cd.items ?? [])
+              .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+              .map((it) => it.getAsFile())
+              .filter((f): f is File => f != null);
+          }
+          if (files.length === 0) return false; // no files -> let Lexical paste text
+          if (!aui.thread.getState().capabilities.attachments) return false;
+          event.preventDefault();
+          void Promise.all(
+            files.map((file) =>
+              Promise.resolve(aui.composer.addAttachment(file)).catch(() => {}),
+            ),
+          );
+          return true;
+        },
+        COMMAND_PRIORITY_HIGH,
+      ),
+    [editor, aui],
+  );
+  return null;
+};
+
 const ShinyLexicalInput: FC<{
   formatter: Unstable_DirectiveFormatter;
   slashCompletionRef: RefObject<(() => boolean) | null>;
@@ -369,6 +409,7 @@ const ShinyLexicalInput: FC<{
       onFocus={onFocus}
     >
       <TabTriggerPlugin slashCompletionRef={slashCompletionRef} />
+      <PasteAttachmentPlugin />
     </LexicalComposerInput>
   );
 };
