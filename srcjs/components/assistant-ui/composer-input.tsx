@@ -160,7 +160,15 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
   // Every directive (skill, action control, and @mention) renders the same blue
   // chip. Skills and actions stay functionally distinct at submit time via
   // matchSlashAction (skill → Claude; action → local action handler).
+  // For slash commands with an argument hint, show it inline right after the chip
+  // (dim, like Claude Code CLI's "/skill [args]") to guide what to type next.
+  const { commands } = useShinyConfig();
+  const argumentHint =
+    directiveType === "slash"
+      ? commands.find((command) => command.name === directiveId)?.argumentHint
+      : undefined;
   return (
+    <>
     <span
       className="aui-directive-chip inline-flex items-center rounded bg-blue-100 px-1.5 py-0.5 text-[13px] font-medium leading-none text-blue-700 dark:bg-blue-950/60 dark:text-blue-300"
       // RStudio Viewer 中外部 tailwind 工具类不可靠生效（与 contenteditable 边框同源问题）；
@@ -176,6 +184,16 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
     >
       {label}
     </span>
+    {argumentHint ? (
+      <span
+        data-directive-hint
+        className="aui-directive-hint text-muted-foreground"
+        style={{ color: "rgb(107, 114, 128)", marginInlineStart: "0.25rem", fontSize: "13px" }}
+      >
+        {argumentHint}
+      </span>
+    ) : null}
+    </>
   );
 };
 
