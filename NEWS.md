@@ -1,6 +1,7 @@
 # shinyAssistantUI 0.4.0.9000 (dev branch)
 
 - Development version (post-0.4.0).
+- **codeagent out-of-process backend (Plan 52 A/B)**: `make_codeagent_remote_handler()` runs codeagent in a separate R worker process pinned to a new-curl library, so the MAIN Shiny process never loads codeagent/ellmer/curl (safe inside sessions with a legacy `curl`). Streaming + tool display + the permission approval card are marshaled over a socket; approve/deny works across the process boundary. `callr` added to Suggests.
 - **codeagent backend Phase B**: `make_codeagent_handler(permission_mode=)` now bridges codeagent's central permission gate to the in-app approval card — sensitive tools (write/execute) prompt for Approve/Deny (reads auto-allow). Approve/deny only (the gate cannot rewrite tool input). `examples/27` switched from `bypass` to `default`.
 
 # shinyAssistantUI 0.4.0

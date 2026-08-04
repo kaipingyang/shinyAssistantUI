@@ -7,8 +7,10 @@
 make_codeagent_handler(
   client_factory,
   approval_tools = character(0),
+  permission_mode = "default",
   store = NULL,
-  stream_fn = NULL
+  stream_fn = NULL,
+  gate_fn = NULL
 )
 }
 \arguments{
@@ -17,8 +19,18 @@ make_codeagent_handler(
 The host constructs the client so it controls the model, permission mode,
 and which domain tools to register. Called once per thread (cached).}
 
-\item{approval_tools}{Character vector of tool names that should prompt for
-approval. Reserved for Phase B (permission gating); currently unused.}
+\item{approval_tools}{Optional character vector of tool names to \emph{additionally}
+force through approval (mapped to the gate's \code{rules$ask}), on top of what
+\code{permission_mode} already prompts for. Note: only approve/deny is supported
+for codeagent tools — the gate cannot rewrite tool input, so any edited
+arguments (\code{decision$updatedInput}) are ignored (that is a Claude-only
+feature via \code{client$approve_tool(updated_input=)}).}
+
+\item{permission_mode}{codeagent permission mode installed on the gate:
+\code{"default"} (write/execute tools prompt for approval; reads auto-allow),
+\code{"acceptEdits"}, \code{"plan"}, or \code{"bypassPermissions"}/\code{"bypass"} (auto-run,
+no prompts — trusted environments only). The handler owns this policy (it
+drives the UI approval card), overriding any mode set on the client.}
 
 \item{store}{Optional persistence adapter with a \code{save(thread_id, client, ...)}
 method (Phase C uses codeagent's lossless session instead).}
@@ -26,6 +38,11 @@ method (Phase C uses codeagent's lossless session instead).}
 \item{stream_fn}{Advanced/testing: the streaming function to drive. Defaults
 to \code{codeagent::codeagent_stream_async}. Injectable so the adapter can be
 unit-tested without a live model.}
+
+\item{gate_fn}{Advanced/testing: the permission-gate installer. Defaults to
+\code{codeagent::install_permission_gate}. Injectable so the approval bridge can
+be unit-tested (and, later, replaced by an out-of-process transport)
+without a live gate.}
 }
 \value{
 A \code{coro::async} handler suitable for \code{\link[=assistantUIServer]{assistantUIServer()}}'s \code{handler}.
@@ -39,10 +56,11 @@ pure addition: it does not modify or replace \code{\link[=make_ellmer_handler]{m
 \code{make_claude_handler()}; hosts that never call it are unaffected.
 }
 \details{
-\strong{Phase A (this release):} streaming + typed tool display forwarding, no
-permission gating and no concurrent sub-agents (permission approval and
-background agents are follow-up phases). Requires the \code{codeagent} package
-(Suggests).
+\strong{Phase B (this release):} streaming + typed tool display forwarding \strong{plus
+permission approval} — sensitive tools (write/execute) are gated by
+codeagent's central permission gate, bridged to the in-app approval card. No
+concurrent sub-agents yet (background agents are a follow-up phase). Requires
+the \code{codeagent} package (Suggests).
 }
 \seealso{
 \code{\link[=make_ellmer_handler]{make_ellmer_handler()}} for the lighter bare-ellmer backend.
