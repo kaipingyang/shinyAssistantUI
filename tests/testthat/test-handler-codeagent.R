@@ -159,3 +159,26 @@ test_that("gate is skipped when client exposes no $chat (Phase A / duck-typed cl
   attr(h, "warmup")("th")
   expect_identical(called$n, 0L)                    # gate_fn not called when $chat is NULL
 })
+
+
+test_that("approval_tools maps to codeagent PermissionRule-shaped ask rules (not list(ask=))", {
+  captured <- new.env()
+  fake_gate <- function(chat, permission_mode, ask_fn, rules = list()) captured$rules <- rules
+  h <- make_codeagent_handler(
+    client_factory = function() structure(list(chat = list()), class = "CodeagentClient"),
+    approval_tools = c("Glob", "RunR"),
+    stream_fn = function(...) promises::promise_resolve(list(text = "x")),
+    gate_fn = fake_gate)
+  attr(h, "warmup")("th")                      # triggers get_client -> gate_fn(rules=)
+  expect_length(captured$rules, 2)
+  expect_identical(captured$rules[[1]]$tool_name, "Glob")
+  expect_identical(captured$rules[[1]]$behavior, "ask")
+  expect_true("rule_content" %in% names(captured$rules[[1]]))
+
+  # the shape is actually honored by codeagent's own gate: a read-only tool that
+  # would auto-allow in "default" mode is forced to "ask" by this rule.
+  skip_if_not_installed("codeagent")
+  cp <- getFromNamespace("check_permission", "codeagent")
+  expect_identical(cp("Glob", "default", rules = list()), "allow")        # baseline
+  expect_identical(cp("Glob", "default", rules = captured$rules), "ask")  # forced
+})

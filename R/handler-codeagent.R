@@ -67,8 +67,15 @@ make_codeagent_handler <- function(client_factory,
     codeagent::install_permission_gate(chat, permission_mode = permission_mode,
                                        ask_fn = ask_fn, rules = rules)
   }
-  # Extra tools to force through approval (on top of `permission_mode`'s policy).
-  gate_rules <- if (length(approval_tools)) list(ask = as.character(approval_tools)) else list()
+  # Extra tools to force through approval, on top of `permission_mode`'s policy.
+  # codeagent's gate iterates `rules` as PermissionRule-shaped objects
+  # (list(tool_name=, behavior=, rule_content=)) — first match wins, evaluated
+  # before the default read-only auto-allow — so this can force even a read tool
+  # to prompt. (A bare list(ask=...) is the WRONG shape and errors in the gate.)
+  gate_rules <- if (length(approval_tools))
+    lapply(as.character(approval_tools),
+           function(t) list(tool_name = t, behavior = "ask", rule_content = NULL))
+    else list()
 
   clients <- list()  # thread_id -> list(client, current)
   get_client <- function(thread_id) {
