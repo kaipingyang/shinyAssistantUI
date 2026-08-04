@@ -26,6 +26,7 @@ import {
 } from "@assistant-ui/react-lexical";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import {
+  $createTextNode,
   $getNodeByKey,
   $getRoot,
   $isElementNode,
@@ -398,6 +399,34 @@ const CommandHintPlugin: FC = () => {
   return null;
 };
 
+// After a slash-command chip is inserted (completion), append a trailing space so
+// typing an argument yields "/cmd arg" (two tokens) instead of "/cmdarg" (one
+// token that never sends). Uses a mutation listener firing once on the directive's
+// "created" event (not a reactive transform), so deleting the space doesn't refight.
+const TrailingSpacePlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () =>
+      editor.registerMutationListener(DirectiveNode, (mutations) => {
+        let needsSpace = false;
+        for (const [, type] of mutations) if (type === "created") needsSpace = true;
+        if (!needsSpace) return;
+        editor.update(() => {
+          for (const [key, type] of mutations) {
+            if (type !== "created") continue;
+            const node = $getNodeByKey(key);
+            if (!node || node.getNextSibling() !== null) continue; // only a bare trailing chip
+            const space = $createTextNode(" ");
+            node.insertAfter(space);
+            space.selectEnd(); // caret after the space: "/cmd |"
+          }
+        });
+      }),
+    [editor],
+  );
+  return null;
+};
+
 const ShinyLexicalInput: FC<{
   formatter: Unstable_DirectiveFormatter;
   slashCompletionRef: RefObject<(() => boolean) | null>;
@@ -450,6 +479,7 @@ const ShinyLexicalInput: FC<{
       <TabTriggerPlugin slashCompletionRef={slashCompletionRef} />
       <PasteAttachmentPlugin />
       <CommandHintPlugin />
+      <TrailingSpacePlugin />
     </LexicalComposerInput>
   );
 };
