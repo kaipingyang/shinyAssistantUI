@@ -1,6 +1,7 @@
 # shinyAssistantUI 0.4.0.9000 (dev branch)
 
 - Development version (post-0.4.0).
+- **codeagent backend Phase B**: `make_codeagent_handler(permission_mode=)` now bridges codeagent's central permission gate to the in-app approval card — sensitive tools (write/execute) prompt for Approve/Deny (reads auto-allow). Approve/deny only (the gate cannot rewrite tool input). `examples/27` switched from `bypass` to `default`.
 
 # shinyAssistantUI 0.4.0
 

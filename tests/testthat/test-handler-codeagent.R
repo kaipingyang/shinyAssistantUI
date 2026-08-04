@@ -77,3 +77,85 @@ test_that("make_codeagent_handler forwards stream callbacks and calls on_done", 
   expect_identical(cap$art$type, "code")            # code display → on_artifact
   expect_identical(cap$art$content, "1+1")
 })
+
+
+# Plan 51 B — permission bridge: the gate's ask_fn -> approval card -> approve/deny.
+# Injected fake gate_fn captures the ask_fn; a fake stream_fn invokes it mid-turn
+# exactly as codeagent's real gate would. No codeagent / LLM needed.
+
+test_that("permission bridge: ask_fn emits requiresApproval card and resolves approve/deny", {
+  skip_if_not_installed("coro"); skip_if_not_installed("promises"); skip_if_not_installed("later")
+
+  captured <- new.env()
+  fake_gate <- function(chat, permission_mode, ask_fn, rules = list()) {
+    captured$ask_fn <- ask_fn; captured$mode <- permission_mode; captured$rules <- rules
+  }
+
+  run_bridge <- function(approve) {
+    cap <- new.env(); cap$done <- FALSE; cap$ask_result <- NULL
+    fake_stream <- function(client, input, on_delta = NULL, on_tool_request = NULL, ...) {
+      p <- captured$ask_fn("run_r", list(code = "1+1"), id = "t1")   # gate asks
+      promises::then(p, function(ok) cap$ask_result <- ok)
+      promises::promise_resolve(list(text = "done", usage = NULL, stop_reason = "completed"))
+    }
+    h <- make_codeagent_handler(
+      client_factory  = function() structure(list(chat = list()), class = "CodeagentClient"),
+      permission_mode = "default", stream_fn = fake_stream, gate_fn = fake_gate)
+    h(message = "hi", thread_id = "th", attachments = list(),
+      on_chunk = function(t) NULL, on_done = function(...) cap$done <- TRUE,
+      on_error = function(m) cap$err <- m,
+      on_tool_call = function(tool_call_id, tool_name, args, annotations) {
+        cap$tc_id <- tool_call_id; cap$tc_ann <- annotations
+      },
+      on_tool_result = function(...) NULL, on_thinking = NULL,
+      on_image = function(...) NULL, on_artifact = function(...) NULL,
+      is_cancelled = function() FALSE,
+      wait_for_approval = function(id) promises::promise_resolve(list(approved = approve)),
+      register_cancel = function(fn) NULL)
+    for (i in seq_len(3000)) { later::run_now(); if (isTRUE(cap$done) && !is.null(cap$ask_result)) break; Sys.sleep(0.002) }
+    cap
+  }
+
+  ap <- run_bridge(TRUE)
+  expect_true(isTRUE(ap$tc_ann$requiresApproval))   # approval card emitted for the tool
+  expect_identical(ap$tc_id, "t1")                  # same id the gate passed
+  expect_identical(captured$mode, "default")        # our permission_mode installed on the gate
+  expect_true(isTRUE(ap$ask_result))                # approve -> ask_fn promise resolves TRUE
+
+  dn <- run_bridge(FALSE)
+  expect_false(isTRUE(dn$ask_result))               # deny -> FALSE
+})
+
+test_that("permission bridge: no approval channel denies (safe default)", {
+  skip_if_not_installed("coro"); skip_if_not_installed("promises"); skip_if_not_installed("later")
+
+  captured <- new.env()
+  fake_gate <- function(chat, permission_mode, ask_fn, rules = list()) captured$ask_fn <- ask_fn
+  cap <- new.env(); cap$done <- FALSE
+  fake_stream <- function(client, input, ...) {
+    cap$ask_result <- captured$ask_fn("Bash", list(command = "echo hi"), id = "x")  # no wait_for_approval wired
+    promises::promise_resolve(list(text = "done"))
+  }
+  h <- make_codeagent_handler(
+    client_factory = function() structure(list(chat = list()), class = "CodeagentClient"),
+    stream_fn = fake_stream, gate_fn = fake_gate)
+  h(message = "hi", thread_id = "th", attachments = list(),
+    on_chunk = function(t) NULL, on_done = function(...) cap$done <- TRUE, on_error = function(m) NULL,
+    on_tool_call = function(...) NULL, on_tool_result = function(...) NULL, on_thinking = NULL,
+    on_image = function(...) NULL, on_artifact = function(...) NULL,
+    is_cancelled = function() FALSE, wait_for_approval = NULL, register_cancel = function(fn) NULL)
+  for (i in seq_len(2000)) { later::run_now(); if (isTRUE(cap$done)) break; Sys.sleep(0.002) }
+  expect_false(isTRUE(cap$ask_result))              # logical FALSE (deny), not a promise
+})
+
+test_that("gate is skipped when client exposes no $chat (Phase A / duck-typed clients unaffected)", {
+  called <- new.env(); called$n <- 0L
+  fake_gate <- function(...) called$n <- called$n + 1L
+  h <- make_codeagent_handler(
+    client_factory = function() structure(list(), class = "CodeagentClient"),  # no $chat
+    stream_fn = function(...) promises::promise_resolve(list(text = "x")),
+    gate_fn = fake_gate)
+  # build the client (warmup path also uses get_client)
+  attr(h, "warmup")("th")
+  expect_identical(called$n, 0L)                    # gate_fn not called when $chat is NULL
+})
