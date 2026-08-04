@@ -27,6 +27,7 @@ import {
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import {
   $getNodeByKey,
+  $getRoot,
   $isElementNode,
   $nodesOfType,
   COMMAND_PRIORITY_HIGH,
@@ -160,6 +161,16 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
   // Every directive (skill, action control, and @mention) renders the same blue
   // chip. Skills and actions stay functionally distinct at submit time via
   // matchSlashAction (skill → Claude; action → local action handler).
+  // The command's argument hint is exposed as a data-* ATTRIBUTE (never a child /
+  // text node), so a CSS ::after ghost (see lexical.css, gated by data-cmd-bare)
+  // can show "/skill [args]" WITHOUT entering the editor content / selection /
+  // submitted text. This is the fix for the earlier bug where the hint was a real
+  // DOM span inside the decorator and corrupted the input.
+  const { commands } = useShinyConfig();
+  const argumentHint =
+    directiveType === "slash"
+      ? commands.find((command) => command.name === directiveId)?.argumentHint
+      : undefined;
   return (
     <span
       className="aui-directive-chip inline-flex items-center rounded bg-blue-100 px-1.5 py-0.5 text-[13px] font-medium leading-none text-blue-700 dark:bg-blue-950/60 dark:text-blue-300"
@@ -173,6 +184,7 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
       }}
       data-directive-type={directiveType}
       data-directive-id={directiveId}
+      data-arg-hint={argumentHint || undefined}
     >
       {label}
     </span>
@@ -359,6 +371,33 @@ const PasteAttachmentPlugin: FC = () => {
   return null;
 };
 
+// Toggle data-cmd-bare on the editor root when the content is a lone slash-command
+// chip with no trailing args. Combined with the chip's data-arg-hint ATTRIBUTE + a
+// CSS ::after (lexical.css), this shows "/skill [args]" as a pure-visual ghost that
+// vanishes once the user types an argument — never touching editor content,
+// selection, or the submitted text (the fix for the earlier real-span bug).
+const CommandHintPlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () =>
+      editor.registerUpdateListener(() => {
+        editor.getEditorState().read(() => {
+          const directives = $nodesOfType(DirectiveNode);
+          const bare =
+            directives.length === 1 &&
+            $getRoot().getTextContent().trim() ===
+              directives[0]!.getTextContent().trim();
+          const el = editor.getRootElement();
+          if (!el) return;
+          if (bare) el.setAttribute("data-cmd-bare", "true");
+          else el.removeAttribute("data-cmd-bare");
+        });
+      }),
+    [editor],
+  );
+  return null;
+};
+
 const ShinyLexicalInput: FC<{
   formatter: Unstable_DirectiveFormatter;
   slashCompletionRef: RefObject<(() => boolean) | null>;
@@ -410,6 +449,7 @@ const ShinyLexicalInput: FC<{
     >
       <TabTriggerPlugin slashCompletionRef={slashCompletionRef} />
       <PasteAttachmentPlugin />
+      <CommandHintPlugin />
     </LexicalComposerInput>
   );
 };

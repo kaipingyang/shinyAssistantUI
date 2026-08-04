@@ -93,3 +93,28 @@
   vertical-align: middle;
   line-height: 1.4;
 }
+
+/* Inline argument-hint ghost: shown ONLY when the editor holds a lone slash-command
+   chip with no args yet (root has data-cmd-bare, set by CommandHintPlugin) and the
+   chip carries a data-arg-hint. Pure ::after pseudo-element — NOT part of the editor
+   content/selection/submitted text, so it can never corrupt input (unlike a real
+   span). Absolutely positioned just right of the blue pill (dim, CLI-style) so it
+   sits OUTSIDE the chip background and takes no layout space. Vanishes as soon as the
+   user types an argument. */
+.aui-lexical-input[data-cmd-bare] .aui-directive-chip[data-arg-hint]:not([data-arg-hint=""]) {
+  position: relative;
+}
+.aui-lexical-input[data-cmd-bare] .aui-directive-chip[data-arg-hint]:not([data-arg-hint=""])::after {
+  content: attr(data-arg-hint);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-inline-start: 0.35rem;
+  color: #6b7280;
+  opacity: 0.8;
+  font-weight: 400;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
