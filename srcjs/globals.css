@@ -113,3 +113,11 @@
   --bs-columns: revert-layer;
   --bs-gap: revert-layer;
 }
+
+/* Image-only user messages render an empty text part (<p><span data-status></span></p>)
+   inside the bubble, so Tailwind's `empty:hidden` can't fire (the <p> child exists) and
+   a tiny empty bubble shows next to the attachment. Hide the content bubble when its
+   only content is that empty text span. Real text (span not :empty) is unaffected. */
+.aui-user-message-content:has(> p:only-child > span[data-status]:only-child:empty) {
+  display: none;
+}
