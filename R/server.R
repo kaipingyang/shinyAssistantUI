@@ -935,6 +935,11 @@ assistantUIServer <- function(id, handler,
   # loads deduplicate, success stays warm, and failure removes the marker so a
   # later load can retry.
   .warmup_fn <- attr(handler, "warmup")
+  # Handlers that own external resources (e.g. make_codeagent_remote_handler's
+  # worker processes) may expose a `teardown` attribute; stop them on session end.
+  .teardown_fn <- attr(handler, "teardown")
+  if (is.function(.teardown_fn))
+    session$onSessionEnded(function() tryCatch(.teardown_fn(), error = function(e) NULL))
   warmup_states <- new.env(parent = emptyenv())
   schedule_warmup <- function(thread_id, delay = 0) {
     # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧

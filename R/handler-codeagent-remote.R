@@ -123,5 +123,12 @@ make_codeagent_remote_handler <- function(config          = list(),
   # Spawn + build the worker in the background when the codeagent backend is
   # selected (assistantUIServer(prewarm=)), off the first-message critical path.
   attr(coro_handler, "warmup") <- function(thread_id) { get_worker(thread_id); invisible(NULL) }
+  # Stop all worker processes (assistantUIServer calls this on session end) so
+  # workers don't leak in a long-lived multi-session app.
+  attr(coro_handler, "teardown") <- function() {
+    for (h in workers) tryCatch(.ca_worker_stop(h), error = function(e) NULL)
+    workers <<- list()
+    invisible(NULL)
+  }
   coro_handler
 }
