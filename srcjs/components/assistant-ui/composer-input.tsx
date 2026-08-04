@@ -20,6 +20,7 @@ import {
   type Unstable_TriggerItem,
 } from "@assistant-ui/react";
 import {
+  $isDirectiveNode,
   DirectiveNode,
   LexicalComposerInput,
   type DirectiveChipProps,
@@ -399,23 +400,27 @@ const CommandHintPlugin: FC = () => {
   return null;
 };
 
-// After a slash-command chip is inserted (completion), append a trailing space so
-// typing an argument yields "/cmd arg" (two tokens) instead of "/cmdarg" (one
-// token that never sends). Uses a mutation listener firing once on the directive's
-// "created" event (not a reactive transform), so deleting the space doesn't refight.
+// After a slash-command/skill chip is inserted (completion), append a trailing
+// space so typing an argument yields "/cmd arg" (two tokens) instead of "/cmdarg"
+// (one token that never sends). Uses a mutation listener firing once on the
+// directive's "created" event (not a reactive transform), so deleting the space
+// doesn't refight. Deterministic ACTIONS (/compact, /context…, type
+// "slash-action") are left bare — they don't take args and routing trims anyway.
 const TrailingSpacePlugin: FC = () => {
   const [editor] = useLexicalComposerContext();
   useEffect(
     () =>
       editor.registerMutationListener(DirectiveNode, (mutations) => {
-        let needsSpace = false;
-        for (const [, type] of mutations) if (type === "created") needsSpace = true;
-        if (!needsSpace) return;
+        const keys: string[] = [];
+        for (const [key, type] of mutations) if (type === "created") keys.push(key);
+        if (keys.length === 0) return;
         editor.update(() => {
-          for (const [key, type] of mutations) {
-            if (type !== "created") continue;
+          for (const key of keys) {
             const node = $getNodeByKey(key);
-            if (!node || node.getNextSibling() !== null) continue; // only a bare trailing chip
+            if (!$isDirectiveNode(node)) continue;
+            if (node.getNextSibling() !== null) continue; // only a bare trailing chip
+            // deterministic actions (/compact …) don't take args -> leave them bare
+            if (node.exportJSON().directiveType === "slash-action") continue;
             const space = $createTextNode(" ");
             node.insertAfter(space);
             space.selectEnd(); // caret after the space: "/cmd |"
