@@ -408,6 +408,18 @@
   result
 }
 
+# 把上传图片(data URI 或普通 URL)转成 Anthropic 图片内容块,供 ClaudeSDKClient$send()
+# 使用。ClaudeAgentSDK 没有 send_with_images();send() 的 `content` 接受内容块列表,
+# 图片即 {type:"image", source:{type:"base64"|"url", ...}}。
+.claude_image_block <- function(uri) {
+  uri <- as.character(uri %||% "")
+  m <- regmatches(uri, regexec("^data:([^;,]+);base64,(.*)$", uri))[[1]]
+  if (length(m) == 3L && nzchar(m[[3]]))
+    list(type = "image", source = list(type = "base64", media_type = m[[2]], data = m[[3]]))
+  else
+    list(type = "image", source = list(type = "url", url = uri))
+}
+
 #' Create an ellmer streaming handler for assistantUIServer
 #'
 #' Wraps an `ellmer` chat object into an `assistantUIServer`-compatible
@@ -1229,10 +1241,15 @@ make_claude_handler <- function(options       = NULL,
     if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
     full_message <- .append_ide_context(full_message, ide_context)
 
-    if (length(img_parts) > 0)
-      client$send_with_images(full_message, img_parts)
-    else
+    if (length(img_parts) > 0) {
+      # ClaudeAgentSDK has no send_with_images(); images ride as Anthropic content
+      # blocks passed to send() (its `content` accepts a list of blocks).
+      blocks <- c(list(list(type = "text", text = full_message)),
+                  lapply(img_parts, .claude_image_block))
+      client$send(blocks)
+    } else {
       client$send(full_message)
+    }
 
     interrupted      <- FALSE
     chunk_count      <- 0L
