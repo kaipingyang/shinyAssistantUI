@@ -6,7 +6,7 @@ ui <- assistantUIPage(assistantUIOutput("chat", height = "100vh"), title = "skil
 server <- function(input, output, session) {
   assistantUIServer(
     "chat",
-    handler = function(message, on_chunk, on_done, ...) { on_chunk("ok"); on_done() },
+    handler = function(message, on_chunk, on_done, ...) { on_chunk(paste0("GOT[", message, "]")); on_done() },
     commands = list(
       list(name = "greet", description = "Say hi to someone",
            prompt = "/greet", argument_hint = "[name]")
