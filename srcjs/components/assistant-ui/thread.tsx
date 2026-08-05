@@ -268,6 +268,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           >
             <ThreadScrollToBottom />
             <ShinyStatusPanels />
+            {/* Plan 48B: 动态 follow-up 建议 chip(自带 !isEmpty && !isRunning && 有建议 门禁)*/}
+            <ThreadFollowupSuggestions />
             <Composer />
             <ShinyUsageFooter />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -355,6 +357,31 @@ const ThreadSuggestions: FC = () => {
         {() => <ThreadSuggestionItem />}
       </ThreadPrimitive.Suggestions>
     </div>
+  );
+};
+
+// Plan 48B — 动态 follow-up 建议:读 thread.suggestions(由 on_done(suggestions=) 或
+// :suggestions 频道设置),在最新回复下方渲染可点 chip(区别于欢迎屏 ThreadSuggestions)。
+// 直接读 s.thread.suggestions(ThreadPrimitive.Suggestions 是空线程/欢迎专用)。点击用
+// method="replace" + autoSend:把 composer 文本替换为 prompt 并立即发送。
+const ThreadFollowupSuggestions: FC = () => {
+  const suggestions = useAuiState((s) => s.thread.suggestions) as Array<{ prompt: string; text?: string }>;
+  return (
+    <AuiIf condition={(s) => !s.thread.isEmpty && !s.thread.isRunning && s.thread.suggestions.length > 0}>
+      <div className="aui-thread-followup-suggestions flex w-full flex-wrap items-center justify-start gap-2 px-1">
+        {suggestions.map((sg, idx) => (
+          <ThreadPrimitive.Suggestion
+            key={idx}
+            prompt={sg.prompt}
+            method="replace"
+            autoSend
+            className="aui-thread-followup-suggestion fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-foreground hover:bg-muted border-border/60 h-auto rounded-full border px-3.5 py-1.5 text-sm font-normal whitespace-nowrap transition-colors duration-200"
+          >
+            {sg.text || sg.prompt}
+          </ThreadPrimitive.Suggestion>
+        ))}
+      </div>
+    </AuiIf>
   );
 };
 

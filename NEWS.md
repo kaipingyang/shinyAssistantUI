@@ -1,5 +1,10 @@
 # shinyAssistantUI 0.5.0.9000 (dev branch)
 
+- **动态 follow-up 建议 / dynamic suggestions (Plan 48B)**: handlers can push "next step" chips
+  at any time via the new `on_suggestions(list(...))` callback (strings or `list(prompt=, text=)`);
+  they render as clickable chips **below the latest reply** (not just the welcome screen) once the
+  turn finishes, and clicking one sends it immediately. Cleared automatically at the next user turn.
+  New `:suggestions` channel + `ThreadFollowupSuggestions` (reads `thread.suggestions`).
 - **划词引用 / Quote (Plan 48A)**: select text in an assistant reply and a floating **Quote**
   toolbar appears; clicking it quotes that text into the composer (shown as a preview). Your
   follow-up is sent in the **same conversation** with the quoted text prepended as a markdown

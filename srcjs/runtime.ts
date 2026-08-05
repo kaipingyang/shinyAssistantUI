@@ -393,14 +393,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [isRunning, setIsRunning] = useState(false);
   // Static starter suggestions from assistantUIServer(suggestions=) show on the welcome
   // screen; on_done(suggestions=) replaces them after a turn. Accepts strings or {prompt, text}.
-  const initialSuggestions = (((config?.suggestions as unknown[]) ?? [])
-    .map((x) => {
-      if (typeof x === "string") return { prompt: x, text: x };
-      const o = x as { prompt?: unknown; text?: unknown };
-      const prompt = String(o?.prompt ?? o?.text ?? "");
-      return { prompt, text: String(o?.text ?? prompt) };
-    })
-    .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  // 归一化 suggestions:接受字符串或 {prompt, text}(欢迎屏 config + onDone + :suggestions 频道共用)
+  const normalizeSuggestions = (arr: unknown[] | undefined): Array<{ prompt: string; text?: string }> =>
+    (((arr as unknown[]) ?? [])
+      .map((x) => {
+        if (typeof x === "string") return { prompt: x, text: x };
+        const o = x as { prompt?: unknown; text?: unknown };
+        const prompt = String(o?.prompt ?? o?.text ?? "");
+        return { prompt, text: String(o?.text ?? prompt) };
+      })
+      .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  const initialSuggestions = normalizeSuggestions(config?.suggestions as unknown[]);
   const [suggestions, setSuggestions] = useState<Array<{prompt: string; text?: string}>>(initialSuggestions);
   // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
   const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
@@ -695,6 +698,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setCommands(((d.commands ?? []) as CommandDef[]) ?? []);
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
+    // Plan 48B: R 端 on_suggestions(...) 经 :suggestions 频道随时推送 follow-up 建议。
+    // 只应用于当前线程(或无 threadId);下一轮 startRun 会清空(见 setSuggestions([]))。
+    bridge.current.onSuggestions((d) => {
+      if (d.threadId && d.threadId !== currentThreadIdRef.current) return;
+      setSuggestions(normalizeSuggestions(d.suggestions as unknown[]));
+    });
     bridge.current.onServerCommands((d) => {
       const cmds = (d.commands ?? []) as Array<Record<string, unknown>>;
       const mapped = cmds.map((c) => ({

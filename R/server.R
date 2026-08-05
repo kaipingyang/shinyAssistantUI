@@ -472,6 +472,12 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":done"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
+      # Plan 48B: handler 可随时推送 follow-up 建议(不必等 on_done),渲染在最新回复下方。
+      # suggestions = 字符列表 或 list(list(prompt=, text=))；前端归一化。
+      on_suggestions = function(suggestions = list()) {
+        session$sendCustomMessage(paste0(input_id, ":suggestions"),
+                                  list(suggestions = suggestions, threadId = thread_id))
+      },
       on_error_fn = function(msg) {
         session$sendCustomMessage(paste0(input_id, ":error"),
                                   list(message = msg, threadId = thread_id))
@@ -902,6 +908,7 @@ assistantUIServer <- function(id, handler,
         on_warming        = cbs$on_warming,
         on_state          = cbs$on_state,
         on_commands       = cbs$on_commands,
+        on_suggestions    = cbs$on_suggestions,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
