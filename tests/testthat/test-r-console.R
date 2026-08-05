@@ -47,6 +47,10 @@ test_that(".addin_run_r_remote 无 server 时安全返回错误(不抛)", {
 })
 
 test_that("nanonext round-trip: 客户端在 server 的 .GlobalEnv 执行并取回捕获结果", {
+  # 集成测试:后台进程 pkgload::load_all(源码树) + nanonext IPC socket 往返。
+  # R CMD check 沙箱里没有源码树(装的是已安装包)、且 socket/时序受限 → server 绑不上
+  # 会超时。仅在开发环境(devtools::test / load_all,NOT_CRAN=true)跑。
+  skip_on_cran()
   skip_if_not_installed("nanonext")
   skip_if_not_installed("callr")
   url <- sprintf("ipc:///tmp/claude-console-test-%d.sock", as.integer(Sys.time()) %% 100000L)

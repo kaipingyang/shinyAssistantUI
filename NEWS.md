@@ -1,8 +1,36 @@
-# shinyAssistantUI 0.4.0.9000 (dev branch)
+# shinyAssistantUI 0.5.0
 
-- Development version (post-0.4.0).
-- **codeagent out-of-process backend (Plan 52 A/B)**: `make_codeagent_remote_handler()` runs codeagent in a separate R worker process pinned to a new-curl library, so the MAIN Shiny process never loads codeagent/ellmer/curl (safe inside sessions with a legacy `curl`). Streaming + tool display + the permission approval card are marshaled over a socket; approve/deny works across the process boundary. `callr` added to Suggests.
-- **codeagent backend Phase B**: `make_codeagent_handler(permission_mode=)` now bridges codeagent's central permission gate to the in-app approval card — sensitive tools (write/execute) prompt for Approve/Deny (reads auto-allow). Approve/deny only (the gate cannot rewrite tool input). `examples/27` switched from `bypass` to `default`.
+## codeagent backend
+
+- **Out-of-process backend (Plan 52 A/B)**: `make_codeagent_remote_handler()` runs codeagent in a
+  separate R worker process pinned to a new-curl library, so the MAIN Shiny process never loads
+  codeagent/ellmer/curl (safe inside sessions with a legacy `curl`, e.g. ERP). Streaming + tool
+  display + the permission approval card are marshaled over a socket; approve/deny works across the
+  process boundary and the worker is torn down on session end. `callr` added to Suggests.
+- **Permission bridge (Plan 51 Phase B)**: `make_codeagent_handler(permission_mode=)` now bridges
+  codeagent's central permission gate to the in-app approval card — sensitive tools (write/execute)
+  prompt for Approve/Deny while reads auto-allow. Approve/deny only (the gate cannot rewrite tool
+  input). `examples/27` switched from `bypass` to `default`.
+
+## Composer
+
+- **Slash-command argument hints**: the slash menu shows argument hints (e.g. `/skill [arg]`), and
+  after selecting a command an inline ghost hint appears in the composer (rendered via a safe CSS
+  `::after`, so nothing is injected into the editable value).
+- **Trailing space after slash-command completion**: completing a skill/command inserts a trailing
+  space so you can type the argument immediately and Enter sends. Deterministic actions
+  (`/clear`, `/compact`, …) are not affected.
+
+## Attachments / images
+
+- **Paste & drag-drop images** into the composer as attachments (Ctrl/Cmd+V or drop).
+- **Image attachments are downscaled** (max ~1280px edge, kept well under the CLI's stdin line
+  limit) so large screenshots no longer hang the `claude` CLI.
+- **Image-only messages fixed** (message with an image and no text): previously it crashed
+  (`ClaudeSDKClient` has no `send_with_images()`), deadlocked on an empty text content block,
+  showed an empty text bubble, and was silently dropped by the submit guard (no cold-start, no
+  reply). All fixed — image-only sends omit the empty text block and still reach the handler.
+- Text-file attachments continue to inline their content into the outgoing message.
 
 # shinyAssistantUI 0.4.0
 
