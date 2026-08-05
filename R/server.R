@@ -993,7 +993,12 @@ assistantUIServer <- function(id, handler,
     is_initial_history <- identical(msg$type, "load_session")
     is_older_history <- identical(msg$type, "load_session_page")
     is_history_request <- is_initial_history || is_older_history
-    if (!is_history_request && !nzchar(trimws(msg$text %||% ""))) return()
+    # Drop truly-empty submits, but NOT image-only messages: an attachment with no
+    # text (e.g. a pasted/dragged screenshot) is a valid message and must still reach
+    # the handler (otherwise it's silently dropped — no cold-start, no reply).
+    if (!is_history_request &&
+        !nzchar(trimws(msg$text %||% "")) &&
+        length(msg$attachments %||% list()) == 0) return()
 
     if (is_history_request && !is.null(on_session_load)) {
       send_thread <- function(messages, cursor = NULL, has_more = FALSE) {
