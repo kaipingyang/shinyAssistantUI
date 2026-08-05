@@ -8,6 +8,7 @@ import {
   SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
 } from "@assistant-ui/react";
 import { ResizingImageAttachmentAdapter } from "./image-attachment-adapter";
+import { FileAttachmentAdapter } from "./file-attachment-adapter";
 import type {
   ThreadMessageLike,
   AppendMessage,
@@ -295,6 +296,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     attachmentAdapter.current = new CompositeAttachmentAdapter([
       new ResizingImageAttachmentAdapter(),
       new SimpleTextAttachmentAdapter(),
+      new FileAttachmentAdapter(), // Plan 56: PDF(→document block) + Excel(→readxl)
     ]);
   }
 

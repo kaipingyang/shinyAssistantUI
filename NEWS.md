@@ -1,5 +1,12 @@
 # shinyAssistantUI 0.5.0.9000 (dev branch)
 
+- **上传 PDF 与 Excel / PDF & Excel upload (Plan 56)**: attach or drag-drop a **PDF** — it's sent
+  to Claude as a native **document block**, so Claude reads its text *and* visuals (no server-side
+  parsing, no poppler) — or an **Excel** `.xlsx/.xls`, parsed server-side with `readxl` into a
+  markdown table (per sheet, row/col-capped; backend-agnostic). Text files
+  (`.md/.csv/.txt/.json/…`) already worked. New `FileAttachmentAdapter` base64-encodes files with
+  **no client-side parsing** (bundle unchanged); `readxl`/`writexl` added to Suggests. Word/PPT are
+  intentionally deferred (poor ROI — see Plan 56).
 - **动态 follow-up 建议 / dynamic suggestions (Plan 48B)**: handlers can push "next step" chips
   at any time via the new `on_suggestions(list(...))` callback (strings or `list(prompt=, text=)`);
   they render as clickable chips **below the latest reply** (not just the welcome screen) once the

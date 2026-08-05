@@ -373,14 +373,74 @@
   )
   file_parts <- vapply(
     Filter(function(a) identical(a$type, "file"), atts),
-    function(a) {
-      nm <- a$name %||% "unnamed"
-      ct <- a$contentType %||% "unknown type"
-      sprintf("[Attached file: %s (%s) \u2014 binary content not directly readable]", nm, ct)
-    },
+    .extract_file_text,
     character(1)
   )
   paste(c(text_parts, file_parts), collapse = "\n")
+}
+
+# 附件是否 PDF(走 Claude 原生 document block)。
+.att_is_pdf <- function(a) {
+  identical(a$type, "file") &&
+    (grepl("pdf", a$contentType %||% "", ignore.case = TRUE) ||
+     grepl("\\.pdf$", a$name %||% "", ignore.case = TRUE))
+}
+
+# 附件文件 → 文本(后端无关)。xlsx/xls 用 readxl 提取成 markdown 表;其余二进制给占位。
+# PDF 在 make_claude_handler 里走原生 document block(调用前已从 atts 排除);非 Claude
+# 后端的 PDF 暂给占位(pdftools 兜底见 Plan 56 延后项)。
+.extract_file_text <- function(a) {
+  ct <- a$contentType %||% ""
+  nm <- a$name %||% "unnamed"
+  is_xlsx <- grepl("spreadsheetml|ms-excel", ct, ignore.case = TRUE) ||
+             grepl("\\.xlsx?$", nm, ignore.case = TRUE)
+  if (is_xlsx) return(.xlsx_to_markdown(a$data, nm))
+  sprintf("[Attached file: %s (%s) \u2014 binary content not directly readable]", nm,
+          if (nzchar(ct)) ct else "unknown type")
+}
+
+# Excel → markdown 表(逐 sheet,行列上限)。readxl/base64enc 为 Suggests,缺则占位。
+.xlsx_to_markdown <- function(data, name, max_rows = 200L, max_cols = 40L) {
+  if (!requireNamespace("readxl", quietly = TRUE) ||
+      !requireNamespace("base64enc", quietly = TRUE))
+    return(sprintf("[Attached spreadsheet: %s \u2014 readxl/base64enc not available]", name))
+  b64 <- sub("^data:[^,]*,", "", as.character(data %||% ""))
+  raw <- tryCatch(base64enc::base64decode(b64), error = function(e) NULL)
+  if (is.null(raw)) return(sprintf("[Attached spreadsheet: %s \u2014 decode failed]", name))
+  tf <- tempfile(fileext = ".xlsx"); on.exit(unlink(tf), add = TRUE)
+  writeBin(raw, tf)
+  sheets <- tryCatch(readxl::excel_sheets(tf), error = function(e) NULL)
+  if (is.null(sheets)) return(sprintf("[Attached spreadsheet: %s \u2014 could not read]", name))
+  parts <- character(0)
+  for (sh in sheets) {
+    df <- tryCatch(
+      suppressMessages(readxl::read_excel(tf, sheet = sh, n_max = max_rows)),
+      error = function(e) NULL
+    )
+    if (is.null(df) || ncol(df) == 0L) next
+    trunc_cols <- ncol(df) > max_cols
+    if (trunc_cols) df <- df[, seq_len(max_cols), drop = FALSE]
+    hdr <- sprintf("### Sheet: %s (%d rows shown, %d cols%s)", sh, nrow(df), ncol(df),
+                   if (trunc_cols) ", cols truncated" else "")
+    parts <- c(parts, hdr, .df_to_markdown(df))
+  }
+  if (length(parts) == 0L) return(sprintf("[Attached spreadsheet: %s \u2014 empty]", name))
+  paste0("<attachment name=", name, " type=spreadsheet>\n",
+         paste(parts, collapse = "\n\n"), "\n</attachment>")
+}
+
+# data.frame → markdown 表(NA→空,转义竖线)。
+.df_to_markdown <- function(df) {
+  cells <- lapply(df, function(col) { v <- as.character(col); v[is.na(v)] <- ""; gsub("\\|", "\\\\|", v) })
+  df2 <- as.data.frame(cells, stringsAsFactors = FALSE, check.names = FALSE)
+  cols <- gsub("\\|", "\\\\|", names(df))
+  header <- paste0("| ", paste(cols, collapse = " | "), " |")
+  sep <- paste0("| ", paste(rep("---", length(cols)), collapse = " | "), " |")
+  rows <- if (nrow(df2) == 0L) character(0)
+          else vapply(seq_len(nrow(df2)),
+                      function(i) paste0("| ", paste(unlist(df2[i, ]), collapse = " | "), " |"),
+                      character(1))
+  paste(c(header, sep, rows), collapse = "\n")
 }
 
 # 划词引用(Plan 48A):把用户在 UI 里选中的一段文字(msg$quote$text)作为 markdown
@@ -435,13 +495,24 @@
 # blocks. CRITICAL: when the message text is empty (image-only send), OMIT the text
 # block entirely — an empty {type:"text", text:""} block is rejected by the API and
 # deadlocks the turn (the reported "image + tiny empty bubble, AI never replies").
-.claude_message_content <- function(full_message, img_parts) {
-  if (length(img_parts) == 0) return(full_message)
-  img_blocks <- lapply(img_parts, .claude_image_block)
-  if (nzchar(trimws(full_message %||% "")))
-    c(list(list(type = "text", text = full_message)), img_blocks)
+# 把上传 PDF(data URI)转成 Anthropic document 内容块——Claude 原生读 PDF(文本+视觉)。
+# 已 spike 证 claude CLI 的 stream-json 接受 document 块(Plan 56)。
+.claude_document_block <- function(uri) {
+  uri <- as.character(uri %||% "")
+  m <- regmatches(uri, regexec("^data:([^;,]+);base64,(.*)$", uri))[[1]]
+  if (length(m) == 3L && nzchar(m[[3]]))
+    list(type = "document", source = list(type = "base64", media_type = m[[2]], data = m[[3]]))
   else
-    img_blocks
+    list(type = "document", source = list(type = "url", url = uri))
+}
+
+.claude_message_content <- function(full_message, img_parts, doc_parts = list()) {
+  if (length(img_parts) == 0 && length(doc_parts) == 0) return(full_message)
+  blocks <- c(lapply(img_parts, .claude_image_block), lapply(doc_parts, .claude_document_block))
+  if (nzchar(trimws(full_message %||% "")))
+    c(list(list(type = "text", text = full_message)), blocks)
+  else
+    blocks
 }
 
 #' Create an ellmer streaming handler for assistantUIServer
@@ -1260,14 +1331,16 @@ make_claude_handler <- function(options       = NULL,
       Filter(function(a) identical(a$type, "image"), atts),
       function(a) a$data
     )
-    text_sections <- .attachment_text_sections(atts)
+    # PDF 附件 → Claude 原生 document block;从 text_sections 排除,避免双处理。
+    doc_parts <- lapply(Filter(.att_is_pdf, atts), function(a) a$data)
+    text_sections <- .attachment_text_sections(Filter(function(a) !.att_is_pdf(a), atts))
     full_message <- message
     if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
     full_message <- .append_ide_context(full_message, ide_context)
 
     # Images ride as Anthropic content blocks; image-only sends omit the empty text
     # block (see .claude_message_content). send() accepts a string OR a block list.
-    client$send(.claude_message_content(full_message, img_parts))
+    client$send(.claude_message_content(full_message, img_parts, doc_parts))
 
     interrupted      <- FALSE
     chunk_count      <- 0L
