@@ -1,3 +1,13 @@
+# shinyAssistantUI 0.5.0.9000 (dev branch)
+
+- **划词引用 / Quote (Plan 48A)**: select text in an assistant reply and a floating **Quote**
+  toolbar appears; clicking it quotes that text into the composer (shown as a preview). Your
+  follow-up is sent in the **same conversation** with the quoted text prepended as a markdown
+  blockquote, so the model has focused context — no manual copy-paste, no new session. Built on
+  `@assistant-ui/react` primitives (`SelectionToolbar` / `ComposerQuotePreview` / `QuoteBlock`);
+  the quote rides at `message.metadata.custom.quote` and is injected backend-agnostically
+  (Claude / ellmer / codeagent) via a blockquote prefix.
+
 # shinyAssistantUI 0.5.0
 
 ## codeagent backend

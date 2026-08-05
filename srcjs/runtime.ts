@@ -1283,6 +1283,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // 提取附件：序列化为结构化数据供 R 端使用
       const { attachmentData, storedAttachments } = extractAttachments(msg);
 
+      // 划词引用:发送时 runtime 自动把 quote 写到 msg.metadata.custom.quote({text,messageId})。
+      // 带给 R(server.R 前置成 blockquote 注入 prompt)+ 回显在用户气泡。
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const quote = (msg as any).metadata?.custom?.quote as { text: string; messageId: string } | undefined;
+
       // 追加用户消息
       setCurrentMessages((prev) => [
         ...prev,
@@ -1292,6 +1297,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           content: [{ type: "text" as const, text }],
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ...(quote && ({ metadata: { custom: { quote } } } as any)),
         },
       ]);
 
@@ -1301,6 +1308,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           sendText, threadId,
           attachmentData.length > 0 ? attachmentData : undefined,
           capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+          quote,
         );
       });
     },

@@ -15,6 +15,7 @@ export type AttachmentData = {
 
 
 export type IdeContextPolicy = { selectionVisible: boolean };
+export type QuoteInfo = { text: string; messageId: string };  // 划词引用 metadata.custom.quote
 export type WorkingDirPayload = { dir?: string; recent?: string[] };
 export type ProjectsPayload = { projects?: string[] };
 export type IdeContextMeta = {
@@ -96,7 +97,7 @@ export type HistoryLoadPayload = {
 };
 
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo) => void;
   sendReload: (text: string, threadId: string) => void;
   sendCancel: (threadId: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
@@ -268,10 +269,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   return {
-    sendUserMessage(text, threadId, attachments, ideContext) {
+    sendUserMessage(text, threadId, attachments, ideContext, quote) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ts: Date.now() },
         { priority: "event" }
       );
     },

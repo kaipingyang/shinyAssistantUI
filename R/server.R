@@ -1039,8 +1039,15 @@ assistantUIServer <- function(id, handler,
     assign(thread_id, FALSE, envir = cancel_flags)
     if (exists(thread_id, envir = cancel_fns)) rm(list = thread_id, envir = cancel_fns)
 
+    # 划词引用:UI 划选的文本经 msg$quote({text,messageId})随本次提交带来;非 reload 时
+    # 前置成 markdown blockquote 注入 prompt(对齐上游 injectQuoteContext,后端无关)。
+    user_text <- msg$text
+    quote <- msg$quote
+    if (!is_reload && is.list(quote) && nzchar(trimws(quote$text %||% "")))
+      user_text <- .prepend_quote(user_text, quote$text)
+
     stream_task$invoke(
-      msg$text,
+      user_text,
       thread_id,
       is_reload,
       msg$attachments %||% list(),

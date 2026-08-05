@@ -383,6 +383,16 @@
   paste(c(text_parts, file_parts), collapse = "\n")
 }
 
+# 划词引用(Plan 48A):把用户在 UI 里选中的一段文字(msg$quote$text)作为 markdown
+# blockquote 前置到消息前 —— 对齐上游 injectQuoteContext,让模型把被引用文本当上下文。
+# 后端无关(在 server.R 分发前调用,对 claude/ellmer/codeagent 一致生效)。
+.prepend_quote <- function(text, quote_text) {
+  qt <- trimws(quote_text %||% "")
+  if (!nzchar(qt)) return(text %||% "")
+  bq <- paste0("> ", gsub("\n", "\n> ", qt))
+  paste0(bq, "\n\n", text %||% "")
+}
+
 # ── ellmer turns → ThreadMessageLike（内部辅助）──────────────────────────────
 .ellmer_turns_to_messages <- function(turns) {
   result <- list()
