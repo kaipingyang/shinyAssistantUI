@@ -5,8 +5,9 @@ export const sessionDates = new Map<string, string>();
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import {
   useExternalStoreRuntime, WebSpeechDictationAdapter, WebSpeechSynthesisAdapter,
-  SimpleImageAttachmentAdapter, SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
+  SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
 } from "@assistant-ui/react";
+import { ResizingImageAttachmentAdapter } from "./image-attachment-adapter";
 import type {
   ThreadMessageLike,
   AppendMessage,
@@ -292,7 +293,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const attachmentAdapter = useRef<CompositeAttachmentAdapter>(null!);
   if (!attachmentAdapter.current) {
     attachmentAdapter.current = new CompositeAttachmentAdapter([
-      new SimpleImageAttachmentAdapter(),
+      new ResizingImageAttachmentAdapter(),
       new SimpleTextAttachmentAdapter(),
     ]);
   }
