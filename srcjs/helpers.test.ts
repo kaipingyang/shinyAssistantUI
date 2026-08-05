@@ -489,3 +489,25 @@ describe("toolCallSummary", () => {
     expect(out.endsWith("\u2026")).toBe(true);
   });
 });
+
+describe("mergeSlashCommands argumentHint", () => {
+  it("normalizes R's argument_hint to argumentHint on configured commands", () => {
+    const merged = mergeSlashCommands(
+      [{ name: "review", prompt: "/review", argument_hint: "[file]" } as never],
+      [],
+      [],
+    );
+    expect(merged[0]!.argumentHint).toBe("[file]");
+  });
+
+  it("keeps an already-camelCase argumentHint and populates it for live commands", () => {
+    const merged = mergeSlashCommands(
+      [{ name: "skillx", prompt: "/skillx", argumentHint: "<arg>" }],
+      [{ name: "deploy", description: "d", argument_hint: "[env]" } as never],
+      [],
+    );
+    const byName = Object.fromEntries(merged.map((c) => [c.name, c.argumentHint]));
+    expect(byName["skillx"]).toBe("<arg>");
+    expect(byName["deploy"]).toBe("[env]");
+  });
+});

@@ -20,17 +20,21 @@ import {
   type Unstable_TriggerItem,
 } from "@assistant-ui/react";
 import {
+  $isDirectiveNode,
   DirectiveNode,
   LexicalComposerInput,
   type DirectiveChipProps,
 } from "@assistant-ui/react-lexical";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import {
+  $createTextNode,
   $getNodeByKey,
+  $getRoot,
   $isElementNode,
   $nodesOfType,
   COMMAND_PRIORITY_HIGH,
   KEY_TAB_COMMAND,
+  PASTE_COMMAND,
 } from "lexical";
 import "@/lexical.css";
 import { useShinyConfig, type ShinyActionItem, type ShinyCommand } from "@/shiny-config-context";
@@ -146,7 +150,7 @@ function createSlashItems(
       type: "slash",
       label: `/${command.name}`,
       description: command.description,
-      metadata: { section: command.category ?? "Commands" },
+      metadata: { section: command.category ?? "Commands", argumentHint: command.argumentHint },
     })),
   ];
 }
@@ -159,6 +163,16 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
   // Every directive (skill, action control, and @mention) renders the same blue
   // chip. Skills and actions stay functionally distinct at submit time via
   // matchSlashAction (skill → Claude; action → local action handler).
+  // The command's argument hint is exposed as a data-* ATTRIBUTE (never a child /
+  // text node), so a CSS ::after ghost (see lexical.css, gated by data-cmd-bare)
+  // can show "/skill [args]" WITHOUT entering the editor content / selection /
+  // submitted text. This is the fix for the earlier bug where the hint was a real
+  // DOM span inside the decorator and corrupted the input.
+  const { commands } = useShinyConfig();
+  const argumentHint =
+    directiveType === "slash"
+      ? commands.find((command) => command.name === directiveId)?.argumentHint
+      : undefined;
   return (
     <span
       className="aui-directive-chip inline-flex items-center rounded bg-blue-100 px-1.5 py-0.5 text-[13px] font-medium leading-none text-blue-700 dark:bg-blue-950/60 dark:text-blue-300"
@@ -172,6 +186,7 @@ const BlueDirectiveChip: FC<DirectiveChipProps> = ({
       }}
       data-directive-type={directiveType}
       data-directive-id={directiveId}
+      data-arg-hint={argumentHint || undefined}
     >
       {label}
     </span>
@@ -319,6 +334,104 @@ const TabTriggerPlugin: FC<{
   return null;
 };
 
+// Paste screenshots/images (Ctrl/Cmd+V) straight into the composer as attachments.
+// The custom Lexical input bypasses the stock ComposerPrimitive.Input paste handler,
+// so re-add it here: image files on the clipboard -> composer.addAttachment(),
+// preventing the raw blob from being dumped into the editable text. Text paste is
+// left untouched (return false).
+const PasteAttachmentPlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  const aui = useAui();
+  useEffect(
+    () =>
+      editor.registerCommand(
+        PASTE_COMMAND,
+        (event: ClipboardEvent | InputEvent) => {
+          const cd = (event as ClipboardEvent).clipboardData;
+          if (!cd) return false;
+          let files = Array.from(cd.files ?? []);
+          if (files.length === 0) {
+            files = Array.from(cd.items ?? [])
+              .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+              .map((it) => it.getAsFile())
+              .filter((f): f is File => f != null);
+          }
+          if (files.length === 0) return false; // no files -> let Lexical paste text
+          if (!aui.thread.getState().capabilities.attachments) return false;
+          event.preventDefault();
+          void Promise.all(
+            files.map((file) =>
+              Promise.resolve(aui.composer.addAttachment(file)).catch(() => {}),
+            ),
+          );
+          return true;
+        },
+        COMMAND_PRIORITY_HIGH,
+      ),
+    [editor, aui],
+  );
+  return null;
+};
+
+// Toggle data-cmd-bare on the editor root when the content is a lone slash-command
+// chip with no trailing args. Combined with the chip's data-arg-hint ATTRIBUTE + a
+// CSS ::after (lexical.css), this shows "/skill [args]" as a pure-visual ghost that
+// vanishes once the user types an argument — never touching editor content,
+// selection, or the submitted text (the fix for the earlier real-span bug).
+const CommandHintPlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () =>
+      editor.registerUpdateListener(() => {
+        editor.getEditorState().read(() => {
+          const directives = $nodesOfType(DirectiveNode);
+          const bare =
+            directives.length === 1 &&
+            $getRoot().getTextContent().trim() ===
+              directives[0]!.getTextContent().trim();
+          const el = editor.getRootElement();
+          if (!el) return;
+          if (bare) el.setAttribute("data-cmd-bare", "true");
+          else el.removeAttribute("data-cmd-bare");
+        });
+      }),
+    [editor],
+  );
+  return null;
+};
+
+// After a slash-command/skill chip is inserted (completion), append a trailing
+// space so typing an argument yields "/cmd arg" (two tokens) instead of "/cmdarg"
+// (one token that never sends). Uses a mutation listener firing once on the
+// directive's "created" event (not a reactive transform), so deleting the space
+// doesn't refight. Deterministic ACTIONS (/compact, /context…, type
+// "slash-action") are left bare — they don't take args and routing trims anyway.
+const TrailingSpacePlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () =>
+      editor.registerMutationListener(DirectiveNode, (mutations) => {
+        const keys: string[] = [];
+        for (const [key, type] of mutations) if (type === "created") keys.push(key);
+        if (keys.length === 0) return;
+        editor.update(() => {
+          for (const key of keys) {
+            const node = $getNodeByKey(key);
+            if (!$isDirectiveNode(node)) continue;
+            if (node.getNextSibling() !== null) continue; // only a bare trailing chip
+            // deterministic actions (/compact …) don't take args -> leave them bare
+            if (node.exportJSON().directiveType === "slash-action") continue;
+            const space = $createTextNode(" ");
+            node.insertAfter(space);
+            space.selectEnd(); // caret after the space: "/cmd |"
+          }
+        });
+      }),
+    [editor],
+  );
+  return null;
+};
+
 const ShinyLexicalInput: FC<{
   formatter: Unstable_DirectiveFormatter;
   slashCompletionRef: RefObject<(() => boolean) | null>;
@@ -369,6 +482,9 @@ const ShinyLexicalInput: FC<{
       onFocus={onFocus}
     >
       <TabTriggerPlugin slashCompletionRef={slashCompletionRef} />
+      <PasteAttachmentPlugin />
+      <CommandHintPlugin />
+      <TrailingSpacePlugin />
     </LexicalComposerInput>
   );
 };

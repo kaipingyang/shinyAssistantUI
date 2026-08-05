@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 
-export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; }
+export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; argumentHint?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
 export interface ShinyActionItem { section?: string; id: string; command?: string; label?: string; description?: string; }
 export interface PermissionModeOption {

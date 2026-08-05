@@ -935,6 +935,11 @@ assistantUIServer <- function(id, handler,
   # loads deduplicate, success stays warm, and failure removes the marker so a
   # later load can retry.
   .warmup_fn <- attr(handler, "warmup")
+  # Handlers that own external resources (e.g. make_codeagent_remote_handler's
+  # worker processes) may expose a `teardown` attribute; stop them on session end.
+  .teardown_fn <- attr(handler, "teardown")
+  if (is.function(.teardown_fn))
+    session$onSessionEnded(function() tryCatch(.teardown_fn(), error = function(e) NULL))
   warmup_states <- new.env(parent = emptyenv())
   schedule_warmup <- function(thread_id, delay = 0) {
     # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧
@@ -988,7 +993,12 @@ assistantUIServer <- function(id, handler,
     is_initial_history <- identical(msg$type, "load_session")
     is_older_history <- identical(msg$type, "load_session_page")
     is_history_request <- is_initial_history || is_older_history
-    if (!is_history_request && !nzchar(trimws(msg$text %||% ""))) return()
+    # Drop truly-empty submits, but NOT image-only messages: an attachment with no
+    # text (e.g. a pasted/dragged screenshot) is a valid message and must still reach
+    # the handler (otherwise it's silently dropped — no cold-start, no reply).
+    if (!is_history_request &&
+        !nzchar(trimws(msg$text %||% "")) &&
+        length(msg$attachments %||% list()) == 0) return()
 
     if (is_history_request && !is.null(on_session_load)) {
       send_thread <- function(messages, cursor = NULL, has_more = FALSE) {

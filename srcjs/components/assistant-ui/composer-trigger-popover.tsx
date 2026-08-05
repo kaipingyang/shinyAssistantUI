@@ -205,6 +205,12 @@ const Items: FC<ItemsProps> = ({
                     <span className="flex items-center gap-2 text-sm font-medium">
                       <Icon className="text-primary size-3.5" />
                       {item.label}
+                      {typeof item.metadata?.argumentHint === "string" &&
+                        item.metadata.argumentHint !== "" && (
+                          <span className="text-muted-foreground font-normal">
+                            {item.metadata.argumentHint as string}
+                          </span>
+                        )}
                     </span>
                     {item.description && (
                       <span className="text-muted-foreground ms-5.5 text-xs leading-tight">

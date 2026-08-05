@@ -129,6 +129,7 @@ export interface SlashCommandLike {
   category?: string;
   source?: string;
   kind?: string;
+  argumentHint?: string;
 }
 
 // Local actions are deterministic controls, not prompts. Only intercept an exact,
@@ -163,7 +164,12 @@ export function mergeSlashCommands(
     const name = command.name.toLowerCase();
     if (!name || blocked.has(name) || seen.has(name)) continue;
     seen.add(name);
-    dedupedConfigured.push(command);
+    // R sends the frontmatter hint as `argument_hint`; normalize to argumentHint.
+    dedupedConfigured.push({
+      ...command,
+      argumentHint:
+        command.argumentHint ?? (command as { argument_hint?: string }).argument_hint,
+    });
   }
   const live = serverCommands
     .filter((command) => {
@@ -177,6 +183,9 @@ export function mergeSlashCommands(
       description: command.description,
       prompt: `/${command.name}`,
       category: "Claude Code",
+      argumentHint:
+        (command as { argumentHint?: string }).argumentHint ??
+        (command as { argument_hint?: string }).argument_hint,
     }));
   return [...dedupedConfigured, ...live];
 }
