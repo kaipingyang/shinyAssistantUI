@@ -22,6 +22,7 @@ import type { PermissionModeOption, PermissionModeState } from "./shiny-config-c
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
+  resolveToolFileReference,
 } from "./helpers";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
@@ -1522,11 +1523,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendRename(threadId, title);
   }, [inputId]);
 
-  // ── 点击文件引用 → 请求在 IDE 打开（addin 侧 rstudioapi::navigateToFile）──────
+  // ── 点击文件引用 → 优先用本线程最近工具调用的精确路径，再请求 IDE 打开 ──────
   const openFile = useCallback((path: string, line?: number) => {
     if (!path) return;
-    bridge.current.sendOpenFile(path, line);
-  }, []);
+    bridge.current.sendOpenFile(resolveToolFileReference(path, messages), line);
+  }, [messages]);
   // 代码块"Run in Console"：在用户活 R 会话执行(addin/RStudio；config.console_run 开启才暴露)。
   const consoleRunEnabled = config?.console_run === true;
   const runInConsole = useCallback((code: string) => {

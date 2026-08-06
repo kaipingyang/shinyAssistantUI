@@ -94,3 +94,26 @@ test_that("search provider memoizes the index within TTL (no per-keystroke git/r
   expect_identical(build_calls, 1L)                 # 只构建一次
 })
 
+
+
+test_that("workspace provider peek is read-only and never builds a cold index", {
+  build_calls <- 0L
+  testthat::local_mocked_bindings(
+    .addin_workspace_index_cached = function(project, cache_path, max_files = 10000L) {
+      build_calls <<- build_calls + 1L
+      list(list(kind = "file", path = "subfolder/dm.R"))
+    }
+  )
+  provider <- shinyAssistantUI:::.make_addin_workspace_search_provider(
+    function() "/tmp/proj", cache_path = tempfile()
+  )
+  peek <- attr(provider, "peek_index")
+
+  expect_true(is.function(peek))
+  expect_null(peek())
+  expect_identical(build_calls, 0L)
+
+  provider("dm")
+  expect_identical(build_calls, 1L)
+  expect_identical(peek(), list(list(kind = "file", path = "subfolder/dm.R")))
+})

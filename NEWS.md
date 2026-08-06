@@ -1,5 +1,14 @@
 # shinyAssistantUI 0.5.0.9000 (dev branch)
 
+- **文件引用点击打开 / file-reference opening (Plan 58)**: bare filenames in assistant prose
+  such as `dm.R` now resolve to the most recent matching `file_path`/`path` from the current
+  thread's tool calls, so a file under `<cwd>/subfolder/` opens without a filesystem scan.
+  A read-only fallback may reuse an already-hot `@mention` workspace index, but clicking never
+  builds a cold index; cold, missing, ambiguous, or stale matches stay silent. Per-click RStudio
+  API calls drop from three to two by reusing the addin's startup availability check, while the
+  current-editor guard remains. Markdown chips and tool-card links immediately show English
+  **Opening…** feedback during IDE/network latency.
+
 - **修复:切换工作目录卡顿 (Plan 57)**: switching the working directory (or model / permission
   mode / thinking / autorun / run_r) no longer freezes the addin for ~10s. The old CLI clients'
   teardown (each `interrupt`+`wait`+`kill`+`wait`, up to ~5s per subprocess) ran synchronously on

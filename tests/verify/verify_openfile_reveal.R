@@ -100,6 +100,17 @@ check("Lexical composer mounted", wait_for("!!document.querySelector('.aui-lexic
 
 # ── IDE 文件上下文：仅有文件(无选区)时，chip 与“眼睛”都出现且眼睛可切换隐藏 ──────
 current_stage <- "ide-context-eye"
+click_thread <- function(label) {
+  j <- value(sprintf(
+    "(function(){const e=Array.from(document.querySelectorAll('[data-slot=aui_thread-list-item]')).find(x=>(x.innerText||'').includes(%s));if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+20,y:r.top+r.height/2})})()",
+    jsonlite::toJSON(label, auto_unbox = TRUE)
+  ))
+  if (is.null(j)) return(FALSE)
+  p <- fromJSON(j)
+  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
+  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
+  TRUE
+}
 check("ide-context chip shows the active file", wait_for(
   "document.querySelector('[data-slot=aui_ide_context]')?.getAttribute('data-context-file')==='R/demo.R'", 6))
 # 关键回归：没有选区时“眼睛”也要出现（旧代码只在 hasSelection 时才渲染 → bug）
@@ -147,8 +158,48 @@ value("document.getElementById('opened-file-probe').textContent='';true")
 # 点击其中一个工具卡的打开按钮（Read → R/server.R）
 clicked <- click_sel("[data-open-file='R/server.R']")
 check("clicked a file-open button", clicked)
+check("tool-card shows English Opening feedback", wait_for(
+  "document.querySelector(\"[data-open-file='R/server.R']\")?.getAttribute('aria-busy')==='true' && document.querySelector(\"[data-open-file='R/server.R']\")?.innerText.includes('Opening…')", 1))
 check("clicking a file reference calls on_open_file",
       wait_for("document.getElementById('opened-file-probe').textContent === 'R/server.R'", 6),
+      value("document.getElementById('opened-file-probe').textContent"))
+
+# prose 只有裸名 `addin.R`；runtime 应从最近 Write 工具调用解析到 R/addin.R，绝不扫描文件系统。
+current_stage <- "click-bare-file-ref"
+check("bare prose file chip is rendered", wait_for(
+  "!!document.querySelector(\"[data-file-ref='addin.R']\")", 4))
+value("document.getElementById('opened-file-probe').textContent='';true")
+clicked_bare <- click_sel("[data-file-ref='addin.R']")
+check("clicked a bare prose file chip", clicked_bare)
+check("prose chip shows English Opening feedback", wait_for(
+  "document.querySelector(\"[data-file-ref='addin.R']\")?.getAttribute('aria-busy')==='true' && document.querySelector(\"[data-file-ref='addin.R']\")?.innerText.includes('Opening…')", 1))
+check("bare filename resolves to recent tool full path",
+      wait_for("document.getElementById('opened-file-probe').textContent === 'R/addin.R'", 6),
+      value("document.getElementById('opened-file-probe').textContent"))
+
+# ── 历史 session-load：两个 thread 的同名 dm.R 必须严格按当前 thread 隔离 ──────
+current_stage <- "history-thread-a"
+check("clicked history thread A", click_thread("Open history A"))
+check("history A loaded from on_session_load", wait_for(
+  "document.body.innerText.includes('Historical A:') && !!document.querySelector(\"[data-file-ref='dm.R']\")", 6))
+check("history A does not render thread B", isTRUE(value(
+  "!document.body.innerText.includes('Historical B:')")))
+value("document.getElementById('opened-file-probe').textContent='';true")
+check("clicked history A bare dm.R", click_sel("[data-file-ref='dm.R']"))
+check("history A bare dm.R resolves within current thread",
+      wait_for("document.getElementById('opened-file-probe').textContent === '/project/history-a/dm.R'", 6),
+      value("document.getElementById('opened-file-probe').textContent"))
+
+current_stage <- "history-thread-b"
+check("clicked history thread B", click_thread("Open history B"))
+check("history B loaded from on_session_load", wait_for(
+  "document.body.innerText.includes('Historical B:') && !!document.querySelector(\"[data-file-ref='dm.R']\")", 6))
+check("history B does not render thread A", isTRUE(value(
+  "!document.body.innerText.includes('Historical A:')")))
+value("document.getElementById('opened-file-probe').textContent='';true")
+check("clicked history B bare dm.R", click_sel("[data-file-ref='dm.R']"))
+check("history B bare dm.R resolves within current thread",
+      wait_for("document.getElementById('opened-file-probe').textContent === '/project/history-b/dm.R'", 6),
       value("document.getElementById('opened-file-probe').textContent"))
 
 check("no browser console errors or exceptions", length(console_errors) == 0,

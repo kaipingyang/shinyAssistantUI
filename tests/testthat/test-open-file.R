@@ -44,3 +44,52 @@ test_that(".new_edit_reveal_tracker 支持 path 别名且无 file_path 时忽略
   tracker$note_result("n2", is_error = FALSE)
   expect_null(tracker$flush())
 })
+
+
+test_that(".addin_resolve_file_path resolves root and unique hot-index files", {
+  project <- tempfile("open-file-")
+  dir.create(file.path(project, "subfolder"), recursive = TRUE)
+  root_file <- file.path(project, "root.R")
+  nested_file <- file.path(project, "subfolder", "dm.R")
+  file.create(root_file, nested_file)
+
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path("root.R", project),
+    normalizePath(root_file, winslash = "/")
+  )
+  peek <- function() list(list(kind = "file", path = "subfolder/dm.R"))
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path("dm.R", project, peek),
+    normalizePath(nested_file, winslash = "/")
+  )
+})
+
+test_that(".addin_resolve_file_path keeps cold, missing, ambiguous and stale fallbacks silent", {
+  project <- tempfile("open-file-")
+  dir.create(project)
+
+  expect_null(shinyAssistantUI:::.addin_resolve_file_path("dm.R", project, function() NULL))
+  expect_null(shinyAssistantUI:::.addin_resolve_file_path(
+    "dm.R", project, function() list(list(kind = "file", path = "subfolder/ae.R"))
+  ))
+  expect_null(shinyAssistantUI:::.addin_resolve_file_path(
+    "dm.R", project,
+    function() list(
+      list(kind = "file", path = "adam/dm.R"),
+      list(kind = "file", path = "sdtm/dm.R")
+    )
+  ))
+  expect_null(shinyAssistantUI:::.addin_resolve_file_path(
+    "dm.R", project, function() list(list(kind = "file", path = "deleted/dm.R"))
+  ))
+  expect_null(shinyAssistantUI:::.addin_resolve_file_path(
+    "dm.R", project, function() list(list(kind = "file", path = "../dm.R"))
+  ))
+})
+
+test_that(".addin_open_file no longer repeats rstudioapi isAvailable per click", {
+  source_text <- paste(deparse(body(shinyAssistantUI:::.addin_open_file)), collapse = "\n")
+  expect_false(grepl("isAvailable", source_text, fixed = TRUE))
+  expect_true(grepl("getSourceEditorContext", source_text, fixed = TRUE))
+  expect_true(grepl("navigateToFile", source_text, fixed = TRUE))
+})

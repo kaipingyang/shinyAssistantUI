@@ -12,20 +12,45 @@
 }
 
 # 活动编辑器上下文:list(path, rel, selection, first_line, last_line) 或 NULL。全程 guard。
-# 点击文件引用 / Claude 编辑后揭示 → 在 RStudio 编辑器打开。
-# 相对路径按 project 解析成绝对路径；若编辑器已聚焦同一文件则不重复跳转（避免抢焦点）。
-.addin_open_file <- function(path, line = NULL, project = NULL) {
-  if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(invisible(NULL))
-  if (!requireNamespace("rstudioapi", quietly = TRUE) ||
-      !isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))) return(invisible(NULL))
+# 解析点击的文件引用。先走 cwd/显式路径快路径；裸名 miss 后只读取已经热过的
+# workspace memo（peek 不得触发索引构建），唯一 basename 命中才使用。其余静默。
+.addin_resolve_file_path <- function(path, project = NULL, workspace_index_peek = NULL) {
+  if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(NULL)
+  is_absolute <- startsWith(path, "/") || grepl("^[A-Za-z]:", path) || startsWith(path, "\\\\")
+  candidate <- path
+  if (!is_absolute && !is.null(project) && nzchar(project)) candidate <- file.path(project, path)
+  candidate <- tryCatch(normalizePath(candidate, winslash = "/", mustWork = FALSE),
+                        error = function(e) candidate)
+  if (file.exists(candidate)) return(candidate)
 
-  abs_path <- path
-  if (!isTRUE(startsWith(path, "/")) && !grepl("^[A-Za-z]:", path) && !is.null(project)) {
-    abs_path <- file.path(project, path)
-  }
-  abs_path <- tryCatch(normalizePath(abs_path, winslash = "/", mustWork = FALSE),
-                       error = function(e) abs_path)
-  if (!file.exists(abs_path)) return(invisible(NULL))
+  is_bare <- !is_absolute && !grepl("[/\\\\]", path)
+  if (!is_bare || is.null(project) || !is.function(workspace_index_peek)) return(NULL)
+  index <- tryCatch(workspace_index_peek(), error = function(e) NULL)
+  if (!is.list(index)) return(NULL)
+  hits <- Filter(function(x) {
+    is.list(x) && identical(x$kind, "file") && is.character(x$path) &&
+      length(x$path) == 1L && nzchar(x$path) &&
+      identical(basename(gsub("\\\\", "/", x$path)), path) &&
+      !startsWith(x$path, "/") && !grepl("^[A-Za-z]:|^\\.\\.(?:[/\\\\]|$)", x$path)
+  }, index)
+  if (length(hits) != 1L) return(NULL)
+
+  resolved <- file.path(project, hits[[1L]]$path)
+  resolved <- tryCatch(normalizePath(resolved, winslash = "/", mustWork = FALSE),
+                       error = function(e) resolved)
+  project_norm <- tryCatch(normalizePath(project, winslash = "/", mustWork = FALSE),
+                           error = function(e) project)
+  project_prefix <- paste0(sub("/+$", "", project_norm), "/")
+  if (!startsWith(resolved, project_prefix) || !file.exists(resolved)) return(NULL)
+  resolved
+}
+
+# 点击文件引用 / Claude 编辑后揭示 → 在 RStudio 编辑器打开。
+# RStudio 可用性已在 addin 启动时计算为 native_picker；这里不再为每次点击重复 RPC。
+.addin_open_file <- function(path, line = NULL, project = NULL, workspace_index_peek = NULL) {
+  if (!requireNamespace("rstudioapi", quietly = TRUE)) return(invisible(NULL))
+  abs_path <- .addin_resolve_file_path(path, project, workspace_index_peek)
+  if (is.null(abs_path)) return(invisible(NULL))
 
   # 已聚焦同一文件则不跳转
   current <- tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) NULL)
