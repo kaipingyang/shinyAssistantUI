@@ -42,7 +42,10 @@ test_that("reset_clients 断开并清空所有 client", {
   attr(handler, "warmup")("t1")
   attr(handler, "warmup")("t2")
   attr(handler, "reset_clients")()
-  expect_identical(disconnected, 2L)               # 两个 client 都断开
+  # Plan 57:断开改异步(不阻塞 addin UI)→ 注册表同步清空,子进程 disconnect 挪到 later
+  expect_identical(disconnected, 0L)               # 调用未同步阻塞在断开上
+  if (requireNamespace("later", quietly = TRUE)) later::run_now()
+  expect_identical(disconnected, 2L)               # flush 后两个 client 都断开
   expect_silent(attr(handler, "warmup")("t1"))     # 清空后可重连
 })
 

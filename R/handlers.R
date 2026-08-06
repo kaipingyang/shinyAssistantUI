@@ -812,16 +812,33 @@ make_ellmer_session_loader <- function(store) {
 # Snapshot and clear the registry before touching subprocesses. This makes
 # cleanup idempotent and prevents an interrupt in one client from hiding the
 # remaining clients from a later cleanup attempt.
-.cleanup_claude_client_registry <- function(get_clients, clear_clients) {
-  tryCatch(
+.cleanup_claude_client_registry <- function(get_clients, clear_clients, async = FALSE) {
+  # 快照 + 清空注册表(同步):新连接立即从空注册表开始,不会复用正被丢弃的旧 client。
+  clients <- tryCatch(
     suspendInterrupts({
-      clients <- get_clients()
+      cs <- get_clients()
       clear_clients()
-      for (client in clients) .disconnect_claude_client_safely(client)
+      cs
     }),
-    interrupt = function(e) NULL,
-    error = function(e) NULL
+    interrupt = function(e) list(),
+    error = function(e) list()
   )
+  if (length(clients) == 0L) return(invisible(NULL))
+  # 断开子进程(interrupt+wait+kill+wait,每个可达数秒)。async=TRUE 时挪到主循环外
+  # (later),避免切目录/切模型时同步阻塞冻住 addin UI(Plan 57);session 结束等
+  # 必须落地的场景用同步(默认 FALSE)。缺 later 也退回同步。
+  disconnect_all <- function() {
+    tryCatch(
+      suspendInterrupts(for (client in clients) .disconnect_claude_client_safely(client)),
+      interrupt = function(e) NULL,
+      error = function(e) NULL
+    )
+  }
+  if (isTRUE(async) && requireNamespace("later", quietly = TRUE)) {
+    later::later(disconnect_all, delay = 0)
+  } else {
+    disconnect_all()
+  }
   invisible(NULL)
 }
 
@@ -1120,10 +1137,11 @@ make_claude_handler <- function(options       = NULL,
   }
 
   # 断开并清空所有 client（切换工作目录时用：换 cwd = 全部重连，下条消息按新 cwd 连）。
-  reset_clients <- function() {
+  reset_clients <- function(async = TRUE) {
     .cleanup_claude_client_registry(
       get_clients   = function() clients,
-      clear_clients = function() clients <<- list()
+      clear_clients = function() clients <<- list(),
+      async         = async
     )
     invisible(NULL)
   }

@@ -1,5 +1,12 @@
 # shinyAssistantUI 0.5.0.9000 (dev branch)
 
+- **修复:切换工作目录卡顿 (Plan 57)**: switching the working directory (or model / permission
+  mode / thinking / autorun / run_r) no longer freezes the addin for ~10s. The old CLI clients'
+  teardown (each `interrupt`+`wait`+`kill`+`wait`, up to ~5s per subprocess) ran synchronously on
+  the R event loop; it's now deferred to `later` — the client registry is cleared synchronously
+  (so the new directory reconnects cleanly) while the old subprocesses are disconnected in the
+  background. Click → refresh is now immediate. Session-end teardown stays synchronous.
+
 - **上传 PDF 与 Excel / PDF & Excel upload (Plan 56)**: attach or drag-drop a **PDF** — it's sent
   to Claude as a native **document block**, so Claude reads its text *and* visuals (no server-side
   parsing, no poppler) — or an **Excel** `.xlsx/.xls`, parsed server-side with `readxl` into a
