@@ -142,3 +142,69 @@ describe("resolveToolView", () => {
     expect(v).toMatchObject({ kind: "json", raw: true });
   });
 });
+
+
+  it("AskUserQuestion -> structured questions instead of raw JSON", () => {
+    const args = { questions: [
+      {
+        question: "Fav color?",
+        header: "Color",
+        multiSelect: false,
+        options: [
+          { label: "Red", description: "Warm" },
+          { label: "Blue" },
+        ],
+      },
+      {
+        question: "Which langs?",
+        multiSelect: true,
+        options: [{ label: "R" }, { label: "Python" }],
+      },
+    ] };
+    const v = resolveToolView("AskUserQuestion", args, at(args));
+    expect(v.kind).toBe("questions");
+    if (v.kind === "questions") {
+      expect(v.items).toHaveLength(2);
+      expect(v.items[0]).toMatchObject({
+        header: "Color",
+        question: "Fav color?",
+        multiSelect: false,
+        options: [{ label: "Red", description: "Warm" }, { label: "Blue" }],
+      });
+      expect(v.items[1].multiSelect).toBe(true);
+    }
+  });
+
+  it("AskUserQuestion with empty/malformed questions falls back to JSON", () => {
+    expect(resolveToolView("AskUserQuestion", { questions: [] }, '{"questions":[]}').kind).toBe("json");
+    expect(resolveToolView("AskUserQuestion", { questions: [{ question: 42 }] }, '{"questions":[{"question":42}]}').kind).toBe("json");
+  });
+
+
+  it("AskUserQuestion preserves submitted answers in the structured history view", () => {
+    const args = {
+      questions: [
+        { question: "Fav color?", options: [{ label: "Blue" }] },
+        { question: "Which langs?", multiSelect: true, options: [{ label: "R" }] },
+      ],
+      answers: { "Fav color?": "Teal", "Which langs?": ["R", "SQL"] },
+    };
+    const v = resolveToolView("AskUserQuestion", args, at(args));
+    expect(v.kind).toBe("questions");
+    if (v.kind === "questions") {
+      expect(v.items[0].answer).toBe("Teal");
+      expect(v.items[1].answer).toEqual(["R", "SQL"]);
+    }
+  });
+
+  it("AskUserQuestion with unknown fields falls back to JSON instead of hiding data", () => {
+    const topLevelExtra = {
+      questions: [{ question: "Continue?", options: [{ label: "Yes" }] }],
+      futureMetadata: { source: "new-sdk" },
+    };
+    const questionExtra = {
+      questions: [{ question: "Continue?", futureField: true, options: [{ label: "Yes" }] }],
+    };
+    expect(resolveToolView("AskUserQuestion", topLevelExtra, at(topLevelExtra)).kind).toBe("json");
+    expect(resolveToolView("AskUserQuestion", questionExtra, at(questionExtra)).kind).toBe("json");
+  });

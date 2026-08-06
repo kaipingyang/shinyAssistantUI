@@ -45,18 +45,50 @@ press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
 chk("AskUserQuestion card rendered", wait_for("!!document.querySelector('[data-slot=\"ask-user-question\"]')", 15))
 chk("two questions rendered", isTRUE(value("document.querySelectorAll('[data-ask-question]').length===2")),
     value("document.querySelectorAll('[data-ask-question]').length+''"))
+click_thread <- function(label) {
+  j <- value(sprintf(
+    "(function(){const e=Array.from(document.querySelectorAll('[data-slot=aui_thread-list-item]')).find(x=>(x.innerText||'').includes(%s));if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+20,y:r.top+r.height/2})})()",
+    jsonlite::toJSON(label, auto_unbox = TRUE)
+  ))
+  if (is.null(j)) return(FALSE)
+  p <- fromJSON(j)
+  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
+  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
+  TRUE
+}
 chk("options rendered (Red/Blue/R/Python)",
     isTRUE(value("['Red','Blue','R','Python'].every(l => !!document.querySelector('[data-ask-option=\"'+l+'\"]'))")))
 
-# 单选 Blue + 多选 R + Python → 提交(用原生 .click() 更可靠)
+chk("tool args use readable questions view (not JSON)",
+    isTRUE(value("!!document.querySelector('[data-arg-view=\"questions\"]') && !document.querySelector('[data-args-format=\"json\"]') && document.querySelector('[data-arg-view=\"questions\"]').innerText.includes('Single choice') && document.querySelector('[data-arg-view=\"questions\"]').innerText.includes('Multiple choice')")))
+
+# BUG回归：单选先 Blue 再输入 Teal → Other 必须接管；多选 R + SQL 可叠加。
 jclick <- function(sel) value(sprintf("(function(){var e=document.querySelector(%s);if(!e)return false;e.click();return true;})()", jsonlite::toJSON(sel, auto_unbox = TRUE)))
 jclick("[data-ask-option='Blue'] input"); Sys.sleep(0.15)
+value("document.querySelector('[data-ask-custom=\"0\"]').focus(); true")
+browser$Input$insertText(text = "Teal"); Sys.sleep(0.15)
 jclick("[data-ask-option='R'] input"); Sys.sleep(0.15)
-jclick("[data-ask-option='Python'] input"); Sys.sleep(0.15)
+value("document.querySelector('[data-ask-custom=\"1\"]').focus(); true")
+browser$Input$insertText(text = "SQL"); Sys.sleep(0.15)
+chk("single Other becomes selected and old Blue is cleared",
+    isTRUE(value("document.querySelector('[data-ask-custom-selector=\"0\"]').checked && !document.querySelector('[data-ask-option=\"Blue\"] input').checked")))
+chk("multi Other is checked alongside R",
+    isTRUE(value("document.querySelector('[data-ask-custom-selector=\"1\"]').checked && document.querySelector('[data-ask-option=\"R\"] input').checked")))
 jclick("[data-ask-submit]")
-chk("answers round-trip: single=string 'Blue', multi=array ['R','Python']",
-    wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\"Fav color?\":\"Blue\"') && t.includes('\"Which langs?\":[\"R\",\"Python\"]');})()", 12),
+chk("answers round-trip: custom overrides single; multi includes custom",
+    wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\\\"Fav color?\\\":\\\"Teal\\\"') && t.includes('\\\"Which langs?\\\":[\\\"R\\\",\\\"SQL\\\"]');})()", 12),
     value("document.getElementById('decision')?.textContent"))
+
+# session-load / 历史完成态：answers必须保留在结构化视图，不能恢复审批表单。
+chk("clicked AskUserQuestion history thread", click_thread("Ask history"))
+chk("historical AskUserQuestion loaded", wait_for(
+    "document.body.innerText.includes('Historical answers restored')", 8))
+chk("history keeps structured questions and submitted answers",
+    isTRUE(value("(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v && !document.querySelector('[data-args-format=json]') && v.innerText.includes('Answer:') && v.innerText.includes('Teal') && v.innerText.includes('R, SQL');})()")))
+chk("history does not restore interactive question form",
+    isTRUE(value("!document.querySelector('[data-slot=ask-user-question]')")))
+chk("history preserves approved completion state",
+    isTRUE(value("document.querySelector('[data-approval-result=approved]')?.innerText.includes('Approved')")))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)

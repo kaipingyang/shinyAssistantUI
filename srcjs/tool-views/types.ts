@@ -1,14 +1,23 @@
 // Tool-card 参数区的富渲染模型(解耦:解析 = 纯数据,渲染 = dumb 组件)。
-// Phase 1 kinds: diff | code | json。后续可加 todos | query,call site 不变。
+// 内建结构化参数视图；未知工具仍回落 json。
 
 export type TodoItem = { content: string; status: string; activeForm?: string };
 export type QueryField = { label: string; value: string; href?: string };
+export type QuestionOptionSummary = { label: string; description?: string };
+export type QuestionSummary = {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: QuestionOptionSummary[];
+  answer?: string | string[];
+};
 
 export type ToolView =
   | { kind: "diff"; oldContent: string; newContent: string; fileName?: string; startLine?: number }
   | { kind: "code"; code: string; lang: string; fileName?: string }
   | { kind: "todos"; items: TodoItem[] }
   | { kind: "query"; fields: QueryField[] }
+  | { kind: "questions"; items: QuestionSummary[] }
   // json 兜底保留原 raw/json 双态:object/array → 缩进 JSON;标量/非 JSON → 原样 pre。
   | { kind: "json"; text: string; raw: boolean };
 

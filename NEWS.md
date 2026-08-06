@@ -1,3 +1,12 @@
+# shinyAssistantUI 0.5.1.9000 (dev branch)
+
+- **AskUserQuestion custom answers + readable card (Plan 60)**: selecting a preset and then
+  typing an **Other** answer now correctly submits the custom text instead of the stale preset.
+  Other is an explicit radio/checkbox: single-choice answers are mutually exclusive, while
+  multi-choice answers may combine presets with custom text. The tool's expanded arguments now
+  show readable questions, Single/Multiple choice badges, and option descriptions instead of raw
+  `questions` JSON; malformed payloads still fall back to JSON for debugging.
+
 # shinyAssistantUI 0.5.1
 
 - **文件引用点击打开 / file-reference opening (Plan 58)**: bare filenames in assistant prose
