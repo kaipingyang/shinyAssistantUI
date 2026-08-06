@@ -249,8 +249,17 @@
     assign(dir, list(index = idx, head = head, checked_at = now), envir = memo)
     idx
   }
-  function(query = "", kinds = c("file", "folder"), limit = 50L) {
+  provider <- function(query = "", kinds = c("file", "folder"), limit = 50L) {
     index <- get_index(dir_provider())
     .addin_workspace_search(index, query = query, kinds = kinds, limit = limit)
   }
+  # Plan 58：文件点击只能“蹭”已经热过的 @mention 内存索引。这个 accessor
+  # 绝不调用 get_index()/git/readRDS/BFS；冷 cwd 返回 NULL，避免文件夹黑洞负优化。
+  attr(provider, "peek_index") <- function() {
+    dir <- dir_provider()
+    if (is.null(dir) || length(dir) != 1L || !nzchar(dir)) return(NULL)
+    entry <- get0(dir, envir = memo, inherits = FALSE)
+    if (is.list(entry) && is.list(entry$index)) entry$index else NULL
+  }
+  provider
 }

@@ -12,7 +12,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { type FC, memo, useState, useMemo } from "react";
-import { CheckIcon, CopyIcon, PlayIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, LoaderCircleIcon, PlayIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { SyntaxHighlighter, resolveCodeLanguage } from "@/components/assistant-ui/syntax-highlighter";
@@ -20,6 +20,7 @@ import { DiffCodeBlock } from "@/components/assistant-ui/diff-viewer";
 import { cn } from "@/lib/utils";
 import { safeUrl, parseFileRef } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
+import { useOpeningFile } from "@/hooks/use-opening-file";
 
 const MarkdownTextImpl = () => {
   // LaTeX 数学(Plan 34,opt-in via assistantUIServer(latex=TRUE))。默认关。
@@ -293,6 +294,7 @@ const defaultComponents = memoizeMarkdownComponents({
   code: function Code({ className, children, ...props }) {
     const isCodeBlock = useIsMarkdownCodeBlock();
     const { onOpenFile } = useShinyConfig();
+    const { opening, open: openFile } = useOpeningFile(onOpenFile);
     // 行内 code 且长得像仓库文件路径（严格：需已知扩展名）→ addin 里点击在 RStudio 打开。
     const text = typeof children === "string"
       ? children
@@ -304,21 +306,26 @@ const defaultComponents = memoizeMarkdownComponents({
           role="button"
           tabIndex={0}
           data-file-ref={fileRef.path}
-          title={`Open ${fileRef.path}${fileRef.line ? ":" + fileRef.line : ""} in RStudio`}
-          onClick={() => onOpenFile(fileRef.path, fileRef.line)}
+          aria-busy={opening}
+          aria-label={opening ? `Opening ${fileRef.path}` : `Open ${fileRef.path} in RStudio`}
+          title={opening ? `Opening ${fileRef.path}…` : `Open ${fileRef.path}${fileRef.line ? ":" + fileRef.line : ""} in RStudio`}
+          onClick={() => openFile(fileRef.path, fileRef.line)}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
-              onOpenFile(fileRef.path, fileRef.line);
+              openFile(fileRef.path, fileRef.line);
             }
           }}
           className={cn(
             "aui-md-inline-code aui-file-ref bg-blue-500/10 text-blue-700 dark:text-blue-300 hover:bg-blue-500/20 cursor-pointer rounded-md px-1.5 py-0.5 font-mono text-[0.85em] underline decoration-dotted underline-offset-2",
+            opening && "inline-flex items-center gap-1",
             className,
           )}
           {...props}
         >
-          {children}
+          {opening ? (
+            <><LoaderCircleIcon aria-hidden="true" className="size-3 animate-spin" /><span>Opening…</span></>
+          ) : children}
         </code>
       );
     }

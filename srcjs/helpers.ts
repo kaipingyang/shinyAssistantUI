@@ -216,6 +216,37 @@ export function parseFileRef(raw: string): { path: string; line?: number } | nul
 }
 
 
+// 裸文件名优先解析到当前线程里最近一次工具调用的完整路径。
+// Claude 的 Read/Edit/Write 等 tool-call 会携带 args.file_path/path；倒序查找能把
+// prose 中的 `dm.R` 精确映射到它刚操作的 subfolder/dm.R，而无需扫描文件系统。
+export function resolveToolFileReference(
+  path: string,
+  messages: readonly unknown[],
+): string {
+  if (!path || /[\\/]/.test(path) || /^[A-Za-z]:/.test(path)) return path;
+
+  for (let mi = messages.length - 1; mi >= 0; mi -= 1) {
+    const message = messages[mi] as { content?: unknown } | undefined;
+    if (!Array.isArray(message?.content)) continue;
+    for (let pi = message.content.length - 1; pi >= 0; pi -= 1) {
+      const part = message.content[pi] as { type?: unknown; args?: unknown } | undefined;
+      if (part?.type !== "tool-call" || !part.args || typeof part.args !== "object") continue;
+      const args = part.args as Record<string, unknown>;
+      const candidate =
+        typeof args.file_path === "string" && args.file_path
+          ? args.file_path
+          : typeof args.path === "string" && args.path
+            ? args.path
+            : undefined;
+      if (!candidate) continue;
+      const candidateBase = candidate.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+      if (candidateBase === path) return candidate;
+    }
+  }
+  return path;
+}
+
+
 // 流式 markdown 表格补全：补上缺失的 separator 行，使流式中途的表格也能渲染。
 export function preprocessStreamingMarkdown(text: string): string {
   // 快速短路：每个流式 token 都会调用本函数，绝大多数 markdown 不含表格。

@@ -1,14 +1,13 @@
-#' @keywords internal
-#' Out-of-process codeagent worker transport (Plan 52.A).
-#'
-#' Runs a `codeagent` turn in a separate R process pinned to a lib with a NEW
-#' curl (e.g. `Rlibs/codeagent/R-4.4`), so the MAIN (Shiny/ERP) process never
-#' loads codeagent/ellmer/curl. Streaming deltas + tool events + interactive
-#' permission approval are marshaled over a socket as newline-delimited JSON.
-#'
-#' 🔴 INVARIANT: nothing in this file may `library()`/`requireNamespace("codeagent")`
-#' in the MAIN process. codeagent/ellmer/curl load ONLY inside the worker process.
-#' Availability is checked with `find.package(lib.loc=)` (no load side-effect).
+# Out-of-process codeagent worker transport (Plan 52.A).
+#
+# Runs a codeagent turn in a separate R process pinned to a lib with a new curl
+# (for example Rlibs/codeagent/R-4.4), so the MAIN Shiny/ERP process never loads
+# codeagent/ellmer/curl. Streaming deltas, tool events, and interactive
+# permission approval are marshaled over a socket as newline-delimited JSON.
+#
+# IMPORTANT: nothing in this file may library()/requireNamespace("codeagent")
+# in the MAIN process. codeagent/ellmer/curl load only inside the worker process.
+# Availability is checked with find.package(lib.loc=) without loading it.
 
 # codeagent availability WITHOUT loading it into MAIN (must NOT requireNamespace).
 .ca_worker_available <- function(libpath = NULL) {

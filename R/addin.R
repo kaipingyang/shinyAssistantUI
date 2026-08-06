@@ -157,6 +157,7 @@
     tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
   workspace_search <- .make_addin_workspace_search_provider(cur_dir)
+  workspace_index_peek <- attr(workspace_search, "peek_index")
 
   ui <- .claude_chat_ui()
   server <- function(input, output, session) {
@@ -247,7 +248,11 @@
       on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
       commands         = skills,
       action_items     = .claude_action_items(),
-      on_open_file     = function(path, line = NULL) .addin_open_file(path, line, cur_dir()),
+      on_open_file     = if (native_picker) {
+        function(path, line = NULL) {
+          .addin_open_file(path, line, cur_dir(), workspace_index_peek)
+        }
+      } else NULL,
       on_run_in_console = if (requireNamespace("rstudioapi", quietly = TRUE) &&
                               isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE),
                                               error = function(e) FALSE))) {

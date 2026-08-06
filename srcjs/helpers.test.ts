@@ -5,7 +5,7 @@ import {
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
   matchSlashAction, mergeSlashCommands, rankMentionItems, mentionInsertText,
-  toolHistoryDefaultOpen, toolCallSummary,
+  toolHistoryDefaultOpen, toolCallSummary, resolveToolFileReference,
 } from "./helpers";
 
 describe("storageKey", () => {
@@ -509,5 +509,34 @@ describe("mergeSlashCommands argumentHint", () => {
     const byName = Object.fromEntries(merged.map((c) => [c.name, c.argumentHint]));
     expect(byName["skillx"]).toBe("<arg>");
     expect(byName["deploy"]).toBe("[env]");
+  });
+});
+
+
+describe("resolveToolFileReference", () => {
+  const messages = [
+    {
+      role: "assistant",
+      content: [
+        { type: "tool-call", args: { file_path: "/project/old/dm.R" } },
+        { type: "tool-call", args: { path: "C:\\project\\ae\\ae.R" } },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "tool-call", args: { file_path: "/project/latest/dm.R" } },
+      ],
+    },
+  ];
+
+  it("maps a bare filename to the most recent matching tool path", () => {
+    expect(resolveToolFileReference("dm.R", messages)).toBe("/project/latest/dm.R");
+    expect(resolveToolFileReference("ae.R", messages)).toBe("C:\\project\\ae\\ae.R");
+  });
+
+  it("does not rewrite explicit paths and falls back silently when unmatched", () => {
+    expect(resolveToolFileReference("subfolder/dm.R", messages)).toBe("subfolder/dm.R");
+    expect(resolveToolFileReference("vs.R", messages)).toBe("vs.R");
   });
 });

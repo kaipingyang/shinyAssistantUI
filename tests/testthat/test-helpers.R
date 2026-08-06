@@ -198,3 +198,28 @@ test_that(".claude_msgs_to_thread 过滤 <task-notification> 合成 user 气泡"
   expect_equal(out[[1]]$content[[1]]$text, "真实用户提问")
   expect_equal(out[[2]]$role, "assistant")
 })
+
+# ── .prepend_quote(划词引用 blockquote 前置)────────────────────────────────
+test_that(".prepend_quote 空引用原样返回", {
+  f <- shinyAssistantUI:::.prepend_quote
+  expect_identical(f("hello", ""), "hello")
+  expect_identical(f("hello", NULL), "hello")
+  expect_identical(f("hello", "   "), "hello")
+})
+
+test_that(".prepend_quote 单行引用前置为 blockquote", {
+  f <- shinyAssistantUI:::.prepend_quote
+  expect_identical(f("how to dedupe?", "join may duplicate rows"),
+                   "> join may duplicate rows\n\nhow to dedupe?")
+})
+
+test_that(".prepend_quote 多行引用每行加 > ", {
+  f <- shinyAssistantUI:::.prepend_quote
+  expect_identical(f("q", "line1\nline2"), "> line1\n> line2\n\nq")
+})
+
+test_that(".prepend_quote 空文本 + 有引用也可用", {
+  f <- shinyAssistantUI:::.prepend_quote
+  expect_identical(f("", "quoted"), "> quoted\n\n")
+  expect_identical(f(NULL, "quoted"), "> quoted\n\n")
+})

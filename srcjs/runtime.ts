@@ -8,6 +8,7 @@ import {
   SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
 } from "@assistant-ui/react";
 import { ResizingImageAttachmentAdapter } from "./image-attachment-adapter";
+import { FileAttachmentAdapter } from "./file-attachment-adapter";
 import type {
   ThreadMessageLike,
   AppendMessage,
@@ -21,6 +22,7 @@ import type { PermissionModeOption, PermissionModeState } from "./shiny-config-c
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
+  resolveToolFileReference,
 } from "./helpers";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
@@ -295,6 +297,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     attachmentAdapter.current = new CompositeAttachmentAdapter([
       new ResizingImageAttachmentAdapter(),
       new SimpleTextAttachmentAdapter(),
+      new FileAttachmentAdapter(), // Plan 56: PDF(→document block) + Excel(→readxl)
     ]);
   }
 
@@ -393,14 +396,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [isRunning, setIsRunning] = useState(false);
   // Static starter suggestions from assistantUIServer(suggestions=) show on the welcome
   // screen; on_done(suggestions=) replaces them after a turn. Accepts strings or {prompt, text}.
-  const initialSuggestions = (((config?.suggestions as unknown[]) ?? [])
-    .map((x) => {
-      if (typeof x === "string") return { prompt: x, text: x };
-      const o = x as { prompt?: unknown; text?: unknown };
-      const prompt = String(o?.prompt ?? o?.text ?? "");
-      return { prompt, text: String(o?.text ?? prompt) };
-    })
-    .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  // 归一化 suggestions:接受字符串或 {prompt, text}(欢迎屏 config + onDone + :suggestions 频道共用)
+  const normalizeSuggestions = (arr: unknown[] | undefined): Array<{ prompt: string; text?: string }> =>
+    (((arr as unknown[]) ?? [])
+      .map((x) => {
+        if (typeof x === "string") return { prompt: x, text: x };
+        const o = x as { prompt?: unknown; text?: unknown };
+        const prompt = String(o?.prompt ?? o?.text ?? "");
+        return { prompt, text: String(o?.text ?? prompt) };
+      })
+      .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
+  const initialSuggestions = normalizeSuggestions(config?.suggestions as unknown[]);
   const [suggestions, setSuggestions] = useState<Array<{prompt: string; text?: string}>>(initialSuggestions);
   // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
   const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
@@ -695,6 +701,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       setCommands(((d.commands ?? []) as CommandDef[]) ?? []);
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
+    // Plan 48B: R 端 on_suggestions(...) 经 :suggestions 频道随时推送 follow-up 建议。
+    // 只应用于当前线程(或无 threadId);下一轮 startRun 会清空(见 setSuggestions([]))。
+    bridge.current.onSuggestions((d) => {
+      if (d.threadId && d.threadId !== currentThreadIdRef.current) return;
+      setSuggestions(normalizeSuggestions(d.suggestions as unknown[]));
+    });
     bridge.current.onServerCommands((d) => {
       const cmds = (d.commands ?? []) as Array<Record<string, unknown>>;
       const mapped = cmds.map((c) => ({
@@ -1283,6 +1295,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // 提取附件：序列化为结构化数据供 R 端使用
       const { attachmentData, storedAttachments } = extractAttachments(msg);
 
+      // 划词引用:发送时 runtime 自动把 quote 写到 msg.metadata.custom.quote({text,messageId})。
+      // 带给 R(server.R 前置成 blockquote 注入 prompt)+ 回显在用户气泡。
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const quote = (msg as any).metadata?.custom?.quote as { text: string; messageId: string } | undefined;
+
       // 追加用户消息
       setCurrentMessages((prev) => [
         ...prev,
@@ -1292,6 +1309,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           content: [{ type: "text" as const, text }],
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ...(quote && ({ metadata: { custom: { quote } } } as any)),
         },
       ]);
 
@@ -1301,6 +1320,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           sendText, threadId,
           attachmentData.length > 0 ? attachmentData : undefined,
           capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+          quote,
         );
       });
     },
@@ -1503,11 +1523,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendRename(threadId, title);
   }, [inputId]);
 
-  // ── 点击文件引用 → 请求在 IDE 打开（addin 侧 rstudioapi::navigateToFile）──────
+  // ── 点击文件引用 → 优先用本线程最近工具调用的精确路径，再请求 IDE 打开 ──────
   const openFile = useCallback((path: string, line?: number) => {
     if (!path) return;
-    bridge.current.sendOpenFile(path, line);
-  }, []);
+    bridge.current.sendOpenFile(resolveToolFileReference(path, messages), line);
+  }, [messages]);
   // 代码块"Run in Console"：在用户活 R 会话执行(addin/RStudio；config.console_run 开启才暴露)。
   const consoleRunEnabled = config?.console_run === true;
   const runInConsole = useCallback((code: string) => {

@@ -1,3 +1,41 @@
+# shinyAssistantUI 0.5.1
+
+- **文件引用点击打开 / file-reference opening (Plan 58)**: bare filenames in assistant prose
+  such as `dm.R` now resolve to the most recent matching `file_path`/`path` from the current
+  thread's tool calls, so a file under `<cwd>/subfolder/` opens without a filesystem scan.
+  A read-only fallback may reuse an already-hot `@mention` workspace index, but clicking never
+  builds a cold index; cold, missing, ambiguous, or stale matches stay silent. Per-click RStudio
+  API calls drop from three to two by reusing the addin's startup availability check, while the
+  current-editor guard remains. Markdown chips and tool-card links immediately show English
+  **Opening…** feedback during IDE/network latency.
+
+- **修复:切换工作目录卡顿 (Plan 57)**: switching the working directory (or model / permission
+  mode / thinking / autorun / run_r) no longer freezes the addin for ~10s. The old CLI clients'
+  teardown (each `interrupt`+`wait`+`kill`+`wait`, up to ~5s per subprocess) ran synchronously on
+  the R event loop; it's now deferred to `later` — the client registry is cleared synchronously
+  (so the new directory reconnects cleanly) while the old subprocesses are disconnected in the
+  background. Click → refresh is now immediate. Session-end teardown stays synchronous.
+
+- **上传 PDF 与 Excel / PDF & Excel upload (Plan 56)**: attach or drag-drop a **PDF** — it's sent
+  to Claude as a native **document block**, so Claude reads its text *and* visuals (no server-side
+  parsing, no poppler) — or an **Excel** `.xlsx/.xls`, parsed server-side with `readxl` into a
+  markdown table (per sheet, row/col-capped; backend-agnostic). Text files
+  (`.md/.csv/.txt/.json/…`) already worked. New `FileAttachmentAdapter` base64-encodes files with
+  **no client-side parsing** (bundle unchanged); `readxl`/`writexl` added to Suggests. Word/PPT are
+  intentionally deferred (poor ROI — see Plan 56).
+- **动态 follow-up 建议 / dynamic suggestions (Plan 48B)**: handlers can push "next step" chips
+  at any time via the new `on_suggestions(list(...))` callback (strings or `list(prompt=, text=)`);
+  they render as clickable chips **below the latest reply** (not just the welcome screen) once the
+  turn finishes, and clicking one sends it immediately. Cleared automatically at the next user turn.
+  New `:suggestions` channel + `ThreadFollowupSuggestions` (reads `thread.suggestions`).
+- **划词引用 / Quote (Plan 48A)**: select text in an assistant reply and a floating **Quote**
+  toolbar appears; clicking it quotes that text into the composer (shown as a preview). Your
+  follow-up is sent in the **same conversation** with the quoted text prepended as a markdown
+  blockquote, so the model has focused context — no manual copy-paste, no new session. Built on
+  `@assistant-ui/react` primitives (`SelectionToolbar` / `ComposerQuotePreview` / `QuoteBlock`);
+  the quote rides at `message.metadata.custom.quote` and is injected backend-agnostically
+  (Claude / ellmer / codeagent) via a blockquote prefix.
+
 # shinyAssistantUI 0.5.0
 
 ## codeagent backend

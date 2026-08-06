@@ -14,7 +14,7 @@
 #' whole environment already has a new `curl`, the lighter in-process
 #' [make_codeagent_handler()] works too.
 #'
-#' 🔴 The MAIN process must never `requireNamespace("codeagent")` — that would
+#' **IMPORTANT:** The MAIN process must never `requireNamespace("codeagent")` — that would
 #' load ellmer/curl into MAIN. Availability is checked with `find.package()`; the
 #' worker is spawned only when a turn actually runs (or via `warmup`).
 #'

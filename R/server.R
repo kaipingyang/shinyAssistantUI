@@ -134,16 +134,16 @@
 #'   "How can I help you today?".
 #' @param strings Optional named list for overriding UI text (tooltips, labels,
 #'   placeholders). `NULL` (default) keeps all built-in English strings. Example
-#'   for a Chinese UI:
+#'   for a customized UI:
 #'   ```r
 #'   strings = list(
 #'     assistantMessage = list(
-#'       copy   = list(tooltip = "复制"),
-#'       reload = list(tooltip = "重新生成")
+#'       copy   = list(tooltip = "Copy text"),
+#'       reload = list(tooltip = "Regenerate answer")
 #'     ),
 #'     editComposer = list(
-#'       send   = list(label = "发送"),
-#'       cancel = list(label = "取消")
+#'       send   = list(label = "Send now"),
+#'       cancel = list(label = "Cancel")
 #'     )
 #'   )
 #'   ```
@@ -158,7 +158,8 @@
 #' @param on_session_load Optional `function(session_id, thread_id, send_thread)`
 #'   called when the frontend requests messages for a historical session thread.
 #' @param on_feedback Optional `function(message_id, type)` called when the user
-#'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
+#'   clicks a positive or negative feedback button (`type` is `"positive"` or
+#'   `"negative"`).
 #' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
 #'   instead of an inline panel.
 #' @param thread_max_width Optional CSS length capping the chat content width
@@ -470,6 +471,12 @@ assistantUIServer <- function(id, handler,
         if (!is.null(on_edits) && length(run_edits))
           tryCatch(on_edits(run_edits), error = function(e) NULL)
         session$sendCustomMessage(paste0(input_id, ":done"),
+                                  list(suggestions = suggestions, threadId = thread_id))
+      },
+      # Plan 48B: handler 可随时推送 follow-up 建议(不必等 on_done),渲染在最新回复下方。
+      # suggestions = 字符列表 或 list(list(prompt=, text=))；前端归一化。
+      on_suggestions = function(suggestions = list()) {
+        session$sendCustomMessage(paste0(input_id, ":suggestions"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
       on_error_fn = function(msg) {
@@ -902,6 +909,7 @@ assistantUIServer <- function(id, handler,
         on_warming        = cbs$on_warming,
         on_state          = cbs$on_state,
         on_commands       = cbs$on_commands,
+        on_suggestions    = cbs$on_suggestions,
         attachments       = attachments,
         is_reload         = is_reload,
         is_cancelled      = is_cancelled,
@@ -1039,8 +1047,15 @@ assistantUIServer <- function(id, handler,
     assign(thread_id, FALSE, envir = cancel_flags)
     if (exists(thread_id, envir = cancel_fns)) rm(list = thread_id, envir = cancel_fns)
 
+    # 划词引用:UI 划选的文本经 msg$quote({text,messageId})随本次提交带来;非 reload 时
+    # 前置成 markdown blockquote 注入 prompt(对齐上游 injectQuoteContext,后端无关)。
+    user_text <- msg$text
+    quote <- msg$quote
+    if (!is_reload && is.list(quote) && nzchar(trimws(quote$text %||% "")))
+      user_text <- .prepend_quote(user_text, quote$text)
+
     stream_task$invoke(
-      msg$text,
+      user_text,
       thread_id,
       is_reload,
       msg$attachments %||% list(),

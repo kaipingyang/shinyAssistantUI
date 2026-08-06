@@ -14,8 +14,10 @@ import { resolveApprovalHandler } from "@/approval-registry";
 import {
   SearchIcon, DatabaseIcon, CodeIcon, FileTextIcon, GlobeIcon, TerminalIcon,
   WrenchIcon, FolderIcon, PencilIcon, BookOpenIcon, ZapIcon, ExternalLinkIcon,
+  LoaderCircleIcon,
   type LucideIcon,
 } from "lucide-react";
+import { useOpeningFile } from "@/hooks/use-opening-file";
 
 // annotations.icon(lucide 名)→ 组件,对齐 v0.1.0 的 per-tool 图标。
 const TOOL_ICONS: Record<string, LucideIcon> = {
@@ -116,6 +118,7 @@ export type ToolCard = ReturnType<typeof useToolCard>;
 // (pending && needsApproval && 未决策 时显示 meta + 传入的 approvalBody)+ 决策指示。
 export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approvalBody?: ReactNode }) {
   const { onOpenFile } = useShinyConfig();
+  const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
     toolName, args, argsText, result, status, ann,
     pending, needsApproval, decision, depth, open, setOpen,
@@ -156,13 +159,17 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
             <button
               type="button"
               data-open-file={filePath}
-              aria-label={`在编辑器打开 ${filePath}`}
-              title={`在编辑器打开 ${filePath}`}
-              onClick={() => onOpenFile(filePath)}
+              aria-busy={opening}
+              aria-label={opening ? `Opening ${filePath}` : `Open ${filePath} in RStudio`}
+              title={opening ? `Opening ${filePath}…` : `Open ${filePath} in RStudio`}
+              onClick={() => openFile(filePath)}
               className="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex w-fit items-center gap-1 rounded px-1 py-0.5 text-[11px] transition-colors"
             >
-              <ExternalLinkIcon className="size-3 shrink-0" />
-              <span className="aui-tool-file-path break-all text-start">{filePath}</span>
+              {opening ? (
+                <><LoaderCircleIcon aria-hidden="true" className="size-3 shrink-0 animate-spin" /><span>Opening…</span></>
+              ) : (
+                <><ExternalLinkIcon className="size-3 shrink-0" /><span className="aui-tool-file-path break-all text-start">{filePath}</span></>
+              )}
             </button>
           )}
         </div>

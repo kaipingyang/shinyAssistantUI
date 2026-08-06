@@ -9,6 +9,7 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { QuoteBlock, SelectionToolbar, ComposerQuotePreview } from "@/components/assistant-ui/quote";
 import {
   Reasoning,
   ReasoningContent,
@@ -267,6 +268,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           >
             <ThreadScrollToBottom />
             <ShinyStatusPanels />
+            {/* Plan 48B: 动态 follow-up 建议 chip(自带 !isEmpty && !isRunning && 有建议 门禁)*/}
+            <ThreadFollowupSuggestions />
             <Composer />
             <ShinyUsageFooter />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -275,6 +278,9 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
+
+      {/* 划词引用:选中助手回复文本 → 浮现 Quote → 引用进 composer(portal 到 body) */}
+      <SelectionToolbar />
     </ThreadPrimitive.Root>
   );
 };
@@ -354,6 +360,31 @@ const ThreadSuggestions: FC = () => {
   );
 };
 
+// Plan 48B — 动态 follow-up 建议:读 thread.suggestions(由 on_done(suggestions=) 或
+// :suggestions 频道设置),在最新回复下方渲染可点 chip(区别于欢迎屏 ThreadSuggestions)。
+// 直接读 s.thread.suggestions(ThreadPrimitive.Suggestions 是空线程/欢迎专用)。点击用
+// method="replace" + autoSend:把 composer 文本替换为 prompt 并立即发送。
+const ThreadFollowupSuggestions: FC = () => {
+  const suggestions = useAuiState((s) => s.thread.suggestions) as Array<{ prompt: string; text?: string }>;
+  return (
+    <AuiIf condition={(s) => !s.thread.isEmpty && !s.thread.isRunning && s.thread.suggestions.length > 0}>
+      <div className="aui-thread-followup-suggestions flex w-full flex-wrap items-center justify-start gap-2 px-1">
+        {suggestions.map((sg, idx) => (
+          <ThreadPrimitive.Suggestion
+            key={idx}
+            prompt={sg.prompt}
+            method="replace"
+            autoSend
+            className="aui-thread-followup-suggestion fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-foreground hover:bg-muted border-border/60 h-auto rounded-full border px-3.5 py-1.5 text-sm font-normal whitespace-nowrap transition-colors duration-200"
+          >
+            {sg.text || sg.prompt}
+          </ThreadPrimitive.Suggestion>
+        ))}
+      </div>
+    </AuiIf>
+  );
+};
+
 const ThreadSuggestionItem: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestion-display fade-in slide-in-from-bottom-2 animate-in fill-mode-both duration-200">
@@ -417,6 +448,7 @@ const Composer: FC = () => {
           data-density={composerDensity ?? "comfortable"}
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
+          <ComposerQuotePreview />
           <ComposerAttachments />
           <IdeContextIndicator />
           {compact ? (
@@ -859,6 +891,9 @@ const UserMessage: FC = () => {
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 wrap-break-word empty:hidden">
+          <MessagePrimitive.Quote>
+            {(quote) => <QuoteBlock {...quote} />}
+          </MessagePrimitive.Quote>
           <MessagePrimitive.Parts />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
