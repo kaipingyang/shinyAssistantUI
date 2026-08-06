@@ -1,4 +1,4 @@
-# shinyAssistantUI 0.5.0.9000 (dev branch)
+# shinyAssistantUI 0.5.1
 
 - **文件引用点击打开 / file-reference opening (Plan 58)**: bare filenames in assistant prose
   such as `dm.R` now resolve to the most recent matching `file_path`/`path` from the current

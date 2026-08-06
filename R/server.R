@@ -134,16 +134,16 @@
 #'   "How can I help you today?".
 #' @param strings Optional named list for overriding UI text (tooltips, labels,
 #'   placeholders). `NULL` (default) keeps all built-in English strings. Example
-#'   for a Chinese UI:
+#'   for a customized UI:
 #'   ```r
 #'   strings = list(
 #'     assistantMessage = list(
-#'       copy   = list(tooltip = "复制"),
-#'       reload = list(tooltip = "重新生成")
+#'       copy   = list(tooltip = "Copy text"),
+#'       reload = list(tooltip = "Regenerate answer")
 #'     ),
 #'     editComposer = list(
-#'       send   = list(label = "发送"),
-#'       cancel = list(label = "取消")
+#'       send   = list(label = "Send now"),
+#'       cancel = list(label = "Cancel")
 #'     )
 #'   )
 #'   ```
@@ -158,7 +158,8 @@
 #' @param on_session_load Optional `function(session_id, thread_id, send_thread)`
 #'   called when the frontend requests messages for a historical session thread.
 #' @param on_feedback Optional `function(message_id, type)` called when the user
-#'   clicks a 👍/👎 feedback button (`type` is `"positive"` or `"negative"`).
+#'   clicks a positive or negative feedback button (`type` is `"positive"` or
+#'   `"negative"`).
 #' @param modal Logical. If `TRUE`, renders the chat as a floating modal bubble
 #'   instead of an inline panel.
 #' @param thread_max_width Optional CSS length capping the chat content width

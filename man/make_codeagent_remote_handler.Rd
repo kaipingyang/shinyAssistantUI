@@ -49,7 +49,7 @@ Use this when the host session cannot load the new \code{curl}/\code{ellmer} in-
 whole environment already has a new \code{curl}, the lighter in-process
 \code{\link[=make_codeagent_handler]{make_codeagent_handler()}} works too.
 
-🔴 The MAIN process must never \code{requireNamespace("codeagent")} — that would
+\strong{IMPORTANT:} The MAIN process must never \code{requireNamespace("codeagent")} — that would
 load ellmer/curl into MAIN. Availability is checked with \code{find.package()}; the
 worker is spawned only when a turn actually runs (or via \code{warmup}).
 

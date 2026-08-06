@@ -202,7 +202,8 @@ trigger server-side logic (e.g. toggle a setting, open a URL, call
 called when the frontend requests messages for a historical session thread.}
 
 \item{on_feedback}{Optional \verb{function(message_id, type)} called when the user
-clicks a 👍/👎 feedback button (\code{type} is \code{"positive"} or \code{"negative"}).}
+clicks a positive or negative feedback button (\code{type} is \code{"positive"} or
+\code{"negative"}).}
 
 \item{on_rename}{Optional \verb{function(thread_id, title)} called when the user
 renames a thread in the sidebar. The new title is already persisted
@@ -311,16 +312,16 @@ for code blocks. Available light themes: \code{"one-light"} (default),
 
 \item{strings}{Optional named list for overriding UI text (tooltips, labels,
 placeholders). \code{NULL} (default) keeps all built-in English strings. Example
-for a Chinese UI:
+for a customized UI:
 
 \if{html}{\out{<div class="sourceCode r">}}\preformatted{strings = list(
   assistantMessage = list(
-    copy   = list(tooltip = "复制"),
-    reload = list(tooltip = "重新生成")
+    copy   = list(tooltip = "Copy text"),
+    reload = list(tooltip = "Regenerate answer")
   ),
   editComposer = list(
-    send   = list(label = "发送"),
-    cancel = list(label = "取消")
+    send   = list(label = "Send now"),
+    cancel = list(label = "Cancel")
   )
 )
 }\if{html}{\out{</div>}}}
