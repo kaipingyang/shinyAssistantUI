@@ -93,3 +93,60 @@ test_that(".addin_open_file no longer repeats rstudioapi isAvailable per click",
   expect_true(grepl("getSourceEditorContext", source_text, fixed = TRUE))
   expect_true(grepl("navigateToFile", source_text, fixed = TRUE))
 })
+
+
+test_that(".addin_resolve_file_path safely handles a repeated cwd basename prefix", {
+  parent <- tempfile("open-file-prefix-")
+  project <- file.path(parent, "ERP")
+  dir.create(project, recursive = TRUE)
+  name <- "\u4ea4\u63a5\u6587\u6863_xpt2sas\u5f02\u6b65\u5316.md"
+  root_file <- file.path(project, name)
+  file.create(root_file)
+
+  # cwd已经是ERP；Claude输出ERP/file时，direct ERP/ERP/file不存在才回退根文件。
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path(file.path("ERP", name), project),
+    normalizePath(root_file, winslash = "/")
+  )
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path(paste0("ERP\\\\", name), project),
+    normalizePath(root_file, winslash = "/")
+  )
+  expect_null(
+    shinyAssistantUI:::.addin_resolve_file_path(file.path("ERP-copy", name), project)
+  )
+
+  # 若真实ERP/ERP/file存在，即使根目录有同名文件，也必须由direct candidate优先命中。
+  nested_dir <- file.path(project, "ERP")
+  dir.create(nested_dir)
+  nested_file <- file.path(nested_dir, name)
+  file.create(nested_file)
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path(file.path("ERP", name), project),
+    normalizePath(nested_file, winslash = "/")
+  )
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path(paste0("ERP\\\\", name), project),
+    normalizePath(nested_file, winslash = "/")
+  )
+
+  # fallback和相对direct候选都不得通过..或symlink逃出cwd；显式绝对路径保持兼容。
+  outside <- file.path(parent, "outside.md")
+  file.create(outside)
+  expect_null(
+    shinyAssistantUI:::.addin_resolve_file_path("ERP/../outside.md", project)
+  )
+  expect_null(
+    shinyAssistantUI:::.addin_resolve_file_path("ERP/../../outside.md", project)
+  )
+  outside_link <- file.path(nested_dir, "outside-link.md")
+  if (isTRUE(file.symlink(outside, outside_link))) {
+    expect_null(
+      shinyAssistantUI:::.addin_resolve_file_path("ERP/outside-link.md", project)
+    )
+  }
+  expect_identical(
+    shinyAssistantUI:::.addin_resolve_file_path(outside, project),
+    normalizePath(outside, winslash = "/")
+  )
+})

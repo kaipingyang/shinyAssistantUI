@@ -1,4 +1,10 @@
-# shinyAssistantUI 0.5.1.9000 (dev branch)
+# shinyAssistantUI 0.5.2
+
+- **Project-prefixed file links (Plan 62)**: when the add-in is already rooted at a
+  project such as `ERP`, clicking a Claude prose link like `ERP/report.md` now safely resolves
+  to the project-root file instead of silently trying `ERP/ERP/report.md`. A real nested
+  `ERP/ERP/report.md` still wins when it exists, and fallback candidates cannot escape the
+  current working directory.
 
 - **Write Markdown table layout (Plan 61)**: Markdown tables shown in expanded `Write`
   tool arguments now keep each source row intact instead of placing every pipe and cell on its

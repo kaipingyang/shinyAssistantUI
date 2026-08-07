@@ -16,14 +16,40 @@
 # workspace memo（peek 不得触发索引构建），唯一 basename 命中才使用。其余静默。
 .addin_resolve_file_path <- function(path, project = NULL, workspace_index_peek = NULL) {
   if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(NULL)
-  is_absolute <- startsWith(path, "/") || grepl("^[A-Za-z]:", path) || startsWith(path, "\\\\")
-  candidate <- path
-  if (!is_absolute && !is.null(project) && nzchar(project)) candidate <- file.path(project, path)
+  path_slashes <- gsub("\\\\", "/", path)
+  is_absolute <- startsWith(path_slashes, "/") || grepl("^[A-Za-z]:", path_slashes)
+  project_norm <- NULL
+  project_prefix <- NULL
+  if (!is.null(project) && nzchar(project)) {
+    project_norm <- tryCatch(normalizePath(project, winslash = "/", mustWork = FALSE),
+                             error = function(e) project)
+    project_prefix <- paste0(sub("/+$", "", project_norm), "/")
+  }
+
+  candidate <- path_slashes
+  if (!is_absolute && !is.null(project_norm)) candidate <- file.path(project, path_slashes)
   candidate <- tryCatch(normalizePath(candidate, winslash = "/", mustWork = FALSE),
                         error = function(e) candidate)
-  if (file.exists(candidate)) return(candidate)
+  candidate_inside <- is.null(project_norm) || startsWith(candidate, project_prefix)
+  if (file.exists(candidate) && (is_absolute || candidate_inside)) return(candidate)
 
-  is_bare <- !is_absolute && !grepl("[/\\\\]", path)
+  # Claude有时在cwd已经是ERP时仍输出ERP/file。direct cwd/ERP/file不存在时，
+  # 仅允许剥掉一个与cwd basename精确相同的首段；真实cwd/ERP/file始终由上面的
+  # direct candidate优先。所有相对候选都必须normalize后留在cwd内，避免..或symlink越界。
+  if (!is_absolute && !is.null(project_norm)) {
+    cwd_prefix <- paste0(basename(sub("/+$", "", project_norm)), "/")
+    if (nzchar(cwd_prefix) && startsWith(path_slashes, cwd_prefix)) {
+      stripped <- substring(path_slashes, nchar(cwd_prefix) + 1L)
+      if (nzchar(stripped)) {
+        fallback <- file.path(project, stripped)
+        fallback <- tryCatch(normalizePath(fallback, winslash = "/", mustWork = FALSE),
+                             error = function(e) fallback)
+        if (startsWith(fallback, project_prefix) && file.exists(fallback)) return(fallback)
+      }
+    }
+  }
+
+  is_bare <- !is_absolute && !grepl("/", path_slashes, fixed = TRUE)
   if (!is_bare || is.null(project) || !is.function(workspace_index_peek)) return(NULL)
   index <- tryCatch(workspace_index_peek(), error = function(e) NULL)
   if (!is.list(index)) return(NULL)
