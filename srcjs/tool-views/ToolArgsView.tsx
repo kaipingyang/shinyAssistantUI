@@ -40,6 +40,61 @@ export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
     );
   }
 
+  if (view.kind === "questions") {
+    return (
+      <div
+        data-arg-view="questions"
+        data-slot="tool-fallback-args"
+        className="aui-tool-questions bg-muted/50 mt-1 flex flex-col gap-2 rounded-md p-2.5 text-xs"
+      >
+        {view.items.map((q, i) => (
+          <div
+            key={i}
+            data-question-kind={q.multiSelect ? "multiple" : "single"}
+            className="flex flex-col gap-1"
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted-foreground font-semibold">
+                {q.header || `Question ${i + 1}`}
+              </span>
+              <span className="bg-background text-muted-foreground rounded-full border px-1.5 py-0.5 text-[10px]">
+                {q.multiSelect ? "Multiple choice" : "Single choice"}
+              </span>
+            </div>
+            <p className="text-foreground font-medium">{q.question}</p>
+            {q.options.length > 0 && (
+              <ul className="flex flex-col gap-0.5 ps-1">
+                {q.options.map((option, oi) => (
+                  <li
+                    key={oi}
+                    data-question-option={option.label}
+                    className="flex items-start gap-1.5"
+                  >
+                    <span aria-hidden className="text-muted-foreground">
+                      {q.multiSelect ? "\u2610" : "\u25CB"}
+                    </span>
+                    <span className="text-foreground/90">{option.label}</span>
+                    {option.description && (
+                      <span className="text-muted-foreground">{option.description}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {q.answer !== undefined && (
+              <div data-question-answer className="bg-background/70 mt-0.5 flex gap-1.5 rounded px-2 py-1">
+                <span className="text-muted-foreground font-medium">Answer:</span>
+                <span className="text-foreground">
+                  {Array.isArray(q.answer) ? q.answer.join(", ") : q.answer}
+                </span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   if (view.kind === "todos") {
     return (
       <ul

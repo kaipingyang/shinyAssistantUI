@@ -68,3 +68,80 @@ describe("AskQuestionCard", () => {
     expect(onSubmit).toHaveBeenCalledWith({ "Fav color?": "Red" });
   });
 });
+
+
+  it("single-select switches from a preset option to Other custom text", () => {
+    const onSubmit = vi.fn();
+    const { getByLabelText, getByText, container } = render(
+      <AskQuestionCard questions={[questions[0]]} onSubmit={onSubmit} onSkip={() => {}} />,
+    );
+    const blue = getByLabelText("Blue") as HTMLInputElement;
+    const other = getByLabelText("Use custom answer for Fav color?") as HTMLInputElement;
+    const custom = container.querySelector('[data-ask-custom="0"]') as HTMLInputElement;
+
+    fireEvent.click(blue);
+    fireEvent.focus(custom);
+    fireEvent.change(custom, { target: { value: "Teal" } });
+
+    expect(blue.checked).toBe(false);
+    expect(other.checked).toBe(true);
+    fireEvent.click(getByText(/Submit answer/));
+    expect(onSubmit).toHaveBeenCalledWith({ "Fav color?": "Teal" });
+  });
+
+  it("single-select switches back from Other to a preset option", () => {
+    const onSubmit = vi.fn();
+    const { getByLabelText, getByText, container } = render(
+      <AskQuestionCard questions={[questions[0]]} onSubmit={onSubmit} onSkip={() => {}} />,
+    );
+    const custom = container.querySelector('[data-ask-custom="0"]') as HTMLInputElement;
+    fireEvent.focus(custom);
+    fireEvent.change(custom, { target: { value: "Teal" } });
+    fireEvent.click(getByLabelText("Blue"));
+
+    expect((getByLabelText("Use custom answer for Fav color?") as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(getByText(/Submit answer/));
+    expect(onSubmit).toHaveBeenCalledWith({ "Fav color?": "Blue" });
+  });
+
+  it("disables Submit when the only active custom answer is cleared", () => {
+    const { getByText, container } = render(
+      <AskQuestionCard questions={[questions[0]]} onSubmit={() => {}} onSkip={() => {}} />,
+    );
+    const custom = container.querySelector('[data-ask-custom="0"]') as HTMLInputElement;
+    fireEvent.focus(custom);
+    fireEvent.change(custom, { target: { value: "Teal" } });
+    fireEvent.change(custom, { target: { value: "" } });
+    expect((getByText(/Submit answer/).closest("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("multi-select adds an active custom answer to preset choices", () => {
+    const onSubmit = vi.fn();
+    const { getByLabelText, getByText, container } = render(
+      <AskQuestionCard questions={[questions[1]]} onSubmit={onSubmit} onSkip={() => {}} />,
+    );
+    fireEvent.click(getByLabelText("R"));
+    const custom = container.querySelector('[data-ask-custom="0"]') as HTMLInputElement;
+    fireEvent.focus(custom);
+    fireEvent.change(custom, { target: { value: "SQL" } });
+
+    expect((getByLabelText("Use custom answer for Which langs?") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(getByText(/Submit answer/));
+    expect(onSubmit).toHaveBeenCalledWith({ "Which langs?": ["R", "SQL"] });
+  });
+
+  it("multi-select can uncheck Other without discarding typed text", () => {
+    const onSubmit = vi.fn();
+    const { getByLabelText, getByText, container } = render(
+      <AskQuestionCard questions={[questions[1]]} onSubmit={onSubmit} onSkip={() => {}} />,
+    );
+    fireEvent.click(getByLabelText("R"));
+    const custom = container.querySelector('[data-ask-custom="0"]') as HTMLInputElement;
+    fireEvent.focus(custom);
+    fireEvent.change(custom, { target: { value: "SQL" } });
+    fireEvent.click(getByLabelText("Use custom answer for Which langs?"));
+
+    expect(custom.value).toBe("SQL");
+    fireEvent.click(getByText(/Submit answer/));
+    expect(onSubmit).toHaveBeenCalledWith({ "Which langs?": ["R"] });
+  });

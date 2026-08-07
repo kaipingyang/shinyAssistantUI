@@ -1,6 +1,7 @@
 // 纯函数:把 (toolName, args, argsText, annotations) 解析成一个 ToolView。
 // 无 React 依赖 → 可直接单测。渲染由 ToolArgsView 负责(dumb)。
 import type { ArgsViewHint, ToolView, TodoItem, QueryField } from "./types";
+import { parseAskUserQuestionArgs } from "./ask-user-question-args";
 import { getEditDiff, formatToolArgs } from "../helpers";
 
 // 文件扩展名 → 已在 syntax-highlighter 注册的 prism 语言;未知 → "markdown"(中性,
@@ -91,7 +92,14 @@ export function resolveToolView(
     if (code !== undefined) return { kind: "code", code, lang: "r" };
   }
 
-  // 4) 内建 checklist:TodoWrite。
+  // 4) AskUserQuestion：把 questions JSON 转成稳定的可读摘要；任一字段 malformed
+  // 就整体回落 JSON，避免“美化”吞掉调试信息。
+  if (toolName === "AskUserQuestion") {
+    const questions = parseAskUserQuestionArgs(args);
+    if (questions) return { kind: "questions", items: questions };
+  }
+
+  // 5) 内建 checklist:TodoWrite。
   if (toolName === "TodoWrite" && Array.isArray(a.todos)) {
     const items: TodoItem[] = a.todos.map((t) => {
       const o = (t ?? {}) as Record<string, unknown>;

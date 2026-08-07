@@ -24,19 +24,28 @@ export function AskQuestionCard({
   const [submitted, setSubmitted] = useState(false);
   const [sel, setSel] = useState<Record<number, string[]>>({});
   const [custom, setCustom] = useState<Record<number, string>>({});
+  const [customActive, setCustomActive] = useState<Record<number, boolean>>({});
 
-  const toggle = (qi: number, label: string, multi: boolean) =>
+  const setCustomMode = (qi: number, active: boolean, multi: boolean) => {
+    setCustomActive((s) => ({ ...s, [qi]: active }));
+    // 单选的 Other 与预设项严格互斥；多选则允许预设 + Other 并存。
+    if (active && !multi) setSel((s) => ({ ...s, [qi]: [] }));
+  };
+
+  const toggle = (qi: number, label: string, multi: boolean) => {
+    if (!multi) setCustomActive((s) => ({ ...s, [qi]: false }));
     setSel((s) => {
       const cur = s[qi] ?? [];
       if (multi)
         return { ...s, [qi]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
       return { ...s, [qi]: cur.includes(label) ? [] : [label] };
     });
+  };
 
   const picksFor = (qi: number): string[] => {
     const picks = [...(sel[qi] ?? [])];
     const c = (custom[qi] ?? "").trim();
-    if (c) picks.push(c);
+    if (customActive[qi] && c) picks.push(c);
     return picks;
   };
 
@@ -84,14 +93,34 @@ export function AskQuestionCard({
                 </span>
               </label>
             ))}
-            <input
-              type="text"
-              data-ask-custom={qi}
-              placeholder="Other (type a custom answer)…"
-              className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
-              value={custom[qi] ?? ""}
-              onChange={(e) => setCustom((c) => ({ ...c, [qi]: e.target.value }))}
-            />
+            <div
+              data-ask-custom-row={qi}
+              data-custom-active={customActive[qi] ? "true" : "false"}
+              className="aui-ask-custom mt-1 flex items-center gap-2"
+            >
+              <input
+                type={q.multiSelect ? "checkbox" : "radio"}
+                name={`aui-ask-${qi}`}
+                data-ask-custom-selector={qi}
+                aria-label={`Use custom answer for ${q.question}`}
+                checked={!!customActive[qi]}
+                onChange={(e) => setCustomMode(qi, e.target.checked, !!q.multiSelect)}
+              />
+              <input
+                type="text"
+                data-ask-custom={qi}
+                aria-label={`Custom answer for ${q.question}`}
+                placeholder="Other (type a custom answer)…"
+                className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+                value={custom[qi] ?? ""}
+                onFocus={() => setCustomMode(qi, true, !!q.multiSelect)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setCustom((c) => ({ ...c, [qi]: value }));
+                  if (value.length > 0) setCustomMode(qi, true, !!q.multiSelect);
+                }}
+              />
+            </div>
           </div>
         </div>
       ))}
