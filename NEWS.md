@@ -1,5 +1,10 @@
 # shinyAssistantUI 0.5.1.9000 (dev branch)
 
+- **Write Markdown table layout (Plan 61)**: Markdown tables shown in expanded `Write`
+  tool arguments now keep each source row intact instead of placing every pipe and cell on its
+  own line. Prism token spans are locally isolated from same-named Tailwind layout utilities
+  (notably `.table`), preserving syntax highlighting in both live and restored tool cards.
+
 - **AskUserQuestion custom answers + readable card (Plan 60)**: selecting a preset and then
   typing an **Other** answer now correctly submits the custom text instead of the stale preset.
   Other is an explicit radio/checkbox: single-choice answers are mutually exclusive, while

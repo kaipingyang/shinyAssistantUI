@@ -37,3 +37,24 @@ describe("markdown SyntaxHighlighter", () => {
     expect(container.textContent).toContain("print");
   });
 });
+
+
+describe("Prism token layout isolation", () => {
+  it("keeps Markdown table token spans inline instead of inheriting Tailwind's table utility", () => {
+    const markdown = [
+      "## Contributors",
+      "",
+      "| Developer | Changes |",
+      "|---|---|",
+      "| Kaiping Yang | Fixed table rendering |",
+    ].join("\n");
+    const { container } = render(
+      <SyntaxHighlighter language="markdown" code={markdown} components={noComponents} />,
+    );
+
+    const prism = container.querySelector('[data-syntax-highlighter="prism"]')!;
+    expect(container.querySelectorAll(".token.table").length).toBeGreaterThan(0);
+    expect(prism.classList.contains("[&_.token]:inline")).toBe(true);
+    expect(prism.textContent).toBe(markdown);
+  });
+});

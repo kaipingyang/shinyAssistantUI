@@ -56,6 +56,7 @@ export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }
     <PrismLight
       language={resolveCodeLanguage(language)}
       style={oneLight}
+      className="aui-syntax-highlighter [&_.token]:inline"
       data-syntax-highlighter="prism"
       customStyle={{
         margin: 0,
