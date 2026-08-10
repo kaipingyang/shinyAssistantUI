@@ -1,3 +1,11 @@
+# shinyAssistantUI 0.5.2.9000 (dev branch)
+
+- **Claude image/terminal reply fallback (Plan 64)**: Claude turns no longer finish with an
+  empty or truncated assistant reply when a backend returns final `AssistantMessage` or
+  `ResultMessage$result` text missing from partial stream events. Only the non-overlapping
+  terminal suffix is appended, so normal streaming is not duplicated. Error results use the
+  existing error UI, while an intentional user Deny remains a normal stopped turn.
+
 # shinyAssistantUI 0.5.2
 
 - **Project-prefixed file links (Plan 62)**: when the add-in is already rooted at a

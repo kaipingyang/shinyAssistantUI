@@ -515,6 +515,89 @@
     blocks
 }
 
+# Final-message fallback for backends/turns that do not emit partial StreamEvent
+# text deltas. Keep this separate from the drain loop so it is easy to test and
+# never serializes arbitrary SDK objects into the UI.
+.claude_assistant_text <- function(message) {
+  blocks <- tryCatch(message$content, error = function(e) list())
+  if (!is.list(blocks)) return("")
+  texts <- vapply(blocks, function(block) {
+    is_text <- inherits(block, "TextBlock") ||
+      identical(tryCatch(block[["type"]], error = function(e) NULL), "text")
+    if (!isTRUE(is_text)) return("")
+    value <- tryCatch(block[["text"]], error = function(e) NULL)
+    if (is.character(value) && length(value) == 1L && !is.na(value)) value else ""
+  }, character(1))
+  paste0(texts[nzchar(texts)], collapse = "")
+}
+
+.claude_result_text <- function(message) {
+  value <- tryCatch(message$result, error = function(e) NULL)
+  if (!is.character(value) || length(value) == 0L) return("")
+  value <- value[!is.na(value)]
+  if (!length(value)) return("")
+  text <- paste(value, collapse = "\n")
+  if (!nzchar(trimws(text))) return("")
+  text
+}
+
+# Return only the terminal text not already represented by streamed text. This
+# handles full snapshots (terminal starts with stream), exact duplicates, and
+# separate assistant rounds whose boundary overlaps.
+.claude_terminal_suffix <- function(streamed, terminal) {
+  scalar <- function(value) {
+    value <- value %||% ""
+    if (!is.character(value) || length(value) == 0L || is.na(value[[1L]])) return("")
+    value[[1L]]
+  }
+  streamed <- scalar(streamed)
+  terminal <- scalar(terminal)
+  if (!nzchar(terminal)) return("")
+  if (!nzchar(streamed)) return(terminal)
+
+  max_overlap <- min(nchar(streamed), nchar(terminal))
+  if (max_overlap > 0L) {
+    for (size in seq.int(max_overlap, 1L)) {
+      streamed_end <- substr(streamed, nchar(streamed) - size + 1L, nchar(streamed))
+      terminal_start <- substr(terminal, 1L, size)
+      if (identical(streamed_end, terminal_start))
+        return(substr(terminal, size + 1L, nchar(terminal)))
+    }
+  }
+  terminal
+}
+
+.claude_result_error_message <- function(message) {
+  pieces <- character()
+  result <- .claude_result_text(message)
+  if (nzchar(result)) pieces <- c(pieces, result)
+
+  status <- tryCatch(message$api_error_status, error = function(e) NULL)
+  if (is.character(status) && length(status) > 0L && !is.na(status[[1L]]) && nzchar(status[[1L]]))
+    pieces <- c(pieces, paste0("API status: ", status[[1L]]))
+
+  errors <- tryCatch(message$errors, error = function(e) NULL)
+  if (is.character(errors)) {
+    errors <- errors[!is.na(errors) & nzchar(errors)]
+    pieces <- c(pieces, errors)
+  } else if (is.list(errors)) {
+    for (error in errors) {
+      text <- NULL
+      if (inherits(error, "condition")) text <- conditionMessage(error)
+      if (is.null(text) && is.list(error)) text <- error$message %||% error$error
+      if (is.null(text) && is.character(error)) text <- error
+      if (is.character(text) && length(text) > 0L && !is.na(text[[1L]]) && nzchar(text[[1L]]))
+        pieces <- c(pieces, text[[1L]])
+    }
+  }
+
+  pieces <- unique(trimws(pieces[nzchar(trimws(pieces))]))
+  if (!length(pieces)) return("Claude request failed without an error message.")
+  paste(pieces, collapse = " — ")
+}
+
+.claude_drain_timeout_seconds <- function() 10
+
 #' Create an ellmer streaming handler for assistantUIServer
 #'
 #' Wraps an `ellmer` chat object into an `assistantUIServer`-compatible
@@ -1360,9 +1443,13 @@ make_claude_handler <- function(options       = NULL,
     # block (see .claude_message_content). send() accepts a string OR a block list.
     client$send(.claude_message_content(full_message, img_parts, doc_parts))
 
-    interrupted      <- FALSE
-    chunk_count      <- 0L
-    pending_tool_ids <- character(0)
+    interrupted              <- FALSE
+    chunk_count              <- 0L
+    streamed_text            <- ""
+    assistant_terminal_parts <- character(0)
+    terminal_error           <- NULL
+    intentional_deny         <- FALSE
+    pending_tool_ids         <- character(0)
     tb               <- new.env(parent = emptyenv())
 
     flush_tool_blocks <- function(mark_completed = FALSE) {
@@ -1393,7 +1480,7 @@ make_claude_handler <- function(options       = NULL,
     # 垃圾事件（poll 非空但永不收尾），都会导致 repeat 死循环、ExtendedTask 永不
     # resolve、前端永久 running。用墙钟封顶覆盖两种场景（非"连续空轮询"——后者
     # 在持续吐垃圾时会被不断重置而失效）。
-    DRAIN_TIMEOUT_SECS <- 10
+    DRAIN_TIMEOUT_SECS <- .claude_drain_timeout_seconds()
     drain_start        <- NULL  # interrupted 时记录起点
 
     repeat {
@@ -1473,6 +1560,7 @@ make_claude_handler <- function(options       = NULL,
               }
               flush_tool_blocks(mark_completed = TRUE)
               chunk_count <- chunk_count + 1L
+              streamed_text <- paste0(streamed_text, delta[["text"]])
               on_chunk(delta[["text"]])
             }
             if (identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% ""))
@@ -1494,6 +1582,16 @@ make_claude_handler <- function(options       = NULL,
               tb[[bidx]]$emitted <- TRUE
             }
           }
+
+        } else if (inherits(msg, "AssistantMessage")) {
+          # Some backend/image turns deliver final AssistantMessage content without
+          # partial StreamEvent text deltas. Buffer it and emit only at ResultMessage
+          # when chunk_count is still zero, so normal streaming never duplicates text.
+          final_text <- .claude_assistant_text(msg)
+          if (nzchar(final_text) &&
+              (length(assistant_terminal_parts) == 0L ||
+               !identical(tail(assistant_terminal_parts, 1L), final_text)))
+            assistant_terminal_parts <- c(assistant_terminal_parts, final_text)
 
         } else if (inherits(msg, "PermissionRequestMessage")) {
           # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
@@ -1523,6 +1621,7 @@ make_claude_handler <- function(options       = NULL,
 
           if (!interrupted && is_cancelled()) {
             interrupted <- TRUE
+            drain_start <- Sys.time()
             tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
             tryCatch(client$interrupt(), error = function(e) NULL)
             on_tool_result(tuid, "Interrupted", is_error = TRUE)
@@ -1568,12 +1667,42 @@ make_claude_handler <- function(options       = NULL,
             has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
             deny_msg <- "Denied by user"
             if (has_msg) deny_msg <- decision$customMessage
+            if (!has_msg) intentional_deny <- TRUE
             .record_tool_decision(decisions_path, tuid, "denied")
             client$deny_tool(msg$request_id, deny_msg, interrupt = !has_msg)
             on_tool_result(tuid, deny_msg, is_error = TRUE)
+            if (!has_msg) {
+              interrupted <- TRUE
+              drain_start <- Sys.time()
+              interrupt_tool_blocks()
+              for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+              pending_tool_ids <- character(0)
+            }
           }
 
         } else if (inherits(msg, "ResultMessage")) {
+          result_is_error <- isTRUE(msg$is_error)
+          if (result_is_error && !intentional_deny) {
+            terminal_error <- .claude_result_error_message(msg)
+            interrupt_tool_blocks()
+            for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+            pending_tool_ids <- character(0)
+          } else if (!result_is_error) {
+            terminal_candidates <- character(0)
+            assistant_text <- paste0(assistant_terminal_parts, collapse = "")
+            result_text <- .claude_result_text(msg)
+            if (nzchar(assistant_text)) terminal_candidates <- c(terminal_candidates, assistant_text)
+            if (nzchar(result_text)) terminal_candidates <- c(terminal_candidates, result_text)
+            for (terminal_text in terminal_candidates) {
+              missing_text <- .claude_terminal_suffix(streamed_text, terminal_text)
+              if (nzchar(missing_text)) {
+                chunk_count <- chunk_count + 1L
+                streamed_text <- paste0(streamed_text, missing_text)
+                on_chunk(missing_text)
+              }
+            }
+          }
+
           for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
           pending_tool_ids <- character(0)
           flush_tool_blocks(mark_completed = TRUE)
@@ -1666,7 +1795,11 @@ make_claude_handler <- function(options       = NULL,
       coro::await(later_promise(0.01))
     }
 
-    on_done()
+    if (!is.null(terminal_error)) {
+      on_error(terminal_error)
+    } else {
+      on_done()
+    }
   })
 
   attr(handler_fn, "cleanup") <- cleanup

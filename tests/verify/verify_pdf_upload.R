@@ -16,6 +16,7 @@ on.exit({try(p$kill(),silent=TRUE);system("rm -f /tmp/vp.*")},add=TRUE); Sys.sle
 if(!p$is_alive()){cat("BOOT FAIL\n");cat(tail(readLines("/tmp/vp.e"),20),sep="\n");quit(status=1)}
 errs<-c(); b<-chromote::ChromoteSession$new(); b$Runtime$enable()
 b$Runtime$consoleAPICalled(callback_=function(m) if(identical(m$type,"error")) errs<<-c(errs,paste(sapply(m$args,function(a)a$value%||%""),collapse=" ")))
+b$Runtime$exceptionThrown(callback_=function(m) errs<<-c(errs,paste0("EXCEPTION: ",m$exceptionDetails$text%||%"unknown")))
 ev<-function(js)tryCatch(b$Runtime$evaluate(js)$result$value,error=function(e)NA)
 key<-function(){b$Input$dispatchKeyEvent(type="keyDown",key="Enter",code="Enter",windowsVirtualKeyCode=13L);b$Input$dispatchKeyEvent(type="keyUp",key="Enter",code="Enter",windowsVirtualKeyCode=13L)}
 lastReply<-function()ev("(function(){var a=document.querySelectorAll('[data-role=assistant]');return a.length?a[a.length-1].innerText:''})()") %||% ""
