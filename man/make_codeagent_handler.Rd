@@ -14,53 +14,41 @@ make_codeagent_handler(
 )
 }
 \arguments{
-\item{client_factory}{\verb{function()} returning a codeagent client, e.g.
-\code{function() codeagent::codeagent_client(chat = my_chat, register_tools = FALSE)}.
-The host constructs the client so it controls the model, permission mode,
-and which domain tools to register. Called once per thread (cached).}
+\item{client_factory}{\verb{function()} returning a codeagent client. Called once
+per thread and cached for the lifetime of this handler.}
 
-\item{approval_tools}{Optional character vector of tool names to \emph{additionally}
-force through approval (mapped to the gate's \code{rules$ask}), on top of what
-\code{permission_mode} already prompts for. Note: only approve/deny is supported
-for codeagent tools — the gate cannot rewrite tool input, so any edited
-arguments (\code{decision$updatedInput}) are ignored (that is a Claude-only
-feature via \code{client$approve_tool(updated_input=)}).}
+\item{approval_tools}{Optional tool names to additionally force through the
+approval card, on top of \code{permission_mode}.}
 
-\item{permission_mode}{codeagent permission mode installed on the gate:
-\code{"default"} (write/execute tools prompt for approval; reads auto-allow),
-\code{"acceptEdits"}, \code{"plan"}, or \code{"bypassPermissions"}/\code{"bypass"} (auto-run,
-no prompts — trusted environments only). The handler owns this policy (it
-drives the UI approval card), overriding any mode set on the client.}
+\item{permission_mode}{A current codeagent permission mode: \code{"default"},
+\code{"plan"}, \code{"accept_edits"}, \code{"bypass"}, \code{"dont_ask"}, \code{"auto"}, or
+\code{"bubble"}. \code{"bypass"} auto-runs tools and is for trusted environments.}
 
-\item{store}{Optional persistence adapter with a \code{save(thread_id, client, ...)}
-method (Phase C uses codeagent's lossless session instead).}
+\item{store}{Optional persistence adapter with \code{save(thread_id, chat, ...)}.
+It receives the underlying ellmer chat after successful non-Shield turns.
+Shield-backed turns are not persisted by this adapter.}
 
-\item{stream_fn}{Advanced/testing: the streaming function to drive. Defaults
-to \code{codeagent::codeagent_stream_async}. Injectable so the adapter can be
-unit-tested without a live model.}
+\item{stream_fn}{Advanced/testing streaming function. Defaults to
+\code{codeagent::codeagent_stream_async}.}
 
-\item{gate_fn}{Advanced/testing: the permission-gate installer. Defaults to
-\code{codeagent::install_permission_gate}. Injectable so the approval bridge can
-be unit-tested (and, later, replaced by an out-of-process transport)
-without a live gate.}
+\item{gate_fn}{Advanced/testing permission-gate installer. Defaults to
+\code{codeagent::install_permission_gate}.}
 }
 \value{
-A \code{coro::async} handler suitable for \code{\link[=assistantUIServer]{assistantUIServer()}}'s \code{handler}.
+A \code{coro::async} handler suitable for \code{\link[=assistantUIServer]{assistantUIServer()}}. It has
+\code{warmup} and \code{teardown} attributes for session lifecycle management.
 }
 \description{
 Adapter that lets \code{\link[=assistantUIServer]{assistantUIServer()}} drive a
 \href{https://github.com/kaipingyang/codeagent}{codeagent} agent instead of a
-bare \code{ellmer::Chat} — gaining codeagent's harness (multi-turn self-healing,
-central permission gate, compaction, skills/hooks, lossless sessions). It is a
-pure addition: it does not modify or replace \code{\link[=make_ellmer_handler]{make_ellmer_handler()}} /
-\code{make_claude_handler()}; hosts that never call it are unaffected.
+bare \code{ellmer::Chat} — gaining codeagent's harness (agent loop, central
+permission gate, compaction, skills/hooks, sessions, and rich tool output).
 }
 \details{
-\strong{Phase B (this release):} streaming + typed tool display forwarding \strong{plus
-permission approval} — sensitive tools (write/execute) are gated by
-codeagent's central permission gate, bridged to the in-app approval card. No
-concurrent sub-agents yet (background agents are a follow-up phase). Requires
-the \code{codeagent} package (Suggests).
+When a client has an active \code{DataShield}, assistant text is held server-side,
+scanned as one complete response, and only then released to the browser.
+Thinking, raw tool arguments, and rich display payloads are suppressed in
+this mode so they cannot bypass the shield through another UI callback.
 }
 \seealso{
 \code{\link[=make_ellmer_handler]{make_ellmer_handler()}} for the lighter bare-ellmer backend.

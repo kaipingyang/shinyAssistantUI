@@ -6,6 +6,17 @@
   terminal suffix is appended, so normal streaming is not duplicated. Error results use the
   existing error UI, while an intentional user Deny remains a normal stopped turn.
 
+
+- **codeagent Data Shield-safe adapter and showcase (Plan 65)**: `make_codeagent_handler()`
+  now maps codeagent usage, sends image attachments as native ellmer content, and forwards all
+  images from rich tool results. With Data Shield active, assistant output is held server-side,
+  scanned as a complete response, and only then released; prompt scans fail closed, while
+  thinking, raw tool arguments, provider tool IDs, unscanned tool values, approval inputs, and
+  parallel rich-display payloads cannot bypass that boundary. Shield-backed turns are not passed
+  to the optional persistence adapter. Error/cancel terminal states no longer also report normal
+  completion, and handler teardown closes per-thread shields.
+  Example 27 is now a per-session workbench/Data Shield showcase covering permissions, Stop,
+  usage, rich R results, images, project skills, and configured MCP/agent tools.
 # shinyAssistantUI 0.5.2
 
 - **Project-prefixed file links (Plan 62)**: when the add-in is already rooted at a
