@@ -487,6 +487,37 @@ describe("useShinyRuntime — ordinary action correlation", () => {
 
 
 describe("useShinyRuntime — permission progress correlation", () => {
+
+  it.each([
+    ["ok", "Conversation compacted", "✓ Conversation compacted"],
+    ["error", "Compact timed out", "⚠️ Compact timed out"],
+  ] as const)("settles compact progress with %s without starting an AI run", async (status, message, expected) => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.invokeAction({ id: "compact", label: "Compact conversation" });
+    });
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId: request.threadId,
+      requestId: request.requestId,
+      actionId: "compact",
+      status: "progress",
+      message: "Compacting conversation…",
+    });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+
+    await fireR("action-result", {
+      threadId: request.threadId,
+      requestId: request.requestId,
+      actionId: "compact",
+      status,
+      message,
+    });
+    const ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
+    const text = (ack.content as any[]).map((part) => part.text ?? "").join("");
+    expect(text).toBe(expected);
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+  });
   const config = {
     ui_capabilities: {
       permission_mode: {

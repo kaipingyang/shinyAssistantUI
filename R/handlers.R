@@ -978,6 +978,347 @@ make_ellmer_session_loader <- function(store) {
   }
 }
 
+.new_claude_text_guard <- function(on_text, max_prefix_chars = 64L) {
+  pending <- ""
+  deferred_course_spaces <- 0L
+  at_line_start <- TRUE
+  suppress_rest <- FALSE
+  malformed <- FALSE
+  in_fence <- FALSE
+  fence_marker <- NULL
+  max_prefix_chars <- max(32L, as.integer(max_prefix_chars))
+  course_marker <- "course_status"
+  malformed_prefixes <- c("call <invoke name=", "<invoke name=")
+
+  emit <- function(text) {
+    if (nzchar(text)) on_text(text)
+  }
+  mark_malformed <- function() {
+    malformed <<- TRUE
+    suppress_rest <<- TRUE
+    pending <<- ""
+    deferred_course_spaces <<- 0L
+  }
+  malformed_line <- function(text) {
+    grepl("^(call[ \\t]+)?<invoke[ \\t]+name[ \\t]*=", trimws(text))
+  }
+
+  consume <- NULL
+  consume <- function(text) {
+    if (suppress_rest || !nzchar(text)) return(invisible(NULL))
+
+    if (deferred_course_spaces > 0L) {
+      first_non_space <- regexpr("[^ \\t]", text)[[1L]]
+      if (first_non_space < 0L) {
+        deferred_course_spaces <<- deferred_course_spaces +
+          nchar(text, type = "chars")
+        return(invisible(NULL))
+      }
+      leading_spaces <- first_non_space - 1L
+      deferred_course_spaces <<- deferred_course_spaces + leading_spaces
+      next_char <- substr(text, first_non_space, first_non_space)
+      if (identical(next_char, "\n")) {
+        # The deferred whitespace belongs to a standalone marker line.
+        text <- substr(text, first_non_space, nchar(text))
+      } else {
+        # It was ordinary prose beginning with the same token; restore spacing.
+        pending <<- paste0(
+          pending,
+          strrep(" ", deferred_course_spaces)
+        )
+        text <- substr(text, first_non_space, nchar(text))
+      }
+      deferred_course_spaces <<- 0L
+    }
+
+    if (!at_line_start) {
+      newline <- regexpr("\n", text, fixed = TRUE)[[1L]]
+      if (newline < 0L) {
+        emit(text)
+        return(invisible(NULL))
+      }
+      emit(substr(text, 1L, newline))
+      at_line_start <<- TRUE
+      remainder <- substr(text, newline + 1L, nchar(text))
+      if (nzchar(remainder)) consume(remainder)
+      return(invisible(NULL))
+    }
+
+    pending <<- paste0(pending, text)
+    repeat {
+      newline <- regexpr("\n", pending, fixed = TRUE)[[1L]]
+      if (newline > 0L) {
+        line <- substr(pending, 1L, newline)
+        pending <<- substr(pending, newline + 1L, nchar(pending))
+        body <- sub("[\\r\\n]+$", "", line)
+        trimmed <- trimws(body)
+        line_fence <- NULL
+        if (startsWith(trimmed, "```")) line_fence <- "```"
+        if (startsWith(trimmed, "~~~")) line_fence <- "~~~"
+        matching_fence <- !is.null(line_fence) &&
+          (!in_fence || identical(line_fence, fence_marker))
+        if (matching_fence) {
+          emit(line)
+          if (in_fence) {
+            in_fence <<- FALSE
+            fence_marker <<- NULL
+          } else {
+            in_fence <<- TRUE
+            fence_marker <<- line_fence
+          }
+        } else if (in_fence) {
+          emit(line)
+        } else if (identical(trimmed, course_marker)) {
+          # Provider-only status marker: omit the complete standalone line.
+        } else if (malformed_line(body)) {
+          mark_malformed()
+          return(invisible(NULL))
+        } else {
+          emit(line)
+        }
+        at_line_start <<- TRUE
+        if (!nzchar(pending)) return(invisible(NULL))
+        next
+      }
+
+      left_trimmed <- sub("^[ \\t]*", "", pending)
+      allowed_fences <- if (in_fence) fence_marker else c("```", "~~~")
+      fence_confirmed <- vapply(
+        allowed_fences,
+        function(marker) startsWith(left_trimmed, marker),
+        logical(1)
+      )
+      if (any(fence_confirmed)) {
+        matched_fence <- allowed_fences[[which(fence_confirmed)[[1L]]]]
+        emit(pending)
+        pending <<- ""
+        at_line_start <<- FALSE
+        if (in_fence) {
+          in_fence <<- FALSE
+          fence_marker <<- NULL
+        } else {
+          in_fence <<- TRUE
+          fence_marker <<- matched_fence
+        }
+        return(invisible(NULL))
+      }
+      fence_candidate <- any(vapply(
+        allowed_fences,
+        function(marker) startsWith(marker, left_trimmed),
+        logical(1)
+      ))
+      if (in_fence && !fence_candidate) {
+        emit(pending)
+        pending <<- ""
+        at_line_start <<- FALSE
+        return(invisible(NULL))
+      }
+
+      malformed_confirmed <- !in_fence && any(vapply(
+        malformed_prefixes,
+        function(prefix) startsWith(left_trimmed, prefix),
+        logical(1)
+      ))
+      if (malformed_confirmed) {
+        mark_malformed()
+        return(invisible(NULL))
+      }
+
+      course_candidate <- !in_fence && (
+        startsWith(course_marker, left_trimmed) ||
+          grepl("^course_status[ \\t]*$", left_trimmed)
+      )
+      malformed_candidate <- !in_fence && any(vapply(
+        malformed_prefixes,
+        function(prefix) startsWith(prefix, left_trimmed),
+        logical(1)
+      ))
+      candidate <- course_candidate || malformed_candidate || fence_candidate
+      course_trailing_spaces <- !in_fence &&
+        grepl("^course_status[ \\t]+$", left_trimmed)
+      if (course_trailing_spaces &&
+          nchar(pending, type = "chars") > max_prefix_chars) {
+        without_trailing <- sub("[ \\t]+$", "", pending)
+        trailing_chars <- nchar(pending, type = "chars") -
+          nchar(without_trailing, type = "chars")
+        deferred_course_spaces <<- deferred_course_spaces + trailing_chars
+        first_content <- regexpr("[^ \\t]", without_trailing)[[1L]]
+        leading_chars <- if (first_content < 0L) 0L else first_content - 1L
+        if (leading_chars > 16L) {
+          excess <- leading_chars - 16L
+          emit(substr(without_trailing, 1L, excess))
+          without_trailing <- substr(
+            without_trailing,
+            excess + 1L,
+            nchar(without_trailing)
+          )
+        }
+        pending <<- without_trailing
+        return(invisible(NULL))
+      }
+      if (candidate) {
+        first_non_space <- regexpr("[^ \\t]", pending)[[1L]]
+        leading_chars <- if (first_non_space < 0L) {
+          nchar(pending, type = "chars")
+        } else {
+          first_non_space - 1L
+        }
+        # Emit only harmless excess indentation while retaining enough prefix
+        # to recognize a marker split after arbitrarily many spaces.
+        keep_indent <- 16L
+        if (leading_chars > keep_indent) {
+          excess <- leading_chars - keep_indent
+          emit(substr(pending, 1L, excess))
+          pending <<- substr(pending, excess + 1L, nchar(pending))
+        }
+        if (nchar(pending, type = "chars") <= max_prefix_chars) {
+          return(invisible(NULL))
+        }
+      }
+
+      emit(pending)
+      pending <<- ""
+      at_line_start <<- FALSE
+      return(invisible(NULL))
+    }
+  }
+
+  finish <- function() {
+    if (suppress_rest) return(invisible(NULL))
+    if (nzchar(pending)) {
+      if (in_fence) {
+        emit(pending)
+        pending <<- ""
+      } else if (identical(trimws(pending), course_marker)) {
+        pending <<- ""
+      } else if (malformed_line(pending)) {
+        mark_malformed()
+      } else {
+        emit(pending)
+        pending <<- ""
+      }
+    }
+    invisible(NULL)
+  }
+
+  list(
+    push = consume,
+    finish = finish,
+    malformed_seen = function() malformed,
+    buffered_chars = function() nchar(pending, type = "chars")
+  )
+}
+
+.claude_filter_complete_text <- function(text) {
+  output <- character(0)
+  guard <- .new_claude_text_guard(function(value) output <<- c(output, value))
+  guard$push(text %||% "")
+  guard$finish()
+  list(
+    text = paste0(output, collapse = ""),
+    malformed = guard$malformed_seen()
+  )
+}
+
+.claude_compact_timeout_seconds <- function() {
+  value <- suppressWarnings(as.numeric(
+    getOption("shinyAssistantUI.claude_compact_timeout", 180)
+  ))
+  if (length(value) != 1L || !is.finite(value) || value < 0) 180 else value
+}
+
+# Start a non-blocking compact drain. The total wall clock is measured from this
+# call and is never reset by empty polls or unrelated provider messages.
+.claude_start_compact_poll <- function(
+    client,
+    on_terminal,
+    persist_result = function(message) invisible(NULL),
+    timeout_seconds = .claude_compact_timeout_seconds(),
+    poll_interval = 0.25,
+    now = Sys.time,
+    schedule = function(callback, delay) later::later(callback, delay = delay)) {
+  started <- now()
+  settled <- FALSE
+
+  elapsed_seconds <- function() {
+    elapsed <- now() - started
+    if (inherits(elapsed, "difftime")) {
+      as.numeric(elapsed, units = "secs")
+    } else {
+      as.numeric(elapsed)
+    }
+  }
+  finish <- function(status, message) {
+    if (settled) return(invisible(FALSE))
+    settled <<- TRUE
+    on_terminal(status, message)
+    invisible(TRUE)
+  }
+
+  poll <- NULL
+  poll <- function() {
+    if (settled) return(invisible(NULL))
+    if (elapsed_seconds() >= timeout_seconds) {
+      finish("error", "Compact timed out")
+      return(invisible(NULL))
+    }
+
+    messages <- tryCatch(
+      client$poll_messages(),
+      error = function(error) error
+    )
+    if (inherits(messages, "error")) {
+      finish("error", paste0("Compact failed: ", conditionMessage(messages)))
+      return(invisible(NULL))
+    }
+
+    result <- NULL
+    for (message in (messages %||% list())) {
+      if (inherits(message, "ResultMessage")) {
+        result <- message
+        break
+      }
+    }
+    if (!is.null(result)) {
+      if (isTRUE(result$is_error)) {
+        finish("error", paste0(
+          "Compact failed: ", .claude_result_error_message(result)
+        ))
+      } else {
+        persist_error <- tryCatch({
+          persist_result(result)
+          NULL
+        }, error = function(error) error)
+        if (inherits(persist_error, "error")) {
+          finish("error", paste0(
+            "Compact completed but session persistence failed: ",
+            conditionMessage(persist_error)
+          ))
+        } else {
+          finish("ok", "Conversation compacted")
+        }
+      }
+      return(invisible(NULL))
+    }
+
+    tryCatch(
+      schedule(poll, poll_interval),
+      error = function(error) finish(
+        "error", paste0("Compact polling failed: ", conditionMessage(error))
+      )
+    )
+    invisible(NULL)
+  }
+
+  tryCatch(
+    schedule(poll, poll_interval),
+    error = function(error) finish(
+      "error", paste0("Compact polling failed: ", conditionMessage(error))
+    )
+  )
+  invisible(list(is_settled = function() settled))
+}
+
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
 #' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
@@ -1131,6 +1472,8 @@ make_claude_handler <- function(options       = NULL,
 
   clients <- list()
   commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
+  active_turns <- list()
+  compact_in_progress <- list()
 
   get_client <- function(thread_id) {
     if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
@@ -1302,25 +1645,38 @@ make_claude_handler <- function(options       = NULL,
         # 请求前端创建一个全新的空线程。新线程首次发言时才会创建 client。
         ok("Starting new conversation", value = list(effect = "new-thread"))
       } else if (identical(id, "compact")) {
-        # /compact 无直接 SDK 方法 —— 经输入流发 "/compact",由 CLI 解析压缩上下文。
-        # 慢操作:先报 progress(转圈),用 later 非阻塞轮询 drain,收到 ResultMessage 报成功。
+        # /compact 与普通 turn 都消费同一个 SDK 队列，必须保持每线程单消费者。
         if (is.null(cl)) { ok("No active session to compact"); return(invisible()) }
-        send_action_result("Compacting conversation\u2026", "progress")
-        cl$send("/compact")
-        t0 <- Sys.time()
-        poll <- function() {
-          done <- FALSE
-          msgs <- tryCatch(cl$poll_messages(), error = function(e) NULL)
-          for (m in (msgs %||% list())) if (inherits(m, "ResultMessage")) done <- TRUE
-          if (isTRUE(done)) {
-            ok("Conversation compacted")
-          } else if (as.numeric(Sys.time() - t0) > 180) {
-            err("Compact timed out")
-          } else {
-            later::later(poll, 0.25)
-          }
+        if (isTRUE(active_turns[[thread_id]])) {
+          err("Cannot compact while a response is running")
+          return(invisible(NULL))
         }
-        later::later(poll, 0.25)
+        if (isTRUE(compact_in_progress[[thread_id]])) {
+          err("Conversation compaction is already running")
+          return(invisible(NULL))
+        }
+        compact_in_progress[[thread_id]] <<- TRUE
+        release_compact <- function() {
+          compact_in_progress[[thread_id]] <<- NULL
+          invisible(NULL)
+        }
+        tryCatch({
+          send_action_result("Compacting conversation\u2026", "progress")
+          cl$send("/compact")
+          .claude_start_compact_poll(
+            client = cl,
+            on_terminal = function(status, message) {
+              release_compact()
+              if (identical(status, "ok")) ok(message) else err(message)
+            },
+            persist_result = function(message) {
+              persist_session(thread_id, message$session_id)
+            }
+          )
+        }, error = function(error) {
+          release_compact()
+          stop(error)
+        })
       } else if (identical(id, "mcp")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
         status <- cl$get_mcp_status()
@@ -1398,6 +1754,19 @@ make_claude_handler <- function(options       = NULL,
     on_commands = NULL, on_warming = NULL,
     ide_context = NULL
   ) {
+    if (isTRUE(compact_in_progress[[thread_id]])) {
+      on_error("Conversation compaction is still running; retry after it finishes")
+      return(invisible(NULL))
+    }
+    if (isTRUE(active_turns[[thread_id]])) {
+      on_error("A response is already running for this conversation")
+      return(invisible(NULL))
+    }
+    active_turns[[thread_id]] <<- TRUE
+    on.exit({
+      active_turns[[thread_id]] <<- NULL
+    }, add = TRUE)
+
     # 每线程冷启动:该线程尚无 client → connect() 要 spawn CLI 子进程 + initialize,
     # 首条消息慢。先发"冷启动中"信号,并【让出事件循环】使指示器在阻塞 connect 之前
     # 就渲染出来(否则 sendCustomMessage 会排到 connect 之后才 flush,指示器出现太晚)。
@@ -1447,10 +1816,27 @@ make_claude_handler <- function(options       = NULL,
     chunk_count              <- 0L
     streamed_text            <- ""
     assistant_terminal_parts <- character(0)
+    assistant_stop_reason    <- NULL
+    structured_tool_seen     <- FALSE
+    malformed_text_seen      <- FALSE
     terminal_error           <- NULL
     intentional_deny         <- FALSE
     pending_tool_ids         <- character(0)
     tb               <- new.env(parent = emptyenv())
+
+    emit_guarded_text <- function(text) {
+      if (!nzchar(text)) return(invisible(NULL))
+      if (length(pending_tool_ids) > 0) {
+        for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
+        pending_tool_ids <<- character(0)
+      }
+      flush_tool_blocks(mark_completed = TRUE)
+      chunk_count <<- chunk_count + 1L
+      streamed_text <<- paste0(streamed_text, text)
+      on_chunk(text)
+      invisible(NULL)
+    }
+    text_guard <- .new_claude_text_guard(emit_guarded_text)
 
     flush_tool_blocks <- function(mark_completed = FALSE) {
       for (key in ls(tb)) {
@@ -1524,15 +1910,20 @@ make_claude_handler <- function(options       = NULL,
           bidx  <- as.character(evt[["index"]] %||% "")
           parent <- msg[["parent_tool_use_id"]]  # 子agent工具的父 Task 调用 id(用于嵌套缩进)
 
-          if (identical(etype, "content_block_start")) {
+          if (identical(etype, "message_delta")) {
+            assistant_stop_reason <- delta[["stop_reason"]] %||%
+              evt[["message"]][["stop_reason"]] %||% assistant_stop_reason
+          } else if (identical(etype, "content_block_start")) {
             blk <- evt[["content_block"]]
             if (identical(blk[["type"]], "tool_use")) {
+              structured_tool_seen <- TRUE
               tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
                                  args_buf="", emitted=FALSE, approval_handled=FALSE)
               if (!is.null(on_tool_call_start))
                 on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
                                    annotations=list(parentToolCallId=parent))
             } else if (identical(blk[["type"]], "server_tool_use")) {
+              structured_tool_seen <- TRUE
               # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
               # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
               tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
@@ -1554,14 +1945,8 @@ make_claude_handler <- function(options       = NULL,
             }
 
             if (identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
-              if (length(pending_tool_ids) > 0) {
-                for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
-                pending_tool_ids <- character(0)
-              }
-              flush_tool_blocks(mark_completed = TRUE)
-              chunk_count <- chunk_count + 1L
-              streamed_text <- paste0(streamed_text, delta[["text"]])
-              on_chunk(delta[["text"]])
+              text_guard$push(delta[["text"]])
+              malformed_text_seen <- isTRUE(text_guard$malformed_seen())
             }
             if (identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% ""))
               on_thinking(delta[["thinking"]])
@@ -1584,6 +1969,16 @@ make_claude_handler <- function(options       = NULL,
           }
 
         } else if (inherits(msg, "AssistantMessage")) {
+          assistant_stop_reason <- msg$stop_reason %||% assistant_stop_reason
+          if (length(msg$content %||% list())) {
+            has_structured_tool <- any(vapply(
+              msg$content,
+              function(block) inherits(block, "ToolUseBlock") ||
+                inherits(block, "ServerToolUseBlock"),
+              logical(1)
+            ))
+            if (has_structured_tool) structured_tool_seen <- TRUE
+          }
           # Some backend/image turns deliver final AssistantMessage content without
           # partial StreamEvent text deltas. Buffer it and emit only at ResultMessage
           # when chunk_count is still zero, so normal streaming never duplicates text.
@@ -1594,6 +1989,9 @@ make_claude_handler <- function(options       = NULL,
             assistant_terminal_parts <- c(assistant_terminal_parts, final_text)
 
         } else if (inherits(msg, "PermissionRequestMessage")) {
+          # PermissionRequestMessage is provider/harness-structured tool evidence
+          # even when a backend omits the preceding streaming content block.
+          structured_tool_seen <- TRUE
           # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
           # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
           # approve_tool/deny_tool 仍用 request_id。
@@ -1682,23 +2080,52 @@ make_claude_handler <- function(options       = NULL,
 
         } else if (inherits(msg, "ResultMessage")) {
           result_is_error <- isTRUE(msg$is_error)
+          text_guard$finish()
+          malformed_text_seen <- malformed_text_seen ||
+            isTRUE(text_guard$malformed_seen())
+
           if (result_is_error && !intentional_deny) {
             terminal_error <- .claude_result_error_message(msg)
             interrupt_tool_blocks()
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (!result_is_error) {
-            terminal_candidates <- character(0)
+            raw_terminal_candidates <- character(0)
             assistant_text <- paste0(assistant_terminal_parts, collapse = "")
             result_text <- .claude_result_text(msg)
-            if (nzchar(assistant_text)) terminal_candidates <- c(terminal_candidates, assistant_text)
-            if (nzchar(result_text)) terminal_candidates <- c(terminal_candidates, result_text)
-            for (terminal_text in terminal_candidates) {
-              missing_text <- .claude_terminal_suffix(streamed_text, terminal_text)
-              if (nzchar(missing_text)) {
-                chunk_count <- chunk_count + 1L
-                streamed_text <- paste0(streamed_text, missing_text)
-                on_chunk(missing_text)
+            if (nzchar(assistant_text)) {
+              raw_terminal_candidates <- c(raw_terminal_candidates, assistant_text)
+            }
+            if (nzchar(result_text)) {
+              raw_terminal_candidates <- c(raw_terminal_candidates, result_text)
+            }
+
+            terminal_candidates <- character(0)
+            for (terminal_text in raw_terminal_candidates) {
+              filtered <- .claude_filter_complete_text(terminal_text)
+              malformed_text_seen <- malformed_text_seen || isTRUE(filtered$malformed)
+              if (nzchar(filtered$text)) {
+                terminal_candidates <- c(terminal_candidates, filtered$text)
+              }
+            }
+
+            stop_reason <- msg$stop_reason %||% assistant_stop_reason
+            protocol_violation <- !structured_tool_seen &&
+              (malformed_text_seen || identical(stop_reason, "tool_use"))
+            if (protocol_violation) {
+              terminal_error <- paste0(
+                "Upstream protocol error: the model announced a tool call ",
+                "without a structured tool_use block. No text was executed."
+              )
+              interrupt_tool_blocks()
+              for (tid in pending_tool_ids) {
+                on_tool_result(tid, "Interrupted", is_error = TRUE)
+              }
+              pending_tool_ids <- character(0)
+            } else {
+              for (terminal_text in terminal_candidates) {
+                missing_text <- .claude_terminal_suffix(streamed_text, terminal_text)
+                if (nzchar(missing_text)) emit_guarded_text(missing_text)
               }
             }
           }
