@@ -43,6 +43,10 @@ assistantUIServer(
   on_set_composer_density = NULL,
   run_r_enabled = NULL,
   on_toggle_run_r = NULL,
+  auto_start_copilot_api = NULL,
+  on_toggle_auto_start_copilot_api = NULL,
+  service_status = NULL,
+  on_retry_service = NULL,
   thread_max_width = NULL,
   show_usage = FALSE,
   context_window = NULL,
@@ -288,6 +292,20 @@ toggle (\code{NULL} hides it).}
 
 \item{on_toggle_run_r}{Optional \verb{function(value)} called when the \code{run_r}
 toggle changes.}
+
+\item{auto_start_copilot_api}{Optional logical initial state of the addin-only
+copilot-api auto-start preference (\code{NULL} hides the service controls).}
+
+\item{on_toggle_auto_start_copilot_api}{Optional \verb{function(value)} called when
+the copilot-api auto-start preference changes.}
+
+\item{service_status}{Optional named list describing the addin service state:
+\code{status} is one of \code{"disabled"}, \code{"checking"}, \code{"starting"}, \code{"ready"},
+or \code{"failed"}; optional \code{message} supplies detail. \code{NULL} means the generic
+widget has no service readiness barrier.}
+
+\item{on_retry_service}{Optional zero-argument function called when the user
+retries a failed addin service startup.}
 
 \item{thread_max_width}{Optional CSS length capping the chat content width
 (e.g. \code{"44rem"}, \code{"800px"}). Default \code{NULL} = \strong{full width} (fills the

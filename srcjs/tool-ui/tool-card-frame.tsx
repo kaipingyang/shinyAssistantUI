@@ -2,8 +2,8 @@
 // 缩进 + 决策记忆。ShinyToolFallback(默认审批体)和各 per-tool 交互组件(如 AskUserQuestion)
 // 都复用它,交互体经 `approvalBody` 插槽注入 —— 这是官方"per-message inline tool render
 // override"模式的落地(替代已 deprecated 的 makeAssistantToolUI/useAssistantToolUI 注册表)。
-import { useState, useEffect, useRef, type ReactNode } from "react";
-import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { useState, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
+import { useThreadViewport, type ToolCallMessagePartProps } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ShinyToolResult } from "@/shiny-tool-result";
 import { computeToolDepth, toolHistoryDefaultOpen, toolCallSummary } from "@/helpers";
@@ -125,18 +125,29 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
 
-  // 连续审批时,新审批框出现要主动滚进视口(轮次挂起时 assistant-ui 的自动滚动不触发)。
+  // 审批卡只在用户原本跟随底部时主动 reveal；如果用户正在上方阅读历史，
+  // 不再用无条件 scrollIntoView 把视口劫持回来。审批完成后再次滚到底，
+  // 让后续 tool/text stream 重新进入 assistant-ui 的 auto-follow 状态。
   const showApproval = pending && needsApproval && decision === null;
   const approvalRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (showApproval) {
-      const id = window.setTimeout(
-        () => approvalRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }),
-        50,
-      );
-      return () => window.clearTimeout(id);
-    }
-  }, [showApproval]);
+  const viewport = useThreadViewport({ optional: true });
+  const isAtBottom = viewport?.isAtBottom ?? false;
+  const scrollToBottom = viewport?.scrollToBottom;
+  const previousShowApprovalRef = useRef(false);
+  const approvalWasFollowingRef = useRef(false);
+  useLayoutEffect(() => {
+    const justOpened = showApproval && !previousShowApprovalRef.current;
+    const justSettled = !showApproval && previousShowApprovalRef.current && decision !== null;
+    previousShowApprovalRef.current = showApproval;
+    if (justOpened) approvalWasFollowingRef.current = isAtBottom;
+    if (!((justOpened && isAtBottom) || (justSettled && approvalWasFollowingRef.current))) return;
+    if (!scrollToBottom) return;
+    const scroll = scrollToBottom;
+    const id = window.setTimeout(() => {
+      scroll({ behavior: "smooth" });
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [showApproval, decision, isAtBottom, scrollToBottom]);
 
   return (
     <div

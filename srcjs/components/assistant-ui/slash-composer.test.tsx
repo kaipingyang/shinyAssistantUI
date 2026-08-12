@@ -356,6 +356,103 @@ describe("Lexical slash composer", () => {
   });
 });
 
+describe("copilot-api service state", () => {
+  it("renders ready as a compact green line below the Composer", () => {
+    const { getByTestId } = render(
+      <Widget
+        id="service-ready"
+        context={{ serviceState: { status: "ready" } } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-service-ready");
+    const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+    const ready = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_service_status"][data-status="ready"]',
+    );
+    const icon = ready?.querySelector<HTMLElement>("[data-slot='aui_service_ready_icon']");
+
+    expect(composer).not.toBeNull();
+    expect(ready).not.toBeNull();
+    expect(ready?.dataset.compact).toBe("true");
+    expect(composer!.compareDocumentPosition(ready!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(ready?.className).not.toContain("rounded-lg");
+    expect(ready?.className).not.toContain("border-border");
+    expect(icon?.className).toMatch(/text-green-/);
+    expect(editorIn(widget).getAttribute("contenteditable")).toBe("true");
+  });
+
+  it.each(["checking", "starting", "failed"] as const)(
+    "renders actionable %s state above the Composer",
+    (status) => {
+      const retryService = vi.fn();
+      const context = {
+        serviceState: {
+          status,
+          message: status === "failed" ? "copilot-api did not become ready" : undefined,
+        },
+        retryService,
+      } as unknown as Partial<ShinyConfigCtx>;
+      const { getByTestId } = render(
+        <Widget id={`service-${status}`} context={context} />,
+      );
+      const widget = getByTestId(`widget-service-${status}`);
+      const service = widget.querySelector<HTMLElement>(
+        `[data-slot="aui_service_status"][data-status="${status}"]`,
+      );
+      const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+
+      expect(service).not.toBeNull();
+      expect(composer).not.toBeNull();
+      expect(service!.compareDocumentPosition(composer!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      expect(editorIn(widget).getAttribute("contenteditable")).toBe("true");
+
+      if (status === "failed") {
+        const retry = within(widget).getByRole("button", { name: /retry/i });
+        fireEvent.click(retry);
+        expect(retryService).toHaveBeenCalledOnce();
+      }
+    },
+  );
+});
+
+describe("Claude checklist lifecycle controls", () => {
+  it("offers an exact-revision close action only after every task completes", () => {
+    const dismissChecklist = vi.fn();
+    const completed = {
+      threadId: "thread-a",
+      revision: "rev-complete",
+      allCompleted: true,
+      visibleItems: [{ id: "1", content: "Done", status: "completed" }],
+      overflowCount: 0,
+    };
+    const { getByTestId, rerender } = render(
+      <Widget
+        id="checklist-close"
+        context={{ checklist: completed, dismissChecklist } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-checklist-close");
+    fireEvent.click(within(widget).getByRole("button", { name: /dismiss completed checklist/i }));
+    expect(dismissChecklist).toHaveBeenCalledWith("thread-a", "rev-complete");
+
+    rerender(
+      <Widget
+        id="checklist-close"
+        context={{
+          checklist: {
+            ...completed,
+            revision: "rev-active",
+            allCompleted: false,
+            visibleItems: [{ id: "1", content: "Working", status: "in_progress" }],
+          },
+          dismissChecklist,
+        } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(within(widget).queryByRole("button", { name: /dismiss completed checklist/i })).toBeNull();
+  });
+});
+
 
 describe("historical thread paging controls", () => {
   it("renders reading and restoring as separate phases", () => {

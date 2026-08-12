@@ -8,7 +8,8 @@
     defaultPermissionMode = "default",
     modeVisibility        = list(showBypass = TRUE, showYolo = TRUE),
     composerDensity       = "comfortable",
-    runREnabled           = TRUE
+    runREnabled           = TRUE,
+    autoStartCopilotApi   = TRUE
   )
 }
 
@@ -32,6 +33,8 @@
   cd <- raw$composerDensity
   if (is.character(cd) && length(cd) >= 1L && cd[[1L]] %in% c("comfortable", "compact")) d$composerDensity <- cd[[1L]]
   if (!is.null(raw$runREnabled)) d$runREnabled <- isTRUE(raw$runREnabled)
+  if (!is.null(raw$autoStartCopilotApi))
+    d$autoStartCopilotApi <- isTRUE(raw$autoStartCopilotApi)
   d
 }
 

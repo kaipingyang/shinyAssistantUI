@@ -260,6 +260,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           </div>
 
           <ThreadPrimitive.ViewportFooter
+            data-slot="aui_thread-viewport-footer"
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
@@ -268,10 +269,15 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           >
             <ThreadScrollToBottom />
             <ShinyStatusPanels />
+            <ShinyServiceStatus />
+            <ShinyChecklistPanel />
             {/* Plan 48B: 动态 follow-up 建议 chip(自带 !isEmpty && !isRunning && 有建议 门禁)*/}
             <ThreadFollowupSuggestions />
-            <Composer />
-            <ShinyUsageFooter />
+            <div data-slot="aui_composer-stack" className="flex flex-col gap-1">
+              <Composer />
+              <ShinyServiceReadyLine />
+              <ShinyUsageFooter />
+            </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -495,12 +501,154 @@ const ShinyWarmingIndicator: FC = () => {
   );
 };
 
-const ShinyStatusPanels: FC = () => {
-  const { rateLimit, tasks, statusText, stopTask } = useShinyConfig();
-  const activeTasks = (tasks ?? []).filter(
-    (task) => !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(task.status ?? ""),
+const ShinyServiceStatus: FC = () => {
+  const {
+    serviceState, pendingServiceSubmissions, retryService,
+    cancelPendingServiceSubmissions,
+  } = useShinyConfig();
+  if (!serviceState || serviceState.status === "ready") return null;
+  const labels = {
+    disabled: "copilot-api auto-start is disabled",
+    checking: "Checking copilot-api…",
+    starting: "Starting copilot-api…",
+    ready: "copilot-api is ready",
+    failed: "copilot-api is not ready",
+  } as const;
+  const busy = serviceState.status === "checking" || serviceState.status === "starting";
+  return (
+    <div
+      data-slot="aui_service_status"
+      data-status={serviceState.status}
+      role="status"
+      aria-live="polite"
+      className="aui-service-status flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
+    >
+      {busy ? (
+        <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      ) : (
+        <span aria-hidden="true">{serviceState.status === "failed" ? "⚠" : "○"}</span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">{labels[serviceState.status]}</span>
+        {serviceState.message && serviceState.message !== labels[serviceState.status] ? (
+          <span className="text-muted-foreground ms-2">{serviceState.message}</span>
+        ) : null}
+        {(pendingServiceSubmissions ?? 0) > 0 ? (
+          <span data-slot="aui_service_pending" className="text-muted-foreground ms-2">
+            · {pendingServiceSubmissions} submission{pendingServiceSubmissions === 1 ? "" : "s"} waiting
+          </span>
+        ) : null}
+      </span>
+      {serviceState.status === "failed" && retryService ? (
+        <button
+          type="button"
+          onClick={retryService}
+          className="rounded border px-2 py-0.5 text-xs hover:bg-accent"
+        >
+          Retry
+        </button>
+      ) : null}
+      {(pendingServiceSubmissions ?? 0) > 0 && cancelPendingServiceSubmissions ? (
+        <button
+          type="button"
+          onClick={cancelPendingServiceSubmissions}
+          className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+        >
+          Cancel waiting
+        </button>
+      ) : null}
+    </div>
   );
-  const hasAny = rateLimit || activeTasks.length > 0 || statusText;
+};
+
+const ShinyServiceReadyLine: FC = () => {
+  const {
+    serviceState, pendingServiceSubmissions, cancelPendingServiceSubmissions,
+  } = useShinyConfig();
+  if (serviceState?.status !== "ready") return null;
+  return (
+    <div
+      data-slot="aui_service_status"
+      data-status="ready"
+      data-compact="true"
+      role="status"
+      aria-live="polite"
+      className="aui-service-ready flex min-h-5 items-center gap-1.5 px-1 py-0.5 text-[11px] text-green-700 dark:text-green-400"
+    >
+      <span data-slot="aui_service_ready_icon" className="shrink-0 font-bold text-green-600 dark:text-green-400" aria-hidden="true">✓</span>
+      <span className="font-medium">copilot-api is ready</span>
+      {(pendingServiceSubmissions ?? 0) > 0 ? (
+        <span data-slot="aui_service_pending" className="text-muted-foreground">
+          · {pendingServiceSubmissions} submission{pendingServiceSubmissions === 1 ? "" : "s"} waiting
+        </span>
+      ) : null}
+      {(pendingServiceSubmissions ?? 0) > 0 && cancelPendingServiceSubmissions ? (
+        <button
+          type="button"
+          onClick={cancelPendingServiceSubmissions}
+          className="ms-auto rounded px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+        >
+          Cancel waiting
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
+const ShinyChecklistPanel: FC = () => {
+  const { checklist, dismissChecklist } = useShinyConfig();
+  if (!checklist || checklist.visibleItems.length === 0) return null;
+  return (
+    <div
+      data-slot="aui_claude_checklist"
+      data-checklist-revision={checklist.revision}
+      data-all-completed={checklist.allCompleted ? "true" : "false"}
+      className="aui-claude-checklist max-h-[min(12rem,35vh)] overflow-y-auto rounded-lg border border-border bg-background/95 px-3 py-2 text-sm shadow-sm"
+    >
+      <div className="mb-1 flex items-center gap-2 text-xs font-semibold">
+        <span>Claude checklist</span>
+        {checklist.allCompleted && dismissChecklist ? (
+          <button
+            type="button"
+            aria-label="Dismiss completed checklist"
+            title="Close checklist"
+            onClick={() => dismissChecklist(checklist.threadId, checklist.revision)}
+            className="text-muted-foreground hover:bg-accent hover:text-foreground ms-auto inline-flex size-5 items-center justify-center rounded"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        ) : null}
+      </div>
+      <ul className="flex flex-col gap-1">
+        {checklist.visibleItems.map((item) => {
+          const complete = item.status === "completed";
+          const running = item.status === "in_progress";
+          return (
+            <li key={item.id} data-checklist-status={item.status} className="flex items-start gap-2 text-xs">
+              <span className={complete ? "text-green-600" : running ? "text-blue-600" : "text-muted-foreground"}>
+                {complete ? "✓" : running ? "◐" : "○"}
+              </span>
+              <span className={complete ? "text-muted-foreground line-through" : ""}>
+                {running && item.activeForm ? item.activeForm : item.content}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      {checklist.overflowCount > 0 ? (
+        <div data-slot="aui_checklist_overflow" className="text-muted-foreground mt-1 text-[11px]">
+          +{checklist.overflowCount} more
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const ShinyStatusPanels: FC = () => {
+  const { rateLimit, tasks, recentTasks, statusText, stopTask } = useShinyConfig();
+  const activeTasks = tasks ?? [];
+  const recent = (recentTasks ?? []).slice(0, 3);
+  const hasAny = rateLimit || activeTasks.length > 0 || recent.length > 0 || statusText;
   if (!hasAny) return null;
   return (
     <div className="aui-sdk-panels flex flex-col gap-2">
@@ -525,21 +673,32 @@ const ShinyStatusPanels: FC = () => {
           <span className="flex-1 truncate">
             {task.description || task.summary || `Subagent ${task.taskId.slice(0, 6)}`}
             {task.toolName ? <span className="text-muted-foreground"> · {task.toolName}</span> : null}
-            {task.status ? <span className="text-muted-foreground"> · {task.status}</span> : null}
+            {task.status ? <span className="text-muted-foreground"> · {task.stopping ? "stopping" : task.status}</span> : null}
+            <span className="text-muted-foreground"> · {Math.max(0, Math.round((task.updatedAt - task.startedAt) / 1000))}s</span>
           </span>
           {stopTask && (
             <button
               type="button"
               data-slot="aui_task_stop"
               data-stop-task={task.taskId}
+              disabled={task.stopping}
               onClick={() => stopTask(task.taskId)}
-              className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+              className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10 disabled:cursor-wait disabled:opacity-60"
             >
-              Stop
+              {task.stopping ? "Stopping…" : "Stop"}
             </button>
           )}
         </div>
       ))}
+      {recent.length > 0 && (
+        <div data-slot="aui_task_recent" className="flex flex-wrap gap-1 px-1 text-[11px] text-muted-foreground">
+          {recent.map((task) => (
+            <span key={task.taskId} data-task-status={task.status} className="rounded border px-1.5 py-0.5">
+              {task.description || task.summary || task.taskId.slice(0, 6)} · {task.status}
+            </span>
+          ))}
+        </div>
+      )}
       {statusText && (
         <div
           className="aui-status-line flex items-center gap-2 px-1 text-xs text-muted-foreground"

@@ -260,3 +260,31 @@ describe("bridge IDE context and workspace search", () => {
     expect(results).toHaveLength(1);
   });
 });
+
+
+describe("bridge service/run correlation", () => {
+  it("buffers an early service status until runtime registration", () => {
+    const b = createShinyBridge("chat");
+    handlers["chat:service-status"]({ status: "ready", autoStart: true });
+    const received: unknown[] = [];
+    b.onServiceStatus((value) => received.push(value));
+    expect(received).toEqual([{ status: "ready", autoStart: true }]);
+  });
+
+  it("forwards runId on terminal messages and reservation inputs", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:done"]({ threadId: "t1", runId: "run-1" });
+    handlers["chat:error"]({ threadId: "t1", runId: "run-2", message: "bad" });
+    expect(cb.calls.done).toEqual([[undefined, "run-1"]]);
+    expect(cb.calls.error).toEqual([["bad", "run-2"]]);
+
+    b.reserveIdeContext("submission-1", "t1", true);
+    b.cancelReservedSubmissions(["submission-1"]);
+    expect(inputValues.find((value) => value.id === "chat_reserve_submission")?.value)
+      .toMatchObject({ submissionId: "submission-1", threadId: "t1", selectionVisible: true });
+    expect(inputValues.find((value) => value.id === "chat_cancel_reserved_submissions")?.value)
+      .toMatchObject({ submissionIds: ["submission-1"] });
+  });
+});

@@ -259,6 +259,16 @@
 #'   toggle (`NULL` hides it).
 #' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
 #'   toggle changes.
+#' @param auto_start_copilot_api Optional logical initial state of the addin-only
+#'   copilot-api auto-start preference (`NULL` hides the service controls).
+#' @param on_toggle_auto_start_copilot_api Optional `function(value)` called when
+#'   the copilot-api auto-start preference changes.
+#' @param service_status Optional named list describing the addin service state:
+#'   `status` is one of `"disabled"`, `"checking"`, `"starting"`, `"ready"`,
+#'   or `"failed"`; optional `message` supplies detail. `NULL` means the generic
+#'   widget has no service readiness barrier.
+#' @param on_retry_service Optional zero-argument function called when the user
+#'   retries a failed addin service startup.
 #' @param show_usage Logical (default `FALSE`); show the token-usage indicator.
 #' @param context_window Optional integer context-window size for the usage
 #'   indicator.
@@ -310,6 +320,10 @@ assistantUIServer <- function(id, handler,
                               on_set_composer_density = NULL,
                               run_r_enabled = NULL,
                               on_toggle_run_r = NULL,
+                              auto_start_copilot_api = NULL,
+                              on_toggle_auto_start_copilot_api = NULL,
+                              service_status = NULL,
+                              on_retry_service = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -421,6 +435,11 @@ assistantUIServer <- function(id, handler,
     config$composer_density <- as.character(composer_density)[[1L]]
   # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
   if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
+  # Addin-only copilot-api capability. Generic consumers omit these arguments,
+  # so they receive neither service UI nor a submission barrier.
+  if (!is.null(auto_start_copilot_api))
+    config$auto_start_copilot_api <- isTRUE(auto_start_copilot_api)
+  if (!is.null(service_status)) config$service_status <- service_status
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -451,7 +470,7 @@ assistantUIServer <- function(id, handler,
   # 旧版：静态回调，所有 thread 共用一个 callbacks slot，切 thread 时旧 handler
   # 的 onDone 会错误清掉新 thread 的 running 状态，旧消息也可能串入新 thread。
   # 新版：每次 ExtendedTask 启动时动态构建，消息携带 threadId，JS 按 threadId 路由。
-  make_callbacks <- function(thread_id) {
+  make_callbacks <- function(thread_id, run_id = NULL) {
     # 任务 D：per-run 编辑揭示 tracker——run 结束只揭示最近一次成功编辑的文件。
     edit_reveal <- .new_edit_reveal_tracker()
     list(
@@ -471,7 +490,8 @@ assistantUIServer <- function(id, handler,
         if (!is.null(on_edits) && length(run_edits))
           tryCatch(on_edits(run_edits), error = function(e) NULL)
         session$sendCustomMessage(paste0(input_id, ":done"),
-                                  list(suggestions = suggestions, threadId = thread_id))
+                                  list(suggestions = suggestions, threadId = thread_id,
+                                       runId = run_id))
       },
       # Plan 48B: handler 可随时推送 follow-up 建议(不必等 on_done),渲染在最新回复下方。
       # suggestions = 字符列表 或 list(list(prompt=, text=))；前端归一化。
@@ -481,7 +501,8 @@ assistantUIServer <- function(id, handler,
       },
       on_error_fn = function(msg) {
         session$sendCustomMessage(paste0(input_id, ":error"),
-                                  list(message = msg, threadId = thread_id))
+                                  list(message = msg, threadId = thread_id,
+                                       runId = run_id))
       },
       on_tool_call = function(tool_call_id, tool_name, args = list(), annotations = list()) {
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
@@ -580,7 +601,7 @@ assistantUIServer <- function(id, handler,
         session$sendCustomMessage(paste0(input_id, ":task"),
                                   list(taskId = task_id, kind = kind, description = description,
                                        status = status, toolName = tool_name, summary = summary,
-                                       threadId = thread_id))
+                                       threadId = thread_id, runId = run_id))
       },
       # #3 限流告警。
       on_rate_limit = function(status = NULL, resets_at = NULL, utilization = NULL, type = NULL) {
@@ -614,6 +635,32 @@ assistantUIServer <- function(id, handler,
       }
     )
   }
+
+  # Explicit submissions blocked by the addin service barrier reserve their IDE
+  # context immediately. The browser stores only an opaque submission id; file
+  # and selection text remain on the R side and are consumed exactly once.
+  reserved_ide_contexts <- new.env(parent = emptyenv())
+  if (is.function(ide_context_provider)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_reserve_submission")]], {
+      msg <- session$input[[paste0(input_id, "_reserve_submission")]]
+      submission_id <- as.character(msg$submissionId %||% "")
+      if (!nzchar(submission_id)) return()
+      assign(
+        submission_id,
+        .read_ide_context(
+          ide_context_provider,
+          selection_visible = !identical(msg$selectionVisible, FALSE)
+        ),
+        envir = reserved_ide_contexts
+      )
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  shiny::observeEvent(session$input[[paste0(input_id, "_cancel_reserved_submissions")]], {
+    msg <- session$input[[paste0(input_id, "_cancel_reserved_submissions")]]
+    ids <- as.character(msg$submissionIds %||% character())
+    ids <- intersect(ids[nzchar(ids)], ls(reserved_ide_contexts, all.names = TRUE))
+    if (length(ids)) rm(list = ids, envir = reserved_ide_contexts)
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   # ── IDE context / workspace mention RPC ─────────────────────────────────────
   # Preview responses contain metadata only. The selection body is sampled again
@@ -710,6 +757,19 @@ assistantUIServer <- function(id, handler,
       if (is.null(msg)) return()
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_toggle_run_r(isTRUE(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_toggle_auto_start_copilot_api)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_auto_start_copilot_api")]], {
+      msg <- session$input[[paste0(input_id, "_auto_start_copilot_api")]]
+      if (is.null(msg)) return()
+      value <- if (is.list(msg)) msg$value else msg
+      tryCatch(on_toggle_auto_start_copilot_api(isTRUE(value)), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_retry_service)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_retry_service")]], {
+      tryCatch(on_retry_service(), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -880,8 +940,8 @@ assistantUIServer <- function(id, handler,
   # ExtendedTask 让 Shiny 知道有长时任务在运行，允许 reactive flush 在 await 期间发生，
   # 从而 _tool_approval / _cancel 等 observer 可以正常触发。
   stream_task <- shiny::ExtendedTask$new(
-    function(msg_text, thread_id, is_reload, attachments, ide_context) {
-      cbs <- make_callbacks(thread_id)
+    function(msg_text, thread_id, is_reload, attachments, ide_context, run_id) {
+      cbs <- make_callbacks(thread_id, run_id)
       is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
       register_cancel <- function(fn) assign(thread_id, fn, envir = cancel_fns)
       wait_for_approval <- make_wait_for_approval(thread_id)
@@ -1037,11 +1097,23 @@ assistantUIServer <- function(id, handler,
     thread_id <- msg$threadId %||% "default"
     is_reload <- identical(msg$type, "reload")
     selection_visible <- !identical(msg$ideContext$selectionVisible, FALSE)
-    # Reload 重跑历史 prompt，不附加任意旧/当前 selection；普通新提交则在
-    # observer 收到消息的同一时刻采样 provider，形成该 run 的不可变快照。
-    ide_context <- if (!is_reload && is.function(ide_context_provider))
-      .read_ide_context(ide_context_provider, selection_visible)
-    else NULL
+    submission_id <- as.character(msg$submissionId %||% "")
+    has_reserved_context <- FALSE
+    reserved_context <- NULL
+    if (nzchar(submission_id) &&
+        exists(submission_id, envir = reserved_ide_contexts, inherits = FALSE)) {
+      has_reserved_context <- TRUE
+      reserved_context <- get(submission_id, envir = reserved_ide_contexts, inherits = FALSE)
+      rm(list = submission_id, envir = reserved_ide_contexts)
+    }
+    # Reload never receives current selection. A service-blocked explicit submit
+    # consumes the snapshot captured at click time (including an empty snapshot);
+    # ordinary submits keep the existing observer-time immutable sampling.
+    ide_context <- if (is_reload) NULL
+      else if (has_reserved_context) reserved_context
+      else if (is.function(ide_context_provider))
+        .read_ide_context(ide_context_provider, selection_visible)
+      else NULL
 
     # 新 run 开始前重置 cancel 标志和 cancel fn
     assign(thread_id, FALSE, envir = cancel_flags)
@@ -1059,7 +1131,8 @@ assistantUIServer <- function(id, handler,
       thread_id,
       is_reload,
       msg$attachments %||% list(),
-      ide_context
+      ide_context,
+      msg$runId %||% NULL
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
@@ -1104,6 +1177,9 @@ assistantUIServer <- function(id, handler,
     send_commands = function(commands) {
       session$sendCustomMessage(paste0(input_id, ":commands"),
                                 list(commands = commands))
+    },
+    send_service_status = function(status) {
+      session$sendCustomMessage(paste0(input_id, ":service-status"), status)
     },
     # 推送当前工作目录 + 最近目录列表给 UI（切目录时先发这个，再重推 sessions）。
     send_working_dir = function(dir, recent = list()) {

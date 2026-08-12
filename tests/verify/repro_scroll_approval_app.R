@@ -48,6 +48,22 @@ repro_handler <- function(message, thread_id, on_chunk, on_done,
     on_done()
     return(invisible(NULL))
   }
+  if (grepl("slow scroll", message, fixed = TRUE)) {
+    # 在第20行停顿，让浏览器产生稳定scrollHeight；验证用户此时主动上滚后，
+    # 后续chunk不会被auto-follow强拉回底部。
+    i <- 0L
+    emit <- function() {
+      i <<- i + 1L
+      on_chunk(sprintf("Slow line %03d: streaming content for user-scroll verification.\n", i))
+      if (i >= 80L) {
+        on_done()
+      } else {
+        later::later(emit, if (i == 20L) 1.5 else 0.03)
+      }
+    }
+    emit()
+    return(invisible(NULL))
+  }
   if (grepl("scroll", message, fixed = TRUE)) {
     # 问题1：流式一段远超视口高度的长回复（逐块，模拟 token 流）
     for (i in 1:120) on_chunk(sprintf("Line %03d: the quick brown fox jumps over the lazy dog and keeps typing.\n", i))

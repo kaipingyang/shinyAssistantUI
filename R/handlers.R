@@ -1332,6 +1332,84 @@ make_ellmer_session_loader <- function(store) {
   invisible(list(is_settled = function() settled))
 }
 
+# Extract client-tool results emitted by ClaudeAgentSDK as UserMessage content.
+# `tool_use_result` preserves structured TaskCreate ids when the CLI supplies
+# them; textual ToolResultBlock content remains a backward-compatible fallback.
+.claude_user_tool_results <- function(message) {
+  if (!inherits(message, "UserMessage") || !is.list(message$content)) return(list())
+  blocks <- Filter(function(block) inherits(block, "ToolResultBlock"), message$content)
+  if (!length(blocks)) return(list())
+  normalize_content <- function(content) {
+    if (is.character(content)) return(paste(content, collapse = "\n"))
+    if (is.list(content) && length(content)) {
+      texts <- vapply(content, function(item) {
+        if (inherits(item, "TextBlock")) return(as.character(item$text %||% ""))
+        if (is.character(item) && length(item)) return(as.character(item[[1L]]))
+        if (is.list(item) && identical(item$type, "text")) return(as.character(item$text %||% ""))
+        ""
+      }, character(1))
+      if (any(nzchar(texts))) return(paste(texts[nzchar(texts)], collapse = "\n"))
+    }
+    content
+  }
+  structured <- message$tool_use_result
+  lapply(seq_along(blocks), function(index) {
+    block <- blocks[[index]]
+    list(
+      tool_use_id = block$tool_use_id,
+      result = if (length(blocks) == 1L && !is.null(structured)) structured
+        else normalize_content(block$content),
+      is_error = isTRUE(block$is_error)
+    )
+  })
+}
+
+# Reconnect exactly one thread after a successful /reload-skills turn. A new
+# CLI initialization result is the only authoritative command registry; the
+# current SDK client's get_server_info() is only a cache.
+.claude_reload_skills_thread <- function(thread_id, result, get_client, set_client,
+                                         persist_session, disconnect_client,
+                                         resume_client, publish_commands) {
+  failed <- isTRUE(result$is_error) || identical(result$subtype, "error") ||
+    identical(result$subtype, "failed")
+  if (failed) stop("reload-skills failed", call. = FALSE)
+  sid <- result$session_id %||% result$sessionId
+  if (is.null(sid) || !length(sid) || is.na(sid[[1L]]) || !nzchar(as.character(sid[[1L]])))
+    stop("reload-skills failed: terminal result has no session id", call. = FALSE)
+  sid <- as.character(sid[[1L]])
+
+  persist_session(thread_id, sid)
+  current <- get_client(thread_id)
+  if (!is.null(current)) disconnect_client(current)
+  set_client(thread_id, NULL)
+  replacement <- resume_client(thread_id, sid)
+  set_client(thread_id, replacement)
+  info <- replacement$get_server_info() %||% list()
+  publish_commands(
+    info$commands %||% list(),
+    info$output_styles %||% info$outputStyles %||% list()
+  )
+  invisible(replacement)
+}
+
+# A strict SID (set after /reload-skills reconnect failure) must never fall
+# through to a fresh session on a later turn. Normal historical resume keeps
+# the existing backward-compatible fresh fallback.
+.claude_connect_with_resume_policy <- function(stored_sid = NULL, strict_sid = NULL,
+                                               connect_resume, connect_fresh,
+                                               on_normal_resume_failure = function(error) NULL) {
+  if (!is.null(strict_sid) && nzchar(strict_sid %||% ""))
+    return(connect_resume(strict_sid))
+  if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
+    resumed <- tryCatch(connect_resume(stored_sid), error = function(error) {
+      on_normal_resume_failure(error)
+      NULL
+    })
+    if (!is.null(resumed)) return(resumed)
+  }
+  connect_fresh()
+}
+
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
 #' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
@@ -1484,73 +1562,70 @@ make_claude_handler <- function(options       = NULL,
   }
 
   clients <- list()
+  # /reload-skills 已确认的 SID 若重连失败，后续 turn 只能继续恢复该
+  # SID；不得落入通用历史会话的 fresh fallback。
+  strict_resume_sids <- list()
   commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
   active_turns <- list()
   compact_in_progress <- list()
 
+  make_opts <- function(thread_id, resume_sid = NULL) {
+    # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
+    #        "YOLO"(yolo)  = bypassPermissions + 丢弃 --permission-prompt-tool。
+    .pm      <- permission_mode_for(thread_id)
+    .ask_all <- identical(.pm, "askAll")
+    .yolo    <- identical(.pm, "yolo")
+    .new_claude_options(
+      permission_mode             = if (.ask_all) "default" else if (.yolo) "bypassPermissions" else .pm,
+      permission_prompt_tool_name = if (.yolo) NULL else (options$permission_prompt_tool_name %||% "stdio"),
+      include_partial_messages    = options$include_partial_messages %||% TRUE,
+      cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
+      system_prompt               = options$system_prompt,
+      thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
+      model                       = internal_model() %||% options$model,
+      settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
+      mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
+      allowed_tools               = .addin_run_r_allowed_tools(
+        isTRUE(autorun_state$on) && isTRUE(run_r_state$enabled) &&
+          ("r_session" %in% names(options$mcp_servers)),
+        options$allowed_tools),
+      resume                      = resume_sid
+    )
+  }
+
+  connect_new_client <- function(thread_id, client_options) {
+    client <- .new_claude_client(client_options)
+    .connect_registered_claude_client(
+      client,
+      register = function(x) clients[[thread_id]] <<- x,
+      unregister = function(x) {
+        if (identical(clients[[thread_id]], x)) clients[[thread_id]] <<- NULL
+      }
+    )
+  }
+
   get_client <- function(thread_id) {
     if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
 
+    strict_sid <- strict_resume_sids[[thread_id]]
     stored_sid <- read_session_id(thread_id)
-
-    make_opts <- function(resume_sid = NULL) {
-      # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
-      #        "YOLO"(yolo)  = bypassPermissions + 丢弃 --permission-prompt-tool
-      #        (无提问通道 → 彻底不弹,等价终端 --dangerously-skip-permissions)。
-      .pm      <- permission_mode_for(thread_id)
-      .ask_all <- identical(.pm, "askAll")
-      .yolo    <- identical(.pm, "yolo")
-      .new_claude_options(
-        permission_mode             = if (.ask_all) "default" else if (.yolo) "bypassPermissions" else .pm,
-        permission_prompt_tool_name = if (.yolo) NULL else (options$permission_prompt_tool_name %||% "stdio"),
-        include_partial_messages    = options$include_partial_messages %||% TRUE,
-        # cwd：优先动态 cwd_provider()（工作目录选择器），否则静态 options$cwd。
-        # 之前漏传 → CLI 只继承 R 进程 getwd()（Plan 16/18）。
-        cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
-        system_prompt               = options$system_prompt,
-        # thinking（思考强度）为连接时 options；内部选择器 > 外部 provider > options$thinking。
-        thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
-        model                       = internal_model() %||% options$model,
-        # 全审批("Strict"):注入 ask:["*"](覆盖只读放行);否则沿用用户 options$settings。
-        settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
-        # 角度 B:透传进程内 MCP servers(含 run_r);autorun 开且 run_r 已注册 →
-        # 把 run_r 加进 allowed_tools 免审批,否则走审批卡。
-        mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
-        allowed_tools               = .addin_run_r_allowed_tools(
-          isTRUE(autorun_state$on) && isTRUE(run_r_state$enabled) &&
-            ("r_session" %in% names(options$mcp_servers)),
-          options$allowed_tools),
-        resume                      = resume_sid
-      )
-    }
-
-    connect_new_client <- function(client_options) {
-      client <- .new_claude_client(client_options)
-      .connect_registered_claude_client(
-        client,
-        register = function(x) clients[[thread_id]] <<- x,
-        unregister = function(x) {
-          if (identical(clients[[thread_id]], x)) clients[[thread_id]] <<- NULL
-        }
-      )
-    }
-
-    client <- if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
-      result <- tryCatch(
-        connect_new_client(make_opts(stored_sid)),
-        error = function(e) {
-          message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
-          session_map <<- tryCatch(
-            .update_claude_session_map(session_map_path, thread_id, NULL),
-            error = function(map_error) session_map
-          )
-          NULL
-        }
-      )
-      if (!is.null(result)) result else connect_new_client(make_opts())
-    } else {
-      connect_new_client(make_opts())
-    }
+    client <- .claude_connect_with_resume_policy(
+      stored_sid = stored_sid,
+      strict_sid = strict_sid,
+      connect_resume = function(sid) {
+        resumed <- connect_new_client(thread_id, make_opts(thread_id, sid))
+        if (!is.null(strict_sid)) strict_resume_sids[[thread_id]] <<- NULL
+        resumed
+      },
+      connect_fresh = function() connect_new_client(thread_id, make_opts(thread_id)),
+      on_normal_resume_failure = function(e) {
+        message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
+        session_map <<- tryCatch(
+          .update_claude_session_map(session_map_path, thread_id, NULL),
+          error = function(map_error) session_map
+        )
+      }
+    )
 
     client
   }
@@ -1827,7 +1902,7 @@ make_claude_handler <- function(options       = NULL,
         info <- client$get_server_info()
         cmds <- info$commands %||% list()
         styles <- info$output_styles %||% info$outputStyles %||% list()
-        if (length(cmds) > 0 || length(styles) > 0) on_commands(cmds, styles)
+        on_commands(cmds, styles)
       }, error = function(e) NULL)
     }
 
@@ -2003,6 +2078,21 @@ make_claude_handler <- function(options       = NULL,
             }
           }
 
+        } else if (inherits(msg, "UserMessage")) {
+          # Claude Code executes client tools between assistant turns and emits
+          # their real result in a UserMessage ToolResultBlock. Preserve that
+          # result (not the synthetic terminal "Completed") so TaskCreate ids
+          # can be deterministically associated with later TaskUpdate calls.
+          for (tool_result in .claude_user_tool_results(msg)) {
+            tuid <- as.character(tool_result$tool_use_id %||% "")
+            if (!nzchar(tuid)) next
+            on_tool_result(tuid, tool_result$result, is_error = tool_result$is_error)
+            pending_tool_ids <- setdiff(pending_tool_ids, tuid)
+            for (key in ls(tb)) {
+              if (identical(as.character(tb[[key]]$id), tuid)) rm(list = key, envir = tb)
+            }
+          }
+
         } else if (inherits(msg, "AssistantMessage")) {
           assistant_stop_reason <- msg$stop_reason %||% assistant_stop_reason
           if (length(msg$content %||% list())) {
@@ -2168,7 +2258,31 @@ make_claude_handler <- function(options       = NULL,
           for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
           pending_tool_ids <- character(0)
           flush_tool_blocks(mark_completed = TRUE)
-          persist_session(thread_id, msg$session_id)
+          if (identical(message, "/reload-skills") && !result_is_error && is.null(terminal_error)) {
+            client <- .claude_reload_skills_thread(
+              thread_id = thread_id,
+              result = msg,
+              get_client = function(id) clients[[id]],
+              set_client = function(id, value) {
+                clients[[id]] <<- value
+                invisible(value)
+              },
+              persist_session = persist_session,
+              disconnect_client = .disconnect_claude_client_safely,
+              resume_client = function(id, sid) {
+                strict_resume_sids[[id]] <<- sid
+                resumed <- connect_new_client(id, make_opts(id, sid))
+                strict_resume_sids[[id]] <<- NULL
+                resumed
+              },
+              publish_commands = function(commands, output_styles) {
+                if (!is.null(on_commands)) on_commands(commands, output_styles)
+              }
+            )
+            commands_discovered[[thread_id]] <<- TRUE
+          } else {
+            persist_session(thread_id, msg$session_id)
+          }
           # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
           if (!is.null(on_usage)) {
             u <- msg$usage

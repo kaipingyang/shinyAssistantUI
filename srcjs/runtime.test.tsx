@@ -91,6 +91,362 @@ describe("useShinyRuntime — onNew 基本流", () => {
   });
 });
 
+describe("useShinyRuntime — copilot-api readiness barrier", () => {
+  it("exposes authoritative service state updates from the backend", async () => {
+    const { result } = setup();
+
+    await fireR("service-status", {
+      status: "checking",
+      autoStart: true,
+      message: "Checking copilot-api",
+    });
+    expect(result.current.serviceState).toMatchObject({
+      status: "checking",
+      autoStart: true,
+      message: "Checking copilot-api",
+    });
+
+    await fireR("service-status", {
+      status: "failed",
+      autoStart: true,
+      message: "copilot-api did not become ready",
+    });
+    expect(result.current.serviceState).toMatchObject({
+      status: "failed",
+      message: "copilot-api did not become ready",
+    });
+  });
+
+  it("holds an explicit pre-ready submission and dispatches it exactly once when ready", async () => {
+    const { result } = setup();
+    await fireR("service-status", { status: "checking", autoStart: true });
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("wait for copilot");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    expect(outbound()).toHaveLength(0);
+
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(outbound()).toHaveLength(1);
+    expect(outbound()[0].value.text).toBe("wait for copilot");
+
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(outbound()).toHaveLength(1);
+  });
+
+  it("releases multiple explicit submissions FIFO, one terminal result at a time", async () => {
+    const { result } = setup();
+    await fireR("service-status", { status: "starting", autoStart: true });
+
+    for (const text of ["first", "second"]) {
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText(text);
+        await result.current.runtime.thread.composer.send();
+      });
+    }
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    expect(outbound()).toHaveLength(0);
+    expect(result.current.pendingServiceSubmissions).toBe(2);
+
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(outbound().map((item) => item.value.text)).toEqual(["first"]);
+    const tid = currentThreadId(result);
+    await fireR("done", { threadId: tid });
+    expect(outbound().map((item) => item.value.text)).toEqual(["first", "second"]);
+    await fireR("done", { threadId: tid });
+    expect(outbound()).toHaveLength(2);
+  });
+
+  it("ignores a stale same-thread terminal and only advances the matching run", async () => {
+    const { result } = setup();
+    await fireR("service-status", { status: "starting", autoStart: true });
+    for (const text of ["first", "second"]) {
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText(text);
+        await result.current.runtime.thread.composer.send();
+      });
+    }
+    await fireR("service-status", { status: "ready", autoStart: true });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    const firstRunId = outbound()[0].value.runId as string;
+
+    await fireR("done", { threadId: tid, runId: "older-run" });
+    expect(outbound().map((item) => item.value.text)).toEqual(["first"]);
+
+    await fireR("done", { threadId: tid, runId: firstRunId });
+    expect(outbound().map((item) => item.value.text)).toEqual(["first", "second"]);
+  });
+
+  it("serializes the service FIFO before a clock-queued message", async () => {
+    const { result } = setup();
+    await fireR("service-status", { status: "starting", autoStart: true });
+    for (const text of ["service A", "service B"]) {
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText(text);
+        await result.current.runtime.thread.composer.send();
+      });
+    }
+    await fireR("service-status", { status: "ready", autoStart: true });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    await act(async () => result.current.enqueueMessage("clock C"));
+
+    await fireR("done", { threadId: tid, runId: outbound()[0].value.runId });
+    expect(outbound().map((item) => item.value.text)).toEqual(["service A", "service B"]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toEqual(["service A", "service B"]);
+
+    await fireR("done", { threadId: tid, runId: outbound()[1].value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toEqual([
+      "service A", "service B", "clock C",
+    ]);
+  });
+
+  it("serializes Enter submissions made while the same thread is running", async () => {
+    const { result } = setup();
+    for (const text of ["running first", "enter second"]) {
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText(text);
+        await result.current.runtime.thread.composer.send();
+      });
+    }
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    expect(outbound().map((item) => item.value.text)).toEqual(["running first"]);
+    expect(result.current.pendingServiceSubmissions).toBe(1);
+    const tid = currentThreadId(result);
+    await fireR("done", { threadId: tid, runId: outbound()[0].value.runId });
+    expect(outbound().map((item) => item.value.text)).toEqual([
+      "running first", "enter second",
+    ]);
+  });
+
+  it("does not let another thread service run starve this thread clock queue", async () => {
+    const { result } = setup();
+    const threadA = currentThreadId(result);
+    await fireR("service-status", { status: "checking", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("service A");
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("service-status", { status: "ready", autoStart: true });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+
+    await act(async () => result.current.switchToNewThread());
+    const threadB = currentThreadId(result);
+    expect(threadB).not.toBe(threadA);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("ordinary B");
+      await result.current.runtime.thread.composer.send();
+      result.current.enqueueMessage("clock B");
+    });
+    const ordinaryB = outbound().find((item) => item.value.text === "ordinary B")!;
+    await fireR("done", { threadId: threadB, runId: ordinaryB.value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toContain("clock B");
+  });
+
+  it("derives running UI from the current thread while a background service run proceeds", async () => {
+    const { result } = setup();
+    const threadA = currentThreadId(result);
+    await fireR("service-status", { status: "checking", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("background A");
+      await result.current.runtime.thread.composer.send();
+      result.current.switchToNewThread();
+    });
+    const threadB = currentThreadId(result);
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runtime.thread.getState().isRunning).toBe(true);
+    await act(async () => result.current.runtime.threads.switchToThread(threadB));
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+  });
+
+  it("requeues a clock dispatch if another run starts during its delay window", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("first run");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    await act(async () => result.current.enqueueMessage("clock delayed"));
+    await fireR("done", { threadId: tid, runId: outbound()[0].value.runId });
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("wins window");
+      await result.current.runtime.thread.composer.send();
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toEqual(["first run", "wins window"]);
+
+    await fireR("done", { threadId: tid, runId: outbound()[1].value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toEqual([
+      "first run", "wins window", "clock delayed",
+    ]);
+  });
+
+  it("waits for an existing ordinary run before draining a ready service submission", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("ordinary run");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    const ordinaryRunId = outbound()[0].value.runId;
+
+    await fireR("service-status", { status: "checking", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("service queued");
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(outbound().map((item) => item.value.text)).toEqual(["ordinary run"]);
+
+    await fireR("done", { threadId: tid, runId: ordinaryRunId });
+    expect(outbound().map((item) => item.value.text)).toEqual([
+      "ordinary run", "service queued",
+    ]);
+  });
+
+  it("does not let reload bypass pending service work", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("original");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    const originalRun = inputs.find((item) => item.id === "test")!.value.runId;
+    await fireR("chunk", { text: "answer", threadId: tid });
+    await fireR("done", { threadId: tid, runId: originalRun });
+    const assistant = messages(result).find((message) => message.role === "assistant")!;
+
+    await fireR("service-status", { status: "checking", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("queued");
+      await result.current.runtime.thread.composer.send();
+      result.current.runtime.thread.getMessageById(assistant.id).reload();
+    });
+    expect(inputs.filter((item) => item.id === "test" && item.value.type === "reload"))
+      .toHaveLength(0);
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["original", "queued"]);
+  });
+
+  it("drops clock-queued text when the working directory changes", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("old cwd running");
+      await result.current.runtime.thread.composer.send();
+      result.current.enqueueMessage("old cwd clock");
+    });
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    await fireR("working-dir", { dir: "/new-cwd", recent: [] });
+    await fireR("done", { threadId: tid, runId: outbound()[0].value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(outbound().map((item) => item.value.text)).toEqual(["old cwd running"]);
+  });
+
+  it("cancels waiting submissions on cwd change or when auto-start is disabled", async () => {
+    const { result } = setup({ auto_start_copilot_api: true });
+    await fireR("service-status", { status: "failed", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("old project");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(result.current.pendingServiceSubmissions).toBe(1);
+    await fireR("working-dir", { dir: "/new-project", recent: [] });
+    expect(result.current.pendingServiceSubmissions).toBe(0);
+    expect(messages(result).filter((message) => message.role === "user")).toHaveLength(0);
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+    expect(inputs.some((item) => item.id === "test_cancel_reserved_submissions")).toBe(true);
+
+    await fireR("service-status", { status: "failed", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("disabled wait");
+      await result.current.runtime.thread.composer.send();
+    });
+    await act(async () => {
+      result.current.setAutoStartCopilotApi?.(false);
+    });
+    expect(result.current.pendingServiceSubmissions).toBe(0);
+    expect(result.current.serviceState?.status).toBe("disabled");
+    expect(messages(result).filter((message) => message.role === "user")).toHaveLength(0);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("after disable");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["after disable"]);
+    await fireR("service-status", { status: "disabled", autoStart: false });
+    expect(result.current.pendingServiceSubmissions).toBe(0);
+  });
+
+  it("enters checking immediately when auto-start is re-enabled", async () => {
+    const { result } = setup({ auto_start_copilot_api: false });
+    await fireR("service-status", { status: "disabled", autoStart: false });
+    await act(async () => result.current.setAutoStartCopilotApi?.(true));
+    expect(result.current.serviceState?.status).toBe("checking");
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("wait after enable");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+    expect(result.current.pendingServiceSubmissions).toBe(1);
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["wait after enable"]);
+  });
+
+  it("retains waiting submissions through failure and never auto-sends an ordinary draft", async () => {
+    const { result } = setup();
+    await fireR("service-status", { status: "checking", autoStart: true });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("draft only");
+    });
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("service-status", { status: "failed", autoStart: true });
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+    expect(result.current.pendingServiceSubmissions).toBe(1);
+
+    await fireR("service-status", { status: "ready", autoStart: true });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["draft only"]);
+  });
+
+  it("replaces the current thread server-command snapshot, including an empty clear", async () => {
+    const { result } = setup();
+    const tid = currentThreadId(result);
+    await fireR("server-commands", {
+      threadId: tid,
+      commands: [{ name: "old" }, { name: "removed" }],
+    });
+    expect(result.current.serverCommands.map((command) => command.name)).toEqual(["old", "removed"]);
+
+    await fireR("server-commands", { threadId: tid, commands: [] });
+    expect(result.current.serverCommands).toEqual([]);
+
+    await fireR("server-commands", { threadId: tid, commands: [{ name: "new" }] });
+    expect(result.current.serverCommands.map((command) => command.name)).toEqual(["new"]);
+  });
+});
+
 describe("useShinyRuntime — onError / thinking", () => {
   it("run 结束(onDone)清理残留任务卡，不再永久显示 Stop", async () => {
     const isActive = (t: { status?: string }) =>
@@ -201,6 +557,35 @@ describe("useShinyRuntime — 多线程隔离", () => {
       return txt.includes("late reply");
     });
     expect(leaked).toBe(false);
+  });
+
+  it("keeps each thread streaming message id isolated across interleaved terminals", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("A");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadA = currentThreadId(result);
+    const runA = inputs.find((item) => item.id === "test" && item.value.text === "A")!.value.runId;
+    await act(async () => result.current.switchToNewThread());
+    const threadB = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("B");
+      await result.current.runtime.thread.composer.send();
+    });
+
+    await fireR("chunk", { text: "A1", threadId: threadA });
+    await fireR("chunk", { text: "B1", threadId: threadB });
+    await fireR("done", { threadId: threadA, runId: runA });
+    await fireR("chunk", { text: "B2", threadId: threadB });
+
+    const assistantTexts = messages(result)
+      .filter((message) => message.role === "assistant")
+      .map((message) => (message.content as any[])
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""));
+    expect(assistantTexts).toEqual(["B1B2"]);
   });
 });
 
@@ -1069,5 +1454,101 @@ describe("useShinyRuntime — paged historical sessions", () => {
     expect(result.current.readingHistory).toBe(false);
     expect(result.current.historyHasMore).toBe(false);
     expect(messages(result).map((message) => message.id)).toEqual(["legacy-message"]);
+  });
+});
+
+
+describe("useShinyRuntime — Claude checklist lifecycle", () => {
+  async function emitTodoSnapshot(
+    result: ReturnType<typeof setup>["result"],
+    threadId: string,
+    callId: string,
+    todos: Array<{ content: string; status: string }>,
+  ) {
+    await fireR("tool-call", {
+      toolCallId: callId,
+      toolName: "TodoWrite",
+      args: { todos },
+      argsText: JSON.stringify({ todos }),
+      threadId,
+    });
+  }
+
+  it("dismisses only the exact completed revision and reopens for changed task state", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("make a checklist");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await emitTodoSnapshot(result, tid, "todo-complete", [
+      { content: "finished", status: "completed" },
+    ]);
+
+    const completed = result.current.checklist;
+    expect(completed?.allCompleted).toBe(true);
+    expect(completed?.threadId).toBe(tid);
+    await act(async () => result.current.dismissChecklist(tid, completed!.revision));
+    expect(result.current.checklist).toBeUndefined();
+
+    await emitTodoSnapshot(result, tid, "todo-next", [
+      { content: "new work", status: "pending" },
+    ]);
+    expect(result.current.checklist?.allCompleted).toBe(false);
+    expect(result.current.checklist?.visibleItems[0]?.content).toBe("new work");
+  });
+
+  it("automatically hides a completed checklist on the next real user turn and reopens if Claude uses tasks", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("first turn");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await emitTodoSnapshot(result, tid, "todo-first", [
+      { content: "first done", status: "completed" },
+    ]);
+    await fireR("done", { threadId: tid });
+    expect(result.current.checklist?.allCompleted).toBe(true);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("just answer a follow-up");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(result.current.checklist).toBeUndefined();
+
+    await emitTodoSnapshot(result, tid, "todo-followup", [
+      { content: "follow-up task", status: "in_progress" },
+    ]);
+    expect(result.current.checklist?.visibleItems[0]?.content).toBe("follow-up task");
+  });
+
+  it("keeps dismissed revisions isolated by thread", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("thread A");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadA = currentThreadId(result);
+    await emitTodoSnapshot(result, threadA, "todo-a", [
+      { content: "A done", status: "completed" },
+    ]);
+    const revisionA = result.current.checklist!.revision;
+    await act(async () => result.current.dismissChecklist(threadA, revisionA));
+    expect(result.current.checklist).toBeUndefined();
+
+    await act(async () => result.current.switchToNewThread());
+    const threadB = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("thread B");
+      await result.current.runtime.thread.composer.send();
+    });
+    await emitTodoSnapshot(result, threadB, "todo-b", [
+      { content: "B done", status: "completed" },
+    ]);
+    expect(result.current.checklist?.threadId).toBe(threadB);
+
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.checklist).toBeUndefined();
   });
 });

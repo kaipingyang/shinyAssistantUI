@@ -154,6 +154,30 @@ describe("SidebarSettings", () => {
     expect(values).toContain("bypassPermissions");
     expect(values).not.toContain("yolo");
   });
+
+  it("shows an enabled-by-default copilot-api auto-start toggle and delegates changes", () => {
+    const setAutoStartCopilotApi = vi.fn();
+    const context = {
+      ...ctxWith(),
+      autoStartCopilotApi: true,
+      setAutoStartCopilotApi,
+    } as ShinyConfigCtx;
+    render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const toggle = screen.getByRole("checkbox", {
+      name: "Automatically start copilot-api",
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+
+    fireEvent.click(toggle);
+    expect(setAutoStartCopilotApi).toHaveBeenCalledOnce();
+    expect(setAutoStartCopilotApi).toHaveBeenCalledWith(false);
+  });
 });
 
 describe("ThinkingControl", () => {

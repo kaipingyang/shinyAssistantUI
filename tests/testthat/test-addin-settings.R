@@ -1,10 +1,11 @@
 # addin_settings.json 读写 + 迁移(Plan 46)。
 
-test_that(".read/.write_addin_settings round-trip preserves types", {
+test_that(".read/.write_addin_settings round-trip preserves copilot auto-start", {
   path <- tempfile(fileext = ".json"); on.exit(unlink(path), add = TRUE)
   s <- list(defaultPermissionMode = "bypassPermissions",
             modeVisibility = list(showBypass = FALSE, showYolo = TRUE),
-            composerDensity = "compact", runREnabled = FALSE)
+            composerDensity = "compact", runREnabled = FALSE,
+            autoStartCopilotApi = FALSE)
   shinyAssistantUI:::.write_addin_settings(s, path)
   r <- shinyAssistantUI:::.read_addin_settings(path)
   expect_identical(r$defaultPermissionMode, "bypassPermissions")
@@ -12,21 +13,27 @@ test_that(".read/.write_addin_settings round-trip preserves types", {
   expect_true(r$modeVisibility$showYolo)
   expect_identical(r$composerDensity, "compact")
   expect_false(r$runREnabled)
+  expect_false(r$autoStartCopilotApi)
   expect_match(paste(readLines(path), collapse = "\n"), "bypassPermissions", fixed = TRUE)  # 可读 JSON
 })
 
-test_that(".read_addin_settings defaults on missing / bad / partial JSON", {
-  expect_identical(shinyAssistantUI:::.read_addin_settings(tempfile(fileext = ".json")),
-                   shinyAssistantUI:::.addin_settings_defaults())
+test_that(".read_addin_settings defaults copilot auto-start on missing / bad / partial JSON", {
+  missing <- shinyAssistantUI:::.read_addin_settings(tempfile(fileext = ".json"))
+  expect_identical(missing, shinyAssistantUI:::.addin_settings_defaults())
+  expect_true(missing$autoStartCopilotApi)
+
   bad <- tempfile(fileext = ".json"); writeLines("{not valid json", bad); on.exit(unlink(bad), add = TRUE)
-  expect_identical(shinyAssistantUI:::.read_addin_settings(bad),
-                   shinyAssistantUI:::.addin_settings_defaults())
+  bad_result <- shinyAssistantUI:::.read_addin_settings(bad)
+  expect_identical(bad_result, shinyAssistantUI:::.addin_settings_defaults())
+  expect_true(bad_result$autoStartCopilotApi)
+
   part <- tempfile(fileext = ".json"); writeLines('{"composerDensity":"compact"}', part); on.exit(unlink(part), add = TRUE)
   r <- shinyAssistantUI:::.read_addin_settings(part)
   expect_identical(r$composerDensity, "compact")        # 有的用
   expect_identical(r$defaultPermissionMode, "default")  # 缺的补默认
   expect_true(r$modeVisibility$showBypass)
   expect_true(r$runREnabled)
+  expect_true(r$autoStartCopilotApi)
 })
 
 test_that(".migrate_addin_settings folds old rds into json then deletes them; idempotent", {

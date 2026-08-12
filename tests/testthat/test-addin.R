@@ -153,7 +153,9 @@ test_that("Claude addin wires live IDE context and workspace providers", {
   skip_if_not_installed("ClaudeAgentSDK")
   server_args <- NULL
   local_mocked_bindings(
-    make_claude_handler = function(options, cwd_provider = NULL, models = NULL, session_map_path) function(...) NULL,
+    make_claude_handler = function(options, cwd_provider = NULL, models = NULL, session_map_path) {
+      function(message, on_chunk = NULL) "ok"
+    },
     load_claude_skills = function(project_dir) list(),
     make_claude_session_loader = function(session_map_path) function(...) NULL,
     list_claude_sessions = function(directory, limit = 100L) list(),
@@ -169,4 +171,11 @@ test_that("Claude addin wires live IDE context and workspace providers", {
 
   expect_true(is.function(server_args$ide_context_provider))
   expect_true(is.function(server_args$workspace_search_provider))
+  expect_no_error(server_args$handler(
+    message = "hello",
+    on_chunk = function(...) NULL,
+    on_source = function(...) NULL,
+    is_reload = FALSE,
+    register_cancel = function(...) NULL
+  ))
 })

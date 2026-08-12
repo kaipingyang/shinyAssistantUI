@@ -256,3 +256,33 @@ test_that("malformed tool prose is never converted into a tool invocation", {
     "permission-only-tool"
   )
 })
+
+
+test_that("Claude user tool results preserve structured TaskCreate ids", {
+  tool_result <- structure(
+    list(tool_use_id = "call-create", content = "Task created", is_error = FALSE),
+    class = "ToolResultBlock"
+  )
+  message <- structure(
+    list(
+      content = list(tool_result),
+      tool_use_result = list(taskId = "task-42", subject = "Second task")
+    ),
+    class = "UserMessage"
+  )
+
+  results <- .claude_user_tool_results(message)
+  expect_length(results, 1L)
+  expect_identical(results[[1L]]$tool_use_id, "call-create")
+  expect_identical(results[[1L]]$result$taskId, "task-42")
+  expect_false(results[[1L]]$is_error)
+
+  message$tool_use_result <- NULL
+  message$content[[1L]]$content <- list(
+    structure(list(text = "Task #43 created successfully"), class = "TextBlock")
+  )
+  expect_identical(
+    .claude_user_tool_results(message)[[1L]]$result,
+    "Task #43 created successfully"
+  )
+})

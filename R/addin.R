@@ -193,8 +193,32 @@
       ctrl$send_projects(.remove_saved_project(projects_path, path))
     }
 
+    # The inner handler reconnects the current CLI thread after /reload-skills.
+    # Only after that promise succeeds do we rescan direct local skills from the
+    # current working directory and replace the local command snapshot.
+    server_handler <- function(...) {
+      args <- list(...)
+      handler_params <- names(formals(handler))
+      call_args <- if ("..." %in% handler_params) args
+                   else args[names(args) %in% handler_params]
+      result <- do.call(handler, call_args)
+      if (!identical(args$message, "/reload-skills")) return(result)
+      refresh_local <- function(value = NULL) {
+        ctrl$send_commands(tryCatch(
+          load_claude_skills(project_dir = cur_dir()),
+          error = function(e) list()
+        ))
+        value
+      }
+      if (inherits(result, "promise")) promises::then(result, refresh_local)
+      else refresh_local(result)
+    }
+    for (attribute_name in names(attributes(handler)))
+      attr(server_handler, attribute_name) <- attr(handler, attribute_name)
+
+    copilot_service <- NULL
     ctrl <- assistantUIServer(
-      "chat", handler = handler,
+      "chat", handler = server_handler,
       show_thread_list = TRUE,
       persistence      = "server",
       latex            = TRUE,   # Claude Code 常输出数学公式 → 默认启用 KaTeX 渲染
@@ -232,6 +256,19 @@
         tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
         tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
       } else NULL,
+      auto_start_copilot_api = settings_state$v$autoStartCopilotApi,
+      service_status = list(
+        status = if (isTRUE(settings_state$v$autoStartCopilotApi)) "checking" else "disabled",
+        autoStart = isTRUE(settings_state$v$autoStartCopilotApi)
+      ),
+      on_toggle_auto_start_copilot_api = function(v) {
+        settings_state$v$autoStartCopilotApi <- isTRUE(v)
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        if (!is.null(copilot_service)) copilot_service$set_auto_start(isTRUE(v))
+      },
+      on_retry_service = function() {
+        if (!is.null(copilot_service)) copilot_service$retry()
+      },
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)
@@ -287,6 +324,15 @@
       warming_label    = "Starting Claude Code\u2026",
       prewarm          = prewarm
     )
+
+    if (is.function(ctrl$send_service_status)) {
+      copilot_service <- .new_copilot_service(
+        auto_start = settings_state$v$autoStartCopilotApi,
+        publish = function(status) ctrl$send_service_status(status)
+      )
+      session$onSessionEnded(function() copilot_service$dispose())
+      copilot_service$start()
+    }
 
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
     # 才运行，ctrl 已赋值）。按当前工作目录 cur_dir() 分桶。

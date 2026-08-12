@@ -1,5 +1,7 @@
 import { createContext, useContext } from "react";
-import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
+import type { IdeContextMeta, WorkspaceMentionItem, ServiceState } from "./bridge";
+import type { ChecklistSnapshot } from "./checklist-reducer";
+import type { MonitoredTask } from "./task-monitor";
 
 export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; argumentHint?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
@@ -75,9 +77,16 @@ export interface ShinyConfigCtx {
   showUsage?: boolean;
   contextWindow?: number;
   usageStyle?: "ring" | "bar" | "text";
-  tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
+  tasks?: MonitoredTask[];
+  recentTasks?: MonitoredTask[];
+  checklist?: ChecklistSnapshot & { threadId: string };
+  dismissChecklist?: (threadId: string, revision: string) => void;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
+  serviceState?: ServiceState;
+  pendingServiceSubmissions?: number;
+  retryService?: () => void;
+  cancelPendingServiceSubmissions?: () => void;
   warming?: boolean;
   warmingResuming?: boolean;
   /** Cold-start indicator text (English default "Starting…"); backend-specific override. */
@@ -113,6 +122,8 @@ export interface ShinyConfigCtx {
   /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
   runREnabled?: boolean;
   setRunREnabled?: (value: boolean) => void;
+  autoStartCopilotApi?: boolean;
+  setAutoStartCopilotApi?: (value: boolean) => void;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

@@ -228,8 +228,26 @@ function RunRToggle() {
   );
 }
 
+function CopilotAutoStartToggle() {
+  const { autoStartCopilotApi, setAutoStartCopilotApi } = useShinyConfig();
+  if (autoStartCopilotApi === undefined || !setAutoStartCopilotApi) return null;
+  return (
+    <label
+      className="aui-copilot-auto-start mt-3 flex cursor-pointer items-center gap-2 text-xs"
+      data-slot="aui_copilot_auto_start"
+    >
+      <input
+        type="checkbox"
+        checked={autoStartCopilotApi}
+        onChange={(event) => setAutoStartCopilotApi(event.target.checked)}
+      />
+      <span className="text-foreground font-medium">Automatically start copilot-api</span>
+    </label>
+  );
+}
+
 export function SidebarSettings() {
-  const { permissionMode, thinking, composerDensity } = useShinyConfig();
+  const { permissionMode, thinking, composerDensity, autoStartCopilotApi } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -239,7 +257,7 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode && !thinking && composerDensity === undefined) return null;
+  if (!permissionMode && !thinking && composerDensity === undefined && autoStartCopilotApi === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -278,6 +296,7 @@ export function SidebarSettings() {
           <ThinkingControl />
           <ComposerDensityControl />
           <RunRToggle />
+          <CopilotAutoStartToggle />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.
           </p>
