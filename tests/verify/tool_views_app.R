@@ -1,5 +1,5 @@
 # Fixture：一条 assistant 消息内发多种工具 tool-call,验证参数区富渲染
-# (Edit→diff / Bash→bash / Write→python / run_r→r / 未知→json)。defaultOpen 让卡展开。
+# (Edit→diff / Bash→bash / Write→Markdown Source / run_r→r / 未知→json)。defaultOpen 让卡展开。
 library(shiny)
 library(shinyAssistantUI)
 

@@ -54,10 +54,16 @@ describe("resolveToolView", () => {
     expect(v).toMatchObject({ kind: "code", lang: "bash", code: "ls -la" });
   });
 
-  it("Write -> code with lang by extension", () => {
+  it("Write non-Markdown text -> markdown view in Source mode with language metadata", () => {
     const args = { file_path: "f.py", content: "print(1)" };
     const v = resolveToolView("Write", args, at(args));
-    expect(v).toMatchObject({ kind: "code", lang: "python", code: "print(1)", fileName: "f.py" });
+    expect(v).toMatchObject({
+      kind: "markdown",
+      text: "print(1)",
+      defaultMode: "source",
+      sourceLanguage: "python",
+      fileName: "f.py",
+    });
   });
 
   it("run_r MCP tool -> code (r) using code arg", () => {
@@ -208,3 +214,66 @@ describe("resolveToolView", () => {
     expect(resolveToolView("AskUserQuestion", topLevelExtra, at(topLevelExtra)).kind).toBe("json");
     expect(resolveToolView("AskUserQuestion", questionExtra, at(questionExtra)).kind).toBe("json");
   });
+
+
+describe("resolveToolView markdown views", () => {
+  it("explicit markdown annotation has highest priority and supports a custom field", () => {
+    const args = { command: "echo ignored", document: "# Annotated" };
+    const view = resolveToolView("Bash", args, at(args), {
+      argsView: {
+        kind: "markdown",
+        field: "document",
+        defaultMode: "source",
+        sourceControl: "prominent",
+      },
+    });
+    expect(view).toMatchObject({
+      kind: "markdown",
+      text: "# Annotated",
+      defaultMode: "source",
+      sourceControl: "prominent",
+    });
+  });
+
+  it("ExitPlanMode plan defaults to rendered Markdown without depending on its path", () => {
+    const args = { plan: "# Plan\n\n| Step | State |\n| --- | --- |\n| Test | Ready |", planFilePath: "/totally/custom/location/plan.txt" };
+    expect(resolveToolView("ExitPlanMode", args, at(args))).toMatchObject({
+      kind: "markdown",
+      text: args.plan,
+      defaultMode: "preview",
+      sourceControl: "subtle",
+    });
+  });
+
+  it.each([
+    ["file_path", "/any/directory/PLAN.md"],
+    ["path", "C:\\custom\\nested\\PLAN.MARKDOWN"],
+  ] as const)("Write recognizes markdown from arbitrary %s paths", (field, fileName) => {
+    const args = { [field]: fileName, content: "# Plan" };
+    expect(resolveToolView("Write", args, at(args))).toMatchObject({
+      kind: "markdown",
+      text: "# Plan",
+      defaultMode: "preview",
+      sourceControl: "prominent",
+      fileName,
+    });
+  });
+
+  it("other textual Write args default to exact source but allow Markdown preview", () => {
+    const args = { file_path: "/tmp/report.txt", content: "# Literal source\n" };
+    expect(resolveToolView("Write", args, at(args))).toMatchObject({
+      kind: "markdown",
+      text: args.content,
+      defaultMode: "source",
+      sourceControl: "prominent",
+      fileName: args.file_path,
+    });
+  });
+
+  it("malformed markdown candidates preserve existing fallback behavior", () => {
+    const exitArgs = { plan: { unexpected: true } };
+    const writeArgs = { file_path: "notes.md", content: 42 };
+    expect(resolveToolView("ExitPlanMode", exitArgs, at(exitArgs)).kind).toBe("json");
+    expect(resolveToolView("Write", writeArgs, at(writeArgs)).kind).toBe("json");
+  });
+});

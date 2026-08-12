@@ -1,9 +1,13 @@
 test_that("compact polling succeeds once on a structured ResultMessage", {
   queue <- list(
-    list(structure(list(), class = "SystemMessage")),
+    list(structure(
+      list(subtype = "status", data = list(status = "compacting")),
+      class = "SystemMessage"
+    )),
     list(structure(list(session_id = "session-compact"), class = "ResultMessage"))
   )
   scheduled <- list()
+  progress <- character()
   terminal <- list()
   persisted <- character()
   client <- new.env(parent = emptyenv())
@@ -15,6 +19,7 @@ test_that("compact polling succeeds once on a structured ResultMessage", {
 
   shinyAssistantUI:::.claude_start_compact_poll(
     client = client,
+    on_progress = function(phase) progress <<- c(progress, phase),
     on_terminal = function(status, message) {
       terminal[[length(terminal) + 1L]] <<- list(status = status, message = message)
     },
@@ -30,6 +35,7 @@ test_that("compact polling succeeds once on a structured ResultMessage", {
     callback()
   }
 
+  expect_identical(progress, "compacting")
   expect_length(terminal, 1L)
   expect_identical(terminal[[1L]]$status, "ok")
   expect_match(terminal[[1L]]$message, "compacted", ignore.case = TRUE)
@@ -212,12 +218,17 @@ test_that("a second compact action is rejected without disturbing the first", {
   second <- list()
   action <- attr(handler, "action_handler")
   action("compact", "compact-lock-thread", function(message, status = "ok", value = NULL) {
-    first[[length(first) + 1L]] <<- list(status = status, message = message)
+    first[[length(first) + 1L]] <<- list(
+      status = status, message = message, value = value
+    )
   })
   action("compact", "compact-lock-thread", function(message, status = "ok", value = NULL) {
     second[[length(second) + 1L]] <<- list(status = status, message = message)
   })
   expect_identical(first[[1L]]$status, "progress")
+  expect_identical(first[[1L]]$value$kind, "compact")
+  expect_identical(first[[1L]]$value$phase, "starting")
+  expect_true(is.numeric(first[[1L]]$value$startedAt))
   expect_length(second, 1L)
   expect_identical(second[[1L]]$status, "error")
   expect_match(second[[1L]]$message, "already running", fixed = TRUE)
@@ -269,4 +280,43 @@ test_that("a second compact action is rejected without disturbing the first", {
     Sys.sleep(0.001)
   }
   expect_true(resumed_done)
+})
+
+
+test_that("compact polling survives progress callback failures and still settles", {
+  queue <- list(
+    list(structure(
+      list(subtype = "status", data = list(status = "compacting")),
+      class = "SystemMessage"
+    )),
+    list(structure(list(session_id = "session-after-progress-error"), class = "ResultMessage"))
+  )
+  scheduled <- list()
+  terminal <- list()
+  client <- new.env(parent = emptyenv())
+  client$poll_messages <- function() {
+    value <- queue[[1L]]
+    queue <<- queue[-1L]
+    value
+  }
+
+  shinyAssistantUI:::.claude_start_compact_poll(
+    client = client,
+    on_progress = function(phase) stop("disconnected progress sink"),
+    on_terminal = function(status, message) {
+      terminal[[length(terminal) + 1L]] <<- list(status = status, message = message)
+    },
+    timeout_seconds = 10,
+    poll_interval = 0,
+    schedule = function(callback, delay) scheduled[[length(scheduled) + 1L]] <<- callback
+  )
+
+  while (length(scheduled)) {
+    callback <- scheduled[[1L]]
+    scheduled <- scheduled[-1L]
+    callback()
+  }
+
+  expect_length(terminal, 1L)
+  expect_identical(terminal[[1L]]$status, "ok")
 })

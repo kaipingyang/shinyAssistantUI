@@ -1,15 +1,95 @@
 // Dumb 渲染:按 ToolView.kind 复用现有渲染件(DiffViewer / SyntaxHighlighter /
 // JsonHighlighter),不含任何工具判定逻辑(那在 resolve.ts)。data-arg-view / data-arg-lang
 // 供无头断言。
-import type { FC } from "react";
+import { useState, type FC } from "react";
+import { TextMessagePartProvider } from "@assistant-ui/react";
 import type { ToolView } from "./types";
+import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { DiffViewer } from "@/components/assistant-ui/diff-viewer";
 import {
   SyntaxHighlighter,
   JsonHighlighter,
 } from "@/components/assistant-ui/syntax-highlighter";
 
+type MarkdownView = Extract<ToolView, { kind: "markdown" }>;
+
+const MarkdownToolView: FC<{ view: MarkdownView }> = ({ view }) => {
+  const [mode, setMode] = useState<"preview" | "source">(view.defaultMode);
+  const { isCopied, copyToClipboard } = useCopyToClipboard();
+  const previewLabel = view.defaultMode === "source" ? "Preview as Markdown" : "Preview";
+  const sourceProminent = view.sourceControl === "prominent";
+  const controlClass = "rounded-md px-2 py-1 text-[11px] font-medium transition-colors";
+
+  return (
+    <div
+      data-arg-view="markdown"
+      data-markdown-mode={mode}
+      data-source-control={view.sourceControl}
+      data-slot="tool-fallback-args"
+      className="aui-tool-markdown mt-1 overflow-hidden rounded-md border"
+    >
+      <div className="bg-muted/40 flex items-center justify-between gap-2 border-b px-2 py-1.5">
+        <div className="flex items-center gap-1" role="group" aria-label="Markdown view">
+          <button
+            type="button"
+            aria-pressed={mode === "preview"}
+            className={`${controlClass} ${
+              mode === "preview" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+            }`}
+            onClick={() => setMode("preview")}
+          >
+            {previewLabel}
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "source"}
+            data-prominent={sourceProminent ? "true" : "false"}
+            className={`${controlClass} ${
+              mode === "source"
+                ? "bg-background text-foreground shadow-sm"
+                : sourceProminent
+                  ? "border-primary/40 text-primary border bg-background"
+                  : "text-muted-foreground hover:text-foreground"
+            }`}
+            onClick={() => setMode("source")}
+          >
+            Source
+          </button>
+        </div>
+        <button
+          type="button"
+          aria-label="Copy source"
+          title={isCopied ? "Copied" : "Copy source"}
+          className="text-muted-foreground hover:bg-accent hover:text-foreground inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px]"
+          onClick={() => copyToClipboard(view.text)}
+        >
+          {isCopied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
+          <span>{isCopied ? "Copied" : "Copy"}</span>
+        </button>
+      </div>
+      {mode === "preview" ? (
+        <div data-markdown-preview="true" className="max-h-96 overflow-auto p-3 text-sm">
+          <TextMessagePartProvider text={view.text} isRunning={false}>
+            <MarkdownText />
+          </TextMessagePartProvider>
+        </div>
+      ) : (
+        <pre
+          data-markdown-source="true"
+          data-source-language={view.sourceLanguage ?? "markdown"}
+          className="bg-muted/30 text-foreground/90 max-h-96 overflow-auto p-3 font-mono text-xs whitespace-pre-wrap"
+        >
+          {view.text}
+        </pre>
+      )}
+    </div>
+  );
+};
+
 export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
+  if (view.kind === "markdown") return <MarkdownToolView view={view} />;
   if (view.kind === "diff") {
     return (
       <div

@@ -45,8 +45,8 @@ function Harness({ content }: { content: any[] }) {
 }
 
 describe("Plan 47 A0 — DATA_UI_BY_NAME + renderDataPart (production GroupedParts path)", () => {
-  it("registry has table/stat/flow", () => {
-    expect(Object.keys(DATA_UI_BY_NAME).sort()).toEqual(["flow", "stat", "table"]);
+  it("registry has table/stat/flow/action-progress", () => {
+    expect(Object.keys(DATA_UI_BY_NAME).sort()).toEqual(["action-progress", "flow", "stat", "table"]);
   });
 
   it("data-table renders a table from row objects", () => {
@@ -76,5 +76,54 @@ describe("Plan 47 A0 — DATA_UI_BY_NAME + renderDataPart (production GroupedPar
   it("unknown data name renders nothing (no crash)", () => {
     const { container } = render(<Harness content={[{ type: "data-nope", data: {} }]} />);
     expect(container.querySelector('[data-testid^="data-"]')).toBeNull();
+  });
+});
+
+
+describe("compact action progress data UI", () => {
+  it("renders an honest indeterminate compacting phase with elapsed time and no percentage", () => {
+    const { container } = render(<Harness content={[{
+      type: "data-action-progress",
+      data: { kind: "compact", phase: "compacting", startedAt: Date.now() - 4_000 },
+    }]} />);
+    const progress = container.querySelector('[data-slot="action-progress"]')!;
+    expect(progress).not.toBeNull();
+    expect(progress.getAttribute("data-action-kind")).toBe("compact");
+    expect(progress.getAttribute("data-action-state")).toBe("running");
+    expect(progress.querySelector('[data-indeterminate="true"]')).not.toBeNull();
+    expect(progress.textContent).toMatch(/Compacting/i);
+    expect(progress.textContent).toMatch(/4s/);
+    expect(progress.textContent).not.toMatch(/\d+%/);
+  });
+
+  it.each(["complete", "error"])("renders %s as a non-animating terminal state", (phase) => {
+    const { container } = render(<Harness content={[{
+      type: "data-action-progress",
+      data: { kind: "compact", phase, startedAt: Date.now() - 1_000, message: phase },
+    }]} />);
+    const progress = container.querySelector('[data-slot="action-progress"]')!;
+    expect(progress.getAttribute("data-action-state")).toBe(phase === "complete" ? "complete" : "error");
+    expect(progress.querySelector('[data-indeterminate="true"]')).toBeNull();
+  });
+
+  it("settles stale restored running progress instead of animating forever", () => {
+    const { container } = render(<Harness content={[{
+      type: "data-action-progress",
+      data: { kind: "compact", phase: "compacting", startedAt: Date.now() - 186_000 },
+    }]} />);
+    const progress = container.querySelector('[data-slot="action-progress"]')!;
+    expect(progress.getAttribute("data-action-state")).toBe("interrupted");
+    expect(progress.querySelector('[data-indeterminate="true"]')).toBeNull();
+  });
+
+
+  it("treats missing or unknown restored phases as interrupted", () => {
+    const { container } = render(<Harness content={[{
+      type: "data-action-progress",
+      data: { kind: "compact", phase: "future-phase", startedAt: Date.now() },
+    }]} />);
+    const progress = container.querySelector('[data-slot="action-progress"]')!;
+    expect(progress.getAttribute("data-action-state")).toBe("interrupted");
+    expect(progress.querySelector('[data-indeterminate="true"]')).toBeNull();
   });
 });

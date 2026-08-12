@@ -437,7 +437,7 @@ const IdeContextIndicator: FC = () => {
 };
 
 const Composer: FC = () => {
-  const { refreshIdeContext, composerDensity } = useShinyConfig();
+  const { refreshIdeContext, composerDensity, blockingAction } = useShinyConfig();
   const compact = composerDensity === "compact";
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
@@ -446,6 +446,7 @@ const Composer: FC = () => {
         <div
           data-slot="aui_composer-shell"
           data-density={composerDensity ?? "comfortable"}
+          data-blocked={blockingAction ? "true" : "false"}
           className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerQuotePreview />
@@ -613,6 +614,24 @@ const ShinyTimestamp: FC = () => {
 };
 
 const ComposerSendGroup: FC = () => {
+  const { blockingAction } = useShinyConfig();
+  if (blockingAction?.kind === "compact") {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="default"
+          size="icon"
+          disabled
+          className="aui-composer-compact-blocked size-7 rounded-full"
+          aria-label="Compacting conversation"
+          title="Compacting conversation"
+        >
+          <RefreshCwIcon className="size-3.5 animate-spin" />
+        </Button>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-1.5">
       <AuiIf condition={(s) => s.thread.capabilities.dictation}>

@@ -35,6 +35,9 @@ const fileNameOf = (a: Record<string, unknown>): string | undefined => {
   return undefined;
 };
 
+const isMarkdownFileName = (name?: string): boolean =>
+  typeof name === "string" && /\.(?:md|markdown)\s*$/i.test(name);
+
 const asString = (v: unknown): string | undefined =>
   typeof v === "string" ? v : undefined;
 
@@ -58,7 +61,19 @@ export function resolveToolView(
 
   // 1) 扩展点:R / MCP 工具声明的 argsView(最高优先级)。
   const hint = annotations?.argsView as ArgsViewHint | undefined;
-  if (hint?.kind === "code") {
+  if (hint?.kind === "markdown") {
+    const text = asString(a[hint.field ?? "content"]);
+    if (text !== undefined) {
+      return {
+        kind: "markdown",
+        text,
+        defaultMode: hint.defaultMode === "source" ? "source" : "preview",
+        sourceControl: hint.sourceControl === "subtle" ? "subtle" : "prominent",
+        sourceLanguage: "markdown",
+        fileName: fileNameOf(a),
+      };
+    }
+  } else if (hint?.kind === "code") {
     const code = asString(a[hint.field ?? "code"]);
     if (code !== undefined)
       return { kind: "code", code, lang: hint.lang || "markdown", fileName: fileNameOf(a) };
@@ -68,6 +83,21 @@ export function resolveToolView(
     if (oldC !== undefined && newC !== undefined) {
       const fileName = asString(a[hint.fileField ?? "file_path"]) ?? fileNameOf(a);
       return { kind: "diff", oldContent: oldC, newContent: newC, fileName, startLine };
+    }
+  }
+
+  // ExitPlanMode already carries the complete plan; its path is metadata only.
+  if (toolName === "ExitPlanMode") {
+    const plan = asString(a.plan);
+    if (plan !== undefined) {
+      return {
+        kind: "markdown",
+        text: plan,
+        defaultMode: "preview",
+        sourceControl: "subtle",
+        sourceLanguage: "markdown",
+        fileName: asString(a.planFilePath),
+      };
     }
   }
 
@@ -84,7 +114,14 @@ export function resolveToolView(
     const content = asString(a.content);
     if (content !== undefined) {
       const fileName = fileNameOf(a);
-      return { kind: "code", code: content, lang: langFromFileName(fileName), fileName };
+      return {
+        kind: "markdown",
+        text: content,
+        defaultMode: isMarkdownFileName(fileName) ? "preview" : "source",
+        sourceControl: "prominent",
+        sourceLanguage: langFromFileName(fileName),
+        fileName,
+      };
     }
   }
   if (isRunR(toolName)) {

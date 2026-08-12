@@ -489,22 +489,40 @@ describe("useShinyRuntime — ordinary action correlation", () => {
 describe("useShinyRuntime — permission progress correlation", () => {
 
   it.each([
-    ["ok", "Conversation compacted", "✓ Conversation compacted"],
-    ["error", "Compact timed out", "⚠️ Compact timed out"],
-  ] as const)("settles compact progress with %s without starting an AI run", async (status, message, expected) => {
+    ["ok", "Conversation compacted", "complete"],
+    ["error", "Compact timed out", "error"],
+  ] as const)("settles compact progress with %s without starting an AI run", async (status, message, phase) => {
     const { result } = setup();
     await act(async () => {
       result.current.invokeAction({ id: "compact", label: "Compact conversation" });
     });
     const request = inputs.find((item) => item.id === "test_action")!.value;
+    let ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
+    expect((ack.content as any[])[0]).toMatchObject({
+      type: "data",
+      name: "action-progress",
+      data: { kind: "compact", phase: "starting" },
+    });
+    expect(result.current.blockingAction).toMatchObject({ kind: "compact" });
+
     await fireR("action-result", {
       threadId: request.threadId,
       requestId: request.requestId,
       actionId: "compact",
       status: "progress",
       message: "Compacting conversation…",
+      value: {
+        kind: "compact", phase: "compacting", startedAt: Date.now(),
+        message: "Compacting conversation…",
+      },
     });
     expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
+    expect((ack.content as any[])[0]).toMatchObject({
+      type: "data", name: "action-progress",
+      data: { kind: "compact", phase: "compacting" },
+    });
+    expect(result.current.blockingAction).toMatchObject({ kind: "compact" });
 
     await fireR("action-result", {
       threadId: request.threadId,
@@ -512,12 +530,42 @@ describe("useShinyRuntime — permission progress correlation", () => {
       actionId: "compact",
       status,
       message,
+      value: { kind: "compact", phase, startedAt: Date.now(), message },
     });
-    const ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
-    const text = (ack.content as any[]).map((part) => part.text ?? "").join("");
-    expect(text).toBe(expected);
+    ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
+    expect((ack.content as any[])[0]).toMatchObject({
+      type: "data", name: "action-progress", data: { kind: "compact", phase },
+    });
+    expect(result.current.blockingAction).toBeUndefined();
     expect(result.current.runtime.thread.getState().isRunning).toBe(false);
   });
+
+  it("client watchdog settles compact and releases blocking when terminal is lost", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = setup();
+      await act(async () => {
+        result.current.invokeAction({ id: "compact", label: "Compact conversation" });
+      });
+      expect(result.current.blockingAction).toMatchObject({ kind: "compact" });
+
+      await act(async () => {
+        vi.advanceTimersByTime(186_000);
+      });
+
+      const ack = messages(result).find((item) => item.id.startsWith("ack-"))!;
+      expect((ack.content as any[])[0]).toMatchObject({
+        type: "data",
+        name: "action-progress",
+        data: { kind: "compact", phase: "error" },
+      });
+      expect(result.current.blockingAction).toBeUndefined();
+      expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   const config = {
     ui_capabilities: {
       permission_mode: {

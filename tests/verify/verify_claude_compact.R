@@ -146,6 +146,25 @@ browser$Input$dispatchKeyEvent(
 browser$Input$dispatchKeyEvent(
   type = "keyUp", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L
 )
+compact_running <- wait_for(
+  "!!document.querySelector('[data-slot=action-progress][data-action-kind=compact][data-action-state=running]')",
+  10, interval = 0.02
+)
+check("structured compact running phase appeared", compact_running)
+if (compact_running) {
+  check("compact uses an indeterminate bar", isTRUE(value(
+    "!!document.querySelector('[data-slot=action-progress] [data-indeterminate=true]')"
+  )))
+  check("compact progress shows elapsed time without a percentage", isTRUE(value(
+    "(function(){const t=document.querySelector('[data-slot=action-progress]')?.innerText||'';return /\\d+s elapsed/.test(t) && !/\\d+%/.test(t)})()"
+  )))
+  check("compact blocks the current composer", isTRUE(value(
+    "document.querySelector('[data-slot=aui_composer-shell]')?.getAttribute('data-blocked')==='true' && document.querySelector('.aui-lexical-input')?.getAttribute('contenteditable')==='false'"
+  )))
+  check("compact does not expose AI Stop semantics", isTRUE(value(
+    "!!document.querySelector('.aui-composer-compact-blocked') && !document.querySelector('.aui-composer-cancel')"
+  )))
+}
 check("/compact action bubble appeared", wait_for(
   "Array.from(document.querySelectorAll('[data-role=user]')).some(x=>(x.innerText||'').includes('/compact'))",
   20
@@ -163,6 +182,12 @@ check("/compact produced a terminal action result", compact_settled, compact_sta
 check("/compact reached successful terminal ack",
       isTRUE(value("(document.body.innerText||'').includes('Conversation compacted')")),
       compact_state)
+check("compact terminal data UI is complete and non-animating", isTRUE(value(
+  "!!document.querySelector('[data-slot=action-progress][data-action-state=complete]') && !document.querySelector('[data-slot=action-progress] [data-indeterminate=true]')"
+)))
+check("composer is restored after compact", isTRUE(value(
+  "document.querySelector('[data-slot=aui_composer-shell]')?.getAttribute('data-blocked')==='false' && document.querySelector('.aui-lexical-input')?.getAttribute('contenteditable')==='true' && !!document.querySelector('.aui-composer-send')"
+)))
 check("compact progress no longer remains", body_excludes("Compacting conversation"))
 check("root remains mounted after compact", isTRUE(value("!!document.querySelector('.aui-root')")))
 check("websocket remains connected after compact", isTRUE(value(
@@ -177,6 +202,12 @@ check("compacted terminal ack restored from history", wait_for(
   "(document.body.innerText||'').includes('Conversation compacted')",
   30
 ))
+check("restored compact is terminal and never animates", isTRUE(value(
+  "!!document.querySelector('[data-slot=action-progress][data-action-state=complete]') && !document.querySelector('[data-slot=action-progress] [data-indeterminate=true]')"
+)))
+check("restored history does not block composer", isTRUE(value(
+  "document.querySelector('[data-slot=aui_composer-shell]')?.getAttribute('data-blocked')==='false' && document.querySelector('.aui-lexical-input')?.getAttribute('contenteditable')==='true'"
+)))
 check("restored history has no leaked provider marker", body_excludes("course_status"))
 check("no browser console errors or runtime exceptions", length(console_errors) == 0L,
       if (length(console_errors)) paste(unique(console_errors), collapse = ", ") else "0 errors")

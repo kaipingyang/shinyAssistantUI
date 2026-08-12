@@ -1232,6 +1232,7 @@ make_ellmer_session_loader <- function(store) {
 .claude_start_compact_poll <- function(
     client,
     on_terminal,
+    on_progress = function(phase) invisible(NULL),
     persist_result = function(message) invisible(NULL),
     timeout_seconds = .claude_compact_timeout_seconds(),
     poll_interval = 0.25,
@@ -1274,6 +1275,18 @@ make_ellmer_session_loader <- function(store) {
 
     result <- NULL
     for (message in (messages %||% list())) {
+      if (inherits(message, "SystemMessage")) {
+        phase <- tryCatch(
+          message$data$status %||% message$status %||% NULL,
+          error = function(error) NULL
+        )
+        if (identical(phase, "compacting")) {
+          tryCatch(
+            on_progress("compacting"),
+            error = function(error) invisible(NULL)
+          )
+        }
+      }
       if (inherits(message, "ResultMessage")) {
         result <- message
         break
@@ -1660,14 +1673,36 @@ make_claude_handler <- function(options       = NULL,
           compact_in_progress[[thread_id]] <<- NULL
           invisible(NULL)
         }
+        compact_started_at <- as.numeric(Sys.time()) * 1000
+        compact_value <- function(phase, message = NULL) {
+          value <- list(
+            kind = "compact",
+            phase = phase,
+            startedAt = compact_started_at
+          )
+          if (!is.null(message)) value$message <- message
+          value
+        }
         tryCatch({
-          send_action_result("Compacting conversation\u2026", "progress")
+          send_action_result(
+            "Preparing conversation\u2026", "progress",
+            value = compact_value("starting", "Preparing conversation\u2026")
+          )
           cl$send("/compact")
           .claude_start_compact_poll(
             client = cl,
+            on_progress = function(phase) {
+              if (identical(phase, "compacting")) {
+                send_action_result(
+                  "Compacting conversation\u2026", "progress",
+                  value = compact_value("compacting", "Compacting conversation\u2026")
+                )
+              }
+            },
             on_terminal = function(status, message) {
               release_compact()
-              if (identical(status, "ok")) ok(message) else err(message)
+              phase <- if (identical(status, "ok")) "complete" else "error"
+              send_action_result(message, status, value = compact_value(phase, message))
             },
             persist_result = function(message) {
               persist_session(thread_id, message$session_id)

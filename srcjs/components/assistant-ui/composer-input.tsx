@@ -436,7 +436,8 @@ const ShinyLexicalInput: FC<{
   formatter: Unstable_DirectiveFormatter;
   slashCompletionRef: RefObject<(() => boolean) | null>;
   onFocus?: FocusEventHandler<HTMLDivElement>;
-}> = ({ formatter, slashCompletionRef, onFocus }) => {
+  blocked?: boolean;
+}> = ({ formatter, slashCompletionRef, onFocus, blocked = false }) => {
   const shellRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -467,7 +468,9 @@ const ShinyLexicalInput: FC<{
       userSelect: "none",
       whiteSpace: "nowrap",
     });
-  }, []);
+    input.contentEditable = blocked ? "false" : "true";
+    input.setAttribute("aria-disabled", blocked ? "true" : "false");
+  }, [blocked]);
 
   return (
     <LexicalComposerInput
@@ -492,7 +495,8 @@ const ShinyLexicalInput: FC<{
 export const ShinyComposerInput: FC<{
   onFocus?: FocusEventHandler<HTMLDivElement>;
 }> = ({ onFocus }) => {
-  const { commands, actionItems } = useShinyConfig();
+  const { commands, actionItems, blockingAction } = useShinyConfig();
+  const blocked = Boolean(blockingAction);
   const slashCompletionRef = useRef<(() => boolean) | null>(null);
   const onTabCompletionChange = useCallback((handler: (() => boolean) | null) => {
     slashCompletionRef.current = handler;
@@ -506,7 +510,11 @@ export const ShinyComposerInput: FC<{
   );
 
   return (
-    <div className="relative">
+    <div
+      className="relative data-[blocked=true]:pointer-events-none data-[blocked=true]:opacity-60"
+      data-blocked={blocked ? "true" : "false"}
+      aria-disabled={blocked}
+    >
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <SlashPopover
           formatter={formatter}
@@ -517,6 +525,7 @@ export const ShinyComposerInput: FC<{
           formatter={formatter}
           slashCompletionRef={slashCompletionRef}
           onFocus={onFocus}
+          blocked={blocked}
         />
       </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </div>

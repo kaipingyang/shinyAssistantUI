@@ -111,6 +111,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     onInvokeAction: rt.invokeAction,
     onOpenFile: rt.openFile,
     onRunInConsole: rt.consoleRunEnabled ? rt.runInConsole : undefined,
+    blockingAction: rt.blockingAction,
     permissionMode: rt.permissionMode,
     thinking: rt.thinking,
     model: rt.model,

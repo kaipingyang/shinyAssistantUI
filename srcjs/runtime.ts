@@ -106,6 +106,24 @@ function deleteMessages(inputId: string, enabled: boolean, threadId: string) {
 
 type CommandDef = { name: string; description: string; prompt: string; category?: string };
 type ActionItemDef = { id: string; command?: string; label?: string; section?: string; description?: string };
+type CompactPhase = "starting" | "compacting" | "complete" | "error";
+export type BlockingAction = {
+  kind: "compact";
+  phase: "starting" | "compacting";
+  startedAt: number;
+  message?: string;
+};
+type CompactActionProgress = {
+  kind: "compact";
+  phase: CompactPhase;
+  startedAt: number;
+  message?: string;
+};
+
+const COMPACT_CLIENT_TIMEOUT_MS = 185_000;
+
+const isCompactPhase = (value: unknown): value is CompactPhase =>
+  value === "starting" || value === "compacting" || value === "complete" || value === "error";
 const AVAILABLE_PERMISSION_MODES = new Set([
   "default", "plan", "acceptEdits", "bypassPermissions", "askAll", "yolo",
 ]);
@@ -445,7 +463,27 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const streamingIdRef  = useRef<string | null>(null);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
-  const actionAckRefs = useRef(new Map<string, { threadId: string; ackId: string }>());
+  const actionAckRefs = useRef(new Map<string, {
+    threadId: string;
+    ackId: string;
+    actionId: string;
+    startedAt?: number;
+    timeoutId?: number;
+  }>());
+  const [blockingActions, setBlockingActions] = useState<Record<string, BlockingAction>>({});
+  const blockingActionsRef = useRef<Record<string, BlockingAction>>({});
+  const setBlockingActionForThread = useCallback((threadId: string, action?: BlockingAction) => {
+    const next = { ...blockingActionsRef.current };
+    if (action) next[threadId] = action;
+    else delete next[threadId];
+    blockingActionsRef.current = next;
+    setBlockingActions(next);
+  }, []);
+  useEffect(() => () => {
+    for (const target of actionAckRefs.current.values()) {
+      if (target.timeoutId !== undefined) window.clearTimeout(target.timeoutId);
+    }
+  }, []);
   const invokeActionRef = useRef<((item: ActionItemDef) => void) | null>(null);
   const actionRequestSeq = useRef(0);
   type PermissionPending = { requestId: string; requested: string };
@@ -595,7 +633,50 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
 
       const target = requestId ? actionAckRefs.current.get(requestId) : undefined;
-      if (!target || !result.message) return;
+      if (!target) return;
+
+      if (target.actionId === "compact") {
+        const incoming = result.value && typeof result.value === "object"
+          ? result.value as Partial<CompactActionProgress>
+          : undefined;
+        const fallbackPhase: CompactPhase = result.status === "error"
+          ? "error"
+          : result.status === "progress" ? "compacting" : "complete";
+        const phase = isCompactPhase(incoming?.phase) ? incoming.phase : fallbackPhase;
+        const startedAt = target.startedAt ?? (
+          typeof incoming?.startedAt === "number" && Number.isFinite(incoming.startedAt)
+            ? incoming.startedAt
+            : Date.now()
+        );
+        const data: CompactActionProgress = {
+          kind: "compact",
+          phase,
+          startedAt,
+          ...(result.message || incoming?.message
+            ? { message: result.message || incoming?.message }
+            : {}),
+        };
+        setMessagesMap((prev) => {
+          const msgs = prev[target.threadId] ?? [];
+          const updated = msgs.map((m): ThreadMessageLike =>
+            m.id === target.ackId
+              ? ({ ...m, content: [{ type: "data-action-progress", data }] } as any)
+              : m,
+          );
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, target.threadId, updated);
+          return { ...prev, [target.threadId]: updated };
+        });
+        if (phase === "starting" || phase === "compacting") {
+          setBlockingActionForThread(target.threadId, data as BlockingAction);
+        } else {
+          if (target.timeoutId !== undefined) window.clearTimeout(target.timeoutId);
+          setBlockingActionForThread(target.threadId);
+          actionAckRefs.current.delete(requestId!);
+        }
+        return;
+      }
+
+      if (!result.message) return;
       const prefix = result.status === "error" ? "\u26a0\ufe0f"
         : result.status === "progress" ? "\u23f3"
         : "\u2713";
@@ -1262,6 +1343,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── onNew ────────────────────────────────────────────────────────────────
   const onNew = useCallback(
     async (msg: AppendMessage) => {
+      if (blockingActionsRef.current[currentThreadId]) return;
       // 气泡显示用原始文本（含 /commandName chip 序列化结果）
       const text = msg.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1331,7 +1413,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // deliverText 追加用户气泡到指定线程并 startRun 发送(无附件)。存入 ref 供 onDone
   // flush 调用(避免 startRun 闭包对后定义函数的时序依赖)。
   const deliverText = useCallback((text: string, threadId: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || blockingActionsRef.current[threadId]) return;
     const slashAction = matchSlashAction(text, actionItems);
     if (slashAction) {
       if (slashAction.id === "model") { setModelPickerOpen(true); return; }
@@ -1372,10 +1454,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // (on_action 执行真实操作,如切模型 / 清历史)。绝不触发 AI run。
   const invokeAction = useCallback((item: ActionItemDef) => {
     const threadId = currentThreadIdRef.current;
+    if (blockingActionsRef.current[threadId]) return;
     const label = item.label ?? item.id;
     const command = item.command ?? item.id;
     const requestId = makeActionRequestId();
     const ackId = `ack-${requestId}`;
+    const compactStartedAt = item.id === "compact" ? Date.now() : undefined;
+    const compactData: CompactActionProgress | undefined = compactStartedAt === undefined
+      ? undefined
+      : {
+          kind: "compact",
+          phase: "starting",
+          startedAt: compactStartedAt,
+          message: "Preparing conversation\u2026",
+        };
     setMessagesMap((prev) => {
       const msgs = prev[threadId] ?? [];
       const updated: ThreadMessageLike[] = [
@@ -1385,14 +1477,48 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           content: [{ type: "text" as const, text: `/${command}` }], metadata: { custom: { shinyAction: true } } as any },
         { id: ackId, role: "assistant" as const,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          content: [{ type: "text" as const, text: `\u2699\ufe0f ${label}\u2026` }], metadata: { custom: { shinyActionAck: true } } as any },
+          content: compactData
+            ? ([{ type: "data-action-progress", data: compactData }] as any)
+            : [{ type: "text" as const, text: `\u2699\ufe0f ${label}\u2026` }],
+          metadata: { custom: { shinyActionAck: true } } as any },
       ];
       if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
       return { ...prev, [threadId]: updated };
     });
-    actionAckRefs.current.set(requestId, { threadId, ackId });
+    if (compactData) setBlockingActionForThread(threadId, compactData as BlockingAction);
+    const target: {
+      threadId: string;
+      ackId: string;
+      actionId: string;
+      startedAt?: number;
+      timeoutId?: number;
+    } = { threadId, ackId, actionId: item.id, startedAt: compactStartedAt };
+    if (compactData) {
+      target.timeoutId = window.setTimeout(() => {
+        if (actionAckRefs.current.get(requestId) !== target) return;
+        const data: CompactActionProgress = {
+          kind: "compact",
+          phase: "error",
+          startedAt: compactData.startedAt,
+          message: "Compaction interrupted: no terminal response",
+        };
+        setMessagesMap((prev) => {
+          const msgs = prev[threadId] ?? [];
+          const updated = msgs.map((m): ThreadMessageLike =>
+            m.id === ackId
+              ? ({ ...m, content: [{ type: "data-action-progress", data }] } as any)
+              : m,
+          );
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+          return { ...prev, [threadId]: updated };
+        });
+        setBlockingActionForThread(threadId);
+        actionAckRefs.current.delete(requestId);
+      }, COMPACT_CLIENT_TIMEOUT_MS);
+    }
+    actionAckRefs.current.set(requestId, target);
     bridge.current.sendAction(item.id, threadId, { requestId });
-  }, [inputId]);
+  }, [inputId, setBlockingActionForThread]);
   invokeActionRef.current = invokeAction;
 
   // ── onEdit ───────────────────────────────────────────────────────────────
@@ -1408,6 +1534,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         .join("");
       if (!text.trim()) return;
       const threadId = currentThreadIdRef.current;
+      if (blockingActionsRef.current[threadId]) return;
       const parentId = message.parentId ?? null;
       const { attachmentData, storedAttachments } = extractAttachments(message);
 
@@ -1445,6 +1572,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const onReload = useCallback(
     async (parentId: string | null, _config: StartRunConfig) => {
       const threadId = currentThreadId;
+      if (blockingActionsRef.current[threadId]) return;
       const msgs = messagesMap[threadId] ?? [];
 
       // 找到 parent user 消息的文本
@@ -1725,6 +1853,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
     runInConsole, consoleRunEnabled,
     invokeAction, permissionMode, thinking, model,
+    blockingAction: blockingActions[currentThreadId],
     ideContext: capabilityContract.ide ? ideContext : undefined,
     selectionVisible,
     setSelectionVisible,

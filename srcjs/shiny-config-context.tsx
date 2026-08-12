@@ -46,6 +46,12 @@ export interface ShinyConfigCtx {
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onRunInConsole?: (code: string) => void;
+  blockingAction?: {
+    kind: "compact";
+    phase: "starting" | "compacting";
+    startedAt: number;
+    message?: string;
+  };
   permissionMode?: PermissionModeState;
   thinking?: ThinkingState;
   model?: ModelState;

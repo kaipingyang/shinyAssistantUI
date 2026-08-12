@@ -54,10 +54,15 @@ chk("Bash code block shows the command (not JSON)",
     isTRUE(value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').includes('ls -la /tmp')")),
     value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').slice(0,40)"))
 
-# Write -> code(python)
-chk("Write renders a python code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"python\"]')")))
-chk("Write code block shows the content",
-    isTRUE(value("(document.querySelector('[data-arg-lang=\"python\"]')?.textContent||'').includes('print(1)')")))
+# Write -> generic Markdown view, Source by default for non-Markdown files.
+chk("Write renders generic Markdown view in Source mode", isTRUE(value(
+  "!!document.querySelector('[data-arg-view=\"markdown\"][data-markdown-mode=\"source\"] [data-source-language=\"python\"]')"
+)))
+chk("Write Source shows the exact content",
+    isTRUE(value("(document.querySelector('[data-source-language=\"python\"]')?.textContent||'')==='print(1)'")))
+chk("Write offers Preview as Markdown", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-arg-view=\"markdown\"] button')).some(b=>(b.innerText||'').trim()==='Preview as Markdown')"
+)))
 
 # run_r -> code(r), clean R (no JSON {\"code\":...} wrapper)
 chk("run_r renders an R code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')")))
@@ -67,8 +72,8 @@ chk("run_r shows clean R code (mean(y), no JSON key)",
 
 # unknown -> json fallback
 chk("unknown tool falls back to JSON view", isTRUE(value("!!document.querySelector('[data-arg-view=\"json\"]')")))
-chk("code views count == 3 (bash+python+r)",
-    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===3")),
+chk("code views count == 2 (bash+r; Write is generic Markdown)",
+    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===2")),
     value("document.querySelectorAll('[data-arg-view=\"code\"]').length+''"))
 
 # Phase 2: TodoWrite -> checklist

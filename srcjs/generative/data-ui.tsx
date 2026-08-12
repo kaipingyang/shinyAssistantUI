@@ -6,7 +6,7 @@
 // which looks up DATA_UI_BY_NAME[part.name] and renders it with the R-sent `data`.
 // This is the verified path (see srcjs/generative-ui-proof.test.tsx): a plain
 // component table, NOT makeAssistantDataUI/dataRendererUI (that needs a scope we don't wire).
-import type { FC, ReactNode } from "react";
+import { useEffect, useState, type FC, type ReactNode } from "react";
 import { FlowCanvas, type FlowCanvasEdge } from "@/components/assistant-ui/flow-canvas";
 
 export type DataUIComponent = FC<{ data: any }>;
@@ -83,11 +83,83 @@ const DataFlow: DataUIComponent = ({ data }) => {
   );
 };
 
+type CompactProgressData = {
+  kind?: unknown;
+  phase?: unknown;
+  startedAt?: unknown;
+  message?: unknown;
+};
+
+const COMPACT_STALE_MS = 185_000;
+
+const CompactActionProgress: DataUIComponent = ({ data: raw }) => {
+  const data = (raw ?? {}) as CompactProgressData;
+  const phase = data.phase;
+  const validPhase = phase === "starting" || phase === "compacting" ||
+    phase === "complete" || phase === "error";
+  const running = phase === "starting" || phase === "compacting";
+  const startedAt = typeof data.startedAt === "number" && Number.isFinite(data.startedAt)
+    ? data.startedAt
+    : null;
+  const [now, setNow] = useState(() => Date.now());
+  const stale = running && (startedAt === null || now - startedAt > COMPACT_STALE_MS);
+
+  useEffect(() => {
+    if (!running || stale) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [running, stale]);
+
+  if (data.kind !== "compact") return null;
+  const state = !validPhase || stale ? "interrupted"
+    : phase === "complete" ? "complete"
+      : phase === "error" ? "error"
+        : "running";
+  const defaultLabel = state === "interrupted" ? "Compaction interrupted"
+    : phase === "starting" ? "Preparing conversation\u2026"
+      : phase === "compacting" ? "Compacting conversation\u2026"
+        : phase === "complete" ? "Conversation compacted"
+          : "Compaction failed";
+  const label = typeof data.message === "string" && data.message ? data.message : defaultLabel;
+  const elapsed = startedAt === null ? null : Math.max(0, Math.floor((now - startedAt) / 1_000));
+
+  return (
+    <div
+      data-slot="action-progress"
+      data-action-kind="compact"
+      data-action-state={state}
+      role="status"
+      aria-live="polite"
+      className={`aui-action-progress my-1 rounded-lg border px-3 py-2 text-sm ${
+        state === "error" || state === "interrupted"
+          ? "border-destructive/30 bg-destructive/5"
+          : "border-border bg-muted/30"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">{label}</span>
+        {elapsed !== null && (
+          <span className="text-muted-foreground shrink-0 font-mono text-xs">{elapsed}s elapsed</span>
+        )}
+      </div>
+      {state === "running" && (
+        <div className="bg-muted mt-2 h-1 overflow-hidden rounded-full" aria-hidden="true">
+          <div
+            data-indeterminate="true"
+            className="bg-primary h-full w-full origin-left animate-pulse rounded-full"
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
 // The registry. Add new R-driven display components here (Plan 47 A0/A4).
 export const DATA_UI_BY_NAME: Record<string, DataUIComponent> = {
   table: DataTable,
   stat: DataStat,
   flow: DataFlow,
+  "action-progress": CompactActionProgress,
 };
 
 // Called from thread.tsx `case "data"`: look up by the part's data-event name.
