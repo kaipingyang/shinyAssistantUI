@@ -162,6 +162,31 @@ check(
   ev("JSON.stringify({messages:[...document.querySelectorAll('#chat [data-role]')].map(e=>e.innerText),checklists:[...document.querySelectorAll('#chat [data-slot=aui_claude_checklist]')].map(e=>({revision:e.dataset.checklistRevision,completed:e.dataset.allCompleted,text:e.innerText}))})")
 )
 check("active checklist has no close action", !isTRUE(ev("!!document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')")))
+send_text("many checklist tasks")
+check("large current checklist shows an actionable +6 more", wait_until(
+  "!!document.querySelector('#chat [data-slot=aui_checklist_overflow][aria-label=\"Show 6 more checklist items\"]')"
+))
+ev("document.querySelector('#chat [data-slot=aui_checklist_overflow]')?.click();true")
+check("+6 more expands all current tasks inline", wait_until(
+  "(document.querySelector('#chat [data-slot=aui_checklist_body]')?.innerText||'').includes('Current task 11')"
+))
+check("expanded checklist body remains bounded and internally scrollable", isTRUE(ev(paste0(
+  "(function(){var b=document.querySelector('#chat [data-slot=aui_checklist_body]');if(!b)return false;",
+  "var r=b.getBoundingClientRect(),s=getComputedStyle(b);return r.height<=145&&s.overflowY==='auto'&&b.scrollHeight>b.clientHeight})()"
+))))
+ev("document.querySelector('#chat [aria-label=\"Collapse checklist\"]')?.click();true")
+check("active checklist can collapse to its header", wait_until(
+  "document.querySelector('#chat [data-slot=aui_claude_checklist]')?.dataset.collapsed==='true'&&!document.querySelector('#chat [data-slot=aui_checklist_body]')"
+))
+ev("document.querySelector('#chat [aria-label=\"Expand checklist\"]')?.click();true")
+check("collapsed checklist can expand again", wait_until(
+  "document.querySelector('#chat [data-slot=aui_claude_checklist]')?.dataset.collapsed==='false'&&!!document.querySelector('#chat [data-slot=aui_checklist_body]')"
+))
+send_text("new current task group")
+check("first TaskCreate after a new user turn replaces the old group", wait_until(paste0(
+  "(function(){var k=document.querySelector('#chat [data-slot=aui_claude_checklist]');if(!k)return false;",
+  "var t=k.innerText||'';return t.includes('Fresh current task')&&!t.includes('Current task 02')})()"
+)))
 check("checklist stays above composer without overlap", isTRUE(ev(paste0(
   "(function(){var k=document.querySelector('#chat [data-slot=aui_claude_checklist]'),",
   "c=document.querySelector('#chat [data-slot=aui_composer-shell]');if(!k||!c)return false;",

@@ -500,3 +500,47 @@ describe("historical thread paging controls", () => {
     expect(loadOlderHistory).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe("Claude checklist bounded expansion and collapse", () => {
+  it("expands +N more inline, keeps the body bounded, and collapses to its header", () => {
+    const items = Array.from({ length: 7 }, (_, index) => ({
+      id: String(index + 1),
+      content: `Current task ${index + 1}`,
+      status: index === 0 ? "in_progress" : "pending",
+    }));
+    const checklist = {
+      threadId: "thread-current",
+      revision: "current-group",
+      allCompleted: false,
+      staleAfterUserTurn: false,
+      items,
+      visibleItems: items.slice(0, 5),
+      overflowCount: 2,
+    };
+    const { getByTestId } = render(
+      <Widget
+        id="checklist-expand-collapse"
+        context={{ checklist } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-checklist-expand-collapse");
+    const panel = widget.querySelector<HTMLElement>('[data-slot="aui_claude_checklist"]')!;
+
+    expect(panel.dataset.collapsed).toBe("false");
+    expect(within(widget).queryByText("Current task 7")).toBeNull();
+    fireEvent.click(within(widget).getByRole("button", { name: /show 2 more checklist items/i }));
+    expect(within(widget).getByText("Current task 7")).toBeTruthy();
+    const body = widget.querySelector<HTMLElement>('[data-slot="aui_checklist_body"]');
+    expect(body?.className).toContain("max-h-");
+    expect(body?.className).toContain("overflow-y-auto");
+    expect(within(widget).getByRole("button", { name: /show fewer checklist items/i })).toBeTruthy();
+
+    fireEvent.click(within(widget).getByRole("button", { name: /collapse checklist/i }));
+    expect(panel.dataset.collapsed).toBe("true");
+    expect(widget.querySelector('[data-slot="aui_checklist_body"]')).toBeNull();
+    fireEvent.click(within(widget).getByRole("button", { name: /expand checklist/i }));
+    expect(panel.dataset.collapsed).toBe("false");
+    expect(widget.querySelector('[data-slot="aui_checklist_body"]')).not.toBeNull();
+  });
+});

@@ -123,3 +123,27 @@ describe("ShinyToolFallback approval — always-allow (multi-select) & deny feed
     expect(queryByText(/Always allow/)).toBeNull();
   });
 });
+
+
+describe("ShinyToolFallback result viewport", () => {
+  it("bounds long Bash/default results in one shared scroll container", () => {
+    const result = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join("\n");
+    const props = {
+      toolName: "Bash",
+      toolCallId: "tc-long-result",
+      argsText: '{"command":"seq 200"}',
+      args: { command: "seq 200" },
+      result,
+      status: { type: "complete" },
+      artifact: { defaultOpen: true },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const { container } = render(<ShinyToolFallback {...props} />);
+    const viewport = container.querySelector('[data-slot="tool-result-scroll"]');
+    expect(viewport).not.toBeNull();
+    expect(viewport?.className).toContain("max-h-96");
+    expect(viewport?.className).toContain("overflow-auto");
+    expect(viewport?.textContent).toContain("line 200");
+  });
+});

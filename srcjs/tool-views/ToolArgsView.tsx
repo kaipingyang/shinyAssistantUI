@@ -76,13 +76,17 @@ const MarkdownToolView: FC<{ view: MarkdownView }> = ({ view }) => {
           </TextMessagePartProvider>
         </div>
       ) : (
-        <pre
+        <div
           data-markdown-source="true"
           data-source-language={view.sourceLanguage ?? "markdown"}
-          className="bg-muted/30 text-foreground/90 max-h-96 overflow-auto p-3 font-mono text-xs whitespace-pre-wrap"
+          className="bg-muted/30 text-foreground/90 max-h-96 overflow-auto p-3 font-mono text-xs"
         >
-          {view.text}
-        </pre>
+          {(view.sourceLanguage ?? "markdown") === "text" ? (
+            <pre className="whitespace-pre-wrap">{view.text}</pre>
+          ) : (
+            <SyntaxHighlighter language={view.sourceLanguage ?? "markdown"} code={view.text} />
+          )}
+        </div>
       )}
     </div>
   );
@@ -269,21 +273,31 @@ export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
             <p className="text-foreground font-medium">{q.question}</p>
             {q.options.length > 0 && (
               <ul className="flex flex-col gap-0.5 ps-1">
-                {q.options.map((option, oi) => (
-                  <li
-                    key={oi}
-                    data-question-option={option.label}
-                    className="flex items-start gap-1.5"
-                  >
-                    <span aria-hidden className="text-muted-foreground">
-                      {q.multiSelect ? "\u2610" : "\u25CB"}
-                    </span>
-                    <span className="text-foreground/90">{option.label}</span>
-                    {option.description && (
-                      <span className="text-muted-foreground">{option.description}</span>
-                    )}
-                  </li>
-                ))}
+                {q.options.map((option, oi) => {
+                  const answers = q.answer === undefined
+                    ? []
+                    : Array.isArray(q.answer) ? q.answer : [q.answer];
+                  const selected = answers.includes(option.label);
+                  return (
+                    <li
+                      key={oi}
+                      data-question-option={option.label}
+                      data-question-selected={selected ? "true" : "false"}
+                      className={`flex items-start gap-1.5 ${selected ? "font-medium" : ""}`}
+                    >
+                      <span
+                        aria-label={selected ? "Selected" : "Not selected"}
+                        className={selected ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}
+                      >
+                        {selected ? (q.multiSelect ? "\u2611" : "\u25C9") : (q.multiSelect ? "\u2610" : "\u25CB")}
+                      </span>
+                      <span className="text-foreground/90">{option.label}</span>
+                      {option.description && (
+                        <span className="text-muted-foreground">{option.description}</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
             {q.answer !== undefined && (

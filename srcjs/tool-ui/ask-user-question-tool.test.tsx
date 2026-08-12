@@ -9,17 +9,17 @@ afterEach(() => {
   _clearApprovalHandlers();
 });
 
-function renderTool(args: unknown, result?: unknown) {
+function renderTool(args: unknown, result?: unknown, toolCallId = "ask-malformed", inputId = "chat-ask") {
   const props = {
     toolName: "AskUserQuestion",
-    toolCallId: "ask-malformed",
+    toolCallId,
     args,
     argsText: JSON.stringify(args),
     result,
     status: result === undefined ? { type: "requires-action" } : { type: "complete" },
     artifact: {
       requiresApproval: result === undefined,
-      inputId: "chat-ask",
+      inputId,
       defaultOpen: true,
       ...(result === undefined ? {} : { approvalResult: "approved" }),
     },
@@ -55,4 +55,37 @@ describe("AskUserQuestionToolUI runtime validation", () => {
     expect(getByText("Answer:")).toBeTruthy();
     expect(getByText("Teal")).toBeTruthy();
   });
+
+  it("keeps submitted options visibly selected in the tool record and across remount", () => {
+    const decide = vi.fn();
+    registerApprovalHandler("chat-live", decide);
+    const args = {
+      questions: [{
+        question: "Which langs?",
+        multiSelect: true,
+        options: [{ label: "R" }, { label: "Python" }],
+      }],
+    };
+
+    const first = renderTool(args, undefined, "ask-live-selection", "chat-live");
+    fireEvent.click(first.getByLabelText("R"));
+    fireEvent.click(first.getByText("Submit answer"));
+
+    expect(decide).toHaveBeenCalledWith("ask-live-selection", true, {
+      answers: { "Which langs?": ["R"] },
+    });
+    expect(first.container.querySelector('[data-slot="ask-user-question"]')).toBeNull();
+    const selected = first.container.querySelector('[data-question-option="R"]');
+    expect(selected?.getAttribute("data-question-selected")).toBe("true");
+    expect(selected?.textContent).toContain("☑");
+    first.unmount();
+
+    const restored = renderTool(args, "Answers submitted", "ask-live-selection", "chat-live");
+    expect(restored.container.querySelector('[data-question-option="R"]')?.getAttribute("data-question-selected")).toBe("true");
+    restored.unmount();
+
+    const isolated = renderTool(args, "Answers submitted", "ask-other", "chat-live");
+    expect(isolated.container.querySelector('[data-question-option="R"]')?.getAttribute("data-question-selected")).toBe("false");
+  });
+
 });

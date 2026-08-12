@@ -4,13 +4,16 @@ library(shiny)
 library(shinyAssistantUI)
 
 handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ...) {
-  emit <- function(id, name, args) {
+  emit <- function(id, name, args, result = "ok") {
     on_tool_call(id, name, args, annotations = list(defaultOpen = TRUE))
-    on_tool_result(id, "ok", is_error = FALSE)
+    on_tool_result(id, result, is_error = FALSE)
   }
   on_chunk("running tools:\n")
   emit("e1", "Edit", list(file_path = "a.R", old_string = "x <- 1", new_string = "x <- 2"))
-  emit("b1", "Bash", list(command = "ls -la /tmp"))
+  emit(
+    "b1", "Bash", list(command = "ls -la /tmp"),
+    paste(sprintf("bash result line %03d", seq_len(200)), collapse = "\n")
+  )
   emit("w-py", "Write", list(file_path = "f.py", content = "print(1)"))
   emit("w-r", "Write", list(file_path = "analysis.R", content = "x <- mean(1:3)"))
   emit("w-csv", "Write", list(

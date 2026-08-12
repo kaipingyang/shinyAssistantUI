@@ -12,13 +12,18 @@ qs <- list(
 )
 
 handler <- coro::async(function(message, on_chunk, on_done, on_tool_call,
-                                wait_for_approval, ...) {
+                                on_tool_result, wait_for_approval, ...) {
   tcid <- paste0("ask-", as.integer(Sys.time()), "-", sample.int(1e6, 1))
   on_chunk("asking...\n")
   on_tool_call(tcid, "AskUserQuestion", list(questions = qs),
                annotations = list(requiresApproval = TRUE, defaultOpen = TRUE))
   decision <- await(wait_for_approval(tcid))
   decrec(as.character(jsonlite::toJSON(decision$answers %||% NA, auto_unbox = TRUE)))
+  on_tool_result(
+    tcid,
+    paste(sprintf("answer result line %03d", seq_len(160)), collapse = "\n"),
+    is_error = FALSE
+  )
   on_chunk("done"); on_done()
 })
 

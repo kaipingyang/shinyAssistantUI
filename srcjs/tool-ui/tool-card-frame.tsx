@@ -35,6 +35,7 @@ export const _regKey = (inputId: string | undefined, id: string) => `${inputId ?
 // 审批决策注册表：按 inputId::toolCallId 记住 approved/denied，使工具卡在结果到达后
 // 重渲染/重挂载时不丢失"✓ Approved"指示。
 const _decisionRegistry = new Map<string, "approved" | "denied">();
+const _decisionOptsRegistry = new Map<string, ToolDecideOpts>();
 
 export type ToolDecideOpts = {
   updatedInput?: Record<string, unknown>;
@@ -60,11 +61,15 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   const isServerTool = ann?.serverTool === true;
   const isError = (status?.type === "incomplete") || ann?.isError === true;
 
+  const registryKey = _regKey(ann?.inputId as string | undefined, toolCallId);
   const [decision, setDecision] = useState<null | "approved" | "denied">(
     () =>
-      _decisionRegistry.get(_regKey(ann?.inputId as string | undefined, toolCallId)) ??
+      _decisionRegistry.get(registryKey) ??
       (ann?.approvalResult as "approved" | "denied" | undefined) ??
       null,
+  );
+  const [decisionOpts, setDecisionOpts] = useState<ToolDecideOpts | undefined>(
+    () => _decisionOptsRegistry.get(registryKey),
   );
   const [open, setOpen] = useState(defaultOpen);
   useEffect(() => {
@@ -101,12 +106,22 @@ export function useToolCard(props: ToolCallMessagePartProps) {
 
   const decide = (approved: boolean, opts?: ToolDecideOpts) => {
     resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
-    _decisionRegistry.set(_regKey(ann?.inputId as string | undefined, toolCallId), approved ? "approved" : "denied");
+    _decisionRegistry.set(registryKey, approved ? "approved" : "denied");
+    if (opts) _decisionOptsRegistry.set(registryKey, opts);
+    else _decisionOptsRegistry.delete(registryKey);
+    setDecisionOpts(opts);
     setDecision(approved ? "approved" : "denied");
   };
 
+  const displayArgs = (() => {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+    if (decisionOpts?.answers) return { ...args, answers: decisionOpts.answers };
+    if (decisionOpts?.updatedInput) return { ...args, ...decisionOpts.updatedInput };
+    return args;
+  })();
+
   return {
-    toolName, args, argsText, result, status, ann,
+    toolName, args, displayArgs, argsText, result, status, ann,
     pending, needsApproval, decision, decide, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   };
@@ -120,7 +135,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
   const { onOpenFile } = useShinyConfig();
   const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
-    toolName, args, argsText, result, status, ann,
+    toolName, displayArgs, argsText, result, status, ann,
     pending, needsApproval, decision, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
@@ -188,12 +203,15 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
         <ToolFallback.Trigger toolName={displayTitle} status={status} />
         <ToolFallback.Content>
-          <ToolArgsView view={resolveToolView(toolName, args, argsText, ann)} />
+          <ToolArgsView view={resolveToolView(toolName, displayArgs, argsText, ann)} />
 
           {!pending && (
             <div className="aui-shiny-tool-result">
               <p className="text-muted-foreground text-xs font-medium">Result:</p>
-              <div className="mt-1">
+              <div
+                data-slot="tool-result-scroll"
+                className="mt-1 max-h-96 overflow-auto overscroll-contain"
+              >
                 <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />
               </div>
             </div>

@@ -79,12 +79,22 @@ chk("answers round-trip: custom overrides single; multi includes custom",
     wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\\\"Fav color?\\\":\\\"Teal\\\"') && t.includes('\\\"Which langs?\\\":[\\\"R\\\",\\\"SQL\\\"]');})()", 12),
     value("document.getElementById('decision')?.textContent"))
 
+chk("live tool record keeps submitted option selected", wait_for(
+    "!!document.querySelector('[data-question-option=R][data-question-selected=true]') && !document.querySelector('[data-slot=ask-user-question]')", 8))
+chk("live tool record keeps custom and multiple answers", isTRUE(value(
+    "(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v&&v.innerText.includes('Teal')&&v.innerText.includes('R, SQL')&&v.querySelector('[data-question-option=R]')?.innerText.includes('☑')})()"
+)))
+chk("long Ask result scrolls inside shared result viewport", wait_for(
+    "(function(){const v=document.querySelector('[data-slot=tool-result-scroll]');if(!v)return false;const r=v.getBoundingClientRect(),c=getComputedStyle(v);return c.overflowY==='auto'&&r.height<=385&&v.scrollHeight>v.clientHeight&&(v.textContent||'').includes('answer result line 160')})()", 8))
+
 # session-load / 历史完成态：answers必须保留在结构化视图，不能恢复审批表单。
 chk("clicked AskUserQuestion history thread", click_thread("Ask history"))
 chk("historical AskUserQuestion loaded", wait_for(
     "document.body.innerText.includes('Historical answers restored')", 8))
 chk("history keeps structured questions and submitted answers",
     isTRUE(value("(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v && !document.querySelector('[data-args-format=json]') && v.innerText.includes('Answer:') && v.innerText.includes('Teal') && v.innerText.includes('R, SQL');})()")))
+chk("history marks the corresponding option selected",
+    isTRUE(value("document.querySelector('[data-arg-view=questions] [data-question-option=R]')?.getAttribute('data-question-selected')==='true' && document.querySelector('[data-arg-view=questions] [data-question-option=R]')?.innerText.includes('☑')")))
 chk("history does not restore interactive question form",
     isTRUE(value("!document.querySelector('[data-slot=ask-user-question]')")))
 chk("history preserves approved completion state",

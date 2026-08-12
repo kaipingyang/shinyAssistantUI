@@ -74,8 +74,13 @@ function normalizeTodo(value: unknown, id: string): ChecklistItem | undefined {
  */
 export function reduceChecklistMessages(messages: readonly unknown[]): ChecklistItem[] {
   let items: ChecklistItem[] = [];
+  // A real user turn creates a protocol-backed boundary. The first subsequent
+  // TaskCreate starts a new current-task group; additional creates in that same
+  // turn accumulate normally. TodoWrite remains an authoritative snapshot.
+  let pendingTaskCreateBoundary = false;
 
   for (const message of messages) {
+    if (isRealUserMessage(message)) pendingTaskCreateBoundary = true;
     if (!isRecord(message) || !Array.isArray(message.content)) continue;
     for (const rawPart of message.content) {
       if (!isRecord(rawPart) || rawPart.type !== "tool-call") continue;
@@ -89,12 +94,17 @@ export function reduceChecklistMessages(messages: readonly unknown[]): Checklist
         items = args.todos
           .map((todo, index) => normalizeTodo(todo, `${callId}:${index}`))
           .filter((item): item is ChecklistItem => Boolean(item));
+        pendingTaskCreateBoundary = false;
         continue;
       }
 
       if (toolName === "TaskCreate") {
         const content = nonEmptyString(args.subject ?? args.content);
         if (!content) continue;
+        if (pendingTaskCreateBoundary) {
+          items = [];
+          pendingTaskCreateBoundary = false;
+        }
         const adoptedId = resultTaskId(rawPart.result);
         const id = adoptedId ?? `create:${callId}`;
         const activeForm = nonEmptyString(args.activeForm ?? args.active_form);
@@ -126,6 +136,7 @@ export function reduceChecklistMessages(messages: readonly unknown[]): Checklist
           if (provisional.length === 1) index = provisional[0].itemIndex;
         }
         if (index < 0) continue;
+        pendingTaskCreateBoundary = false;
         const current = items[index];
         const content = nonEmptyString(args.subject ?? args.content) ?? current.content;
         const status = nonEmptyString(args.status) ?? current.status;
@@ -160,6 +171,7 @@ export function buildChecklistPreview(
 
 
 export type ChecklistSnapshot = ChecklistPreview & {
+  items: ChecklistItem[];
   allCompleted: boolean;
   revision: string;
   staleAfterUserTurn: boolean;
@@ -217,6 +229,7 @@ export function buildChecklistSnapshot(
   );
   return {
     ...buildChecklistPreview(items, maxVisible),
+    items,
     allCompleted,
     revision: checklistRevision(items),
     staleAfterUserTurn:

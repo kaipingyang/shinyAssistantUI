@@ -36,7 +36,7 @@ describe("ToolArgsView questions", () => {
 
 describe("ToolArgsView historical AskUserQuestion answers", () => {
   it("renders single and multiple submitted answers readably", () => {
-    const { getByText } = render(
+    const { container, getByText } = render(
       <ToolArgsView
         view={{
           kind: "questions",
@@ -45,7 +45,7 @@ describe("ToolArgsView historical AskUserQuestion answers", () => {
               question: "Fav color?",
               multiSelect: false,
               options: [{ label: "Blue" }],
-              answer: "Teal",
+              answer: "Blue",
             },
             {
               question: "Which langs?",
@@ -58,8 +58,15 @@ describe("ToolArgsView historical AskUserQuestion answers", () => {
       />,
     );
 
-    expect(getByText("Teal")).toBeTruthy();
     expect(getByText("R, SQL")).toBeTruthy();
+    const blue = container.querySelector('[data-question-option="Blue"]');
+    const r = container.querySelector('[data-question-option="R"]');
+    const sql = container.querySelector('[data-question-option="SQL"]');
+    expect(blue?.getAttribute("data-question-selected")).toBe("true");
+    expect(blue?.textContent).toContain("◉");
+    expect(r?.getAttribute("data-question-selected")).toBe("true");
+    expect(r?.textContent).toContain("☑");
+    expect(sql).toBeNull();
   });
 });
 
@@ -107,6 +114,8 @@ describe("ToolArgsView markdown", () => {
     fireEvent.click(getByRole("button", { name: "Source" }));
     const source = container.querySelector('[data-markdown-source="true"]')!;
     expect(source.textContent).toBe(original);
+    expect(source.querySelector('[data-syntax-highlighter="prism"]')).not.toBeNull();
+    expect(source.getAttribute("data-source-language")).toBe("markdown");
     fireEvent.click(getByRole("button", { name: "Preview" }));
     await waitFor(() => expect(container.querySelector("h1")?.textContent).toBe("Heading"));
   });

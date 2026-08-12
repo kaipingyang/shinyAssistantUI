@@ -2153,7 +2153,11 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (isTRUE(decision$approved)) {
-            .record_tool_decision(decisions_path, tuid, "approved")
+            decision_record <- "approved"
+            if (!is.null(decision$answers) && length(decision$answers)) {
+              decision_record <- list(status = "approved", answers = decision$answers)
+            }
+            .record_tool_decision(decisions_path, tuid, decision_record)
             # Plan 47 B:交互表单收集的值合并进 tool_input 经 updated_input 回传(泛化,非 AskUserQuestion 专用)。
             if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
               ui <- utils::modifyList(msg$tool_input %||% list(), decision$updatedInput)
@@ -2727,9 +2731,16 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
             # 使工具卡重开后仍显示 "✓ Approved / ✕ Denied";isError 也放进 artifact 让前端渲染错误态。
             dec_h <- if (is.character(tuid_h) && length(tuid_h) == 1L && nzchar(tuid_h))
               decisions[[tuid_h]] else NULL
+            # 旧记录是 "approved"/"denied" 字符串；新版 AskUserQuestion 记录
+            # 同时保存 answers，使 transcript 中不含 updated_input 时仍可恢复勾选。
+            dec_status <- if (is.list(dec_h)) dec_h$status %||% dec_h$decision else dec_h
+            dec_answers <- if (is.list(dec_h) && is.list(dec_h$answers)) dec_h$answers else NULL
+            if (identical(blk[["name"]], "AskUserQuestion") && length(dec_answers)) {
+              args_val$answers <- dec_answers
+            }
             artifact_h <- c(
               list(isError = is_err),
-              if (!is.null(dec_h)) list(approvalResult = dec_h) else list()
+              if (!is.null(dec_status)) list(approvalResult = dec_status) else list()
             )
             parts[[length(parts) + 1L]] <- list(
               type       = "tool-call",

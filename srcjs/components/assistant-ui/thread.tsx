@@ -597,16 +597,43 @@ const ShinyServiceReadyLine: FC = () => {
 
 const ShinyChecklistPanel: FC = () => {
   const { checklist, dismissChecklist } = useShinyConfig();
-  if (!checklist || checklist.visibleItems.length === 0) return null;
+  const [collapsed, setCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const allItems = checklist?.items ?? checklist?.visibleItems ?? [];
+  const taskIdentity = allItems.map((item) => item.id).join("\u001f");
+
+  // New task identities should be visible, while status-only revisions must not
+  // repeatedly override a user's explicit collapse/show-all choice.
+  useEffect(() => {
+    setCollapsed(false);
+    setShowAll(false);
+  }, [checklist?.threadId, taskIdentity]);
+
+  if (!checklist || allItems.length === 0) return null;
+  const shownItems = showAll ? allItems : checklist.visibleItems;
   return (
     <div
       data-slot="aui_claude_checklist"
       data-checklist-revision={checklist.revision}
       data-all-completed={checklist.allCompleted ? "true" : "false"}
-      className="aui-claude-checklist max-h-[min(12rem,35vh)] overflow-y-auto rounded-lg border border-border bg-background/95 px-3 py-2 text-sm shadow-sm"
+      data-collapsed={collapsed ? "true" : "false"}
+      className="aui-claude-checklist overflow-hidden rounded-lg border border-border bg-background/95 text-sm shadow-sm"
     >
-      <div className="mb-1 flex items-center gap-2 text-xs font-semibold">
-        <span>Claude checklist</span>
+      <div className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold ${collapsed ? "" : "border-b"}`}>
+        <button
+          type="button"
+          aria-label={collapsed ? "Expand checklist" : "Collapse checklist"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expand checklist" : "Collapse checklist"}
+          onClick={() => setCollapsed((value) => !value)}
+          className="hover:bg-accent inline-flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-start"
+        >
+          <span aria-hidden="true" className="text-muted-foreground w-3">
+            {collapsed ? "\u25B8" : "\u25BE"}
+          </span>
+          <span>Claude checklist</span>
+          <span className="text-muted-foreground font-normal">({allItems.length})</span>
+        </button>
         {checklist.allCompleted && dismissChecklist ? (
           <button
             type="button"
@@ -619,27 +646,43 @@ const ShinyChecklistPanel: FC = () => {
           </button>
         ) : null}
       </div>
-      <ul className="flex flex-col gap-1">
-        {checklist.visibleItems.map((item) => {
-          const complete = item.status === "completed";
-          const running = item.status === "in_progress";
-          return (
-            <li key={item.id} data-checklist-status={item.status} className="flex items-start gap-2 text-xs">
-              <span className={complete ? "text-green-600" : running ? "text-blue-600" : "text-muted-foreground"}>
-                {complete ? "✓" : running ? "◐" : "○"}
-              </span>
-              <span className={complete ? "text-muted-foreground line-through" : ""}>
-                {running && item.activeForm ? item.activeForm : item.content}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
-      {checklist.overflowCount > 0 ? (
-        <div data-slot="aui_checklist_overflow" className="text-muted-foreground mt-1 text-[11px]">
-          +{checklist.overflowCount} more
+      {!collapsed && (
+        <div
+          data-slot="aui_checklist_body"
+          className="max-h-[min(9rem,28vh)] overflow-y-auto px-3 py-2"
+        >
+          <ul className="flex flex-col gap-1">
+            {shownItems.map((item) => {
+              const complete = item.status === "completed";
+              const running = item.status === "in_progress";
+              return (
+                <li key={item.id} data-checklist-status={item.status} className="flex items-start gap-2 text-xs">
+                  <span className={complete ? "text-green-600" : running ? "text-blue-600" : "text-muted-foreground"}>
+                    {complete ? "✓" : running ? "◐" : "○"}
+                  </span>
+                  <span className={complete ? "text-muted-foreground line-through" : ""}>
+                    {running && item.activeForm ? item.activeForm : item.content}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          {checklist.overflowCount > 0 ? (
+            <button
+              type="button"
+              data-slot="aui_checklist_overflow"
+              aria-label={showAll
+                ? "Show fewer checklist items"
+                : `Show ${checklist.overflowCount} more checklist items`}
+              aria-expanded={showAll}
+              onClick={() => setShowAll((value) => !value)}
+              className="text-muted-foreground hover:text-foreground hover:bg-accent mt-1 rounded px-1 py-0.5 text-[11px]"
+            >
+              {showAll ? "Show less" : `+${checklist.overflowCount} more`}
+            </button>
+          ) : null}
         </div>
-      ) : null}
+      )}
     </div>
   );
 };

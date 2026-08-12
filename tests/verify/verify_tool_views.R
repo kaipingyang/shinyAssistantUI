@@ -104,6 +104,14 @@ chk("Markdown Write starts in Preview", isTRUE(value(
   "Array.from(document.querySelectorAll('[data-arg-view=\"markdown\"][data-markdown-mode=\"preview\"]')).some(e=>e.querySelector('h2')?.textContent==='Markdown write')"
 )))
 
+
+chk("Markdown Source control clicked", isTRUE(value(
+  "(function(){const r=Array.from(document.querySelectorAll('[data-arg-view=markdown]')).find(e=>e.querySelector('h2')?.textContent==='Markdown write');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("Markdown Source keeps exact text with Prism highlighting", isTRUE(value(
+  "(function(){const s=Array.from(document.querySelectorAll('[data-markdown-source=true][data-source-language=markdown]')).find(e=>(e.textContent||'').includes('## Markdown write'));const expected=['## Markdown write','','| A | B |','|---|---|','| 1 | 2 |',''].join(String.fromCharCode(10));return !!s && !!s.querySelector('[data-syntax-highlighter=prism]') && s.textContent===expected})()"
+)))
+
 # run_r -> code(r), clean R (no JSON {\"code\":...} wrapper)
 chk("run_r renders an R code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')")))
 chk("run_r shows clean R code (mean(y), no JSON key)",
@@ -131,6 +139,14 @@ chk("WebFetch url renders as a link", isTRUE(value("(function(){var e=document.q
 # Phase 3: run_r text result -> console (monospace, plain text, not JSON)
 chk("run_r result renders as console text (not JSON)",
     isTRUE(value("(function(){var els=document.querySelectorAll('[data-result-view=\"console\"]');for(var i=0;i<els.length;i++){var t=els[i].textContent||'';if(t.includes('[1] 2') && !t.includes('{'))return true;}return false;})()")))
+
+
+chk("every tool result uses the shared bounded viewport", isTRUE(value(
+  "document.querySelectorAll('.aui-shiny-tool-result').length>0 && document.querySelectorAll('.aui-shiny-tool-result').length===document.querySelectorAll('[data-slot=tool-result-scroll]').length"
+)))
+chk("long Bash result scrolls inside the card", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('Bash'));const v=card?.querySelector('[data-slot=tool-result-scroll]');if(!v)return false;const r=v.getBoundingClientRect(),c=getComputedStyle(v);return c.overflowY==='auto'&&r.height<=385&&v.scrollHeight>v.clientHeight&&(v.textContent||'').includes('bash result line 200')})()"
+)))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)

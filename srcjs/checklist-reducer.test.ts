@@ -303,3 +303,101 @@ describe("buildChecklistSnapshot", () => {
     expect(snapshot.allCompleted).toBe(false);
   });
 });
+
+
+describe("current TaskCreate group lifecycle", () => {
+  const userTurn = (id: string, shinyAction = false) => ({
+    id,
+    role: "user",
+    content: [{ type: "text", text: "next task" }],
+    ...(shinyAction ? { metadata: { custom: { shinyAction: true } } } : {}),
+  });
+
+  it.each(["completed", "pending"])(
+    "replaces an old %s group on the first TaskCreate after a real user turn",
+    (oldStatus) => {
+      const items = reduceChecklistMessages([
+        toolMessage("old", "TaskCreate", {
+          args: { subject: "Old task", status: oldStatus },
+          result: { taskId: "old-task" },
+        }),
+        userTurn("next-user"),
+        toolMessage("new", "TaskCreate", {
+          args: { subject: "Current task", status: "in_progress" },
+          result: { taskId: "current-task" },
+        }),
+      ]);
+
+      expect(items).toEqual([
+        expect.objectContaining({ id: "current-task", content: "Current task" }),
+      ]);
+    },
+  );
+
+  it("keeps multiple TaskCreate calls from the same user turn in one current group", () => {
+    const items = reduceChecklistMessages([
+      toolMessage("old", "TaskCreate", {
+        args: { subject: "Old task" }, result: { taskId: "old-task" },
+      }),
+      userTurn("next-user"),
+      toolMessage("new-a", "TaskCreate", {
+        args: { subject: "Current A" }, result: { taskId: "current-a" },
+      }),
+      toolMessage("new-b", "TaskCreate", {
+        args: { subject: "Current B" }, result: { taskId: "current-b" },
+      }),
+    ]);
+
+    expect(items.map((item) => item.content)).toEqual(["Current A", "Current B"]);
+  });
+
+  it("continues the current group when a new turn starts with a matching TaskUpdate", () => {
+    const items = reduceChecklistMessages([
+      toolMessage("create", "TaskCreate", {
+        args: { subject: "Current task" }, result: { taskId: "task-1" },
+      }),
+      userTurn("follow-up"),
+      toolMessage("update", "TaskUpdate", {
+        args: { taskId: "task-1", status: "in_progress", subject: "Current task continued" },
+      }),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({ id: "task-1", content: "Current task continued", status: "in_progress" }),
+    ]);
+  });
+
+  it("does not create a new group boundary for local shinyAction user bubbles", () => {
+    const items = reduceChecklistMessages([
+      toolMessage("first", "TaskCreate", {
+        args: { subject: "First" }, result: { taskId: "first" },
+      }),
+      userTurn("local-action", true),
+      toolMessage("second", "TaskCreate", {
+        args: { subject: "Second" }, result: { taskId: "second" },
+      }),
+    ]);
+
+    expect(items.map((item) => item.content)).toEqual(["First", "Second"]);
+  });
+
+  it("exposes every current item for inline expansion while keeping the five-item preview", () => {
+    const snapshot = buildChecklistSnapshot([
+      toolMessage("seven-current", "TodoWrite", {
+        args: {
+          todos: Array.from({ length: 7 }, (_, index) => ({
+            content: `current ${index + 1}`,
+            status: "pending",
+          })),
+        },
+      }),
+    ]);
+
+    expect(snapshot.visibleItems).toHaveLength(5);
+    expect(snapshot.overflowCount).toBe(2);
+    expect(snapshot.items.map((item) => item.content)).toEqual([
+      "current 1", "current 2", "current 3", "current 4",
+      "current 5", "current 6", "current 7",
+    ]);
+  });
+});

@@ -51,7 +51,10 @@ export function resolveCodeLanguage(language?: string): string {
   return !lang || lang.toLowerCase() === "unknown" ? "markdown" : lang;
 }
 
-export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }) => {
+type ShinySyntaxHighlighterProps = Omit<SyntaxHighlighterProps, "components"> &
+  Partial<Pick<SyntaxHighlighterProps, "components">>;
+
+export const SyntaxHighlighter: FC<ShinySyntaxHighlighterProps> = ({ language, code }) => {
   return (
     <PrismLight
       language={resolveCodeLanguage(language)}

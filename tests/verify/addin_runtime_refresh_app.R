@@ -21,7 +21,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   count <- reactiveVal(0L)
   order <- reactiveVal(character())
-  handler <- function(message, on_chunk, on_done, on_tool_call, ...) {
+  handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ...) {
     cat("[HANDLER]", message, "\n", file = stderr())
     count(isolate(count()) + 1L)
     order(c(isolate(order()), message))
@@ -33,6 +33,21 @@ server <- function(input, output, session) {
           activeForm = "Working on live item"
         )))
       )
+    } else if (identical(message, "many checklist tasks")) {
+      on_tool_call(
+        "todo-live-many", "TodoWrite",
+        list(todos = lapply(seq_len(11), function(i) list(
+          content = sprintf("Current task %02d", i),
+          status = if (i == 1L) "in_progress" else "pending",
+          activeForm = sprintf("Working on current task %02d", i)
+        )))
+      )
+    } else if (identical(message, "new current task group")) {
+      on_tool_call(
+        "task-current-create", "TaskCreate",
+        list(subject = "Fresh current task", activeForm = "Working on fresh current task")
+      )
+      on_tool_result("task-current-create", list(taskId = "fresh-current"), is_error = FALSE)
     } else if (identical(message, "complete checklist")) {
       on_tool_call(
         "todo-live-complete", "TodoWrite",
