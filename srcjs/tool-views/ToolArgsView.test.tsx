@@ -169,3 +169,84 @@ describe("ToolArgsView markdown", () => {
     expect(clipboardWrite).toHaveBeenCalledWith("");
   });
 });
+
+
+describe("ToolArgsView code and delimited tables", () => {
+  it("renders known code through Prism and plain text without an unregistered grammar", () => {
+    const python = render(
+      <ToolArgsView view={{ kind: "code", code: "print(1)", lang: "python" } as never} />,
+    );
+    expect(python.container.querySelector('[data-arg-view="code"][data-arg-lang="python"]')).not.toBeNull();
+    expect(python.container.querySelector('[data-syntax-highlighter="prism"]')).not.toBeNull();
+    python.unmount();
+
+    const plain = render(
+      <ToolArgsView view={{ kind: "code", code: "literal source", lang: "text" } as never} />,
+    );
+    expect(plain.container.querySelector('[data-plain-source="true"]')?.textContent).toBe("literal source");
+    expect(plain.container.querySelector('[data-syntax-highlighter]')).toBeNull();
+  });
+
+  it("renders a semantic CSV preview, keeps values inert, and toggles to exact Source", () => {
+    const source = 'name,note\r\nAlice,"hello, world"\r\nFormula,=1+1\r\nHTML,<script>alert(1)</script>\r\n';
+    const { container, getByRole, getByText } = render(
+      <ToolArgsView view={{
+        kind: "table",
+        text: source,
+        rows: [
+          ["name", "note"],
+          ["Alice", "hello, world"],
+          ["Formula", "=1+1"],
+          ["HTML", "<script>alert(1)</script>"],
+        ],
+        delimiter: "comma",
+        truncatedRows: false,
+        truncatedColumns: false,
+        truncatedCells: false,
+        fileName: "people.csv",
+      } as never} />,
+    );
+
+    expect(container.querySelector('[data-arg-view="table"][data-table-format="csv"]')).not.toBeNull();
+    expect(container.querySelector('[data-table-mode="preview"]')).not.toBeNull();
+    expect(getByRole("columnheader", { name: "name" })).toBeTruthy();
+    expect(getByText("hello, world")).toBeTruthy();
+    expect(getByText("=1+1")).toBeTruthy();
+    expect(container.querySelector("script")).toBeNull();
+
+    fireEvent.click(getByRole("button", { name: "Source" }));
+    expect(container.querySelector('[data-table-source="true"]')?.textContent).toBe(source);
+    fireEvent.click(getByRole("button", { name: "Copy source" }));
+    expect(clipboardWrite).toHaveBeenCalledWith(source);
+  });
+
+  it("shows honest empty and truncation states", () => {
+    const truncated = render(
+      <ToolArgsView view={{
+        kind: "table",
+        text: "a,b\n1,2",
+        rows: [["a", "b"], ["1", "2"]],
+        delimiter: "tab",
+        truncatedRows: true,
+        truncatedColumns: true,
+        truncatedCells: true,
+      } as never} />,
+    );
+    expect(truncated.container.querySelector('[data-table-format="tsv"]')).not.toBeNull();
+    expect(truncated.container.querySelector('[data-table-truncation="true"]')?.textContent).toContain("limited");
+    truncated.unmount();
+
+    const empty = render(
+      <ToolArgsView view={{
+        kind: "table",
+        text: "",
+        rows: [],
+        delimiter: "comma",
+        truncatedRows: false,
+        truncatedColumns: false,
+        truncatedCells: false,
+      } as never} />,
+    );
+    expect(empty.container.querySelector('[data-table-empty="true"]')).not.toBeNull();
+  });
+});

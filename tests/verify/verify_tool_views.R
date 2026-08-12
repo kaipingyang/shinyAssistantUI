@@ -54,26 +54,66 @@ chk("Bash code block shows the command (not JSON)",
     isTRUE(value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').includes('ls -la /tmp')")),
     value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').slice(0,40)"))
 
-# Write -> generic Markdown view, Source by default for non-Markdown files.
-chk("Write renders generic Markdown view in Source mode", isTRUE(value(
-  "!!document.querySelector('[data-arg-view=\"markdown\"][data-markdown-mode=\"source\"] [data-source-language=\"python\"]')"
+# Code Write -> code + Prism, never Markdown preview.
+chk("Python Write renders a Prism code view", isTRUE(value(
+  "!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"python\"] [data-syntax-highlighter=\"prism\"]')"
 )))
-chk("Write Source shows the exact content",
-    isTRUE(value("(document.querySelector('[data-source-language=\"python\"]')?.textContent||'')==='print(1)'")))
-chk("Write offers Preview as Markdown", isTRUE(value(
-  "Array.from(document.querySelectorAll('[data-arg-view=\"markdown\"] button')).some(b=>(b.innerText||'').trim()==='Preview as Markdown')"
+chk("Python Write shows exact code", isTRUE(value(
+  "(document.querySelector('[data-arg-lang=\"python\"]')?.textContent||'')==='print(1)'"
+)))
+chk("R Write renders a Prism code view", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')).some(e=>(e.textContent||'').includes('x <- mean(1:3)') && !!e.querySelector('[data-syntax-highlighter=prism]'))"
+)))
+chk("code Write offers no Markdown Preview", isTRUE(value(
+  "!Array.from(document.querySelectorAll('[data-arg-view=\"code\"] button')).some(b=>(b.innerText||'').includes('Preview'))"
+)))
+
+# CSV/TSV -> semantic bounded table, with exact Source available.
+csv_source <- "name,note\r\nAlice,\"hello, \"\"world\"\"\"\r\nHTML,<script>alert(1)</script>\r\n"
+chk("CSV Write starts in table Preview", isTRUE(value(
+  "!!document.querySelector('[data-arg-view=\"table\"][data-table-format=\"csv\"][data-table-mode=\"preview\"] table')"
+)))
+chk("CSV quoted comma and escaped quote parsed", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-table-format=\"csv\"] td')).some(e=>(e.textContent||'')==='hello, \"world\"')"
+)))
+chk("CSV HTML-looking cell stays inert text", isTRUE(value(
+  "!document.querySelector('[data-table-format=\"csv\"] script') && (document.querySelector('[data-table-format=\"csv\"]')?.textContent||'').includes('<script>alert(1)</script>')"
+)))
+chk("CSV Source control clicked", isTRUE(value(
+  "(function(){const r=document.querySelector('[data-table-format=\"csv\"]');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("CSV Source remains byte-identical", isTRUE(value(sprintf(
+  "document.querySelector('[data-table-format=\"csv\"] [data-table-source=\"true\"]')?.textContent===%s",
+  as.character(jsonlite::toJSON(csv_source, auto_unbox = TRUE))
+))))
+chk("TSV uses tab-delimited table", isTRUE(value(
+  "!!document.querySelector('[data-table-format=\"tsv\"] table') && Array.from(document.querySelectorAll('[data-table-format=\"tsv\"] td')).some(e=>(e.textContent||'')==='hello, world')"
+)))
+
+# TXT -> Source first, explicit sanitized Markdown preview; .md -> Preview first.
+chk("TXT Write starts in exact Source", isTRUE(value(
+  "document.querySelector('[data-source-language=\"text\"]')?.textContent==='# Rich note\\n\\n- first item\\n'"
+)))
+chk("TXT offers Preview as Markdown", isTRUE(value(
+  "(function(){const s=document.querySelector('[data-source-language=\"text\"]');const r=s?.closest('[data-arg-view=\"markdown\"]');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Preview as Markdown');if(!b)return false;b.click();return true})()"
+)))
+chk("TXT rich Preview renders heading and list", wait_for(
+  "Array.from(document.querySelectorAll('[data-markdown-preview=\"true\"]')).some(e=>e.querySelector('h1')?.textContent==='Rich note' && !!e.querySelector('li'))", 8
+))
+chk("Markdown Write starts in Preview", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-arg-view=\"markdown\"][data-markdown-mode=\"preview\"]')).some(e=>e.querySelector('h2')?.textContent==='Markdown write')"
 )))
 
 # run_r -> code(r), clean R (no JSON {\"code\":...} wrapper)
 chk("run_r renders an R code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')")))
 chk("run_r shows clean R code (mean(y), no JSON key)",
-    isTRUE(value("(function(){var e=document.querySelector('[data-arg-lang=\"r\"]');if(!e)return false;var t=e.textContent||'';return t.includes('mean(y)') && !t.includes('\"code\"');})()")),
-    value("(document.querySelector('[data-arg-lang=\"r\"]')?.textContent||'').slice(0,40)"))
+    isTRUE(value("(function(){var es=document.querySelectorAll('[data-arg-lang=\"r\"]');for(var i=0;i<es.length;i++){var t=es[i].textContent||'';if(t.includes('mean(y)') && !t.includes('\"code\"'))return true;}return false;})()")),
+    value("Array.from(document.querySelectorAll('[data-arg-lang=\"r\"]')).map(e=>(e.textContent||'').slice(0,40)).join('|')"))
 
 # unknown -> json fallback
 chk("unknown tool falls back to JSON view", isTRUE(value("!!document.querySelector('[data-arg-view=\"json\"]')")))
-chk("code views count == 2 (bash+r; Write is generic Markdown)",
-    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===2")),
+chk("code views count == 4 (bash + Python Write + R Write + run_r)",
+    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===4")),
     value("document.querySelectorAll('[data-arg-view=\"code\"]').length+''"))
 
 # Phase 2: TodoWrite -> checklist

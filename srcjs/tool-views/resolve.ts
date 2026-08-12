@@ -4,8 +4,8 @@ import type { ArgsViewHint, ToolView, TodoItem, QueryField } from "./types";
 import { parseAskUserQuestionArgs } from "./ask-user-question-args";
 import { getEditDiff, formatToolArgs } from "../helpers";
 
-// 文件扩展名 → 已在 syntax-highlighter 注册的 prism 语言;未知 → "markdown"(中性,
-// 呼应 resolveCodeLanguage 的"不硬套 R"策略,避免把纯文本误标成代码)。
+// 文件扩展名 → 已在 syntax-highlighter 注册的 Prism 语言。未知文件保持纯文本，
+// 不能因为内容是字符串就把代码或任意文件解释成 Markdown。
 const EXT_LANG: Record<string, string> = {
   r: "r", rmd: "markdown",
   py: "python",
@@ -20,10 +20,10 @@ const EXT_LANG: Record<string, string> = {
 };
 
 export function langFromFileName(name?: string): string {
-  if (!name) return "markdown";
+  if (!name) return "text";
   const m = /\.([A-Za-z0-9]+)\s*$/.exec(name);
   const ext = m?.[1]?.toLowerCase();
-  return (ext && EXT_LANG[ext]) || "markdown";
+  return (ext && EXT_LANG[ext]) || "text";
 }
 
 const isRunR = (toolName?: string): boolean =>
@@ -35,8 +35,125 @@ const fileNameOf = (a: Record<string, unknown>): string | undefined => {
   return undefined;
 };
 
-const isMarkdownFileName = (name?: string): boolean =>
-  typeof name === "string" && /\.(?:md|markdown)\s*$/i.test(name);
+const hasFileExtension = (name: string | undefined, extensions: string): boolean =>
+  typeof name === "string" && new RegExp(`\\.(?:${extensions})\\s*$`, "i").test(name);
+
+const isMarkdownFileName = (name?: string): boolean => hasFileExtension(name, "md|markdown");
+const isTextFileName = (name?: string): boolean => hasFileExtension(name, "txt");
+const delimitedFileKind = (name?: string): "comma" | "tab" | undefined =>
+  hasFileExtension(name, "csv") ? "comma" : hasFileExtension(name, "tsv") ? "tab" : undefined;
+
+const TABLE_MAX_ROWS = 100;
+const TABLE_MAX_COLUMNS = 30;
+const TABLE_MAX_CELL_CHARS = 500;
+
+type ParsedDelimitedText = Pick<
+  Extract<ToolView, { kind: "table" }>,
+  "rows" | "truncatedRows" | "truncatedColumns" | "truncatedCells"
+>;
+
+export function parseDelimitedText(
+  text: string,
+  delimiter: "," | "\t",
+): ParsedDelimitedText {
+  if (!text) {
+    return {
+      rows: [],
+      truncatedRows: false,
+      truncatedColumns: false,
+      truncatedCells: false,
+    };
+  }
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let column = 0;
+  let field = "";
+  let fieldChars = 0;
+  let fieldTruncated = false;
+  let inQuotes = false;
+  let endedWithRowSeparator = false;
+  let truncatedRows = false;
+  let truncatedColumns = false;
+  let truncatedCells = false;
+
+  const retainingRow = () => rows.length < TABLE_MAX_ROWS;
+  const appendToField = (value: string) => {
+    fieldChars += 1;
+    if (fieldChars <= TABLE_MAX_CELL_CHARS) field += value;
+    else fieldTruncated = true;
+  };
+  const finishField = () => {
+    if (retainingRow()) {
+      if (column < TABLE_MAX_COLUMNS) {
+        row.push(fieldTruncated ? `${field}…` : field);
+        if (fieldTruncated) truncatedCells = true;
+      } else {
+        truncatedColumns = true;
+      }
+    }
+    column += 1;
+    field = "";
+    fieldChars = 0;
+    fieldTruncated = false;
+  };
+  const finishRow = () => {
+    finishField();
+    if (retainingRow()) rows.push(row);
+    else truncatedRows = true;
+    row = [];
+    column = 0;
+  };
+
+  for (let i = 0; i < text.length; i += 1) {
+    // Once 100 complete rows are retained, any further source character means
+    // another row exists. Stop parsing rather than spending work on hidden data.
+    if (rows.length >= TABLE_MAX_ROWS && row.length === 0 && column === 0 && fieldChars === 0) {
+      truncatedRows = true;
+      break;
+    }
+
+    const codePoint = text.codePointAt(i);
+    const char = String.fromCodePoint(codePoint!);
+    // `i` is a UTF-16 offset; skip the low surrogate after consuming one
+    // non-BMP code point so preview limits never split a valid pair.
+    i += char.length - 1;
+    if (char === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        appendToField('"');
+        i += 1;
+      } else if (inQuotes) {
+        inQuotes = false;
+      } else if (fieldChars === 0) {
+        inQuotes = true;
+      } else {
+        appendToField(char);
+      }
+      endedWithRowSeparator = false;
+      continue;
+    }
+
+    if (!inQuotes && char === delimiter) {
+      finishField();
+      endedWithRowSeparator = false;
+      continue;
+    }
+
+    if (!inQuotes && (char === "\n" || char === "\r")) {
+      finishRow();
+      if (char === "\r" && text[i + 1] === "\n") i += 1;
+      endedWithRowSeparator = true;
+      continue;
+    }
+
+    appendToField(char);
+    endedWithRowSeparator = false;
+  }
+
+  if (!truncatedRows && !endedWithRowSeparator) finishRow();
+
+  return { rows, truncatedRows, truncatedColumns, truncatedCells };
+}
 
 const asString = (v: unknown): string | undefined =>
   typeof v === "string" ? v : undefined;
@@ -114,12 +231,35 @@ export function resolveToolView(
     const content = asString(a.content);
     if (content !== undefined) {
       const fileName = fileNameOf(a);
+      if (isMarkdownFileName(fileName)) {
+        return {
+          kind: "markdown",
+          text: content,
+          defaultMode: "preview",
+          sourceControl: "prominent",
+          sourceLanguage: "markdown",
+          fileName,
+        };
+      }
+      if (isTextFileName(fileName)) {
+        return {
+          kind: "markdown",
+          text: content,
+          defaultMode: "source",
+          sourceControl: "prominent",
+          sourceLanguage: "text",
+          fileName,
+        };
+      }
+      const delimiter = delimitedFileKind(fileName);
+      if (delimiter) {
+        const parsed = parseDelimitedText(content, delimiter === "comma" ? "," : "\t");
+        return { kind: "table", text: content, delimiter, fileName, ...parsed };
+      }
       return {
-        kind: "markdown",
-        text: content,
-        defaultMode: isMarkdownFileName(fileName) ? "preview" : "source",
-        sourceControl: "prominent",
-        sourceLanguage: langFromFileName(fileName),
+        kind: "code",
+        code: content,
+        lang: langFromFileName(fileName),
         fileName,
       };
     }

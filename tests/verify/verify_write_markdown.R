@@ -153,6 +153,18 @@ chk("clicked Markdown tools history thread", click_thread("Markdown tools histor
 chk("historical tool calls restored", wait_for(
   "document.body.innerText.includes('Historical Markdown tools restored')", 10
 ))
+chk("history CSV/TXT/code Write views restored", wait_for(
+  "!!document.querySelector('[data-table-format=csv] table') && !!document.querySelector('[data-source-language=text]') && !!document.querySelector('[data-arg-view=code][data-arg-lang=python] [data-syntax-highlighter=prism]')", 10
+))
+chk("history CSV parsed quoted cell", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-table-format=csv] td')).some(e=>(e.textContent||'')==='hello, world')"
+)))
+chk("history TXT remains Source-first and byte-identical", isTRUE(value(
+  "document.querySelector('[data-source-language=text]')?.textContent==='# Historical rich text\\n\\n- restored item\\n'"
+)))
+chk("history Python Write restored as code, not Markdown", isTRUE(value(
+  "(document.querySelector('[data-arg-view=code][data-arg-lang=python]')?.textContent||'')===\"print('history')\""
+)))
 chk("history ExitPlanMode + Write both render Markdown", isTRUE(value(
   "document.querySelectorAll('[data-arg-view=markdown]').length>=2 && document.querySelectorAll('[data-arg-view=markdown] table').length>=2"
 )))

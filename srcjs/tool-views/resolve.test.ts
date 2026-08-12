@@ -10,10 +10,10 @@ describe("langFromFileName", () => {
     expect(langFromFileName("q.sql")).toBe("sql");
     expect(langFromFileName("a.ts")).toBe("typescript");
   });
-  it("falls back to markdown for unknown / missing extension", () => {
-    expect(langFromFileName("notes.txt")).toBe("markdown");
-    expect(langFromFileName("Makefile")).toBe("markdown");
-    expect(langFromFileName(undefined)).toBe("markdown");
+  it("falls back to plain text for unknown / missing extension", () => {
+    expect(langFromFileName("notes.txt")).toBe("text");
+    expect(langFromFileName("Makefile")).toBe("text");
+    expect(langFromFileName(undefined)).toBe("text");
   });
 });
 
@@ -54,16 +54,130 @@ describe("resolveToolView", () => {
     expect(v).toMatchObject({ kind: "code", lang: "bash", code: "ls -la" });
   });
 
-  it("Write non-Markdown text -> markdown view in Source mode with language metadata", () => {
-    const args = { file_path: "f.py", content: "print(1)" };
-    const v = resolveToolView("Write", args, at(args));
-    expect(v).toMatchObject({
-      kind: "markdown",
-      text: "print(1)",
-      defaultMode: "source",
-      sourceLanguage: "python",
-      fileName: "f.py",
+  it.each([
+    ["f.py", "print(1)", "python"],
+    ["analysis.R", "x <- 1", "r"],
+    ["app.ts", "const x = 1", "typescript"],
+    ["config.yaml", "key: value", "yaml"],
+  ])("Write code %s -> syntax-highlighted code view", (fileName, content, lang) => {
+    const args = { file_path: fileName, content };
+    expect(resolveToolView("Write", args, at(args))).toMatchObject({
+      kind: "code",
+      code: content,
+      lang,
+      fileName,
     });
+  });
+
+  it.each(["README", "payload.bin", "book.xlsx"])(
+    "Write unknown/plain %s -> inert text code view without Markdown preview",
+    (fileName) => {
+      const args = { file_path: fileName, content: "# literal" };
+      expect(resolveToolView("Write", args, at(args))).toMatchObject({
+        kind: "code",
+        code: args.content,
+        lang: "text",
+        fileName,
+      });
+    },
+  );
+
+  it("Write CSV parses RFC 4180 quoting while preserving exact source", () => {
+    const content = 'name,note,blank\r\nAlice,"hello, ""world""",\r\nBob,"line 1\nline 2",x\r\n';
+    const args = { file_path: "nested/PEOPLE.CSV", content };
+    const view = resolveToolView("Write", args, at(args));
+    expect(view.kind).toBe("table");
+    if (view.kind === "table") {
+      expect(view).toMatchObject({
+        text: content,
+        delimiter: "comma",
+        fileName: args.file_path,
+        truncatedRows: false,
+        truncatedColumns: false,
+        truncatedCells: false,
+      });
+      expect(view.rows).toEqual([
+        ["name", "note", "blank"],
+        ["Alice", 'hello, "world"', ""],
+        ["Bob", "line 1\nline 2", "x"],
+      ]);
+    }
+  });
+
+  it("Write TSV parses tabs independently from commas", () => {
+    const content = "name\tnote\nAlice\thello, world\n";
+    const args = { path: "C:\\data\\people.tsv", content };
+    const view = resolveToolView("Write", args, at(args));
+    expect(view.kind).toBe("table");
+    if (view.kind === "table") {
+      expect(view.delimiter).toBe("tab");
+      expect(view.rows).toEqual([["name", "note"], ["Alice", "hello, world"]]);
+      expect(view.text).toBe(content);
+    }
+  });
+
+  it("bounded table preview reports row, column and cell truncation", () => {
+    const header = Array.from({ length: 31 }, (_, i) => `c${i}`).join(",");
+    const longCell = "x".repeat(501);
+    const content = [header, `${longCell},value`, ...Array.from({ length: 100 }, (_, i) => `${i},v`)].join("\n");
+    const args = { file_path: "large.csv", content };
+    const view = resolveToolView("Write", args, at(args));
+    expect(view.kind).toBe("table");
+    if (view.kind === "table") {
+      expect(view.rows).toHaveLength(100);
+      expect(view.rows[0]).toHaveLength(30);
+      expect(view.rows[1][0]).toHaveLength(501);
+      expect(view.rows[1][0].endsWith("…")).toBe(true);
+      expect(view).toMatchObject({
+        truncatedRows: true,
+        truncatedColumns: true,
+        truncatedCells: true,
+      });
+      expect(view.text).toBe(content);
+    }
+  });
+
+  it("does not truncate at exact table limits", () => {
+    const header = Array.from({ length: 30 }, (_, i) => `c${i}`).join(",");
+    const exactCell = "x".repeat(500);
+    const row = [exactCell, ...Array.from({ length: 29 }, () => "v")].join(",");
+    const content = [header, row, ...Array.from({ length: 98 }, (_, i) => `${i},v`)].join("\n");
+    const args = { file_path: "exact.csv", content };
+    const view = resolveToolView("Write", args, at(args));
+    expect(view.kind).toBe("table");
+    if (view.kind === "table") {
+      expect(view.rows).toHaveLength(100);
+      expect(view.rows[0]).toHaveLength(30);
+      expect(view.rows[1][0]).toBe(exactCell);
+      expect(view).toMatchObject({
+        truncatedRows: false,
+        truncatedColumns: false,
+        truncatedCells: false,
+      });
+    }
+  });
+
+  it("counts Unicode code points without splitting surrogate pairs", () => {
+    const exact = `${"a".repeat(499)}😀`;
+    const over = `${exact}b`;
+    const content = `value\n"${exact}"\n"${over}"`;
+    const args = { file_path: "unicode.csv", content };
+    const view = resolveToolView("Write", args, at(args));
+    expect(view.kind).toBe("table");
+    if (view.kind === "table") {
+      expect(view.rows[1][0]).toBe(exact);
+      expect(view.rows[2][0]).toBe(`${exact}…`);
+      expect(Array.from(view.rows[2][0].slice(0, -1))).toHaveLength(500);
+      expect(/[\uD800-\uDFFF]/u.test(Array.from(view.rows[2][0]).filter((c) => c.length === 1).join(""))).toBe(false);
+      expect(view.truncatedCells).toBe(true);
+    }
+  });
+
+  it("explicit Markdown annotation overrides CSV built-in classification", () => {
+    const args = { file_path: "data.csv", content: "# explicitly markdown" };
+    expect(resolveToolView("Write", args, at(args), {
+      argsView: { kind: "markdown", defaultMode: "preview" },
+    })).toMatchObject({ kind: "markdown", text: args.content });
   });
 
   it("run_r MCP tool -> code (r) using code arg", () => {

@@ -76,6 +76,11 @@ server <- function(input, output, session) {
         path = "D:\\custom\\docs\\HISTORICAL.MARKDOWN",
         content = history_content
       )
+      history_csv <- "name,note\r\nHistorical,\"hello, world\"\r\n"
+      history_txt <- "# Historical rich text\n\n- restored item\n"
+      csv_args <- list(path = "D:\\custom\\data\\HISTORY.CSV", content = history_csv)
+      txt_args <- list(file_path = "notes.TXT", content = history_txt)
+      code_args <- list(file_path = "restore.py", content = "print('history')")
       send_thread(messages = list(
         list(
           id = "write-md-history-user",
@@ -104,6 +109,36 @@ server <- function(input, output, session) {
               args = write_args,
               argsText = as.character(jsonlite::toJSON(write_args, auto_unbox = TRUE)),
               result = "File written",
+              isError = FALSE,
+              artifact = list(defaultOpen = TRUE)
+            ),
+            list(
+              type = "tool-call",
+              toolCallId = "write-csv-history-tool",
+              toolName = "Write",
+              args = csv_args,
+              argsText = as.character(jsonlite::toJSON(csv_args, auto_unbox = TRUE)),
+              result = "CSV written",
+              isError = FALSE,
+              artifact = list(defaultOpen = TRUE)
+            ),
+            list(
+              type = "tool-call",
+              toolCallId = "write-txt-history-tool",
+              toolName = "Write",
+              args = txt_args,
+              argsText = as.character(jsonlite::toJSON(txt_args, auto_unbox = TRUE)),
+              result = "Text written",
+              isError = FALSE,
+              artifact = list(defaultOpen = TRUE)
+            ),
+            list(
+              type = "tool-call",
+              toolCallId = "write-code-history-tool",
+              toolName = "Write",
+              args = code_args,
+              argsText = as.character(jsonlite::toJSON(code_args, auto_unbox = TRUE)),
+              result = "Code written",
               isError = FALSE,
               artifact = list(defaultOpen = TRUE)
             ),

@@ -16,6 +16,16 @@ export type ToolView =
   | { kind: "diff"; oldContent: string; newContent: string; fileName?: string; startLine?: number }
   | { kind: "code"; code: string; lang: string; fileName?: string }
   | {
+      kind: "table";
+      text: string;
+      rows: string[][];
+      delimiter: "comma" | "tab";
+      truncatedRows: boolean;
+      truncatedColumns: boolean;
+      truncatedCells: boolean;
+      fileName?: string;
+    }
+  | {
       kind: "markdown";
       text: string;
       defaultMode: "preview" | "source";
