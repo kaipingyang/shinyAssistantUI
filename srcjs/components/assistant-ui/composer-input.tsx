@@ -455,7 +455,7 @@ const ShinyLexicalInput: FC<{
       borderWidth: "0px",
       padding: "0px",
       width: "100%",
-      minHeight: "48px",
+      minHeight: "var(--composer-min-height, 2.5rem)",
       whiteSpace: "pre-wrap",
       wordBreak: "break-word",
       overflowWrap: "anywhere",

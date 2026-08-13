@@ -172,19 +172,31 @@ chk("diff code block renders a diff viewer", wait_for("document.querySelectorAll
 chk("diff code block colours +/- lines", isTRUE(value(
   "!!document.querySelector('[data-slot=diff-viewer-line][data-type=add]') && !!document.querySelector('[data-slot=diff-viewer-line][data-type=del]')")))
 
-# ── 残留任务卡：run 结束后带 Stop 的任务卡应被清理 ─────────────────────────────
+# ── 并行 active task：全部大卡 + 独立 Stop；latest 单项且 turn 后隐藏 ────────
 type_text("stucktask please"); key("Enter", "Enter", 13L)
-chk("task card appears while running", wait_for("!!document.querySelector('[data-slot=aui_task_card]')", 10))
-chk("task card has a Stop button", isTRUE(value("!!document.querySelector('[data-slot=aui_task_card] [data-slot=aui_task_stop]')")))
+chk("two parallel active task cards appear", wait_for("document.querySelectorAll('[data-slot=aui_task_card]').length===2", 10))
+chk("every active task has its own Stop", isTRUE(value(paste0(
+  "(function(){const ids=[...document.querySelectorAll('[data-slot=aui_task_stop]')].map(e=>e.getAttribute('data-stop-task')).sort();",
+  "return JSON.stringify(ids)===JSON.stringify(['task-read','task-tests'])})()"))))
 # gate 是 Bash 工具（requiresApproval → 强制展开）；当前 resolver 将 command 渲染为 bash code view。
 chk("Bash tool args render as highlighted code", wait_for("!!document.querySelector('[data-slot=tool-fallback-args][data-arg-view=code][data-arg-lang=bash] [data-syntax-highlighter=prism]')", 8))
 chk("Bash code view shows the command", isTRUE(value(
   "(document.querySelector('[data-slot=tool-fallback-args][data-arg-view=code][data-arg-lang=bash]')?.textContent||'').includes('ls')")))
-# 批准 gate → run 结束
 value("(function(){const b=[...document.querySelectorAll('button')].find(x=>/^Approve$/i.test((x.textContent||'').trim()));if(b)b.click();return !!b})()")
-chk("run completes", wait_for("document.body.innerText.includes('done')", 8))
-# 关键：run 结束后任务卡（带 Stop）不再残留
-chk("task card is cleared after the run ends", wait_for("!document.querySelector('[data-slot=aui_task_card]')", 6))
+# task-read 的真实 terminal 只移除自己；task-tests 继续运行。latest 只显示 task-read 一项。
+chk("one terminal event removes only its own active card", wait_for(paste0(
+  "document.querySelectorAll('[data-slot=aui_task_card]').length===1&&",
+  "document.querySelector('[data-slot=aui_task_card]')?.getAttribute('data-task-id')==='task-tests'"), 8))
+chk("latest activity exposes exactly one terminal item", wait_for(paste0(
+  "document.querySelectorAll('[data-slot=aui_task_recent]>span').length===1&&",
+  "document.querySelector('[data-slot=aui_task_recent]>span')?.getAttribute('data-task-id')==='task-read'"), 4))
+chk("background turn completes", wait_for("document.body.innerText.includes('background turn done')", 8))
+# on_done 只隐藏 latest，不得伪完成仍为 running 的 background task。
+chk("latest activity hides when the turn ends", wait_for("!document.querySelector('[data-slot=aui_task_recent]')", 4))
+chk("non-terminal background task remains active after done", isTRUE(value(
+  "document.querySelector('[data-slot=aui_task_card]')?.getAttribute('data-task-id')==='task-tests'")))
+# 迟到的真实 killed terminal 到达后，大卡才消失。
+chk("late killed terminal clears the matching active card", wait_for("!document.querySelector('[data-slot=aui_task_card]')", 5))
 
 chk("no browser console errors", length(console_errors) == 0,
     if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")

@@ -23,8 +23,8 @@ import type {
 } from "./bridge";
 import { buildChecklistSnapshot } from "./checklist-reducer";
 import {
-  completeRunningTasks,
   createTaskMonitorState,
+  isTaskTerminalStatus,
   reduceTaskMonitorEvent,
   requestTaskStop,
   selectThreadTaskMonitor,
@@ -239,6 +239,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const serverSessionIdsRef = useRef(new Set<string>());
   // Protect live in-memory turns from an older transcript snapshot.
   const activeRunsRef = useRef<Set<string>>(new Set());
+  const activeTaskRunIdsRef = useRef<Record<string, string>>({});
   const runSeqRef = useRef<Record<string, number>>({});
   const historyRequestSeqRef = useRef(0);
   const historyReplaceRequestsRef = useRef(new Map<string, { requestId: string; runSeq: number }>());
@@ -533,8 +534,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [taskMonitorState, setTaskMonitorState] = useState(createTaskMonitorState);
   const taskMonitorStateRef = useRef(taskMonitorState);
   taskMonitorStateRef.current = taskMonitorState;
-  const markThreadTasksDone = useCallback((threadId: string) => {
-    setTaskMonitorState((previous) => completeRunningTasks(previous, threadId));
+  const [latestTaskActivityIds, setLatestTaskActivityIds] = useState<Record<string, string>>({});
+  const clearLatestTaskActivity = useCallback((threadId: string) => {
+    setLatestTaskActivityIds((previous) => {
+      if (!(threadId in previous)) return previous;
+      const next = { ...previous };
+      delete next[threadId];
+      return next;
+    });
   }, []);
   const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
   const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
@@ -850,6 +857,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         toolName: d.toolName,
         summary: d.summary,
       }));
+      const activeRunId = activeTaskRunIdsRef.current[tid];
+      if (
+        activeRunId
+        && (!d.runId || d.runId === activeRunId)
+        && isTaskTerminalStatus(d.status)
+      ) {
+        setLatestTaskActivityIds((previous) => ({ ...previous, [tid]: d.taskId }));
+      }
     });
     // ── #3 限流告警 ───────────────────────────────────────────────────────────
     bridge.current.onRateLimit((d) => {
@@ -1171,6 +1186,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const mySeq = (runSeqRef.current[threadId] ?? 0) + 1;
       runSeqRef.current[threadId] = mySeq;
       const runId = `run-${Date.now()}-${threadId}-${mySeq}`;
+      activeTaskRunIdsRef.current[threadId] = runId;
+      clearLatestTaskActivity(threadId);
       const isLatestRun = () => runSeqRef.current[threadId] === mySeq;
 
       bridge.current.setRunCallbacks(threadId, {
@@ -1491,11 +1508,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           // 避免 run 重入（edit 后立即 reload 等）时旧 run 的 onDone 误删新 run 的 callbacks。
           if (isLatestRun()) {
             activeRunsRef.current.delete(threadId);
+            delete activeTaskRunIdsRef.current[threadId];
+            clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
             bridge.current.setRunCallbacks(threadId, null);
           }
-          // run 结束：清理该线程残留任务卡（见 markThreadTasksDone）。
-          markThreadTasksDone(threadId);
           advanceServiceQueueRef.current(threadId, runId, true);
           setMessagesMap((prev) => {
             // 收口：把任何未完成的 tool-call part 标记中断。正常结束时无半截卡
@@ -1515,10 +1532,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           hasReasoningRef.current = false;
           if (isLatestRun()) {
             activeRunsRef.current.delete(threadId);
+            delete activeTaskRunIdsRef.current[threadId];
+            clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
             bridge.current.setRunCallbacks(threadId, null);
           }
-          markThreadTasksDone(threadId);
           advanceServiceQueueRef.current(threadId, runId, false);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
@@ -2197,6 +2215,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
   }, []);
   const currentTaskMonitor = selectThreadTaskMonitor(taskMonitorState, currentThreadId);
+  const latestTaskActivityId = latestTaskActivityIds[currentThreadId];
+  const latestTaskActivity = latestTaskActivityId
+    ? currentTaskMonitor.recentTerminal.find((task) => task.taskId === latestTaskActivityId)
+    : undefined;
   const stopTask = useCallback((taskId: string) => {
     const threadId = currentThreadIdRef.current;
     const requested = requestTaskStop(taskMonitorStateRef.current, threadId, taskId);
@@ -2309,7 +2331,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     usage: usageMap[currentThreadId],                                    // #1
     agentState: agentStateMap[currentThreadId],                          // Plan 36
     tasks: currentTaskMonitor.active,                                    // #2
-    recentTasks: currentTaskMonitor.recentTerminal,
+    recentTasks: isRunning && latestTaskActivity ? [latestTaskActivity] : [],
     checklist,
     dismissChecklist,
     rateLimit,                                                           // #3

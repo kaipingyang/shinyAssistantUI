@@ -24,8 +24,9 @@ export type ThreadTaskMonitor = {
   recentTerminal: MonitoredTask[];
 };
 
-const TERMINAL = /^(completed|done|stopped|failed|cancelled|canceled|errored)$/i;
-const isTerminal = (status?: string) => TERMINAL.test(status ?? "");
+const TERMINAL = /^(completed|done|stopped|failed|killed|cancelled|canceled|errored)$/i;
+export const isTaskTerminalStatus = (status?: string) => TERMINAL.test(status ?? "");
+const isTerminal = isTaskTerminalStatus;
 
 export function createTaskMonitorState(maxRecentTerminal = 20): TaskMonitorState {
   return { byThread: {}, maxRecentTerminal: Math.max(1, Math.floor(maxRecentTerminal)) };
@@ -74,33 +75,6 @@ export function reduceTaskMonitorEvent(
     state.maxRecentTerminal,
   );
   return { ...state, byThread: { ...state.byThread, [event.threadId]: nextThread } };
-}
-
-export function completeRunningTasks(
-  state: TaskMonitorState,
-  threadId: string,
-  now = Date.now(),
-): TaskMonitorState {
-  const previousThread = state.byThread[threadId];
-  if (!previousThread) return state;
-  let changed = false;
-  const nextThread: Record<string, MonitoredTask> = {};
-  for (const [taskId, task] of Object.entries(previousThread)) {
-    if (isTerminal(task.status)) {
-      nextThread[taskId] = task;
-    } else {
-      changed = true;
-      nextThread[taskId] = { ...task, status: "completed", stopping: false, updatedAt: now };
-    }
-  }
-  if (!changed) return state;
-  return {
-    ...state,
-    byThread: {
-      ...state.byThread,
-      [threadId]: boundedThread(nextThread, state.maxRecentTerminal),
-    },
-  };
 }
 
 export function requestTaskStop(

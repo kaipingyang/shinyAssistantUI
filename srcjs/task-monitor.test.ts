@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  completeRunningTasks,
   createTaskMonitorState,
   reduceTaskMonitorEvent,
   requestTaskStop,
@@ -34,7 +33,7 @@ describe("Task monitor reducer", () => {
     });
   });
 
-  it("keeps an explicit terminal status sticky against generic run completion", () => {
+  it("keeps an explicit terminal status sticky against a late non-terminal event", () => {
     let state = createTaskMonitorState();
     state = reduceTaskMonitorEvent(state, {
       threadId: "thread-a",
@@ -49,7 +48,12 @@ describe("Task monitor reducer", () => {
       status: "failed",
       summary: "Tests failed",
     }, 200);
-    state = completeRunningTasks(state, "thread-a", 300);
+    state = reduceTaskMonitorEvent(state, {
+      threadId: "thread-a",
+      taskId: "failed-task",
+      kind: "progress",
+      status: "running",
+    }, 300);
 
     const monitor = selectThreadTaskMonitor(state, "thread-a");
     expect(monitor.active).toEqual([]);
@@ -59,32 +63,9 @@ describe("Task monitor reducer", () => {
         status: "failed",
         summary: "Tests failed",
         startedAt: 100,
-        updatedAt: 200,
+        updatedAt: 300,
       }),
     ]);
-  });
-
-  it("marks only non-terminal tasks completed in the run-done fallback", () => {
-    let state = createTaskMonitorState();
-    state = reduceTaskMonitorEvent(state, {
-      threadId: "thread-a",
-      taskId: "running-task",
-      kind: "progress",
-      status: "running",
-    }, 100);
-    state = reduceTaskMonitorEvent(state, {
-      threadId: "thread-a",
-      taskId: "stopped-task",
-      kind: "updated",
-      status: "stopped",
-    }, 150);
-
-    state = completeRunningTasks(state, "thread-a", 250);
-    const terminal = selectThreadTaskMonitor(state, "thread-a").recentTerminal;
-    expect(terminal).toEqual(expect.arrayContaining([
-      expect.objectContaining({ taskId: "running-task", status: "completed", updatedAt: 250 }),
-      expect.objectContaining({ taskId: "stopped-task", status: "stopped", updatedAt: 150 }),
-    ]));
   });
 
   it("de-duplicates Stop while stopping and clears the guard at terminal update", () => {
@@ -117,6 +98,23 @@ describe("Task monitor reducer", () => {
       stopping: false,
       updatedAt: 300,
     });
+  });
+
+  it("treats the SDK killed status as terminal and disables Stop", () => {
+    const killed = reduceTaskMonitorEvent(createTaskMonitorState(), {
+      threadId: "thread-a",
+      taskId: "killed-task",
+      kind: "updated",
+      status: "killed",
+    }, 100);
+
+    const monitor = selectThreadTaskMonitor(killed, "thread-a");
+    expect(monitor.active).toEqual([]);
+    expect(monitor.recentTerminal[0]).toMatchObject({
+      taskId: "killed-task",
+      status: "killed",
+    });
+    expect(requestTaskStop(killed, "thread-a", "killed-task", 200).shouldDispatch).toBe(false);
   });
 
   it("does not dispatch Stop for missing or terminal tasks", () => {

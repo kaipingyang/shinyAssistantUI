@@ -2,7 +2,13 @@ library(shiny)
 library(shinyAssistantUI)
 
 # Plan 45 批1 验证:Settings 重定位(默认模式 + 可见性)+ composer 内联按可见性过滤。
-handler <- function(message, on_chunk, on_done, ...) { on_chunk("ok"); on_done() }
+handler <- function(message, on_chunk, on_done, on_usage = NULL, ...) {
+  on_chunk("ok")
+  if (!is.null(on_usage)) {
+    on_usage(tokens = 1200L, context_tokens = 1200L, context_window = 200000L)
+  }
+  on_done()
+}
 attr(handler, "ui_capabilities") <- list(
   permission_mode = list(value = "default", options = list(
     list(value = "askAll", label = "Strict"),
@@ -26,6 +32,7 @@ ui <- assistantUIPage(div(style = "width:680px;height:100vh", assistantUIOutput(
 server <- function(input, output, session) {
   assistantUIServer(
     "chat", handler = handler, show_thread_list = TRUE,
+    show_usage = TRUE, context_window = 200000L, usage_style = "ring",
     default_permission_mode = "default",
     on_set_default_permission_mode = function(m) message("SET_DEFAULT_MODE=", m),
     mode_visibility = list(showBypass = TRUE, showYolo = FALSE),  # YOLO 初始隐藏

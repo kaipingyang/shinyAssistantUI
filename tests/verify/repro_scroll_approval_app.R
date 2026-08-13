@@ -9,18 +9,32 @@ repro_handler <- function(message, thread_id, on_chunk, on_done,
                           on_tool_call, on_tool_result, on_tool_call_start,
                           on_tool_call_delta, wait_for_approval, on_task = NULL, ...) {
   if (grepl("stucktask", message, fixed = TRUE)) {
-    # 复现“残留任务卡”：发一个开始但无终止状态的任务，然后在审批 gate 解决后 on_done。
-    # 期望：run 结束后该任务卡（带 Stop）被清理，不再浮在 composer 上方。
-    if (!is.null(on_task))
-      on_task("task-stuck", "subagent", description = "Find global_mapping.xlsx",
-              status = "running", tool_name = "local_bash")
+    # 两个并行 background task：每个都必须有独立大卡/Stop，且只能由自己的
+    # SDK terminal event 移出。第一项在 turn 内完成并成为 latest activity；
+    # 第二项跨越 on_done 后仍保持 active，稍后收到 killed 才消失。
+    if (!is.null(on_task)) {
+      on_task("task-read", "started", description = "Inspect repository",
+              status = "running", tool_name = "Read")
+      on_task("task-tests", "started", description = "Run test suite",
+              status = "running", tool_name = "Bash")
+    }
     on_tool_call("gate-tool", "Bash",
                  args = list(command = "ls"),
                  annotations = list(requiresApproval = TRUE, title = "finish run"))
     promises::then(wait_for_approval("gate-tool"), function(d) {
       on_tool_result("gate-tool", "ok", is_error = FALSE)
-      on_chunk("done")
-      on_done()
+      if (!is.null(on_task))
+        on_task("task-read", "notification", description = "Inspect repository",
+                status = "completed", tool_name = "Read")
+      later::later(function() {
+        on_chunk("background turn done")
+        on_done()
+        later::later(function() {
+          if (!is.null(on_task))
+            on_task("task-tests", "updated", description = "Run test suite",
+                    status = "killed", tool_name = "Bash")
+        }, 1.5)
+      }, 0.7)
     })
     return(invisible(NULL))
   }

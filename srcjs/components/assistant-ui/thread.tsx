@@ -444,7 +444,6 @@ const IdeContextIndicator: FC = () => {
 
 const Composer: FC = () => {
   const { refreshIdeContext, composerDensity, blockingAction } = useShinyConfig();
-  const compact = composerDensity === "compact";
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ShinyAgentProgress />
@@ -453,30 +452,13 @@ const Composer: FC = () => {
           data-slot="aui_composer-shell"
           data-density={composerDensity ?? "comfortable"}
           data-blocked={blockingAction ? "true" : "false"}
-          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
+          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[density=compact]:gap-1 data-[density=compact]:[&_.aui-composer-input]:py-0 data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerQuotePreview />
           <ComposerAttachments />
           <IdeContextIndicator />
-          {compact ? (
-            // 扁平单行(≈shinychat):输入框在最左(flex-1,光标贴最左),控件(附件/权限/模型/用量环)
-            // + 发送全在右侧;附件预览 / IDE 上下文条在上方按需出现。comfortable 保留完整两行布局。
-            <div className="aui-composer-compact-row flex items-end gap-1.5">
-              <div className="min-w-0 flex-1">
-                <ShinyComposerInput onFocus={refreshIdeContext} />
-              </div>
-              <ComposerAddAttachment />
-              <PermissionModeControl compact />
-              <ModelPickerDialog />
-              <ShinyContextDisplay />
-              <ComposerSendGroup />
-            </div>
-          ) : (
-            <>
-              <ShinyComposerInput onFocus={refreshIdeContext} />
-              <ComposerAction />
-            </>
-          )}
+          <ShinyComposerInput onFocus={refreshIdeContext} />
+          <ComposerAction />
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
@@ -690,8 +672,8 @@ const ShinyChecklistPanel: FC = () => {
 const ShinyStatusPanels: FC = () => {
   const { rateLimit, tasks, recentTasks, statusText, stopTask } = useShinyConfig();
   const activeTasks = tasks ?? [];
-  const recent = (recentTasks ?? []).slice(0, 3);
-  const hasAny = rateLimit || activeTasks.length > 0 || recent.length > 0 || statusText;
+  const latestActivity = recentTasks?.[0];
+  const hasAny = rateLimit || activeTasks.length > 0 || latestActivity || statusText;
   if (!hasAny) return null;
   return (
     <div className="aui-sdk-panels flex flex-col gap-2">
@@ -733,13 +715,16 @@ const ShinyStatusPanels: FC = () => {
           )}
         </div>
       ))}
-      {recent.length > 0 && (
-        <div data-slot="aui_task_recent" className="flex flex-wrap gap-1 px-1 text-[11px] text-muted-foreground">
-          {recent.map((task) => (
-            <span key={task.taskId} data-task-status={task.status} className="rounded border px-1.5 py-0.5">
-              {task.description || task.summary || task.taskId.slice(0, 6)} · {task.status}
-            </span>
-          ))}
+      {latestActivity && (
+        <div data-slot="aui_task_recent" className="flex px-1 text-[11px] text-muted-foreground">
+          <span
+            key={latestActivity.taskId}
+            data-task-id={latestActivity.taskId}
+            data-task-status={latestActivity.status}
+            className="min-w-0 truncate rounded border px-1.5 py-0.5"
+          >
+            {latestActivity.description || latestActivity.summary || latestActivity.taskId.slice(0, 6)} · {latestActivity.status}
+          </span>
         </div>
       )}
       {statusText && (

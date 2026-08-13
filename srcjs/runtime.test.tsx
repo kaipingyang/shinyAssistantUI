@@ -448,9 +448,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
 });
 
 describe("useShinyRuntime — onError / thinking", () => {
-  it("run 结束(onDone)清理残留任务卡，不再永久显示 Stop", async () => {
-    const isActive = (t: { status?: string }) =>
-      !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(t.status ?? "");
+  it("keeps every non-terminal background task active across turn completion until its own terminal event", async () => {
     const { result } = setup();
     await act(async () => {
       await result.current.runtime.thread.composer.setText("go");
@@ -458,28 +456,99 @@ describe("useShinyRuntime — onError / thinking", () => {
     });
     const tid = currentThreadId(result);
     await fireR("task", {
-      taskId: "t-1", kind: "subagent", description: "Find global_mapping.xlsx",
-      toolName: "local_bash", status: "running", threadId: tid,
+      taskId: "t-1", kind: "started", description: "Inspect repository",
+      toolName: "Read", status: "running", threadId: tid,
     });
-    expect(result.current.tasks.filter(isActive).length).toBe(1);
+    await fireR("task", {
+      taskId: "t-2", kind: "started", description: "Run tests",
+      toolName: "Bash", status: "running", threadId: tid,
+    });
+    expect(result.current.tasks.map((task) => task.taskId)).toEqual(["t-1", "t-2"]);
+
     await fireR("done", { threadId: tid });
-    expect(result.current.tasks.filter(isActive).length).toBe(0);
+    expect(result.current.tasks.map((task) => task.taskId)).toEqual(["t-1", "t-2"]);
+
+    await fireR("task", {
+      taskId: "t-1", kind: "updated", status: "completed", threadId: tid,
+    });
+    expect(result.current.tasks.map((task) => task.taskId)).toEqual(["t-2"]);
+
+    await fireR("task", {
+      taskId: "t-2", kind: "updated", status: "killed", threadId: tid,
+    });
+    expect(result.current.tasks).toEqual([]);
   });
 
-  it("error → 追加错误消息 + isRunning false", async () => {
+  it("exposes only the current run's latest terminal activity and rejects an old run during a new turn", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("first turn");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    const firstRunId = inputs.filter((item) => item.id === "test").at(-1)?.value.runId;
+    expect(firstRunId).toBeTruthy();
+
+    await fireR("task", {
+      taskId: "t-1", kind: "notification", description: "Read files",
+      status: "completed", threadId: tid, runId: firstRunId,
+    });
+    expect(result.current.recentTasks.map((task) => task.taskId)).toEqual(["t-1"]);
+
+    await fireR("task", {
+      taskId: "t-2", kind: "notification", description: "Run tests",
+      status: "failed", threadId: tid, runId: firstRunId,
+    });
+    expect(result.current.recentTasks.map((task) => task.taskId)).toEqual(["t-2"]);
+
+    await fireR("done", { threadId: tid, runId: firstRunId });
+    expect(result.current.recentTasks).toEqual([]);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("second turn");
+      await result.current.runtime.thread.composer.send();
+    });
+    const secondRunId = inputs.filter((item) => item.id === "test").at(-1)?.value.runId;
+    expect(secondRunId).toBeTruthy();
+    expect(secondRunId).not.toBe(firstRunId);
+
+    await fireR("task", {
+      taskId: "late-old-run", kind: "notification", description: "Late event",
+      status: "completed", threadId: tid, runId: firstRunId,
+    });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(true);
+    expect(result.current.recentTasks).toEqual([]);
+
+    await fireR("task", {
+      taskId: "current-run", kind: "notification", description: "Current event",
+      status: "completed", threadId: tid, runId: secondRunId,
+    });
+    expect(result.current.recentTasks.map((task) => task.taskId)).toEqual(["current-run"]);
+  });
+
+  it("error → 追加错误消息、清除当前latest activity并结束running", async () => {
     const { result } = setup();
     await act(async () => {
       await result.current.runtime.thread.composer.setText("hi");
       await result.current.runtime.thread.composer.send();
     });
     const tid = currentThreadId(result);
-    await fireR("error", { message: "boom", threadId: tid });
+    const runId = inputs.filter((item) => item.id === "test").at(-1)?.value.runId;
+    expect(runId).toBeTruthy();
+    await fireR("task", {
+      taskId: "before-error", kind: "notification", description: "Before error",
+      status: "completed", threadId: tid, runId,
+    });
+    expect(result.current.recentTasks.map((task) => task.taskId)).toEqual(["before-error"]);
+
+    await fireR("error", { message: "boom", threadId: tid, runId });
     const msgs = messages(result);
     const err = msgs.find((m) => {
       const t = (m.content as any[]).filter((p) => p.type === "text").map((p) => p.text).join("");
       return t.includes("boom");
     });
     expect(err).toBeTruthy();
+    expect(result.current.recentTasks).toEqual([]);
     expect(result.current.runtime.thread.getState().isRunning).toBe(false);
   });
 
