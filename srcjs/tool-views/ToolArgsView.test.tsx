@@ -259,3 +259,25 @@ describe("ToolArgsView code and delimited tables", () => {
     expect(empty.container.querySelector('[data-table-empty="true"]')).not.toBeNull();
   });
 });
+
+
+describe("ToolArgsView streaming markdown", () => {
+  it("exposes running state while text grows and clears it at completion", async () => {
+    const view = {
+      kind: "markdown",
+      text: "# Live",
+      defaultMode: "preview",
+      sourceControl: "prominent",
+    } as never;
+    const { container, rerender } = render(
+      <ToolArgsView view={view} isRunning />,
+    );
+
+    await waitFor(() => expect(container.querySelector("h1")?.textContent).toBe("Live"));
+    expect(container.querySelector('[data-arg-view="markdown"]')?.getAttribute("data-args-streaming")).toBe("true");
+
+    rerender(<ToolArgsView view={{ ...view, text: "# Live done" } as never} isRunning={false} />);
+    await waitFor(() => expect(container.querySelector("h1")?.textContent).toBe("Live done"));
+    expect(container.querySelector('[data-arg-view="markdown"]')?.getAttribute("data-args-streaming")).toBe("false");
+  });
+});

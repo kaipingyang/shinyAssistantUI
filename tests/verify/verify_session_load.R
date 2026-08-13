@@ -44,6 +44,9 @@ cat(sprintf("[%s] no_react31_crash (react31=%s)\n", if(!react31)"PASS" else "FAI
 aui <- as.integer(ev(b2,"document.querySelectorAll('.aui-root').length"))
 cat(sprintf("[%s] widget_still_rendered (aui-root=%s)\n", if(!is.na(aui)&&aui>=1)"PASS" else "FAIL", aui))
 cat("clicked_any_session:", clicked_any,"\n")
+zero_errors <- length(errs) == 0L
+cat(sprintf("[%s] zero browser console/runtime errors\n", if(zero_errors) "PASS" else "FAIL"))
 if(length(errs)) { cat("=== console errors (head) ===\n"); cat(head(unique(errs),4),sep="\n") }
+stopifnot(!react31, !is.na(aui), aui >= 1L, clicked_any, zero_errors)
 b2$close(); p$kill(); system("rm -f /tmp/sl.* /tmp/aui_repro.txt")
 cat("SL_DONE\n")

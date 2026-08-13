@@ -170,11 +170,12 @@ test_that("a second compact action is rejected without disturbing the first", {
   skip_if_not_installed("promises")
   skip_if_not_installed("later")
 
-  result <- function() ClaudeAgentSDK::ResultMessage(
+  result <- function(text = NULL) ClaudeAgentSDK::ResultMessage(
     subtype = "success", duration_ms = 1, duration_api_ms = 1,
-    is_error = FALSE, num_turns = 1, session_id = "compact-lock-session"
+    is_error = FALSE, num_turns = 1, session_id = "compact-lock-session",
+    result = text
   )
-  queue <- list(result())
+  queue <- list(result("Ready."))
   client <- new.env(parent = emptyenv())
   client$connect <- function() invisible(NULL)
   client$disconnect <- function() invisible(NULL)
@@ -261,7 +262,7 @@ test_that("a second compact action is rejected without disturbing the first", {
   expect_length(first, 2L)
   expect_identical(first[[2L]]$status, "ok")
 
-  queue <- list(result())
+  queue <- list(result("After compact."))
   resumed_done <- FALSE
   handler(
     message = "after compact", thread_id = "compact-lock-thread", attachments = list(),

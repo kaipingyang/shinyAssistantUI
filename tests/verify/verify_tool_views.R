@@ -42,6 +42,26 @@ click_sel(".aui-lexical-input[contenteditable='true']"); Sys.sleep(0.35)
 browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
 
+chk("streaming Markdown Preview appears before final args", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=true]')).some(e=>e.querySelector('h1')?.textContent==='Streaming preview' && (e.textContent||'').includes('first'))",
+  2
+))
+chk("streaming Markdown Preview grows on a later delta", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=true]')).some(e=>(e.textContent||'').includes('second'))",
+  2
+))
+chk("streaming Markdown final canonical args clear running state", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=false]')).some(e=>e.querySelector('h1')?.textContent==='Streaming preview' && (e.textContent||'').includes('final'))",
+  4
+))
+chk("streaming Markdown Source control clicked", isTRUE(value(
+  "(function(){const r=Array.from(document.querySelectorAll('[data-arg-view=markdown]')).find(e=>e.querySelector('h1')?.textContent==='Streaming preview');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("streaming Markdown final Source is exact", wait_for(
+  "(function(){const expected=['# Streaming preview','','- first','- second','- final',''].join(String.fromCharCode(10));const s=Array.from(document.querySelectorAll('[data-markdown-source=true]')).find(e=>(e.textContent||'').includes('# Streaming preview'));return !!s&&s.textContent===expected})()",
+  2
+))
+
 chk("tool cards rendered (arg views present)", wait_for("document.querySelectorAll('[data-arg-view]').length>=5", 15),
     value("document.querySelectorAll('[data-arg-view]').length+''"))
 

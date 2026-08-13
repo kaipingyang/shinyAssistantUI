@@ -521,6 +521,109 @@ describe("useShinyRuntime — tool 流式三段", () => {
     expect(tc.result).toBe("file1\nfile2");
   });
 
+  it("projects growing Write Markdown args before the final canonical tool-call", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("write it");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("tool-call-start", {
+      toolCallId: "write-stream",
+      toolName: "Write",
+      annotations: { parentToolCallId: null },
+      threadId: tid,
+    });
+
+    await fireR("tool-call-delta", {
+      toolCallId: "write-stream",
+      delta: '{"file_path":"report.md","content":"# Liv',
+      threadId: tid,
+    });
+    await fireR("tool-call-delta", {
+      toolCallId: "write-stream",
+      delta: 'e\\n\\n- first',
+      threadId: tid,
+    });
+
+    let tc = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .find((p) => p.type === "tool-call" && p.toolCallId === "write-stream");
+    expect(tc.argsText).toBe('{"file_path":"report.md","content":"# Live\\n\\n- first');
+    expect(tc.args).toEqual({
+      file_path: "report.md",
+      content: "# Live\n\n- first",
+    });
+    expect(tc.artifact.argsStreaming).toBe(true);
+
+    await fireR("tool-call", {
+      toolCallId: "write-stream",
+      toolName: "Write",
+      args: { file_path: "report.md", content: "# Live\n\n- first\n- final" },
+      argsText: '{"file_path":"report.md","content":"# Live\\n\\n- first\\n- final"}',
+      annotations: { defaultOpen: true, argsStreaming: true },
+      threadId: tid,
+    });
+
+    tc = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .find((p) => p.type === "tool-call" && p.toolCallId === "write-stream");
+    expect(tc.args.content).toBe("# Live\n\n- first\n- final");
+    expect(tc.artifact).toMatchObject({
+      parentToolCallId: null,
+      defaultOpen: true,
+      argsStreaming: false,
+    });
+  });
+
+  it("clears provisional streaming state when a result arrives without a canonical tool-call", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("write it");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("tool-call-start", { toolCallId: "write-result", toolName: "Write", threadId: tid });
+    await fireR("tool-call-delta", {
+      toolCallId: "write-result",
+      delta: '{"file_path":"x.md","content":"partial',
+      threadId: tid,
+    });
+    await fireR("tool-result", {
+      toolCallId: "write-result",
+      result: "done",
+      isError: false,
+      threadId: tid,
+    });
+    const tc = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .find((p) => p.type === "tool-call" && p.toolCallId === "write-result");
+    expect(tc.result).toBe("done");
+    expect(tc.artifact.argsStreaming).toBe(false);
+  });
+
+  it("settles a partial Write card when the run errors", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("write it");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("tool-call-start", { toolCallId: "write-error", toolName: "Write", threadId: tid });
+    await fireR("tool-call-delta", {
+      toolCallId: "write-error",
+      delta: '{"file_path":"x.md","content":"partial',
+      threadId: tid,
+    });
+    await fireR("error", { message: "backend failed", threadId: tid });
+    const tc = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .find((p) => p.type === "tool-call" && p.toolCallId === "write-error");
+    expect(tc.result).toBe("Interrupted");
+    expect(tc.isError).toBe(true);
+    expect(tc.artifact.argsStreaming).toBe(false);
+  });
+
   it("ellmer 路径：仅 tool-call（无 start）整包新建", async () => {
     const { result } = setup();
     await act(async () => {
@@ -1208,11 +1311,321 @@ describe("useShinyRuntime — historical session lazy load state", () => {
     await act(async () => {
       result.current.runtime.threads.switchToThread(historicalThread);
     });
-    expect(loadRequests()).toHaveLength(1);
+    expect(loadRequests()).toHaveLength(2);
+    expect(result.current.readingHistory).toBe(true);
+    // Keep the previous snapshot visible while its authoritative refresh loads.
     expect(messages(result).some((message) => message.id === "old-user")).toBe(true);
+
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [
+        { id: "old-user", role: "user", content: [{ type: "text", text: "restored" }] },
+        {
+          id: "late-read", role: "assistant", status: { type: "complete", reason: "stop" },
+          content: [{
+            type: "tool-call", toolCallId: "read-late", toolName: "Read",
+            args: { file_path: "functions/process_sdtm_data.R" },
+            argsText: "{\"file_path\":\"functions/process_sdtm_data.R\"}",
+            result: "Session ended", isError: false,
+          }],
+        },
+      ],
+    });
+    expect(result.current.readingHistory).toBe(false);
+    expect(messages(result).some((message) => message.id === "late-read")).toBe(true);
   });
 
-  it("still hydrates and warms a cached historical session once per page lifecycle", async () => {
+  it("does not let a late history refresh replace a newer live run", async () => {
+    const { result } = setup();
+    const initialThread = currentThreadId(result);
+    const historicalThread = "session-history-race";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Growing history", createdAt: "2026-07-03T00:00:00Z" }],
+    });
+
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "old-history", role: "user", content: [{ type: "text", text: "old" }] }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(initialThread));
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const refreshRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+    expect(result.current.readingHistory).toBe(true);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("new live prompt");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(messages(result).some((message) =>
+      message.role === "user" && message.content.some((part) =>
+        part.type === "text" && part.text === "new live prompt"))).toBe(true);
+
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      requestId: refreshRequest.requestId,
+      messages: [{ id: "stale-refresh", role: "user", content: [{ type: "text", text: "stale" }] }],
+    });
+
+    expect(result.current.readingHistory).toBe(false);
+    expect(messages(result).some((message) => message.id === "stale-refresh")).toBe(false);
+    expect(messages(result).some((message) =>
+      message.role === "user" && message.content.some((part) =>
+        part.type === "text" && part.text === "new live prompt"))).toBe(true);
+  });
+
+  it("keeps older-page and replacement request guards isolated when responses interleave", async () => {
+    const { result } = setup();
+    const initialThread = currentThreadId(result);
+    const historicalThread = "session-history-interleaved";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Interleaved history", createdAt: "2026-07-04T00:00:00Z" }],
+    });
+
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const firstRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: firstRequest.requestId,
+      messages: [{ id: "recent", role: "user", content: [{ type: "text", text: "recent" }] }],
+      cursor: 1, hasMore: true,
+    });
+
+    await act(async () => result.current.loadOlderHistory());
+    const olderRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session_page",
+    ).at(-1)!.value;
+    await act(async () => result.current.runtime.threads.switchToThread(initialThread));
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const refreshRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: olderRequest.requestId, prepend: true,
+      messages: [{ id: "older", role: "user", content: [{ type: "text", text: "older" }] }],
+      cursor: null, hasMore: false,
+    });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("live after older page");
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: refreshRequest.requestId,
+      messages: [{ id: "stale-replace", role: "user", content: [{ type: "text", text: "stale" }] }],
+    });
+
+    expect(messages(result).some((message) => message.id === "older")).toBe(false);
+    expect(messages(result).some((message) => message.id === "stale-replace")).toBe(false);
+    expect(messages(result).some((message) => message.role === "user" &&
+      message.content.some((part) => part.type === "text" && part.text === "live after older page"))).toBe(true);
+  });
+
+  it("ignores an older-page response that arrives after a replacement snapshot", async () => {
+    const { result } = setup();
+    const initialThread = currentThreadId(result);
+    const historicalThread = "session-history-replace-first";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Replace first", createdAt: "2026-07-05T00:00:00Z" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const firstRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: firstRequest.requestId,
+      messages: [{ id: "recent-old", role: "user", content: [{ type: "text", text: "old snapshot" }] }],
+      cursor: 1, hasMore: true,
+    });
+    await act(async () => result.current.loadOlderHistory());
+    const olderRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session_page",
+    ).at(-1)!.value;
+    await act(async () => result.current.runtime.threads.switchToThread(initialThread));
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const replaceRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: replaceRequest.requestId,
+      messages: [{ id: "new-snapshot", role: "user", content: [{ type: "text", text: "new snapshot" }] }],
+      cursor: 7, hasMore: true,
+    });
+    await act(async () => result.current.loadOlderHistory());
+    const newPageRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session_page",
+    ).at(-1)!.value;
+    expect(newPageRequest.requestId).not.toBe(olderRequest.requestId);
+
+    // The invalidated old page had no correlation on legacy servers. It must not
+    // consume the newly-created page request after replacement completed.
+    await fireR("load-thread", {
+      threadId: historicalThread, prepend: true,
+      messages: [{ id: "obsolete-legacy-older", role: "user", content: [{ type: "text", text: "obsolete" }] }],
+      cursor: null, hasMore: false,
+    });
+    expect(result.current.loadingOlder).toBe(true);
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: newPageRequest.requestId, prepend: true,
+      messages: [{ id: "new-older", role: "user", content: [{ type: "text", text: "new older" }] }],
+      cursor: null, hasMore: false,
+    });
+    // A correlated response from the invalidated request is stale too.
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: olderRequest.requestId, prepend: true,
+      messages: [{ id: "obsolete-older", role: "user", content: [{ type: "text", text: "obsolete" }] }],
+      cursor: null, hasMore: false,
+    });
+
+    expect(messages(result).map((message) => message.id)).toEqual(["new-older", "new-snapshot"]);
+    expect(result.current.historyCursor).toBeNull();
+    expect(result.current.historyHasMore).toBe(false);
+  });
+
+  it("ignores timed-out history responses after a retry starts a newer live run", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = setup();
+      const initialThread = currentThreadId(result);
+      const historicalThread = "session-history-timeout";
+      await fireR("sessions", {
+        sessions: [{ id: historicalThread, title: "Timeout history", createdAt: "2026-07-05T00:00:00Z" }],
+      });
+      await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+      const firstRequest = inputs.filter(
+        (input) => input.id === "test" && input.value?.type === "load_session",
+      ).at(-1)!.value;
+
+      await act(async () => { vi.advanceTimersByTime(15_001); });
+      expect(result.current.readingHistory).toBe(false);
+      await act(async () => result.current.runtime.threads.switchToThread(initialThread));
+      await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+      const retryRequest = inputs.filter(
+        (input) => input.id === "test" && input.value?.type === "load_session",
+      ).at(-1)!.value;
+      expect(retryRequest.requestId).not.toBe(firstRequest.requestId);
+
+      await fireR("load-thread", {
+        threadId: historicalThread,
+        messages: [{ id: "legacy-timed-out-response", role: "user", content: [{ type: "text", text: "legacy old" }] }],
+      });
+      expect(result.current.readingHistory).toBe(true);
+      expect(messages(result).some((message) => message.id === "legacy-timed-out-response")).toBe(false);
+
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText("live after retry");
+        await result.current.runtime.thread.composer.send();
+      });
+      await fireR("load-thread", {
+        threadId: historicalThread, requestId: firstRequest.requestId,
+        messages: [{ id: "timed-out-response", role: "user", content: [{ type: "text", text: "old" }] }],
+      });
+      expect(result.current.readingHistory).toBe(true);
+      await fireR("load-thread", {
+        threadId: historicalThread, requestId: retryRequest.requestId,
+        messages: [{ id: "retry-stale-response", role: "user", content: [{ type: "text", text: "retry" }] }],
+      });
+
+      expect(result.current.readingHistory).toBe(false);
+      expect(messages(result).some((message) => message.id === "timed-out-response")).toBe(false);
+      expect(messages(result).some((message) => message.id === "retry-stale-response")).toBe(false);
+      expect(messages(result).some((message) => message.role === "user" &&
+        message.content.some((part) => part.type === "text" && part.text === "live after retry"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("requires request ids after an older-page timeout and retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = setup();
+      const historicalThread = "session-history-page-timeout";
+      await fireR("sessions", {
+        sessions: [{ id: historicalThread, title: "Page timeout", createdAt: "2026-07-06T00:00:00Z" }],
+      });
+      await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+      const initialRequest = inputs.filter(
+        (input) => input.id === "test" && input.value?.type === "load_session",
+      ).at(-1)!.value;
+      await fireR("load-thread", {
+        threadId: historicalThread, requestId: initialRequest.requestId,
+        messages: [{ id: "recent-page", role: "user", content: [{ type: "text", text: "recent" }] }],
+        cursor: 10, hasMore: true,
+      });
+
+      await act(async () => result.current.loadOlderHistory());
+      const firstPageRequest = inputs.filter(
+        (input) => input.id === "test" && input.value?.type === "load_session_page",
+      ).at(-1)!.value;
+      await act(async () => { vi.advanceTimersByTime(15_001); });
+      expect(result.current.loadingOlder).toBe(false);
+      await act(async () => result.current.loadOlderHistory());
+      const retryPageRequest = inputs.filter(
+        (input) => input.id === "test" && input.value?.type === "load_session_page",
+      ).at(-1)!.value;
+      expect(retryPageRequest.requestId).not.toBe(firstPageRequest.requestId);
+
+      await fireR("load-thread", {
+        threadId: historicalThread, prepend: true,
+        messages: [{ id: "legacy-old-page", role: "user", content: [{ type: "text", text: "legacy" }] }],
+        cursor: null, hasMore: false,
+      });
+      expect(result.current.loadingOlder).toBe(true);
+      expect(messages(result).some((message) => message.id === "legacy-old-page")).toBe(false);
+
+      await fireR("load-thread", {
+        threadId: historicalThread, requestId: retryPageRequest.requestId, prepend: true,
+        messages: [{ id: "retry-page", role: "user", content: [{ type: "text", text: "retry page" }] }],
+        cursor: null, hasMore: false,
+      });
+      expect(result.current.loadingOlder).toBe(false);
+      expect(messages(result).some((message) => message.id === "retry-page")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores history responses that arrive after the thread was deleted", async () => {
+    const { result } = setup();
+    const historicalThread = "session-history-deleted";
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Delete pending", createdAt: "2026-07-06T00:00:00Z" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    const deletedRequest = inputs.filter(
+      (input) => input.id === "test" && input.value?.type === "load_session",
+    ).at(-1)!.value;
+    await act(async () => result.current.runtime.threads.getItemById(historicalThread).delete());
+
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "legacy-after-delete", role: "user", content: [{ type: "text", text: "legacy" }] }],
+    });
+    await fireR("load-thread", {
+      threadId: historicalThread, requestId: deletedRequest.requestId,
+      messages: [{ id: "correlated-after-delete", role: "user", content: [{ type: "text", text: "correlated" }] }],
+    });
+
+    await fireR("sessions", {
+      sessions: [{ id: historicalThread, title: "Reappeared", createdAt: "2026-07-06T00:00:00Z" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(historicalThread));
+    await fireR("load-thread", {
+      threadId: historicalThread,
+      messages: [{ id: "legacy-after-reappear", role: "user", content: [{ type: "text", text: "old legacy" }] }],
+    });
+    const ids = messages(result).map((message) => message.id);
+    expect(ids).not.toContain("legacy-after-delete");
+    expect(ids).not.toContain("correlated-after-delete");
+    expect(ids).not.toContain("legacy-after-reappear");
+  });
+
+  it("hydrates cached history immediately and refreshes it when reopened", async () => {
     const historicalThread = "session-history-cached";
     localStorage.setItem(
       `shinyAssistantUI:test:msgs:${historicalThread}`,
@@ -1253,7 +1666,8 @@ describe("useShinyRuntime — historical session lazy load state", () => {
     await act(async () => {
       result.current.runtime.threads.switchToThread(historicalThread);
     });
-    expect(loadRequests()).toHaveLength(1);
+    expect(loadRequests()).toHaveLength(2);
+    expect(result.current.readingHistory).toBe(true);
     expect(messages(result).some((message) => message.id === "server-user")).toBe(true);
   });
 });

@@ -35,6 +35,7 @@ import {
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
   resolveToolFileReference,
 } from "./helpers";
+import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -235,27 +236,77 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // 历史 session 的 lazy-load 状态。只有收到 :load-thread 才进入 loaded；
   // loading 用于阻止重复点击发起并发请求，超时后退回 unloaded 允许重试。
   const sessionLoadStates = useRef(new Map<string, "unloaded" | "loading" | "loaded">());
+  const serverSessionIdsRef = useRef(new Set<string>());
+  // Protect live in-memory turns from an older transcript snapshot.
+  const activeRunsRef = useRef<Set<string>>(new Set());
+  const runSeqRef = useRef<Record<string, number>>({});
+  const historyRequestSeqRef = useRef(0);
+  const historyReplaceRequestsRef = useRef(new Map<string, { requestId: string; runSeq: number }>());
+  const historyOlderRequestsRef = useRef(new Map<string, string>());
+  const historyRequiresRequestIdRef = useRef(new Set<string>());
   const sessionLoadRetryTimers = useRef(new Map<string, number>());
   const olderPageRetryTimers = useRef(new Map<string, number>());
-  // 稳定 ref，供注册一次的 onSessions 回调读取当前 threadId（绕过 stale closure）
+  // Remove all request correlation before a thread disappears. Any response
+  // carrying its old requestId will then be ignored by onLoadThread.
+  const clearThreadHistoryTracking = useCallback((threadId: string) => {
+    const retryTimer = sessionLoadRetryTimers.current.get(threadId);
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    const olderTimer = olderPageRetryTimers.current.get(threadId);
+    if (olderTimer !== undefined) window.clearTimeout(olderTimer);
+    sessionLoadRetryTimers.current.delete(threadId);
+    olderPageRetryTimers.current.delete(threadId);
+    historyReplaceRequestsRef.current.delete(threadId);
+    historyOlderRequestsRef.current.delete(threadId);
+    historyRequiresRequestIdRef.current.add(threadId);
+    sessionLoadStates.current.delete(threadId);
+    serverSessionIdsRef.current.delete(threadId);
+    if (threadId in historyPageStatesRef.current) {
+      const next = { ...historyPageStatesRef.current };
+      delete next[threadId];
+      historyPageStatesRef.current = next;
+      setHistoryPageStates(next);
+    }
+  }, []);
   const currentThreadIdRef = useRef<string>("");
+  // 稳定 ref，供注册一次的 onSessions 回调读取当前 threadId（绕过 stale closure）
   // 本次 React 实例（页面加载后）新建的线程 ID 集合。
   // onSessions 到达时用 server 列表替换 localStorage 线程，但保留这些本地新建线程，
   // 避免把用户正在进行的对话丢掉。
   const thisSessionThreadIds = useRef(new Set<string>());
-  const requestSessionLoad = useCallback((threadId: string) => {
-    if (sessionLoadStates.current.get(threadId) !== "unloaded") return;
+  const requestSessionLoad = useCallback((threadId: string, refresh = false) => {
+    const state = sessionLoadStates.current.get(threadId);
+    if (state === "loading") return;
+    if (!refresh && state !== "unloaded") return;
+    // A live run is newer than the transcript snapshot on disk. Never replace
+    // its in-memory messages merely because the user switches back to it.
+    if (refresh && activeRunsRef.current.has(threadId)) return;
+    const olderTimer = olderPageRetryTimers.current.get(threadId);
+    if (olderTimer !== undefined) window.clearTimeout(olderTimer);
+    olderPageRetryTimers.current.delete(threadId);
+    if (historyOlderRequestsRef.current.has(threadId)) {
+      historyRequiresRequestIdRef.current.add(threadId);
+    }
+    historyOlderRequestsRef.current.delete(threadId);
     sessionLoadStates.current.set(threadId, "loading");
+    const requestId = `history-${Date.now()}-${++historyRequestSeqRef.current}`;
+    historyReplaceRequestsRef.current.set(threadId, {
+      requestId, runSeq: runSeqRef.current[threadId] ?? 0,
+    });
     updateHistoryPage(threadId, (previous) => ({
       ...previous, reading: true, hasMore: false, cursor: null, loadingOlder: false,
     }));
-    bridge.current.sendLoadSession(threadId, threadId);
+    bridge.current.sendLoadSession(threadId, threadId, requestId);
     const timer = window.setTimeout(() => {
-      if (sessionLoadStates.current.get(threadId) === "loading") {
-        sessionLoadStates.current.set(threadId, "unloaded");
-        updateHistoryPage(threadId, (previous) => ({ ...previous, reading: false }));
+      const pending = historyReplaceRequestsRef.current.get(threadId);
+      if (pending?.requestId === requestId) {
+        historyReplaceRequestsRef.current.delete(threadId);
+        historyRequiresRequestIdRef.current.add(threadId);
+        if (sessionLoadStates.current.get(threadId) === "loading") {
+          sessionLoadStates.current.set(threadId, "unloaded");
+          updateHistoryPage(threadId, (previous) => ({ ...previous, reading: false }));
+        }
+        sessionLoadRetryTimers.current.delete(threadId);
       }
-      sessionLoadRetryTimers.current.delete(threadId);
     }, 15_000);
     sessionLoadRetryTimers.current.set(threadId, timer);
   }, [updateHistoryPage]);
@@ -377,12 +428,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!page?.hasMore || page.loadingOlder || page.cursor == null) return;
 
     updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: true }));
-    bridge.current.sendLoadSessionPage(threadId, threadId, page.cursor, 50);
+    const requestId = `history-page-${Date.now()}-${++historyRequestSeqRef.current}`;
+    historyOlderRequestsRef.current.set(threadId, requestId);
+    bridge.current.sendLoadSessionPage(threadId, threadId, page.cursor, 50, requestId);
     const existingTimer = olderPageRetryTimers.current.get(threadId);
     if (existingTimer !== undefined) window.clearTimeout(existingTimer);
     const timer = window.setTimeout(() => {
-      updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: false }));
-      olderPageRetryTimers.current.delete(threadId);
+      if (historyOlderRequestsRef.current.get(threadId) === requestId) {
+        historyOlderRequestsRef.current.delete(threadId);
+        historyRequiresRequestIdRef.current.add(threadId);
+        updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: false }));
+        olderPageRetryTimers.current.delete(threadId);
+      }
     }, 15_000);
     olderPageRetryTimers.current.set(threadId, timer);
   }, [updateHistoryPage]);
@@ -571,10 +628,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const hasReasoningRef = useRef(false); // thinking arrived before text chunks
   // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
   // ① 多 tab storage 同步时保护正在跑的线程不被磁盘旧值覆盖；
-  const activeRunsRef = useRef<Set<string>>(new Set());
-  // per-thread run 序号，用于 onDone/onError 判断自己是否仍是该线程最新的 run，
-  // 避免 run 重入时旧 run 的收尾逻辑误删新 run 的 callbacks。
-  const runSeqRef = useRef<Record<string, number>>({});
+  // per-thread run 序号也用于拒绝晚到的历史快照覆盖请求后启动的 live run。
 
   // 多 tab 同步：监听 storage 事件（仅其它 tab 写同源 localStorage 时触发，本 tab 不触发）。
   // 避免两个 tab 各持独立 state、last-write-wins 互相覆盖对方新建/删除的线程。
@@ -922,7 +976,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           window.clearTimeout(timer);
         }
         olderPageRetryTimers.current.clear();
+        for (const trackedId of new Set([
+          ...sessionLoadStates.current.keys(),
+          ...historyReplaceRequestsRef.current.keys(),
+          ...historyOlderRequestsRef.current.keys(),
+        ])) {
+          historyRequiresRequestIdRef.current.add(trackedId);
+        }
         sessionLoadStates.current.clear();
+        serverSessionIdsRef.current.clear();
+        historyReplaceRequestsRef.current.clear();
+        historyOlderRequestsRef.current.clear();
         historyPageStatesRef.current = {};
         setHistoryPageStates({});
         const newId = makeThreadId();
@@ -936,6 +1000,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
 
       const serverIds = new Set(sessions.map((s) => s.id));
+      for (const trackedId of Array.from(sessionLoadStates.current.keys())) {
+        if (!serverIds.has(trackedId)) clearThreadHistoryTracking(trackedId);
+      }
+      serverSessionIdsRef.current = serverIds;
 
       // 填充日期 Map（供侧边栏展示），ISO 字符串直接传入 Date 构造函数
       for (const s of sessions) {
@@ -1014,13 +1082,40 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // ── 注册 :load-thread（接收 R 发来的历史消息/旧页）─────────────────────
     bridge.current.onLoadThread((data) => {
       const { threadId } = data;
-      sessionLoadStates.current.set(threadId, "loaded");
-      const retryTimer = sessionLoadRetryTimers.current.get(threadId);
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      sessionLoadRetryTimers.current.delete(threadId);
-      const olderTimer = olderPageRetryTimers.current.get(threadId);
-      if (olderTimer !== undefined) window.clearTimeout(olderTimer);
-      olderPageRetryTimers.current.delete(threadId);
+      const isOlderPage = data.prepend === true;
+      let requestedAtRunSeq: number | undefined;
+
+      if (isOlderPage) {
+        const pendingRequestId = historyOlderRequestsRef.current.get(threadId);
+        const legacyAmbiguous = !data.requestId &&
+          (pendingRequestId === undefined || historyRequiresRequestIdRef.current.has(threadId));
+        if (legacyAmbiguous || (data.requestId && data.requestId !== pendingRequestId)) return;
+        historyOlderRequestsRef.current.delete(threadId);
+        const olderTimer = olderPageRetryTimers.current.get(threadId);
+        if (olderTimer !== undefined) window.clearTimeout(olderTimer);
+        olderPageRetryTimers.current.delete(threadId);
+      } else {
+        const pending = historyReplaceRequestsRef.current.get(threadId);
+        const legacyAmbiguous = !data.requestId &&
+          (pending === undefined || historyRequiresRequestIdRef.current.has(threadId));
+        if (legacyAmbiguous || (data.requestId && data.requestId !== pending?.requestId)) return;
+        requestedAtRunSeq = pending?.runSeq;
+        historyReplaceRequestsRef.current.delete(threadId);
+        const retryTimer = sessionLoadRetryTimers.current.get(threadId);
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+        sessionLoadRetryTimers.current.delete(threadId);
+        sessionLoadStates.current.set(threadId, "loaded");
+      }
+
+      const replaceSuperseded = !isOlderPage &&
+        requestedAtRunSeq !== undefined &&
+        (runSeqRef.current[threadId] ?? 0) !== requestedAtRunSeq;
+      if (replaceSuperseded) {
+        updateHistoryPage(threadId, (previous) => ({
+          ...previous, reading: false, loadingOlder: false,
+        }));
+        return;
+      }
 
       setMessagesMap((prev) => {
         const incoming = data.messages as ThreadMessageLike[];
@@ -1171,7 +1266,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     args: {} as any,
                     argsText: "",
-                    artifact: annotations,
+                    artifact: { ...(annotations ?? {}), argsStreaming: true },
                   },
                 ],
               },
@@ -1191,7 +1286,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               const cidx = content.findIndex((p: any) => p.type === "tool-call");
               if (cidx < 0) return m;
               const newContent = [...content];
-              newContent[cidx] = { ...content[cidx], argsText: (content[cidx].argsText ?? "") + delta };
+              const argsText = (content[cidx].argsText ?? "") + delta;
+              const provisionalArgs = content[cidx].toolName === "Write"
+                ? projectPartialWriteArgs(argsText)
+                : {};
+              newContent[cidx] = {
+                ...content[cidx],
+                argsText,
+                args: content[cidx].toolName === "Write"
+                  ? { ...(content[cidx].args ?? {}), ...provisionalArgs }
+                  : content[cidx].args,
+              };
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               return { ...m, content: newContent } as any;
             });
@@ -1219,7 +1324,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   args: toolCall.args as any,
                   argsText: toolCall.argsText,
-                  artifact: toolCall.annotations,
+                  artifact: {
+                    ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
+                      ? content[cidx].artifact
+                      : {}),
+                    ...(toolCall.annotations ?? {}),
+                    argsStreaming: false,
+                  },
                 };
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 return { ...m, content: newContent } as any;
@@ -1239,7 +1350,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
                       // eslint-disable-next-line @typescript-eslint/no-explicit-any
                       args: toolCall.args as any,
                       argsText: toolCall.argsText,
-                      artifact: toolCall.annotations,
+                      artifact: { ...(toolCall.annotations ?? {}), argsStreaming: false },
                     },
                   ],
                 },
@@ -1264,7 +1375,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               );
               if (cidx < 0) return m;
               const newContent = [...content];
-              newContent[cidx] = { ...content[cidx], result, isError };
+              newContent[cidx] = {
+                ...content[cidx],
+                artifact: {
+                  ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
+                    ? content[cidx].artifact
+                    : {}),
+                  argsStreaming: false,
+                },
+                result,
+                isError,
+              };
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               return { ...m, content: newContent } as any;
             });
@@ -1401,8 +1522,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           advanceServiceQueueRef.current(threadId, runId, false);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
+            const { messages: settled } = markStaleToolCalls(threadMsgs, "Interrupted");
             const updated = [
-              ...threadMsgs,
+              ...settled,
               {
                 id: `error-${Date.now()}`,
                 role: "assistant" as const,
@@ -1895,9 +2017,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       onSwitchToThread: (threadId: string) => {
         setCurrentThreadId(threadId);
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
-        // 若目标线程是未加载的历史 session，触发一次懒加载；收到
-        // :load-thread 前保持 loading，避免重复点击产生并发请求。
-        requestSessionLoad(threadId);
+        // Server-backed history may keep growing after its first hydration (for
+        // example a background task finishing). Explicitly switching back starts
+        // a fresh traversal; loading requests still de-duplicate above.
+        if (serverSessionIdsRef.current.has(threadId)) {
+          requestSessionLoad(threadId, true);
+        }
       },
       onArchive: (threadId: string) => {
         setThreads((prev) => {
@@ -1944,6 +2069,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       onDelete: (threadId: string) => {
         cancelPendingServiceSubmissions(threadId);
         messageQueueRef.current.delete(threadId);
+        clearThreadHistoryTracking(threadId);
         const wasServerSession = !thisSessionThreadIds.current.has(threadId);
         // 从活跃或归档列表中删除
         setThreads((prev) => {

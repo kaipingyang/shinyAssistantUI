@@ -146,6 +146,14 @@ check("history item exists", wait_until("Array.from(document.querySelectorAll('#
 ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).find(e=>e.innerText.includes('Checklist history'));if(e)e.querySelector('[data-slot=aui_thread-list-item-trigger]').click();return !!e})()")
 check("historical checklist restored", wait_until("document.querySelectorAll('#chat [data-slot=aui_claude_checklist] li').length===2"))
 check("completed checklist offers close", isTRUE(ev("!!document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')")))
+check("late history tail absent from first snapshot", !grepl("process_sdtm_data.R", ev("document.querySelector('#chat').innerText"), fixed = TRUE))
+# The fixture appends task-notification -> Read -> thinking-only after the first
+# load. Switching away and back must issue a fresh cursor=NULL traversal.
+ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).find(e=>!e.innerText.includes('Checklist history'));if(e)e.querySelector('[data-slot=aui_thread-list-item-trigger]').click();return !!e})()")
+check("switches away from growing history", wait_until("!document.querySelector('#chat')?.innerText.includes('Historical checklist')"))
+ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).find(e=>e.innerText.includes('Checklist history'));if(e)e.querySelector('[data-slot=aui_thread-list-item-trigger]').click();return !!e})()")
+check("reopened history includes appended Read", wait_until("document.querySelector('#chat')?.innerText.includes('process_sdtm_data.R')"))
+check("historical checklist remains after refresh", isTRUE(ev("document.querySelectorAll('#chat [data-slot=aui_claude_checklist] li').length===2")))
 ev("document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')?.click();true")
 check("user can close completed checklist", wait_until("!document.querySelector('#chat [data-slot=aui_claude_checklist]')"))
 

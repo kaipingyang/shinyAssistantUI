@@ -110,6 +110,18 @@ describe("markStaleToolCalls", () => {
     expect(messages[0].content[0].result).toBe("Interrupted");
     expect(messages[0].content[0].isError).toBe(true);
   });
+  it("清理被中断工具的argsStreaming标记", () => {
+    const msgs = [{ id: "m1", role: "assistant", content: [{
+      type: "tool-call",
+      toolCallId: "t1",
+      artifact: { parentToolCallId: null, argsStreaming: true },
+    }] }] as any;
+    const { messages } = markStaleToolCalls(msgs, "Interrupted");
+    expect(messages[0].content[0].artifact).toEqual({
+      parentToolCallId: null,
+      argsStreaming: false,
+    });
+  });
   it("已有 result 的不动，changed=false", () => {
     const msgs = [{ id: "m1", role: "assistant", content: [{ type: "tool-call", toolCallId: "t1", result: "done" }] }] as any;
     const { changed } = markStaleToolCalls(msgs, "Interrupted");

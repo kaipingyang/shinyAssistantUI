@@ -15,7 +15,7 @@ import {
 
 type MarkdownView = Extract<ToolView, { kind: "markdown" }>;
 
-const MarkdownToolView: FC<{ view: MarkdownView }> = ({ view }) => {
+const MarkdownToolView: FC<{ view: MarkdownView; isRunning: boolean }> = ({ view, isRunning }) => {
   const [mode, setMode] = useState<"preview" | "source">(view.defaultMode);
   const { isCopied, copyToClipboard } = useCopyToClipboard();
   const previewLabel = view.defaultMode === "source" ? "Preview as Markdown" : "Preview";
@@ -25,6 +25,7 @@ const MarkdownToolView: FC<{ view: MarkdownView }> = ({ view }) => {
   return (
     <div
       data-arg-view="markdown"
+      data-args-streaming={isRunning ? "true" : "false"}
       data-markdown-mode={mode}
       data-source-control={view.sourceControl}
       data-slot="tool-fallback-args"
@@ -71,7 +72,7 @@ const MarkdownToolView: FC<{ view: MarkdownView }> = ({ view }) => {
       </div>
       {mode === "preview" ? (
         <div data-markdown-preview="true" className="max-h-96 overflow-auto p-3 text-sm">
-          <TextMessagePartProvider text={view.text} isRunning={false}>
+          <TextMessagePartProvider text={view.text} isRunning={isRunning}>
             <MarkdownText />
           </TextMessagePartProvider>
         </div>
@@ -210,8 +211,8 @@ const DelimitedTableToolView: FC<{ view: TableView }> = ({ view }) => {
 };
 
 
-export const ToolArgsView: FC<{ view: ToolView }> = ({ view }) => {
-  if (view.kind === "markdown") return <MarkdownToolView view={view} />;
+export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view, isRunning = false }) => {
+  if (view.kind === "markdown") return <MarkdownToolView view={view} isRunning={isRunning} />;
   if (view.kind === "table") return <DelimitedTableToolView view={view} />;
   if (view.kind === "diff") {
     return (

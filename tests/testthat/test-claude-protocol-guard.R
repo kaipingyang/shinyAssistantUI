@@ -212,8 +212,8 @@ test_that("malformed tool prose is never converted into a tool invocation", {
   ))
   tool_stop <- stream(list(type = "content_block_stop", index = 1))
   mixed <- run_turn(list(malformed, tool_start, tool_delta, tool_stop, result("tool_use")))
-  expect_null(mixed$error)
-  expect_true(mixed$done)
+  expect_match(mixed$error, "after a tool call", ignore.case = TRUE)
+  expect_false(mixed$done)
   expect_length(mixed$tools, 1L)
   expect_identical(mixed$tools[[1L]]$tool_call_id, "real-tool")
 
@@ -224,7 +224,8 @@ test_that("malformed tool prose is never converted into a tool invocation", {
   marker_with_tool <- run_turn(list(
     leaked_marker, tool_start, tool_delta, tool_stop, result("tool_use")
   ))
-  expect_null(marker_with_tool$error)
+  expect_match(marker_with_tool$error, "after a tool call", ignore.case = TRUE)
+  expect_false(marker_with_tool$done)
   expect_length(marker_with_tool$chunks, 0L)
   expect_length(marker_with_tool$tools, 1L)
 
@@ -248,8 +249,8 @@ test_that("malformed tool prose is never converted into a tool invocation", {
     tool_use_id = "permission-only-tool"
   )
   permission_result <- run_turn(list(permission_only, result("tool_use")))
-  expect_null(permission_result$error)
-  expect_true(permission_result$done)
+  expect_match(permission_result$error, "after a tool call", ignore.case = TRUE)
+  expect_false(permission_result$done)
   expect_length(permission_result$tools, 1L)
   expect_identical(
     permission_result$tools[[1L]]$tool_call_id,

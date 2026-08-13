@@ -554,6 +554,7 @@
   terminal <- scalar(terminal)
   if (!nzchar(terminal)) return("")
   if (!nzchar(streamed)) return(terminal)
+  if (identical(trimws(streamed), trimws(terminal))) return("")
 
   max_overlap <- min(nchar(streamed), nchar(terminal))
   if (max_overlap > 0L) {
@@ -1926,15 +1927,20 @@ make_claude_handler <- function(options       = NULL,
     chunk_count              <- 0L
     streamed_text            <- ""
     assistant_terminal_parts <- character(0)
+    assistant_terminal_resolves_post_tool <- FALSE
+    assistant_terminal_force_text <- ""
     assistant_stop_reason    <- NULL
     structured_tool_seen     <- FALSE
+    tool_result_boundary_seen <- FALSE
+    visible_text_seen        <- FALSE
+    awaiting_post_tool_text  <- FALSE
     malformed_text_seen      <- FALSE
     terminal_error           <- NULL
     intentional_deny         <- FALSE
     pending_tool_ids         <- character(0)
     tb               <- new.env(parent = emptyenv())
 
-    emit_guarded_text <- function(text) {
+    emit_guarded_text <- function(text, resolves_post_tool = TRUE) {
       if (!nzchar(text)) return(invisible(NULL))
       if (length(pending_tool_ids) > 0) {
         for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
@@ -1943,10 +1949,28 @@ make_claude_handler <- function(options       = NULL,
       flush_tool_blocks(mark_completed = TRUE)
       chunk_count <<- chunk_count + 1L
       streamed_text <<- paste0(streamed_text, text)
+      has_visible_text <- nzchar(trimws(text))
+      if (has_visible_text) {
+        visible_text_seen <<- TRUE
+        if (isTRUE(resolves_post_tool)) awaiting_post_tool_text <<- FALSE
+      }
       on_chunk(text)
       invisible(NULL)
     }
     text_guard <- .new_claude_text_guard(emit_guarded_text)
+    mark_structured_tool <- function() {
+      # A tool boundary proves that any text still buffered by the protocol
+      # filter belongs before this tool, not to a later final response.
+      text_guard$finish()
+      malformed_text_seen <<- malformed_text_seen ||
+        isTRUE(text_guard$malformed_seen())
+      structured_tool_seen <<- TRUE
+      awaiting_post_tool_text <<- TRUE
+      tool_result_boundary_seen <<- FALSE
+      assistant_terminal_resolves_post_tool <<- FALSE
+      assistant_terminal_force_text <<- ""
+      invisible(NULL)
+    }
 
     flush_tool_blocks <- function(mark_completed = FALSE) {
       for (key in ls(tb)) {
@@ -2026,14 +2050,14 @@ make_claude_handler <- function(options       = NULL,
           } else if (identical(etype, "content_block_start")) {
             blk <- evt[["content_block"]]
             if (identical(blk[["type"]], "tool_use")) {
-              structured_tool_seen <- TRUE
+              mark_structured_tool()
               tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
                                  args_buf="", emitted=FALSE, approval_handled=FALSE)
               if (!is.null(on_tool_call_start))
                 on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
                                    annotations=list(parentToolCallId=parent))
             } else if (identical(blk[["type"]], "server_tool_use")) {
-              structured_tool_seen <- TRUE
+              mark_structured_tool()
               # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
               # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
               tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
@@ -2083,9 +2107,11 @@ make_claude_handler <- function(options       = NULL,
           # their real result in a UserMessage ToolResultBlock. Preserve that
           # result (not the synthetic terminal "Completed") so TaskCreate ids
           # can be deterministically associated with later TaskUpdate calls.
-          for (tool_result in .claude_user_tool_results(msg)) {
+          user_tool_results <- .claude_user_tool_results(msg)
+          for (tool_result in user_tool_results) {
             tuid <- as.character(tool_result$tool_use_id %||% "")
             if (!nzchar(tuid)) next
+            if (structured_tool_seen) tool_result_boundary_seen <- TRUE
             on_tool_result(tuid, tool_result$result, is_error = tool_result$is_error)
             pending_tool_ids <- setdiff(pending_tool_ids, tuid)
             for (key in ls(tb)) {
@@ -2095,14 +2121,33 @@ make_claude_handler <- function(options       = NULL,
 
         } else if (inherits(msg, "AssistantMessage")) {
           assistant_stop_reason <- msg$stop_reason %||% assistant_stop_reason
-          if (length(msg$content %||% list())) {
-            has_structured_tool <- any(vapply(
-              msg$content,
-              function(block) inherits(block, "ToolUseBlock") ||
-                inherits(block, "ServerToolUseBlock"),
-              logical(1)
-            ))
-            if (has_structured_tool) structured_tool_seen <- TRUE
+          assistant_text_so_far <- ""
+          message_resolves_post_tool <- FALSE
+          message_force_text <- FALSE
+          for (block in msg$content %||% list()) {
+            if (inherits(block, "ToolUseBlock") ||
+                inherits(block, "ServerToolUseBlock")) {
+              mark_structured_tool()
+              message_resolves_post_tool <- FALSE
+              message_force_text <- FALSE
+            } else if (inherits(block, "TextBlock")) {
+              assistant_text_so_far <- paste0(
+                assistant_text_so_far,
+                block$text %||% ""
+              )
+              filtered_block <- .claude_filter_complete_text(assistant_text_so_far)
+              new_text <- .claude_terminal_suffix(
+                streamed_text,
+                filtered_block$text
+              )
+              has_visible_block <- nzchar(trimws(filtered_block$text))
+              has_novel_text <- nzchar(trimws(new_text))
+              if (has_visible_block &&
+                  (tool_result_boundary_seen || has_novel_text)) {
+                message_resolves_post_tool <- TRUE
+                message_force_text <- tool_result_boundary_seen && !has_novel_text
+              }
+            }
           }
           # Some backend/image turns deliver final AssistantMessage content without
           # partial StreamEvent text deltas. Buffer it and emit only at ResultMessage
@@ -2110,13 +2155,20 @@ make_claude_handler <- function(options       = NULL,
           final_text <- .claude_assistant_text(msg)
           if (nzchar(final_text) &&
               (length(assistant_terminal_parts) == 0L ||
-               !identical(tail(assistant_terminal_parts, 1L), final_text)))
+               !identical(tail(assistant_terminal_parts, 1L), final_text))) {
             assistant_terminal_parts <- c(assistant_terminal_parts, final_text)
+          }
+          if (isTRUE(message_resolves_post_tool)) {
+            assistant_terminal_resolves_post_tool <- TRUE
+            if (isTRUE(message_force_text)) {
+              assistant_terminal_force_text <- final_text
+            }
+          }
 
         } else if (inherits(msg, "PermissionRequestMessage")) {
           # PermissionRequestMessage is provider/harness-structured tool evidence
           # even when a backend omits the preceding streaming content block.
-          structured_tool_seen <- TRUE
+          mark_structured_tool()
           # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
           # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
           # approve_tool/deny_tool 仍用 request_id。
@@ -2219,22 +2271,49 @@ make_claude_handler <- function(options       = NULL,
             for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
             pending_tool_ids <- character(0)
           } else if (!result_is_error) {
-            raw_terminal_candidates <- character(0)
+            raw_terminal_candidates <- list()
             assistant_text <- paste0(assistant_terminal_parts, collapse = "")
             result_text <- .claude_result_text(msg)
             if (nzchar(assistant_text)) {
-              raw_terminal_candidates <- c(raw_terminal_candidates, assistant_text)
+              raw_terminal_candidates <- c(
+                raw_terminal_candidates,
+                list(list(
+                  text = assistant_text,
+                  resolves_post_tool = assistant_terminal_resolves_post_tool,
+                  force_text = assistant_terminal_force_text
+                ))
+              )
             }
             if (nzchar(result_text)) {
-              raw_terminal_candidates <- c(raw_terminal_candidates, result_text)
+              raw_terminal_candidates <- c(
+                raw_terminal_candidates,
+                list(list(
+                  text = result_text,
+                  resolves_post_tool = TRUE,
+                  force_text = if (tool_result_boundary_seen) result_text else ""
+                ))
+              )
             }
 
-            terminal_candidates <- character(0)
-            for (terminal_text in raw_terminal_candidates) {
-              filtered <- .claude_filter_complete_text(terminal_text)
+            terminal_candidates <- list()
+            for (candidate in raw_terminal_candidates) {
+              filtered <- .claude_filter_complete_text(candidate$text)
               malformed_text_seen <- malformed_text_seen || isTRUE(filtered$malformed)
               if (nzchar(filtered$text)) {
-                terminal_candidates <- c(terminal_candidates, filtered$text)
+                filtered_force <- .claude_filter_complete_text(
+                  candidate$force_text %||% ""
+                )
+                malformed_text_seen <- malformed_text_seen ||
+                  isTRUE(filtered_force$malformed)
+                terminal_candidates <- c(
+                  terminal_candidates,
+                  list(list(
+                    text = filtered$text,
+                    resolves_post_tool = isTRUE(candidate$resolves_post_tool) &&
+                      nzchar(trimws(filtered$text)),
+                    force_text = filtered_force$text
+                  ))
+                )
               }
             }
 
@@ -2252,9 +2331,35 @@ make_claude_handler <- function(options       = NULL,
               }
               pending_tool_ids <- character(0)
             } else {
-              for (terminal_text in terminal_candidates) {
-                missing_text <- .claude_terminal_suffix(streamed_text, terminal_text)
-                if (nzchar(missing_text)) emit_guarded_text(missing_text)
+              for (candidate in terminal_candidates) {
+                missing_text <- .claude_terminal_suffix(streamed_text, candidate$text)
+                if (nzchar(missing_text)) {
+                  emit_guarded_text(
+                    missing_text,
+                    resolves_post_tool = candidate$resolves_post_tool
+                  )
+                }
+                if (awaiting_post_tool_text &&
+                    isTRUE(candidate$resolves_post_tool) &&
+                    nzchar(trimws(candidate$force_text %||% ""))) {
+                  emit_guarded_text(
+                    candidate$force_text,
+                    resolves_post_tool = TRUE
+                  )
+                }
+              }
+              if (!identical(message, "/reload-skills")) {
+                if (awaiting_post_tool_text) {
+                  terminal_error <- paste0(
+                    "Upstream ended after a tool call without a final ",
+                    "user-visible response. Please retry the request."
+                  )
+                } else if (!visible_text_seen) {
+                  terminal_error <- paste0(
+                    "Upstream ended without a user-visible response. ",
+                    "Please retry the request."
+                  )
+                }
               }
             }
           }
@@ -2524,18 +2629,29 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
     }
 
     cache_key <- as.character(session_id %||% thread_id)
-    if (!snapshots$has(cache_key)) {
+    # `cursor = NULL` starts a new browser traversal. Re-read the transcript so
+    # sessions that kept appending after an earlier open do not remain pinned to
+    # a stale tail. Non-NULL cursors continue against one immutable snapshot,
+    # preventing records appended between pages from causing skips/duplicates.
+    # A missing cursor snapshot (for example after LRU eviction) is rebuilt once.
+    if (is.null(cursor) || !snapshots$has(cache_key)) {
       # ClaudeAgentSDK's current limit/offset API still parses the complete JSONL
-      # session internally. Read and convert once here, cache the immutable UI
-      # snapshot, then page in memory. This reduces browser transfer/render work,
-      # but not the SDK's one-time full-file parsing cost.
-      msgs <- tryCatch(
-        .get_claude_session_messages(session_id),
-        error = function(e) list()
+      # session internally. Convert once per traversal and page that snapshot in
+      # memory; this reduces browser transfer/render work, but not the SDK's
+      # one-time full-file parsing cost.
+      loaded <- tryCatch(
+        list(ok = TRUE, messages = .get_claude_session_messages(session_id)),
+        error = function(e) list(ok = FALSE)
       )
-      snapshots$set(cache_key, .claude_msgs_to_thread(
-        msgs, .read_tool_decisions(.claude_decisions_path(session_map_path))
-      ))
+      if (isTRUE(loaded$ok)) {
+        snapshots$set(cache_key, .claude_msgs_to_thread(
+          loaded$messages, .read_tool_decisions(.claude_decisions_path(session_map_path))
+        ))
+      } else if (!snapshots$has(cache_key)) {
+        # Preserve a prior successful traversal across transient filesystem/SDK
+        # failures. Only a first-ever failed load has no snapshot to fall back to.
+        snapshots$set(cache_key, list())
+      }
     }
 
     page <- .history_message_page(

@@ -1074,6 +1074,7 @@ assistantUIServer <- function(id, handler,
           paste0(input_id, ":load-thread"),
           list(
             threadId = msg$threadId,
+            requestId = msg$requestId,
             messages = messages,
             cursor = cursor,
             hasMore = isTRUE(has_more),

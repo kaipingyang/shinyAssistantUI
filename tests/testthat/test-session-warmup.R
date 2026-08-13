@@ -200,9 +200,10 @@ test_that("Claude session loader caches one converted snapshot and pages newest-
   expect_false(pages[[3L]]$has_more)
 })
 
-test_that("older history pages forward cursor but never schedule another warmup", {
+test_that("older history pages forward cursor and request ids without another warmup", {
   warmups <- character()
   calls <- list()
+  sent <- list()
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
     warmups <<- c(warmups, thread_id)
@@ -225,9 +226,13 @@ test_that("older history pages forward cursor but never schedule another warmup"
       "chat", handler = handler, on_session_load = loader, prewarm = FALSE
     )
   }, {
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
     session$flushReact()
     session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "history-1"
+      type = "load_session", sessionId = "s1", threadId = "history-1",
+      requestId = "history-initial-1"
     ))
     session$flushReact()
     run_later_queue()
@@ -235,7 +240,7 @@ test_that("older history pages forward cursor but never schedule another warmup"
 
     session$setInputs(chat_input = list(
       type = "load_session_page", sessionId = "s1", threadId = "history-1",
-      cursor = 50L, limit = 50L
+      cursor = 50L, limit = 50L, requestId = "history-page-1"
     ))
     session$flushReact()
     run_later_queue()
@@ -244,6 +249,14 @@ test_that("older history pages forward cursor but never schedule another warmup"
     expect_null(calls[[1L]]$cursor)
     expect_identical(calls[[2L]], list(cursor = 50L, limit = 50L))
     expect_identical(warmups, "history-1")
+    history_responses <- Filter(
+      function(item) identical(item$type, "chat_input:load-thread"), sent
+    )
+    expect_length(history_responses, 2L)
+    expect_identical(
+      vapply(history_responses, function(item) item$message$requestId, character(1)),
+      c("history-initial-1", "history-page-1")
+    )
   })
 })
 
@@ -259,4 +272,103 @@ test_that("history snapshot cache evicts least-recently-used sessions", {
   expect_false(cache$has("b"))
   expect_true(cache$has("a"))
   expect_true(cache$has("c"))
+})
+
+
+test_that("Claude session loader refreshes an appended transcript on each initial load", {
+  path <- tempfile(fileext = ".rds")
+  reads <- 0L
+  raw <- lapply(seq_len(3L), function(i) list(
+    type = "user", uuid = paste0("u", i),
+    message = list(content = paste0("message-", i))
+  ))
+
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id) {
+      reads <<- reads + 1L
+      raw
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  pages <- list()
+  capture <- function(messages, cursor = NULL, has_more = FALSE, ...) {
+    pages[[length(pages) + 1L]] <<- list(
+      messages = messages, cursor = cursor, has_more = has_more
+    )
+  }
+
+  loader("session-growing", "thread-growing", capture, limit = 2L)
+  expect_identical(reads, 1L)
+  expect_identical(
+    vapply(pages[[1L]]$messages, `[[`, character(1), "id"),
+    c("h-u2", "h-u3")
+  )
+  expect_identical(pages[[1L]]$cursor, 1L)
+
+  raw <- c(raw, list(
+    list(
+      type = "user", uuid = "synthetic-task",
+      message = list(content = paste0(
+        "<task-notification><task-id>background-1</task-id>",
+        "<status>completed</status></task-notification>"
+      ))
+    ),
+    list(
+      type = "assistant", uuid = "a4",
+      message = list(content = list(list(
+        type = "tool_use", id = "read-late", name = "Read",
+        input = list(file_path = "functions/process_sdtm_data.R")
+      )))
+    ),
+    list(
+      type = "assistant", uuid = "thinking-only",
+      message = list(content = list(list(
+        type = "thinking", thinking = "Continue after the completed task"
+      )))
+    )
+  ))
+
+  # Reopening the session starts a new traversal and must see the appended tail.
+  loader("session-growing", "thread-growing", capture, limit = 2L)
+  expect_identical(reads, 2L)
+  expect_identical(
+    vapply(pages[[2L]]$messages, `[[`, character(1), "id"),
+    c("h-u3", "h-a4")
+  )
+  expect_identical(pages[[2L]]$cursor, 2L)
+
+  # Older pages remain pinned to that refreshed snapshot.
+  loader("session-growing", "thread-growing", capture, cursor = 2L, limit = 2L)
+  expect_identical(reads, 2L)
+  expect_identical(
+    vapply(pages[[3L]]$messages, `[[`, character(1), "id"),
+    c("h-u1", "h-u2")
+  )
+})
+
+
+test_that("Claude session refresh keeps the last successful snapshot on read failure", {
+  path <- tempfile(fileext = ".rds")
+  reads <- 0L
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id) {
+      reads <<- reads + 1L
+      if (reads > 1L) stop("transient transcript read failure")
+      list(list(
+        type = "user", uuid = "stable-user",
+        message = list(content = "last successful history")
+      ))
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  pages <- list()
+  capture <- function(messages, ...) pages[[length(pages) + 1L]] <<- messages
+  loader("session-transient", "thread-transient", capture)
+  loader("session-transient", "thread-transient", capture)
+
+  expect_identical(reads, 2L)
+  expect_identical(pages[[1L]], pages[[2L]])
+  expect_identical(pages[[2L]][[1L]]$id, "h-stable-user")
 })

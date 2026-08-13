@@ -98,6 +98,7 @@ export type ActionResult = {
 export type HistoryLoadPayload = {
   threadId: string;
   messages: unknown[];
+  requestId?: string;
   cursor?: string | number | null;
   hasMore?: boolean;
   prepend?: boolean;
@@ -128,8 +129,8 @@ export interface ShinyBridge {
   sendRetryService: () => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
-  sendLoadSession: (sessionId: string, threadId: string) => void;
-  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number) => void;
+  sendLoadSession: (sessionId: string, threadId: string, requestId?: string) => void;
+  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
   sendWarmup: (threadId: string) => void;
@@ -392,18 +393,18 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendLoadSession(sessionId, threadId) {
+    sendLoadSession(sessionId, threadId, requestId) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { type: "load_session", sessionId, threadId, requestId, ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50) {
+    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50, requestId) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session_page", sessionId, threadId, cursor, limit, ts: Date.now() },
+        { type: "load_session_page", sessionId, threadId, cursor, limit, requestId, ts: Date.now() },
         { priority: "event" }
       );
     },

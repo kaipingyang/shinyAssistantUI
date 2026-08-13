@@ -48,6 +48,23 @@ R CMD INSTALL --no-multiarch --with-keep.source .   # R + inst/www/ → installe
   the *installed* `www/` via `system.file`; a dev-only build won't be seen by the browser).
 - Order matters: **build → install** (install copies `inst/www/` into the package).
 
+### 🔴 R library channels — Home first, shared releases require permission
+
+- **Default for all development and verification:** install only to the current user's Home
+  library by omitting `--library`:
+  `R CMD INSTALL --no-multiarch --with-keep.source .`.
+- **Shared Dev channel:**
+  `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4`.
+  Install there only when the user explicitly asks to make a build available for user testing;
+  use an explicit `--library=...` and verify `find.package("shinyAssistantUI")` resolves there.
+- **Shared stable channel (protected):**
+  `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins/R-4.4`.
+  Before every write, explain that this publishes to the majority-user stable channel and wait
+  for a cautious, explicit confirmation for that specific release. Dev-channel permission never
+  implies stable-channel permission.
+- Never clean, overwrite, or synchronize one shared channel as a side effect of installing the
+  other. Record the target path, package version, and install timestamp after a shared install.
+
 If you skip this, your verification runs against **stale code** and "new features don't work"
 — a real trap that has cost multiple debugging rounds.
 

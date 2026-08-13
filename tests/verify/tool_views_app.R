@@ -3,12 +3,24 @@
 library(shiny)
 library(shinyAssistantUI)
 
-handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ...) {
+handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result,
+                    on_tool_call_start, on_tool_call_delta, ...) {
   emit <- function(id, name, args, result = "ok") {
     on_tool_call(id, name, args, annotations = list(defaultOpen = TRUE))
     on_tool_result(id, result, is_error = FALSE)
   }
   on_chunk("running tools:\n")
+  on_tool_call_start(
+    "w-stream", "Write",
+    annotations = list(defaultOpen = TRUE)
+  )
+  on_tool_call_delta(
+    "w-stream",
+    '{"file_path":"STREAM.md","content":"# Streaming preview\\n\\n- first'
+  )
+  later::later(function() {
+    on_tool_call_delta("w-stream", '\\n- second')
+  }, delay = 0.7)
   emit("e1", "Edit", list(file_path = "a.R", old_string = "x <- 1", new_string = "x <- 2"))
   emit(
     "b1", "Bash", list(command = "ls -la /tmp"),
@@ -43,7 +55,19 @@ handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ..
   emit("g1", "Grep", list(pattern = "TODO", path = "src", output_mode = "content"))
   emit("wf1", "WebFetch", list(url = "https://example.com/guide", prompt = "summarize"))
   emit("u1", "Mystery", list(foo = 1, bar = list(2, 3)))
-  on_done()
+  later::later(function() {
+    on_tool_call_delta("w-stream", '\\n- final\\n"}')
+    on_tool_call(
+      "w-stream", "Write",
+      list(
+        file_path = "STREAM.md",
+        content = "# Streaming preview\n\n- first\n- second\n- final\n"
+      ),
+      annotations = list(defaultOpen = TRUE)
+    )
+    on_tool_result("w-stream", "ok", is_error = FALSE)
+    on_done()
+  }, delay = 1.8)
 }
 
 ui <- assistantUIPage(

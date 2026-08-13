@@ -68,18 +68,27 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     captured
   }
 
-  result <- function(is_error = FALSE, text = NULL, api_error_status = NULL) {
+  result <- function(is_error = FALSE, text = NULL, api_error_status = NULL,
+                     stop_reason = NULL) {
     ClaudeAgentSDK::ResultMessage(
       subtype = if (is_error) "error_during_execution" else "success",
       duration_ms = 1, duration_api_ms = 1,
       is_error = is_error, num_turns = 1,
       session_id = "session-terminal-test",
-      result = text, api_error_status = api_error_status
+      result = text, api_error_status = api_error_status,
+      stop_reason = stop_reason
     )
   }
   assistant <- function(text) ClaudeAgentSDK::AssistantMessage(
     content = list(ClaudeAgentSDK::TextBlock(text)),
     model = "mock-model", session_id = "session-terminal-test"
+  )
+  assistant_blocks <- function(...) ClaudeAgentSDK::AssistantMessage(
+    content = list(...), model = "mock-model",
+    session_id = "session-terminal-test"
+  )
+  tool_block <- function(id = "assistant-tool") ClaudeAgentSDK::ToolUseBlock(
+    id = id, name = "Read", input = list(file_path = "R/handlers.R")
   )
   stream <- function(text) ClaudeAgentSDK::StreamEvent(
     uuid = "stream-event", session_id = "session-terminal-test",
@@ -103,6 +112,32 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       )
     )
   )
+  thinking_stream <- function(text) ClaudeAgentSDK::StreamEvent(
+    uuid = "thinking-event", session_id = "session-terminal-test",
+    event = list(
+      type = "content_block_delta", index = 1,
+      delta = list(type = "thinking_delta", thinking = text)
+    )
+  )
+  partial_tool_stop <- function() ClaudeAgentSDK::StreamEvent(
+    uuid = "partial-tool-stop", session_id = "session-terminal-test",
+    event = list(type = "content_block_stop", index = 0)
+  )
+  task_completed <- function() ClaudeAgentSDK::TaskNotificationMessage(
+    subtype = "task_notification", data = list(), task_id = "background-1",
+    status = "completed", output_file = tempfile(),
+    summary = "locate process_sdtm_data definition", uuid = "task-event",
+    session_id = "session-terminal-test"
+  )
+  tool_result_message <- function(id = "partial-tool", text = "Completed") {
+    structure(
+      list(content = list(structure(
+        list(tool_use_id = id, content = text, is_error = FALSE),
+        class = "ToolResultBlock"
+      ))),
+      class = "UserMessage"
+    )
+  }
 
   from_assistant <- run_turn(list(
     assistant("I can see the image."),
@@ -177,6 +212,182 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_identical(multiple_assistants$chunks, "First answer. Second answer.")
   expect_true(multiple_assistants$done)
   expect_null(multiple_assistants$error)
+
+
+  thinking_only <- run_turn(list(
+    thinking_stream("I should answer the user now."),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(thinking_only$done)
+  expect_length(thinking_only$chunks, 0L)
+  expect_match(thinking_only$error, "user-visible response", ignore.case = TRUE)
+
+  thinking_with_whitespace <- run_turn(list(
+    thinking_stream("I should answer after thinking."),
+    stream(" \n"),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(thinking_with_whitespace$done)
+  expect_match(
+    thinking_with_whitespace$error,
+    "without a user-visible response",
+    ignore.case = TRUE
+  )
+  expect_identical(trimws(paste0(thinking_with_whitespace$chunks, collapse = "")), "")
+
+  buffered_whitespace_before_tool <- run_turn(list(
+    stream(" "),
+    partial_tool_start(),
+    partial_tool_stop(),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(buffered_whitespace_before_tool$done)
+  expect_match(
+    buffered_whitespace_before_tool$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+  expect_identical(
+    trimws(paste0(buffered_whitespace_before_tool$chunks, collapse = "")),
+    ""
+  )
+
+  stalled_after_tool <- run_turn(list(
+    stream("I will verify the assumption first."),
+    partial_tool_start(),
+    partial_tool_stop(),
+    task_completed(),
+    thinking_stream("The search timed out; I should ask confirmation questions."),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(stalled_after_tool$done)
+  expect_identical(stalled_after_tool$chunks, "I will verify the assumption first.")
+  expect_match(stalled_after_tool$error, "after a tool call", ignore.case = TRUE)
+
+  final_after_tool <- run_turn(list(
+    partial_tool_start(),
+    partial_tool_stop(),
+    thinking_stream("Now provide the answer."),
+    stream("Here are the confirmation questions."),
+    result(stop_reason = "end_turn")
+  ))
+  expect_true(final_after_tool$done)
+  expect_null(final_after_tool$error)
+  expect_identical(final_after_tool$chunks, "Here are the confirmation questions.")
+
+  assistant_final_after_tool <- run_turn(list(
+    assistant_blocks(
+      tool_block(),
+      ClaudeAgentSDK::TextBlock("Final text from AssistantMessage.")
+    ),
+    result(stop_reason = "end_turn")
+  ))
+  expect_true(assistant_final_after_tool$done)
+  expect_null(assistant_final_after_tool$error)
+  expect_identical(
+    assistant_final_after_tool$chunks,
+    "Final text from AssistantMessage."
+  )
+
+  result_replays_pre_tool_text <- run_turn(list(
+    stream("I will verify first."),
+    partial_tool_start(),
+    partial_tool_stop(),
+    result(text = "I will verify first.", stop_reason = "end_turn")
+  ))
+  expect_false(result_replays_pre_tool_text$done)
+  expect_identical(result_replays_pre_tool_text$chunks, "I will verify first.")
+  expect_match(
+    result_replays_pre_tool_text$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+
+  assistant_replays_pre_tool_text <- run_turn(list(
+    stream("I will verify first."),
+    partial_tool_start(),
+    partial_tool_stop(),
+    assistant("I will verify first."),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(assistant_replays_pre_tool_text$done)
+  expect_identical(assistant_replays_pre_tool_text$chunks, "I will verify first.")
+  expect_match(
+    assistant_replays_pre_tool_text$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+
+  assistant_tool_replays_pre_tool_text <- run_turn(list(
+    stream("Preface"),
+    partial_tool_start(),
+    partial_tool_stop(),
+    assistant_blocks(
+      tool_block("partial-tool"),
+      ClaudeAgentSDK::TextBlock("Preface")
+    ),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(assistant_tool_replays_pre_tool_text$done)
+  expect_identical(assistant_tool_replays_pre_tool_text$chunks, "Preface")
+  expect_match(
+    assistant_tool_replays_pre_tool_text$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+
+  whitespace_normalized_replay <- run_turn(list(
+    stream("Preface"),
+    partial_tool_start(),
+    partial_tool_stop(),
+    result(text = "\nPreface", stop_reason = "end_turn")
+  ))
+  expect_false(whitespace_normalized_replay$done)
+  expect_identical(whitespace_normalized_replay$chunks, "Preface")
+  expect_match(
+    whitespace_normalized_replay$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+
+  repeated_final_after_tool_result <- run_turn(list(
+    stream("I predict 42."),
+    partial_tool_start(),
+    partial_tool_stop(),
+    tool_result_message(),
+    assistant("42."),
+    result(stop_reason = "end_turn")
+  ))
+  expect_true(repeated_final_after_tool_result$done)
+  expect_null(repeated_final_after_tool_result$error)
+  expect_identical(
+    paste0(repeated_final_after_tool_result$chunks, collapse = ""),
+    "I predict 42.42."
+  )
+
+  assistant_preface_before_tool <- run_turn(list(
+    assistant_blocks(
+      ClaudeAgentSDK::TextBlock("Preface before tool."),
+      tool_block("assistant-tool-after-preface")
+    ),
+    result(stop_reason = "end_turn")
+  ))
+  expect_false(assistant_preface_before_tool$done)
+  expect_identical(assistant_preface_before_tool$chunks, "Preface before tool.")
+  expect_match(
+    assistant_preface_before_tool$error,
+    "after a tool call",
+    ignore.case = TRUE
+  )
+
+  result_final_after_tool <- run_turn(list(
+    partial_tool_start(),
+    partial_tool_stop(),
+    result(text = "Final text from ResultMessage.", stop_reason = "end_turn")
+  ))
+  expect_true(result_final_after_tool$done)
+  expect_null(result_final_after_tool$error)
+  expect_identical(result_final_after_tool$chunks, "Final text from ResultMessage.")
 
   denied <- run_turn(list(
     permission(),

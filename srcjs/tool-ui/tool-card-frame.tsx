@@ -203,7 +203,10 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
         <ToolFallback.Trigger toolName={displayTitle} status={status} />
         <ToolFallback.Content>
-          <ToolArgsView view={resolveToolView(toolName, displayArgs, argsText, ann)} />
+          <ToolArgsView
+            view={resolveToolView(toolName, displayArgs, argsText, ann)}
+            isRunning={ann?.argsStreaming === true}
+          />
 
           {!pending && (
             <div className="aui-shiny-tool-result">

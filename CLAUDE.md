@@ -185,6 +185,20 @@ R CMD INSTALL --no-multiarch --with-keep.source .    # 再把 R + inst/www/ 一�
 `devtools::load_all(".")` 只对**当前** R 进程生效,对 `callr::r_bg` 起的示例 app **无效**
 (那是独立进程,走 `library()` 读已安装包)。
 
+### R 库安装与发布通道（强制门禁）
+
+1. **日常开发/验证默认只安装到当前用户 Home 库**（不传 `--library`）：
+   `R CMD INSTALL --no-multiarch --with-keep.source .`。浏览器门禁也先验证这个安装。
+2. **Dev 共享库仅用于用户测试**：只有用户明确表示需要让体验用户测试时，才安装到
+   `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4`。安装命令必须显式带
+   `--library=/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4`，并验证
+   `find.package("shinyAssistantUI")` 命中该目录。
+3. **稳定共享库是受保护发布目标**：
+   `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins/R-4.4`。每一次写入前都必须向用户
+   单独说明将发布到大多数用户使用的稳定通道，并取得谨慎、明确的当次确认；不得因为已获 Dev
+   安装许可而推定稳定发布许可。
+4. 安装 Dev 或稳定共享库时不得覆盖或清理另一通道；发布后记录目标路径、包版本和安装时间。
+
 血泪教训:曾因忘记重装,连续多轮验证跑的都是昨天的旧包,`get_server_info`/`on_task`
 等新代码"没生效"排查半天。改完即装。
 

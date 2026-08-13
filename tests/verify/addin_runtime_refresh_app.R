@@ -61,6 +61,48 @@ server <- function(input, output, session) {
     on_done()
   }
 
+  history_state <- new.env(parent = emptyenv())
+  history_state$reads <- 0L
+  history_state$raw <- list(
+    list(type = "user", uuid = "hist-u", message = list(content = "Historical checklist")),
+    list(type = "assistant", uuid = "hist-a", message = list(content = list(list(
+      type = "tool_use", id = "todo-history", name = "TodoWrite",
+      input = list(todos = list(
+        list(content = "Restored completed item A", status = "completed", activeForm = "Restoring completed item A"),
+        list(content = "Restored completed item B", status = "completed", activeForm = "Restoring completed item B")
+      ))
+    ))))
+  )
+  mock_scope <- new.env(parent = environment())
+  testthat::local_mocked_bindings(
+    .get_claude_session_messages = function(session_id) {
+      history_state$reads <- history_state$reads + 1L
+      history_state$raw
+    },
+    .package = "shinyAssistantUI",
+    .env = mock_scope
+  )
+  history_loader <- make_claude_session_loader(tempfile(fileext = ".rds"))
+  load_growing_history <- function(session_id, thread_id, send_thread,
+                                   cursor = NULL, limit = 50L, ...) {
+    history_loader(session_id, thread_id, send_thread, cursor = cursor, limit = limit)
+    if (is.null(cursor) && history_state$reads == 1L) {
+      history_state$raw <- c(history_state$raw, list(
+        list(type = "user", uuid = "hist-task", message = list(content = paste0(
+          "<task-notification><task-id>background-1</task-id>",
+          "<status>completed</status></task-notification>"
+        ))),
+        list(type = "assistant", uuid = "hist-late-read", message = list(content = list(list(
+          type = "tool_use", id = "read-late", name = "Read",
+          input = list(file_path = "functions/process_sdtm_data.R")
+        )))),
+        list(type = "assistant", uuid = "hist-thinking", message = list(content = list(list(
+          type = "thinking", thinking = "Continue after the completed task"
+        ))))
+      ))
+    }
+  }
+
   ctrl <- assistantUIServer(
     "chat",
     handler = handler,
@@ -70,24 +112,7 @@ server <- function(input, output, session) {
     service_status = list(status = "checking", autoStart = TRUE),
     on_toggle_auto_start_copilot_api = function(value) invisible(value),
     on_retry_service = function() service$retry(),
-    on_session_load = function(session_id, thread_id, send_thread, ...) {
-      todo_args <- list(todos = list(
-        list(content = "Restored completed item A", status = "completed", activeForm = "Restoring completed item A"),
-        list(content = "Restored completed item B", status = "completed", activeForm = "Restoring completed item B")
-      ))
-      send_thread(messages = list(
-        list(id = "hist-u", role = "user",
-             content = list(list(type = "text", text = "Historical checklist"))),
-        list(id = "hist-a", role = "assistant",
-             status = list(type = "complete", reason = "stop"),
-             content = list(list(
-               type = "tool-call", toolCallId = "todo-history", toolName = "TodoWrite",
-               args = todo_args,
-               argsText = as.character(jsonlite::toJSON(todo_args, auto_unbox = TRUE)),
-               result = "Checklist updated", isError = FALSE
-             )))
-      ), has_more = FALSE)
-    }
+    on_session_load = load_growing_history
   )
 
   # Injected fake worker: polls a fixture-only flag and never calls the real home script.
