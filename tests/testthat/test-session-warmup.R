@@ -372,3 +372,108 @@ test_that("Claude session refresh keeps the last successful snapshot on read fai
   expect_identical(pages[[1L]], pages[[2L]])
   expect_identical(pages[[2L]][[1L]]$id, "h-stable-user")
 })
+
+
+test_that("historical warmup waits until foreground runs settle", {
+  entered <- character()
+  finish_run <- NULL
+  warmups <- character()
+  handler <- function(message, thread_id, on_done, ...) {
+    entered <<- c(entered, thread_id)
+    promises::promise(function(resolve, reject) {
+      finish_run <<- function() {
+        on_done()
+        resolve(NULL)
+      }
+    })
+  }
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+  loader <- function(session_id, thread_id, send_thread) send_thread(list())
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler, on_session_load = loader)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "hold foreground", threadId = "foreground", runId = "run-foreground"
+    ))
+    session$flushReact()
+    run_later_queue(0.1)
+    expect_identical(entered, "foreground")
+
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "history", threadId = "background"
+    ))
+    session$flushReact()
+    run_later_queue(0.2)
+    expect_length(warmups, 0L)
+
+    finish_run()
+    session$flushReact()
+    run_later_queue(0.3)
+    expect_identical(warmups, "background")
+  })
+})
+
+
+test_that("session close cancels pending warmup timers", {
+  warmups <- character()
+  handler <- function(...) NULL
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler, prewarm = TRUE)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input_warmup = list(threadId = "must-not-warm"))
+    session$flushReact()
+    session$close()
+    run_later_queue(0.4)
+    expect_length(warmups, 0L)
+  })
+})
+
+
+test_that("deleting a thread removes its queued warmup before foreground release", {
+  finish_run <- NULL
+  warmups <- character()
+  handler <- function(message, on_done, ...) {
+    promises::promise(function(resolve, reject) {
+      finish_run <<- function() { on_done(); resolve(NULL) }
+    })
+  }
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+  loader <- function(session_id, thread_id, send_thread) send_thread(list())
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat", handler = handler, on_session_load = loader,
+      on_delete_session = function(session_id) invisible(NULL)
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "foreground", threadId = "foreground", runId = "run-foreground"
+    ))
+    session$flushReact(); run_later_queue(0.1)
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "history", threadId = "history"
+    ))
+    session$flushReact(); run_later_queue(0.1)
+    session$setInputs(chat_input_delete_session = list(
+      sessionId = "history", ts = 1
+    ))
+    session$flushReact()
+    finish_run(); session$flushReact(); run_later_queue(0.3)
+    expect_length(warmups, 0L)
+  })
+})

@@ -84,7 +84,9 @@ wait_handler_count <- function(expected, timeout = 8) {
   }
 }
 editor_focus <- function() {
-  check("addin composer exists", isTRUE(ev("(function(){var e=document.querySelector('#chat [contenteditable=true]');if(!e)return false;e.focus();return true})()")))
+  check("addin composer exists", wait_until("!!document.querySelector('#chat [contenteditable=true]')"))
+  check("addin composer accepts focus", isTRUE(ev("(function(){var e=document.querySelector('#chat [contenteditable=true]');if(!e)return false;e.focus();return document.activeElement===e})()")))
+  Sys.sleep(0.1)
 }
 send_text <- function(text) {
   editor_focus()
@@ -99,19 +101,45 @@ clear_editor <- function() {
   b$Input$dispatchKeyEvent(type = "keyUp", key = "a", code = "KeyA", modifiers = 2L)
   b$Input$dispatchKeyEvent(type = "keyDown", key = "Backspace", code = "Backspace", windowsVirtualKeyCode = 8L)
   b$Input$dispatchKeyEvent(type = "keyUp", key = "Backspace", code = "Backspace", windowsVirtualKeyCode = 8L)
+  check("addin composer clears", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()===''"))
+  ev("document.querySelector('#chat [contenteditable=true]')?.focus();true")
+  Sys.sleep(0.1)
+}
+editor_text <- function() {
+  ev("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').replace(/\\n$/,'')")
+}
+click_thread <- function(title) {
+  js_title <- jsonlite::toJSON(title, auto_unbox = TRUE)
+  isTRUE(ev(sprintf(paste0(
+    "(function(){var title=%s;var e=Array.from(document.querySelectorAll(",
+    "'#chat [data-slot=aui_thread-list-item]')).find(x=>(x.innerText||'').includes(title));",
+    "var b=e?.querySelector('[data-slot=aui_thread-list-item-trigger]');if(b)b.click();return !!b})()"
+  ), js_title)))
 }
 
 check("two widgets mounted", ev("document.querySelectorAll('.aui-root').length") >= 2)
-check("service status visible", isTRUE(ev("!!document.querySelector('#chat [data-slot=aui_service_status][data-status=starting]')")) ||
-  isTRUE(ev("!!document.querySelector('#chat [data-slot=aui_service_status][data-status=checking]')")))
-check("composer editable during startup", identical(ev("document.querySelector('#chat [contenteditable=true]').getAttribute('contenteditable')"), "true"))
+check("service reaches bounded failed state", wait_until(
+  "!!document.querySelector('#chat [data-slot=aui_service_status][data-status=failed]')", 8
+))
+check("failed state gives manual launcher guidance", isTRUE(ev(paste0(
+  "(document.querySelector('#chat [data-slot=aui_service_status]')?.innerText||'').includes(",
+  "'Start it manually with ~/auto-start-copilot.sh')"
+))))
+check("failed state gives log and Retry guidance", isTRUE(ev(paste0(
+  "(document.querySelector('#chat [data-slot=aui_service_status]')?.innerText||'').includes(",
+  "'check ~/.copilot-api.log, then click Retry')"
+))))
+check("composer editable after startup failure", identical(ev("document.querySelector('#chat [contenteditable=true]').getAttribute('contenteditable')"), "true"))
 check("generic widget has no service UI", !isTRUE(ev("!!document.querySelector('#plain [data-slot=aui_service_status]')")))
 
 send_text("first queued")
 send_text("second queued")
-check("pre-ready backend count remains zero", length(handler_messages()) == 0L)
+check("failed service retains backend queue", length(handler_messages()) == 0L)
 check("pending count is two", grepl("2 submissions waiting", ev("document.querySelector('#chat [data-slot=aui_service_status]').innerText"), fixed = TRUE))
 ev("(function(){Shiny.setInputValue('service_ready',Date.now(),{priority:'event'});return true})()")
+check("Retry button visible", isTRUE(ev("Array.from(document.querySelectorAll('#chat [data-slot=aui_service_status] button')).some(e=>e.innerText==='Retry')")))
+ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_service_status] button')).find(e=>e.innerText==='Retry');if(e)e.click();return !!e})()")
+check("failed to Retry dispatches exactly once", wait_until("document.getElementById('retry_count')?.innerText==='1'"))
 check("queued submissions delivered", wait_handler_count(2L, 10))
 check("queued submissions preserve FIFO", identical(handler_messages(), c("first queued", "second queued")))
 Sys.sleep(0.8)
@@ -130,15 +158,12 @@ check("ready checkmark is visibly green", isTRUE(ev(paste0(
 
 # Authoritative server command snapshots: old -> [] -> new.
 ev("document.getElementById('commands_old').click()")
-Sys.sleep(0.3)
-clear_editor(); b$Input$insertText(text = "/"); Sys.sleep(0.4)
-check("old command snapshot shown", isTRUE(ev("!!document.querySelector('#chat [data-slash-cmd=oldcmd]')")))
+clear_editor(); b$Input$insertText(text = "/")
+check("old command snapshot shown", wait_until("!!document.querySelector('#chat [data-slash-cmd=oldcmd]')"))
 ev("document.getElementById('commands_clear').click()")
-Sys.sleep(0.4)
-check("empty command snapshot clears old", !isTRUE(ev("!!document.querySelector('#chat [data-slash-cmd=oldcmd]')")))
+check("empty command snapshot clears old", wait_until("!document.querySelector('#chat [data-slash-cmd=oldcmd]')"))
 ev("document.getElementById('commands_new').click()")
-Sys.sleep(0.4)
-check("replacement command snapshot shown", isTRUE(ev("!!document.querySelector('#chat [data-slash-cmd=newcmd]')")))
+check("replacement command snapshot shown", wait_until("!!document.querySelector('#chat [data-slash-cmd=newcmd]')"))
 clear_editor()
 
 # Restore historical tool messages and derive the pinned checklist.
@@ -158,12 +183,22 @@ ev("document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')
 check("user can close completed checklist", wait_until("!document.querySelector('#chat [data-slot=aui_claude_checklist]')"))
 
 before_new_task <- length(handler_messages())
+ev(paste0(
+  "(function(){window.__warmTurnStatuses=[];window.__warmTurnTimer=setInterval(function(){",
+  "var e=document.querySelector('#chat [data-slot=aui_warming]');",
+  "if(e)window.__warmTurnStatuses.push(e.innerText||'')},5);return true})()"
+))
 send_text("new checklist task")
 check(
   "new checklist task reaches handler",
   wait_handler_count(before_new_task + 1L, 10),
   paste(handler_messages(), collapse = "|")
 )
+ev("clearInterval(window.__warmTurnTimer);true")
+warm_turn_statuses <- jsonlite::fromJSON(ev("JSON.stringify(window.__warmTurnStatuses||[])"))
+check("warm same-thread turn shows request sending", any(grepl("Sending request", warm_turn_statuses, fixed = TRUE)))
+check("warm same-thread turn does not claim CLI startup", !any(grepl("Starting Claude Code", warm_turn_statuses, fixed = TRUE)))
+check("immediate warm turn does not claim a run-slot wait", !any(grepl("Waiting for an available run slot", warm_turn_statuses, fixed = TRUE)))
 check(
   "new task revision reopens checklist",
   wait_until("!!document.querySelector('#chat [data-slot=aui_claude_checklist][data-all-completed=false]')"),
@@ -218,6 +253,33 @@ ev("document.querySelector('#chat [data-stop-task=browser-task]').click()")
 Sys.sleep(0.3)
 check("task stop enters stopping state", identical(ev("document.querySelector('#chat [data-stop-task=browser-task]').innerText"), "Stopping…"))
 check("task stop disabled after first click", isTRUE(ev("document.querySelector('#chat [data-stop-task=browser-task]').disabled")))
+
+# Per-thread text drafts: use two restored historical sessions and real CDP input.
+check("draft history A item exists", isTRUE(click_thread("Checklist history")))
+Sys.sleep(0.5)
+clear_editor()
+b$Input$insertText(text = "draft alpha")
+check("draft A entered through contenteditable", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').includes('draft alpha')"))
+before_draft_switches <- length(handler_messages())
+
+check("draft history B item exists", isTRUE(click_thread("Draft history B")))
+check("new historical thread starts with empty draft", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()===''"))
+editor_focus(); b$Input$insertText(text = "draft beta")
+check("draft B entered independently", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').includes('draft beta')"))
+
+check("switch back to draft A", isTRUE(click_thread("Checklist history")))
+check("draft A restored exactly", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()==='draft alpha'"))
+check("switch back to draft B", isTRUE(click_thread("Draft history B")))
+check("draft B restored exactly", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()==='draft beta'"))
+check("switching drafts never auto-sends", length(handler_messages()) == before_draft_switches)
+
+b$Input$dispatchKeyEvent(type = "keyDown", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L)
+b$Input$dispatchKeyEvent(type = "keyUp", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L)
+check("submitted B draft reaches backend once", wait_handler_count(before_draft_switches + 1L, 10))
+check("A draft survives B submission", isTRUE(click_thread("Checklist history")))
+check("A draft remains isolated", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()==='draft alpha'"))
+check("return to submitted B thread", isTRUE(click_thread("Draft history B")))
+check("submitted B draft stays cleared", wait_until("(document.querySelector('#chat [contenteditable=true]')?.innerText||'').trim()===''"))
 
 check("zero browser console/runtime errors", length(errors) == 0L,
       if (length(errors)) paste(unique(errors), collapse = " | ") else "")

@@ -465,19 +465,28 @@ const Composer: FC = () => {
   );
 };
 
-// Per-thread Claude CLI connection indicator.
+// Per-thread connection / scheduler indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming, warmingResuming, warmingLabel } = useShinyConfig();
-  if (!warming) return null;
-  // Backend-agnostic English default; consumers (addin / codeagent example) override via warmingLabel.
-  const label = warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…");
+  const { warming, warmingResuming, warmingLabel, runPhase } = useShinyConfig();
+  const waiting = runPhase === "queued";
+  const connecting = runPhase === "connecting";
+  if (!warming && !waiting && !connecting) return null;
+  const label = warming
+    ? (warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…"))
+    : waiting
+      ? "Waiting for an available run slot…"
+      : "Sending request…";
   return (
     <div
       data-slot="aui_warming"
+      data-run-phase={runPhase}
       data-resuming={warmingResuming ? "true" : "false"}
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
-      <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <span className={cn(
+        "inline-block size-3 shrink-0 rounded-full border-2 border-primary",
+        waiting ? "border-dotted" : "animate-spin border-t-transparent",
+      )} />
       <span>{label}</span>
     </div>
   );

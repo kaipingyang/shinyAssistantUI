@@ -216,7 +216,19 @@
     for (attribute_name in names(attributes(handler)))
       attr(server_handler, attribute_name) <- attr(handler, attribute_name)
 
-    copilot_service <- NULL
+    # Internal addin feature: the generic assistant server only transports this
+    # opaque initial config and never probes, starts, or controls copilot-api.
+    copilot_plugin <- .new_copilot_addin_plugin(
+      auto_start = settings_state$v$autoStartCopilotApi,
+      persist_auto_start = function(value) {
+        settings_state$v$autoStartCopilotApi <- isTRUE(value)
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      }
+    )
+    ui_addons <- attr(server_handler, "ui_addons") %||% list()
+    ui_addons$copilotService <- copilot_plugin$config()
+    attr(server_handler, "ui_addons") <- ui_addons
+
     ctrl <- assistantUIServer(
       "chat", handler = server_handler,
       show_thread_list = TRUE,
@@ -256,19 +268,6 @@
         tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
         tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
       } else NULL,
-      auto_start_copilot_api = settings_state$v$autoStartCopilotApi,
-      service_status = list(
-        status = if (isTRUE(settings_state$v$autoStartCopilotApi)) "checking" else "disabled",
-        autoStart = isTRUE(settings_state$v$autoStartCopilotApi)
-      ),
-      on_toggle_auto_start_copilot_api = function(v) {
-        settings_state$v$autoStartCopilotApi <- isTRUE(v)
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
-        if (!is.null(copilot_service)) copilot_service$set_auto_start(isTRUE(v))
-      },
-      on_retry_service = function() {
-        if (!is.null(copilot_service)) copilot_service$retry()
-      },
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)
@@ -322,17 +321,13 @@
       },
       workspace_search_provider = workspace_search,
       warming_label    = "Starting Claude Code\u2026",
-      prewarm          = prewarm
+      prewarm          = prewarm,
+      max_concurrent_runs = 2L
     )
 
-    if (is.function(ctrl$send_service_status)) {
-      copilot_service <- .new_copilot_service(
-        auto_start = settings_state$v$autoStartCopilotApi,
-        publish = function(status) ctrl$send_service_status(status)
-      )
-      session$onSessionEnded(function() copilot_service$dispose())
-      copilot_service$start()
-    }
+    # Binding is session-local. The plugin starts its independent service only
+    # after the frontend addon channel reports that its status handler is ready.
+    copilot_plugin$bind(session, "chat_input")
 
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
     # 才运行，ctrl 已赋值）。按当前工作目录 cur_dir() 分桶。

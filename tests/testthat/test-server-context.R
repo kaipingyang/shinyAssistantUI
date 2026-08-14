@@ -31,7 +31,7 @@ test_that("context provider failures safely produce empty metadata", {
 })
 
 
-test_that("service-blocked submissions consume the IDE snapshot reserved at click time", {
+test_that("deferred submissions consume the IDE snapshot reserved at click time", {
   state <- new.env(parent = emptyenv())
   state$selection <- "before-ready"
   state$provider_calls <- 0L

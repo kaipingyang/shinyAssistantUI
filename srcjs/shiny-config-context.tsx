@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
-import type { IdeContextMeta, WorkspaceMentionItem, ServiceState } from "./bridge";
+import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
+import type { CopilotServiceState } from "./copilot-service-addon";
 import type { ChecklistSnapshot } from "./checklist-reducer";
 import type { MonitoredTask } from "./task-monitor";
 
@@ -83,12 +84,13 @@ export interface ShinyConfigCtx {
   dismissChecklist?: (threadId: string, revision: string) => void;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
-  serviceState?: ServiceState;
+  serviceState?: CopilotServiceState;
   pendingServiceSubmissions?: number;
   retryService?: () => void;
   cancelPendingServiceSubmissions?: () => void;
   warming?: boolean;
   warmingResuming?: boolean;
+  runPhase?: "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
   /** Cold-start indicator text (English default "Starting…"); backend-specific override. */
   warmingLabel?: string;
   /** Empty-state welcome greeting (default "How can I help you today?"). */

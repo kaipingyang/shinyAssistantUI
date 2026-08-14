@@ -259,16 +259,6 @@
 #'   toggle (`NULL` hides it).
 #' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
 #'   toggle changes.
-#' @param auto_start_copilot_api Optional logical initial state of the addin-only
-#'   copilot-api auto-start preference (`NULL` hides the service controls).
-#' @param on_toggle_auto_start_copilot_api Optional `function(value)` called when
-#'   the copilot-api auto-start preference changes.
-#' @param service_status Optional named list describing the addin service state:
-#'   `status` is one of `"disabled"`, `"checking"`, `"starting"`, `"ready"`,
-#'   or `"failed"`; optional `message` supplies detail. `NULL` means the generic
-#'   widget has no service readiness barrier.
-#' @param on_retry_service Optional zero-argument function called when the user
-#'   retries a failed addin service startup.
 #' @param show_usage Logical (default `FALSE`); show the token-usage indicator.
 #' @param context_window Optional integer context-window size for the usage
 #'   indicator.
@@ -276,7 +266,15 @@
 #'   `"text"`.
 #' @param latex Logical (default `FALSE`); enable KaTeX math rendering.
 #' @param allow_warmup Logical (default `TRUE`); allow per-thread cold-start
-#'   warmup of the handler.
+#'   warmup of the handler. Warmups are deduplicated, limited to one at a time,
+#'   deferred while any foreground run is active or queued, and cancelled when
+#'   the Shiny session ends. The backend connect itself may still be synchronous.
+#' @param max_concurrent_runs Positive integer global limit for runs in different
+#'   threads (default `1`, clamped to `8`). The requested limit is honored only
+#'   when `handler` explicitly declares
+#'   `attr(handler, "supports_concurrent_threads") <- TRUE`; all other handlers
+#'   remain globally serial for backward compatibility. Invocations within one
+#'   thread are always strict FIFO and never overlap.
 #' @return A list with a `clear()` function that creates a new thread in the UI,
 #'   `send_tool_call()` / `send_tool_result()` for manual tool card control, and
 #'   `send_sessions(sessions)` for injecting a list of historical session stubs
@@ -320,10 +318,6 @@ assistantUIServer <- function(id, handler,
                               on_set_composer_density = NULL,
                               run_r_enabled = NULL,
                               on_toggle_run_r = NULL,
-                              auto_start_copilot_api = NULL,
-                              on_toggle_auto_start_copilot_api = NULL,
-                              service_status = NULL,
-                              on_retry_service = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -339,7 +333,8 @@ assistantUIServer <- function(id, handler,
                               show_timestamps   = FALSE,
                               modal             = FALSE,
                               prewarm           = FALSE,
-                              allow_warmup      = TRUE) {
+                              allow_warmup      = TRUE,
+                              max_concurrent_runs = 1L) {
   force(show_thread_list); force(suggestions); force(commands)
   persistence <- tryCatch(
     match.arg(persistence),
@@ -365,6 +360,11 @@ assistantUIServer <- function(id, handler,
   if (is.null(on_action) && !is.null(.handler_action)) on_action <- .handler_action
   .ui_capabilities <- if (.uses_handler_action) attr(handler, "ui_capabilities") else NULL
   if (is.null(.ui_capabilities)) .ui_capabilities <- list()
+  # Host-owned optional UI addons are opaque to the generic server. The server
+  # only transports their initial JSON-safe config; lifecycle and protocol stay
+  # with the host integration that attached them to the handler.
+  .ui_addons <- attr(handler, "ui_addons")
+  if (!is.list(.ui_addons) || !length(.ui_addons)) .ui_addons <- NULL
   if (is.function(ide_context_provider) || is.function(workspace_search_provider)) {
     .ui_capabilities$contract_version <- 1L
   }
@@ -383,6 +383,8 @@ assistantUIServer <- function(id, handler,
   force(warming_label); force(welcome_message)
   force(theme); force(dark_mode)
   force(show_timestamps)
+  requested_concurrency <- .normalize_max_concurrent_runs(max_concurrent_runs)
+  effective_concurrency <- .effective_max_concurrent_runs(handler, requested_concurrency)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
 
@@ -401,9 +403,12 @@ assistantUIServer <- function(id, handler,
     code_theme       = code_theme,
     dark_mode        = dark_mode,
     show_timestamps  = show_timestamps,
-    modal            = modal
+    modal            = modal,
+    run_state_protocol = 1L,
+    max_concurrent_runs = effective_concurrency
   )
   normalized_theme <- .normalize_theme(theme)
+  if (!is.null(.ui_addons))       config$addons           <- .ui_addons
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(warming_label))    config$warming_label    <- as.character(warming_label)[[1L]]
@@ -435,11 +440,6 @@ assistantUIServer <- function(id, handler,
     config$composer_density <- as.character(composer_density)[[1L]]
   # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
   if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
-  # Addin-only copilot-api capability. Generic consumers omit these arguments,
-  # so they receive neither service UI nor a submission barrier.
-  if (!is.null(auto_start_copilot_api))
-    config$auto_start_copilot_api <- isTRUE(auto_start_copilot_api)
-  if (!is.null(service_status)) config$service_status <- service_status
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -461,10 +461,28 @@ assistantUIServer <- function(id, handler,
     outputId = id
   )
 
-  # 每线程 cancel 标志（mutable environment，cancel 信号到达时设为 TRUE）
+  # 每线程 active run ID：取消只能触碰与请求 runId 匹配的当前 owner。
+  active_run_ids <- new.env(parent = emptyenv())
+  # 每线程 cancel 标志（仅当前 active run 可读写）。
   cancel_flags <- new.env(parent = emptyenv())
-  # 每线程注册的 cancel 函数（handler 注入，cancel 信号到达时立即调用）
+  # 每线程注册的 cancel 函数（仅当前 active run 可调用）。
   cancel_fns <- new.env(parent = emptyenv())
+  run_scheduler <- NULL
+  cancel_warmup <- function(thread_id) invisible(FALSE)
+  run_states <- new.env(parent = emptyenv())
+  terminal_run_phases <- c("complete", "error", "cancelled")
+  send_run_state <- function(thread_id, run_id, phase, queue_position = NULL) {
+    if (is.null(run_id) || !nzchar(run_id %||% "")) return(invisible(FALSE))
+    previous <- get0(run_id, envir = run_states, inherits = FALSE)
+    if (!is.null(previous) && previous$phase %in% terminal_run_phases) {
+      return(invisible(FALSE))
+    }
+    assign(run_id, list(thread_id = thread_id, phase = phase), envir = run_states)
+    payload <- list(threadId = thread_id, runId = run_id, phase = phase)
+    if (!is.null(queue_position)) payload$queuePosition <- as.integer(queue_position)
+    session$sendCustomMessage(paste0(input_id, ":run-state"), payload)
+    invisible(TRUE)
+  }
 
   # ── 消息回调工厂（按 thread_id 构建，消息携带 threadId 供 JS 路由）──────────
   # 旧版：静态回调，所有 thread 共用一个 callbacks slot，切 thread 时旧 handler
@@ -473,12 +491,16 @@ assistantUIServer <- function(id, handler,
   make_callbacks <- function(thread_id, run_id = NULL) {
     # 任务 D：per-run 编辑揭示 tracker——run 结束只揭示最近一次成功编辑的文件。
     edit_reveal <- .new_edit_reveal_tracker()
+    mark_running <- function() send_run_state(thread_id, run_id, "running")
+    settle_run <- function(phase) send_run_state(thread_id, run_id, phase)
     list(
       on_chunk = function(text) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":chunk"),
                                   list(text = text, threadId = thread_id))
       },
       on_done = function(suggestions = list()) {
+        if (!settle_run("complete")) return(invisible(NULL))
         if (!is.null(on_open_file)) {
           reveal_path <- edit_reveal$flush()
           if (!is.null(reveal_path)) {
@@ -496,15 +518,18 @@ assistantUIServer <- function(id, handler,
       # Plan 48B: handler 可随时推送 follow-up 建议(不必等 on_done),渲染在最新回复下方。
       # suggestions = 字符列表 或 list(list(prompt=, text=))；前端归一化。
       on_suggestions = function(suggestions = list()) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":suggestions"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
       on_error_fn = function(msg) {
+        if (!settle_run("error")) return(invisible(NULL))
         session$sendCustomMessage(paste0(input_id, ":error"),
                                   list(message = msg, threadId = thread_id,
                                        runId = run_id))
       },
       on_tool_call = function(tool_call_id, tool_name, args = list(), annotations = list()) {
+        mark_running()
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
         # （多 widget 同页时模块级单例会串台，靠 inputId 路由隔离）。
         annotations$inputId <- input_id
@@ -531,6 +556,7 @@ assistantUIServer <- function(id, handler,
         )
       },
       on_tool_call_start = function(tool_call_id, tool_name, annotations = list()) {
+        mark_running()
         session$sendCustomMessage(
           paste0(input_id, ":tool-call-start"),
           list(
@@ -542,12 +568,14 @@ assistantUIServer <- function(id, handler,
         )
       },
       on_tool_call_delta = function(tool_call_id, delta) {
+        mark_running()
         session$sendCustomMessage(
           paste0(input_id, ":tool-call-delta"),
           list(toolCallId = tool_call_id, delta = delta, threadId = thread_id)
         )
       },
       on_tool_result = function(tool_call_id, result, is_error = FALSE) {
+        mark_running()
         edit_reveal$note_result(tool_call_id, is_error)
         session$sendCustomMessage(
           paste0(input_id, ":tool-result"),
@@ -555,14 +583,17 @@ assistantUIServer <- function(id, handler,
         )
       },
       on_thinking = function(text) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":thinking"),
                                   list(text = text, threadId = thread_id))
       },
       on_source = function(url, title = NULL, id = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":source"),
                                   list(url = url, title = title, id = id, threadId = thread_id))
       },
       on_image = function(image) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":image"),
                                   list(image = image, threadId = thread_id))
       },
@@ -570,16 +601,19 @@ assistantUIServer <- function(id, handler,
       # `data-<name>` part(前端 DATA_UI_BY_NAME[name] 渲染)。`data` 为任意 R 列表
       # (经 Shiny 序列化);表格/流程图用 gui_table()/gui_flow() 构造更省心。
       on_data_ui = function(name, data = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":data-ui"),
                                   list(name = name, data = data, threadId = thread_id))
       },
       # Plan 47 A1 — Generative-UI primitive:下发一个 {root:{component,props,children}} 布局
       # spec 为当前消息的 generative-ui part(前端用 shinyAllowlist 渲染,未知组件走 Fallback)。
       on_generative_ui = function(spec) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":generative-ui"),
                                   list(spec = spec, threadId = thread_id))
       },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":artifact"),
                                   list(id = id, title = title, type = type,
                                        content = content, lang = lang, threadId = thread_id))
@@ -588,6 +622,7 @@ assistantUIServer <- function(id, handler,
       # #1 成本/用量:ResultMessage 的 total_cost_usd / tokens / turns / duration。
       on_usage = function(cost_usd = NULL, tokens = NULL, context_tokens = NULL, turns = NULL,
                           duration_ms = NULL, model = NULL, context_window = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":usage"),
                                   list(costUsd = cost_usd, tokens = tokens,
                                        contextTokens = context_tokens, turns = turns,
@@ -598,6 +633,7 @@ assistantUIServer <- function(id, handler,
       # #2 子agent/Task 进度:kind = "started" | "progress" | "notification"。
       on_task = function(task_id, kind, description = NULL, status = NULL,
                          tool_name = NULL, summary = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":task"),
                                   list(taskId = task_id, kind = kind, description = description,
                                        status = status, toolName = tool_name, summary = summary,
@@ -605,6 +641,7 @@ assistantUIServer <- function(id, handler,
       },
       # #3 限流告警。
       on_rate_limit = function(status = NULL, resets_at = NULL, utilization = NULL, type = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":rate-limit"),
                                   list(status = status, resetsAt = resets_at,
                                        utilization = utilization, type = type,
@@ -612,17 +649,20 @@ assistantUIServer <- function(id, handler,
       },
       # #4 系统状态行:subtype = status/thinking_tokens/init 等。
       on_status = function(status, text = NULL) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":status"),
                                   list(status = status, text = text, threadId = thread_id))
       },
       # #5 命令自动发现:get_server_info() 拉到的 CLI slash 命令 + output styles。
       on_commands = function(commands = list(), output_styles = list()) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":server-commands"),
                                   list(commands = commands, outputStyles = output_styles,
                                        threadId = thread_id))
       },
       # 每线程冷启动指示:client 首次连接(spawn CLI 子进程)期间 active=TRUE。
       on_warming = function(active, resuming = FALSE) {
+        if (isTRUE(active)) send_run_state(thread_id, run_id, "connecting") else mark_running()
         session$sendCustomMessage(paste0(input_id, ":warming"),
                                   list(active = isTRUE(active), resuming = isTRUE(resuming),
                                        threadId = thread_id))
@@ -630,15 +670,16 @@ assistantUIServer <- function(id, handler,
       # Agent 共享状态(Plan 36):handler 调 on_state(list) 推送任意 per-thread 状态快照,
       # 前端 useShinyAgentState() 订阅。
       on_state = function(state) {
+        mark_running()
         session$sendCustomMessage(paste0(input_id, ":state-snapshot"),
                                   list(state = state, threadId = thread_id))
       }
     )
   }
 
-  # Explicit submissions blocked by the addin service barrier reserve their IDE
-  # context immediately. The browser stores only an opaque submission id; file
-  # and selection text remain on the R side and are consumed exactly once.
+  # Deferred explicit submissions reserve their IDE context immediately. The
+  # browser stores only an opaque submission id; file and selection text remain
+  # on the R side and are consumed exactly once.
   reserved_ide_contexts <- new.env(parent = emptyenv())
   if (is.function(ide_context_provider)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_reserve_submission")]], {
@@ -759,20 +800,6 @@ assistantUIServer <- function(id, handler,
       tryCatch(on_toggle_run_r(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
-  if (is.function(on_toggle_auto_start_copilot_api)) {
-    shiny::observeEvent(session$input[[paste0(input_id, "_auto_start_copilot_api")]], {
-      msg <- session$input[[paste0(input_id, "_auto_start_copilot_api")]]
-      if (is.null(msg)) return()
-      value <- if (is.list(msg)) msg$value else msg
-      tryCatch(on_toggle_auto_start_copilot_api(isTRUE(value)), error = function(e) NULL)
-    }, ignoreNULL = TRUE, ignoreInit = TRUE)
-  }
-  if (is.function(on_retry_service)) {
-    shiny::observeEvent(session$input[[paste0(input_id, "_retry_service")]], {
-      tryCatch(on_retry_service(), error = function(e) NULL)
-    }, ignoreNULL = TRUE, ignoreInit = TRUE)
-  }
-
   if (is.function(workspace_search_provider)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_workspace_search")]], {
       msg <- session$input[[paste0(input_id, "_workspace_search")]]
@@ -813,11 +840,11 @@ assistantUIServer <- function(id, handler,
     }
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # 工厂：绑定 thread_id，返回该线程专用的 wait_for_approval。
-  make_wait_for_approval <- function(thread_id) {
+  # 工厂：绑定 thread_id + run_id，返回该 run 专用的 wait_for_approval。
+  make_wait_for_approval <- function(thread_id, run_id) {
     function(tool_call_id) {
       promises::promise(function(resolve, reject) {
-        assign(tool_call_id, list(fn = resolve, thread = thread_id),
+        assign(tool_call_id, list(fn = resolve, thread = thread_id, run = run_id),
                envir = approval_resolvers)
       })
     }
@@ -894,11 +921,40 @@ assistantUIServer <- function(id, handler,
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
+  cancel_thread_work <- function(tid, run_id = NULL) {
+    if (!is.null(run_scheduler)) run_scheduler$cancel(tid, run_id)
+
+    active_run_id <- get0(tid, envir = active_run_ids)
+    cancels_active <- !is.null(active_run_id) &&
+      (is.null(run_id) || identical(run_id, active_run_id))
+    if (!cancels_active) return(invisible(NULL))
+
+    assign(tid, TRUE, envir = cancel_flags)
+    cancel_fn <- get0(tid, envir = cancel_fns)
+    if (!is.null(cancel_fn)) {
+      rm(list = tid, envir = cancel_fns)
+      tryCatch(cancel_fn(), error = function(e) NULL)
+    }
+    for (key in ls(approval_resolvers)) {
+      entry <- get0(key, envir = approval_resolvers)
+      if (!is.null(entry) && identical(entry$thread, tid) &&
+          identical(entry$run, active_run_id)) {
+        rm(list = key, envir = approval_resolvers)
+        tryCatch(entry$fn(list(approved = FALSE, toolCallId = key)), error = function(e) NULL)
+      }
+    }
+    invisible(NULL)
+  }
+
   # 方案B：Archive 软隐藏（可恢复，持久化在服务端）。
   if (!is.null(on_archive_session)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_archive_session")]], {
       ev <- session$input[[paste0(input_id, "_archive_session")]]
       if (is.null(ev) || is.null(ev$sessionId) || !nzchar(ev$sessionId)) return()
+      if (isTRUE(ev$archived)) {
+        cancel_warmup(ev$sessionId)
+        cancel_thread_work(ev$sessionId)
+      }
       tryCatch(on_archive_session(ev$sessionId, isTRUE(ev$archived)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
@@ -908,90 +964,132 @@ assistantUIServer <- function(id, handler,
     shiny::observeEvent(session$input[[paste0(input_id, "_delete_session")]], {
       ev <- session$input[[paste0(input_id, "_delete_session")]]
       if (is.null(ev) || is.null(ev$sessionId) || !nzchar(ev$sessionId)) return()
+      cancel_warmup(ev$sessionId)
+      cancel_thread_work(ev$sessionId)
+      if (!is.null(run_scheduler)) run_scheduler$cancel_thread(ev$sessionId)
       tryCatch(on_delete_session(ev$sessionId), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
-  # 独立 observer 监听 cancel 信号
+  # 独立 observer 监听 cancel 信号。
   shiny::observeEvent(session$input[[paste0(input_id, "_cancel")]], {
     msg <- session$input[[paste0(input_id, "_cancel")]]
     if (is.null(msg)) return()
-    tid <- msg$threadId %||% "default"
-    assign(tid, TRUE, envir = cancel_flags)
-    # 调用 handler 注册的 cancel fn（如 stream_controller$cancel()），实现真 HTTP 取消。
-    cancel_fn <- get0(tid, envir = cancel_fns)
-    if (!is.null(cancel_fn)) {
-      rm(list = tid, envir = cancel_fns)
-      tryCatch(cancel_fn(), error = function(e) NULL)
-    }
-    # 自动以 denied resolve 本线程挂起的 wait_for_approval promise，
-    # 避免 handler 在 coro::await(wait_for_approval(...)) 处死锁。
-    # 仅否决属于被取消线程的审批，不影响其它线程（多线程隔离）。
-    for (key in ls(approval_resolvers)) {
-      entry <- get0(key, envir = approval_resolvers)
-      if (!is.null(entry) && identical(entry$thread, tid)) {
-        rm(list = key, envir = approval_resolvers)
-        tryCatch(entry$fn(list(approved = FALSE, toolCallId = key)), error = function(e) NULL)
-      }
-    }
+    cancel_thread_work(msg$threadId %||% "default", msg$runId %||% NULL)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # ── ExtendedTask：以 Shiny-aware 异步任务运行 handler ────────────────────────
-  # ExtendedTask 让 Shiny 知道有长时任务在运行，允许 reactive flush 在 await 期间发生，
-  # 从而 _tool_approval / _cancel 等 observer 可以正常触发。
-  stream_task <- shiny::ExtendedTask$new(
-    function(msg_text, thread_id, is_reload, attachments, ide_context, run_id) {
-      cbs <- make_callbacks(thread_id, run_id)
-      is_cancelled <- function() isTRUE(get0(thread_id, envir = cancel_flags))
-      register_cancel <- function(fn) assign(thread_id, fn, envir = cancel_fns)
-      wait_for_approval <- make_wait_for_approval(thread_id)
-
-      all_args <- list(
-        message           = msg_text,
-        thread_id         = thread_id,
-        on_chunk          = cbs$on_chunk,
-        on_done           = cbs$on_done,
-        on_error          = cbs$on_error_fn,
-        on_tool_call      = cbs$on_tool_call,
-        on_tool_call_start = cbs$on_tool_call_start,
-        on_tool_call_delta = cbs$on_tool_call_delta,
-        on_tool_result    = cbs$on_tool_result,
-        on_thinking       = cbs$on_thinking,
-        on_source         = cbs$on_source,
-        on_image          = cbs$on_image,
-        on_data_ui        = cbs$on_data_ui,
-        on_generative_ui  = cbs$on_generative_ui,
-        on_artifact       = cbs$on_artifact,
-        on_usage          = cbs$on_usage,
-        on_task           = cbs$on_task,
-        on_rate_limit     = cbs$on_rate_limit,
-        on_status         = cbs$on_status,
-        on_warming        = cbs$on_warming,
-        on_state          = cbs$on_state,
-        on_commands       = cbs$on_commands,
-        on_suggestions    = cbs$on_suggestions,
-        attachments       = attachments,
-        is_reload         = is_reload,
-        is_cancelled      = is_cancelled,
-        wait_for_approval = wait_for_approval,
-        register_cancel   = register_cancel,
-        ide_context       = ide_context
-      )
-      handler_params <- names(formals(handler))
-      call_args <- if ("..." %in% handler_params) all_args
-                   else all_args[names(all_args) %in% handler_params]
-
-      result <- tryCatch(
-        do.call(handler, call_args),
-        error = function(e) { cbs$on_error_fn(conditionMessage(e)); NULL }
-      )
-      if (inherits(result, "promise")) {
-        promises::catch(result, function(e) { cbs$on_error_fn(conditionMessage(e)); NULL })
-      } else {
-        promises::promise_resolve(NULL)
+  # ── Per-thread ExtendedTask + bounded global scheduler ─────────────────────
+  # One ExtendedTask per thread preserves native same-thread FIFO. The scheduler
+  # permit queue lets different threads progress cooperatively up to the effective
+  # limit (forced to 1 for handlers without the explicit concurrency capability).
+  execute_run <- function(thread_id, run_id, msg_text, is_reload, attachments, ide_context) {
+    # This invocation owns the thread-level cancellation resources until its
+    # returned promise settles. Queued/stale run IDs must not touch that owner.
+    assign(thread_id, run_id, envir = active_run_ids)
+    assign(thread_id, FALSE, envir = cancel_flags)
+    if (exists(thread_id, envir = cancel_fns, inherits = FALSE)) {
+      rm(list = thread_id, envir = cancel_fns)
+    }
+    cbs <- make_callbacks(thread_id, run_id)
+    is_cancelled <- function() {
+      identical(get0(thread_id, envir = active_run_ids), run_id) &&
+        isTRUE(get0(thread_id, envir = cancel_flags))
+    }
+    register_cancel <- function(fn) {
+      if (identical(get0(thread_id, envir = active_run_ids), run_id)) {
+        assign(thread_id, fn, envir = cancel_fns)
       }
+      invisible(NULL)
+    }
+    wait_for_approval <- make_wait_for_approval(thread_id, run_id)
+
+    all_args <- list(
+      message           = msg_text,
+      thread_id         = thread_id,
+      on_chunk          = cbs$on_chunk,
+      on_done           = cbs$on_done,
+      on_error          = cbs$on_error_fn,
+      on_tool_call      = cbs$on_tool_call,
+      on_tool_call_start = cbs$on_tool_call_start,
+      on_tool_call_delta = cbs$on_tool_call_delta,
+      on_tool_result    = cbs$on_tool_result,
+      on_thinking       = cbs$on_thinking,
+      on_source         = cbs$on_source,
+      on_image          = cbs$on_image,
+      on_data_ui        = cbs$on_data_ui,
+      on_generative_ui  = cbs$on_generative_ui,
+      on_artifact       = cbs$on_artifact,
+      on_usage          = cbs$on_usage,
+      on_task           = cbs$on_task,
+      on_rate_limit     = cbs$on_rate_limit,
+      on_status         = cbs$on_status,
+      on_warming        = cbs$on_warming,
+      on_state          = cbs$on_state,
+      on_commands       = cbs$on_commands,
+      on_suggestions    = cbs$on_suggestions,
+      attachments       = attachments,
+      is_reload         = is_reload,
+      is_cancelled      = is_cancelled,
+      wait_for_approval = wait_for_approval,
+      register_cancel   = register_cancel,
+      ide_context       = ide_context
+    )
+    handler_params <- names(formals(handler))
+    call_args <- if ("..." %in% handler_params) all_args
+                 else all_args[names(all_args) %in% handler_params]
+
+    result <- tryCatch(
+      do.call(handler, call_args),
+      error = function(e) { cbs$on_error_fn(conditionMessage(e)); NULL }
+    )
+    settled <- if (inherits(result, "promise")) {
+      promises::catch(result, function(e) { cbs$on_error_fn(conditionMessage(e)); NULL })
+    } else {
+      promises::promise_resolve(NULL)
+    }
+    release_run_ownership <- function(value = NULL) {
+      if (identical(get0(thread_id, envir = active_run_ids), run_id)) {
+        rm(list = thread_id, envir = active_run_ids)
+        if (exists(thread_id, envir = cancel_flags, inherits = FALSE)) {
+          rm(list = thread_id, envir = cancel_flags)
+        }
+        if (exists(thread_id, envir = cancel_fns, inherits = FALSE)) {
+          rm(list = thread_id, envir = cancel_fns)
+        }
+      }
+      for (key in ls(approval_resolvers)) {
+        entry <- get0(key, envir = approval_resolvers)
+        if (!is.null(entry) && identical(entry$run, run_id)) {
+          rm(list = key, envir = approval_resolvers)
+        }
+      }
+      value
+    }
+    promises::then(
+      settled,
+      onFulfilled = release_run_ownership,
+      onRejected = function(error) {
+        release_run_ownership()
+        stop(error)
+      }
+    )
+  }
+
+  run_scheduler <- .new_thread_run_scheduler(
+    run = execute_run,
+    max_concurrent = effective_concurrency,
+    on_state = function(thread_id, run_id, phase, queue_position = NULL) {
+      send_run_state(thread_id, run_id, phase, queue_position)
+    },
+    on_cancelled_settled = function(thread_id, run_id) {
+      session$sendCustomMessage(
+        paste0(input_id, ":done"),
+        list(suggestions = list(), threadId = thread_id, runId = run_id,
+             cancelled = TRUE)
+      )
     }
   )
+  session$onSessionEnded(function() run_scheduler$close())
 
   # ── sessions ready 握手：JS handler 注册后补发 sessions ────────────────────
   # React 18 createRoot().render() 是异步的，Shiny 首次 flush 时 :sessions
@@ -1009,44 +1107,136 @@ assistantUIServer <- function(id, handler,
   if (is.function(.teardown_fn))
     session$onSessionEnded(function() tryCatch(.teardown_fn(), error = function(e) NULL))
   warmup_states <- new.env(parent = emptyenv())
+  warmup_queue <- character()
+  warmup_active <- FALSE
+  warmup_current_thread <- NULL
+  warmup_closed <- FALSE
+  warmup_timer <- NULL
+  warmup_yield_timer <- NULL
+
+  schedule_warmup_pump <- NULL
+  pump_warmups <- NULL
+  schedule_warmup_pump <- function(delay = 0) {
+    if (warmup_closed || warmup_active || !length(warmup_queue) ||
+        !is.null(warmup_timer)) return(invisible(FALSE))
+    warmup_timer <<- later::later(function() {
+      warmup_timer <<- NULL
+      pump_warmups()
+    }, delay)
+    invisible(TRUE)
+  }
+  pump_warmups <- function() {
+    if (warmup_closed || warmup_active || !length(warmup_queue)) {
+      return(invisible(FALSE))
+    }
+    # Warm-ahead is deliberately lower priority than every foreground run,
+    # including permit waiters. Recheck on a short timer rather than competing
+    # with an active stream for the single R event loop.
+    if (run_scheduler$is_busy()) {
+      schedule_warmup_pump(0.05)
+      return(invisible(FALSE))
+    }
+
+    thread_id <- warmup_queue[[1L]]
+    warmup_queue <<- warmup_queue[-1L]
+    if (!identical(get0(thread_id, envir = warmup_states, inherits = FALSE), "queued")) {
+      schedule_warmup_pump()
+      return(invisible(FALSE))
+    }
+    assign(thread_id, "warming", envir = warmup_states)
+    warmup_active <<- TRUE
+    warmup_current_thread <<- thread_id
+    cbs <- make_callbacks(thread_id)
+    # Historical warmup restores an existing conversation, hence resuming=TRUE.
+    tryCatch(cbs$on_warming(TRUE, TRUE), error = function(e) NULL)
+    # Yield so the indicator can flush before the SDK's synchronous connect.
+    warmup_yield_timer <<- later::later(function() {
+      warmup_yield_timer <<- NULL
+      if (warmup_closed) {
+        warmup_active <<- FALSE
+        warmup_current_thread <<- NULL
+        return(invisible(NULL))
+      }
+      # A foreground submit may have arrived during the yield window. Put this
+      # warmup back at the head rather than delaying or blocking that run.
+      if (run_scheduler$is_busy()) {
+        tryCatch(cbs$on_warming(FALSE), error = function(e) NULL)
+        assign(thread_id, "queued", envir = warmup_states)
+        warmup_queue <<- c(thread_id, warmup_queue)
+        warmup_active <<- FALSE
+        warmup_current_thread <<- NULL
+        schedule_warmup_pump(0.05)
+        return(invisible(NULL))
+      }
+      succeeded <- tryCatch(
+        {
+          .warmup_fn(thread_id)
+          TRUE
+        },
+        interrupt = function(e) FALSE,
+        error = function(e) FALSE
+      )
+      tryCatch(cbs$on_warming(FALSE), error = function(e) NULL)
+      warmup_active <<- FALSE
+      warmup_current_thread <<- NULL
+      if (isTRUE(succeeded)) {
+        assign(thread_id, "warmed", envir = warmup_states)
+      } else if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
+        rm(list = thread_id, envir = warmup_states)
+      }
+      schedule_warmup_pump()
+      invisible(NULL)
+    }, 0.05)
+    invisible(TRUE)
+  }
   schedule_warmup <- function(thread_id, delay = 0) {
     # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧
     # 首条消息 ~55s 卡顿(见 Plan 22)。此时禁用一切 warm-ahead,让连接发生在首条
     # 消息发送时(connect+send 相邻 = 快路径)。
-    if (!isTRUE(allow_warmup)) return(invisible(FALSE))
+    if (!isTRUE(allow_warmup) || warmup_closed) return(invisible(FALSE))
     if (!is.function(.warmup_fn) || is.null(thread_id) ||
         !nzchar(thread_id %||% "")) return(invisible(FALSE))
     state <- get0(thread_id, envir = warmup_states, inherits = FALSE)
-    if (!is.null(state) && state %in% c("warming", "warmed")) {
+    if (!is.null(state) && state %in% c("queued", "warming", "warmed")) {
       return(invisible(FALSE))
     }
 
-    assign(thread_id, "warming", envir = warmup_states)
-    cbs <- make_callbacks(thread_id)
-    later::later(function() {
-      # 历史 session 的 warmup = 恢复既有对话，resuming=TRUE。
-      tryCatch(cbs$on_warming(TRUE, TRUE), error = function(e) NULL)
-      # Yield once more so the warming signal can flush before a blocking CLI
-      # connection. This also guarantees load_session itself stays non-blocking.
-      later::later(function() {
-        succeeded <- tryCatch(
-          {
-            .warmup_fn(thread_id)
-            TRUE
-          },
-          interrupt = function(e) FALSE,
-          error = function(e) FALSE
-        )
-        tryCatch(cbs$on_warming(FALSE), error = function(e) NULL)
-        if (isTRUE(succeeded)) {
-          assign(thread_id, "warmed", envir = warmup_states)
-        } else if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
-          rm(list = thread_id, envir = warmup_states)
-        }
-      }, 0.05)
-    }, delay)
+    assign(thread_id, "queued", envir = warmup_states)
+    warmup_queue <<- c(warmup_queue, thread_id)
+    schedule_warmup_pump(delay)
     invisible(TRUE)
   }
+  cancel_warmup <- function(thread_id) {
+    if (is.null(thread_id) || !nzchar(thread_id %||% "")) return(invisible(FALSE))
+    state <- get0(thread_id, envir = warmup_states, inherits = FALSE)
+    if (is.null(state) || identical(state, "warmed")) return(invisible(FALSE))
+
+    warmup_queue <<- warmup_queue[warmup_queue != thread_id]
+    if (is.function(warmup_timer)) {
+      warmup_timer()
+      warmup_timer <<- NULL
+    }
+    if (identical(warmup_current_thread, thread_id) && is.function(warmup_yield_timer)) {
+      warmup_yield_timer()
+      warmup_yield_timer <<- NULL
+      warmup_active <<- FALSE
+      warmup_current_thread <<- NULL
+      tryCatch(make_callbacks(thread_id)$on_warming(FALSE), error = function(e) NULL)
+    }
+    if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
+      rm(list = thread_id, envir = warmup_states)
+    }
+    schedule_warmup_pump()
+    invisible(TRUE)
+  }
+  session$onSessionEnded(function() {
+    warmup_closed <<- TRUE
+    warmup_queue <<- character()
+    if (is.function(warmup_timer)) warmup_timer()
+    if (is.function(warmup_yield_timer)) warmup_yield_timer()
+    warmup_timer <<- NULL
+    warmup_yield_timer <<- NULL
+  })
 
   shiny::observeEvent(session$input[[paste0(input_id, "_sessions_ready")]], {
     if (!is.null(pending_sessions)) {
@@ -1107,7 +1297,7 @@ assistantUIServer <- function(id, handler,
       reserved_context <- get(submission_id, envir = reserved_ide_contexts, inherits = FALSE)
       rm(list = submission_id, envir = reserved_ide_contexts)
     }
-    # Reload never receives current selection. A service-blocked explicit submit
+    # Reload never receives current selection. A deferred explicit submit
     # consumes the snapshot captured at click time (including an empty snapshot);
     # ordinary submits keep the existing observer-time immutable sampling.
     ide_context <- if (is_reload) NULL
@@ -1116,10 +1306,6 @@ assistantUIServer <- function(id, handler,
         .read_ide_context(ide_context_provider, selection_visible)
       else NULL
 
-    # 新 run 开始前重置 cancel 标志和 cancel fn
-    assign(thread_id, FALSE, envir = cancel_flags)
-    if (exists(thread_id, envir = cancel_fns)) rm(list = thread_id, envir = cancel_fns)
-
     # 划词引用:UI 划选的文本经 msg$quote({text,messageId})随本次提交带来;非 reload 时
     # 前置成 markdown blockquote 注入 prompt(对齐上游 injectQuoteContext,后端无关)。
     user_text <- msg$text
@@ -1127,13 +1313,13 @@ assistantUIServer <- function(id, handler,
     if (!is_reload && is.list(quote) && nzchar(trimws(quote$text %||% "")))
       user_text <- .prepend_quote(user_text, quote$text)
 
-    stream_task$invoke(
-      user_text,
+    run_scheduler$invoke(
       thread_id,
+      msg$runId %||% NULL,
+      user_text,
       is_reload,
       msg$attachments %||% list(),
-      ide_context,
-      msg$runId %||% NULL
+      ide_context
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
@@ -1178,9 +1364,6 @@ assistantUIServer <- function(id, handler,
     send_commands = function(commands) {
       session$sendCustomMessage(paste0(input_id, ":commands"),
                                 list(commands = commands))
-    },
-    send_service_status = function(status) {
-      session$sendCustomMessage(paste0(input_id, ":service-status"), status)
     },
     # 推送当前工作目录 + 最近目录列表给 UI（切目录时先发这个，再重推 sessions）。
     send_working_dir = function(dir, recent = list()) {

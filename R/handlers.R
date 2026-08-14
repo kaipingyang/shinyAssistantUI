@@ -1430,6 +1430,11 @@ make_ellmer_session_loader <- function(store) {
 #'   selector (a "Default" option is always prepended).
 #'
 #' @return A `coro::async` handler function compatible with [assistantUIServer()].
+#'   The returned handler declares `supports_concurrent_threads = TRUE`: each
+#'   thread owns a separate Claude client while normal turns and compaction remain
+#'   strict single-consumer operations within that thread. This lets
+#'   `assistantUIServer(max_concurrent_runs = ...)` run different threads under
+#'   its bounded global scheduler.
 #'
 #' @examples
 #' \dontrun{
@@ -1569,6 +1574,7 @@ make_claude_handler <- function(options       = NULL,
   commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
   active_turns <- list()
   compact_in_progress <- list()
+  reset_clients_pending <- FALSE
 
   make_opts <- function(thread_id, resume_sid = NULL) {
     # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
@@ -1651,14 +1657,35 @@ make_claude_handler <- function(options       = NULL,
     invisible(tids)
   }
 
-  # 断开并清空所有 client（切换工作目录时用：换 cwd = 全部重连，下条消息按新 cwd 连）。
-  reset_clients <- function(async = TRUE) {
+  # Settings/cwd changes must not disconnect a client while any thread is
+  # consuming it. Defer the registry reset until every normal turn and compact
+  # action has settled; the next turn reconnects with the new options.
+  has_active_consumers <- function() {
+    any(vapply(active_turns, isTRUE, logical(1))) ||
+      any(vapply(compact_in_progress, isTRUE, logical(1)))
+  }
+  perform_reset_clients <- function(async = TRUE) {
     .cleanup_claude_client_registry(
       get_clients   = function() clients,
       clear_clients = function() clients <<- list(),
       async         = async
     )
     invisible(NULL)
+  }
+  flush_pending_client_reset <- function() {
+    if (isTRUE(reset_clients_pending) && !has_active_consumers()) {
+      reset_clients_pending <<- FALSE
+      perform_reset_clients(async = TRUE)
+    }
+    invisible(NULL)
+  }
+  reset_clients <- function(async = TRUE) {
+    if (has_active_consumers()) {
+      reset_clients_pending <<- TRUE
+      return(invisible(NULL))
+    }
+    reset_clients_pending <<- FALSE
+    perform_reset_clients(async = async)
   }
 
   later_promise <- function(delay = 0.05) {
@@ -1747,6 +1774,7 @@ make_claude_handler <- function(options       = NULL,
         compact_in_progress[[thread_id]] <<- TRUE
         release_compact <- function() {
           compact_in_progress[[thread_id]] <<- NULL
+          flush_pending_client_reset()
           invisible(NULL)
         }
         compact_started_at <- as.numeric(Sys.time()) * 1000
@@ -1876,6 +1904,7 @@ make_claude_handler <- function(options       = NULL,
     active_turns[[thread_id]] <<- TRUE
     on.exit({
       active_turns[[thread_id]] <<- NULL
+      flush_pending_client_reset()
     }, add = TRUE)
 
     # 每线程冷启动:该线程尚无 client → connect() 要 spawn CLI 子进程 + initialize,
@@ -2488,6 +2517,7 @@ make_claude_handler <- function(options       = NULL,
   })
 
   attr(handler_fn, "cleanup") <- cleanup
+  attr(handler_fn, "supports_concurrent_threads") <- TRUE
   attr(handler_fn, "action_handler") <- claude_action
   attr(handler_fn, "ui_capabilities") <- list(
     permission_mode = list(

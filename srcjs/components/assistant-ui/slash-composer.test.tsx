@@ -479,6 +479,43 @@ describe("historical thread paging controls", () => {
     expect(widget.querySelector("[data-slot='aui_warming']")?.getAttribute("data-resuming")).toBe("true");
     expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
       .toContain("Resuming session…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{
+          runPhase: "connecting",
+          warming: false,
+          warmingLabel: "Starting Claude Code…",
+        } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Sending request…");
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .not.toContain("Starting Claude Code…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{
+          runPhase: "connecting",
+          warming: true,
+          warmingLabel: "Starting Claude Code…",
+        } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Starting Claude Code…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{ runPhase: "queued", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Waiting for an available run slot…");
   });
 
   it("offers a top load-older control and guards repeated loads", () => {

@@ -184,10 +184,11 @@ describe("bridge 出站消息", () => {
     expect(v.attachments).toHaveLength(1);
   });
 
-  it("sendCancel 发到 _cancel 子 input", () => {
+  it("sendCancel 发到 _cancel 子 input with matching runId", () => {
     const b = createShinyBridge("chat");
-    b.sendCancel("t1");
+    b.sendCancel("t1", "run-1");
     expect(inputValues[0].id).toBe("chat_cancel");
+    expect(inputValues[0].value).toMatchObject({ threadId: "t1", runId: "run-1" });
   });
 
   it("sendToolApproval 带 toolCallId + approved", () => {
@@ -262,22 +263,14 @@ describe("bridge IDE context and workspace search", () => {
 });
 
 
-describe("bridge service/run correlation", () => {
-  it("buffers an early service status until runtime registration", () => {
-    const b = createShinyBridge("chat");
-    handlers["chat:service-status"]({ status: "ready", autoStart: true });
-    const received: unknown[] = [];
-    b.onServiceStatus((value) => received.push(value));
-    expect(received).toEqual([{ status: "ready", autoStart: true }]);
-  });
-
+describe("bridge run correlation", () => {
   it("forwards runId on terminal messages and reservation inputs", () => {
     const b = createShinyBridge("chat");
     const cb = mkCallbacks();
     b.setRunCallbacks("t1", cb);
-    handlers["chat:done"]({ threadId: "t1", runId: "run-1" });
+    handlers["chat:done"]({ threadId: "t1", runId: "run-1", cancelled: true });
     handlers["chat:error"]({ threadId: "t1", runId: "run-2", message: "bad" });
-    expect(cb.calls.done).toEqual([[undefined, "run-1"]]);
+    expect(cb.calls.done).toEqual([[undefined, "run-1", true]]);
     expect(cb.calls.error).toEqual([["bad", "run-2"]]);
 
     b.reserveIdeContext("submission-1", "t1", true);
@@ -286,5 +279,26 @@ describe("bridge service/run correlation", () => {
       .toMatchObject({ submissionId: "submission-1", threadId: "t1", selectionVisible: true });
     expect(inputValues.find((value) => value.id === "chat_cancel_reserved_submissions")?.value)
       .toMatchObject({ submissionIds: ["submission-1"] });
+  });
+});
+
+
+describe("bridge authoritative run-state", () => {
+  it("routes additive queued/connecting/running/terminal payloads without run callbacks", () => {
+    const bridge = createShinyBridge("chat");
+    const received: unknown[] = [];
+    bridge.onRunState((value) => received.push(value));
+
+    handlers["chat:run-state"]({
+      threadId: "A", runId: "run-A", phase: "queued", queuePosition: 1,
+    });
+    handlers["chat:run-state"]({
+      threadId: "A", runId: "run-A", phase: "running",
+    });
+
+    expect(received).toEqual([
+      expect.objectContaining({ threadId: "A", runId: "run-A", phase: "queued", queuePosition: 1 }),
+      expect.objectContaining({ threadId: "A", runId: "run-A", phase: "running" }),
+    ]);
   });
 });

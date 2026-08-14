@@ -18,9 +18,17 @@ import type {
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
 import type {
-  ShinyBridge, SessionItem, IdeContextMeta, WorkspaceMentionItem, ServiceState,
-  AttachmentData, QuoteInfo,
+  ShinyBridge, SessionItem, IdeContextMeta, WorkspaceMentionItem,
+  AttachmentData, QuoteInfo, RunPhase,
 } from "./bridge";
+import {
+  createCopilotServiceBridge,
+  parseCopilotServiceAddon,
+} from "./copilot-service-addon";
+import type {
+  CopilotServiceBridge,
+  CopilotServiceState,
+} from "./copilot-service-addon";
 import { buildChecklistSnapshot } from "./checklist-reducer";
 import {
   createTaskMonitorState,
@@ -136,14 +144,12 @@ const COMPACT_CLIENT_TIMEOUT_MS = 185_000;
 
 const isCompactPhase = (value: unknown): value is CompactPhase =>
   value === "starting" || value === "compacting" || value === "complete" || value === "error";
-const isServiceStatus = (value: unknown): value is ServiceState["status"] =>
-  value === "disabled" || value === "checking" || value === "starting" ||
-  value === "ready" || value === "failed";
 const AVAILABLE_PERMISSION_MODES = new Set([
   "default", "plan", "acceptEdits", "bypassPermissions", "askAll", "yolo",
 ]);
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
+  const usesRunStateProtocol = config?.run_state_protocol === 1;
   const configuredPersistence = config?.persistence;
   const persistence = configuredPersistence === "server" || configuredPersistence === "none"
     ? configuredPersistence
@@ -212,6 +218,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   if (!bridge.current) {
     bridge.current = createShinyBridge(inputId);
   }
+  const copilotServiceConfig = useMemo(() => parseCopilotServiceAddon(config), [config]);
+  const copilotBridge = useRef<CopilotServiceBridge | null>(null);
+  if (copilotServiceConfig && !copilotBridge.current) {
+    copilotBridge.current = createCopilotServiceBridge(inputId);
+  }
 
   type HistoryPageState = {
     reading: boolean;
@@ -239,6 +250,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const serverSessionIdsRef = useRef(new Set<string>());
   // Protect live in-memory turns from an older transcript snapshot.
   const activeRunsRef = useRef<Set<string>>(new Set());
+  const deletedThreadIdsRef = useRef<Set<string>>(new Set());
   const activeTaskRunIdsRef = useRef<Record<string, string>>({});
   const runSeqRef = useRef<Record<string, number>>({});
   const historyRequestSeqRef = useRef(0);
@@ -359,22 +371,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
     () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
   );
-  const serviceCapability = typeof config?.auto_start_copilot_api === "boolean";
-  const initialService = config?.service_status as Partial<ServiceState> | undefined;
   const [autoStartCopilotApi, setAutoStartCopilotApiState] = useState<boolean | undefined>(
-    () => serviceCapability ? config.auto_start_copilot_api as boolean : undefined,
+    () => copilotServiceConfig?.state.autoStart,
   );
-  const [serviceState, setServiceState] = useState<ServiceState | undefined>(() => {
-    if (!serviceCapability) return undefined;
-    return {
-      status: isServiceStatus(initialService?.status) ? initialService.status : "checking",
-      autoStart: typeof initialService?.autoStart === "boolean"
-        ? initialService.autoStart
-        : config.auto_start_copilot_api as boolean,
-      ...(typeof initialService?.message === "string" ? { message: initialService.message } : {}),
-    };
-  });
-  const serviceStateRef = useRef<ServiceState | undefined>(serviceState);
+  const [serviceState, setServiceState] = useState<CopilotServiceState | undefined>(
+    () => copilotServiceConfig?.state,
+  );
+  const serviceStateRef = useRef<CopilotServiceState | undefined>(serviceState);
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -411,8 +414,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     loadArchivedThreads(inputId, usesClientPersistence)
   );
 
+  // Composer text belongs to the currently bound ExternalStoreRuntime. Keep an
+  // instance-local draft per thread before that binding moves to another thread.
+  // This is deliberately memory-only: restoring a page must never auto-revive or
+  // submit stale text from a previous addin instance.
+  type ComposerDraftRuntime = {
+    thread: {
+      composer: {
+        getState: () => { text: string };
+        setText: (text: string) => void;
+      };
+    };
+  };
+  const composerDraftsRef = useRef(new Map<string, string>());
+  const runtimeRef = useRef<ComposerDraftRuntime | null>(null);
+
   // 当前 threadId
-  const [currentThreadId, setCurrentThreadId] = useState<string>(() => {
+  const [currentThreadId, setCurrentThreadIdState] = useState<string>(() => {
     const saved = loadThreads(inputId, usesClientPersistence);
     if (saved.length > 0) return saved[0].id; // 来自 localStorage（上次运行），不追踪
     const id = makeThreadId();
@@ -422,6 +440,19 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // 每次 render 更新 ref，让注册一次的回调（onSessions 等）始终读到最新值
   currentThreadIdRef.current = currentThreadId;
   selectionVisibleRef.current = selectionVisible;
+
+  const rememberComposerDraft = useCallback((threadId: string) => {
+    const text = runtimeRef.current?.thread.composer.getState().text ?? "";
+    if (text.length > 0) composerDraftsRef.current.set(threadId, text);
+    else composerDraftsRef.current.delete(threadId);
+  }, []);
+
+  const switchCurrentThread = useCallback((threadId: string, preserveCurrent = true) => {
+    const previousThreadId = currentThreadIdRef.current;
+    if (threadId === previousThreadId) return;
+    if (preserveCurrent && previousThreadId) rememberComposerDraft(previousThreadId);
+    setCurrentThreadIdState(threadId);
+  }, [rememberComposerDraft]);
 
   const loadOlderHistory = useCallback(() => {
     const threadId = currentThreadIdRef.current;
@@ -500,14 +531,25 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   });
 
   const [runningThreads, setRunningThreads] = useState<Set<string>>(new Set());
+  const [runPhaseMap, setRunPhaseMap] = useState<Record<string, RunPhase>>({});
+  const runPhaseMapRef = useRef<Record<string, RunPhase>>({});
+  runPhaseMapRef.current = runPhaseMap;
   const [dismissedChecklistRevisions, setDismissedChecklistRevisions] = useState<Record<string, string>>({});
-  const isRunning = runningThreads.has(currentThreadId);
+  const runPhase = runPhaseMap[currentThreadId];
+  const isRunning = usesRunStateProtocol
+    ? runPhase === "running"
+    : runningThreads.has(currentThreadId);
+  const isRunWaiting = usesRunStateProtocol &&
+    (runPhase === "queued" || runPhase === "connecting");
   const setThreadRunning = useCallback((threadId: string, running: boolean) => {
     setRunningThreads((previous) => {
       const next = new Set(previous);
       if (running) next.add(threadId); else next.delete(threadId);
       return next;
     });
+  }, []);
+  const setThreadRunPhase = useCallback((threadId: string, phase: RunPhase) => {
+    setRunPhaseMap((previous) => ({ ...previous, [threadId]: phase }));
   }, []);
   // Static starter suggestions from assistantUIServer(suggestions=) show on the welcome
   // screen; on_done(suggestions=) replaces them after a turn. Accepts strings or {prompt, text}.
@@ -522,10 +564,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       })
       .filter((x) => x.prompt) as Array<{ prompt: string; text?: string }>);
   const initialSuggestions = normalizeSuggestions(config?.suggestions as unknown[]);
-  const [suggestions, setSuggestions] = useState<Array<{prompt: string; text?: string}>>(initialSuggestions);
-  // Artifacts 侧面板:会话级(不持久化)。type ∈ markdown/code/html/text
-  const [artifacts, setArtifacts] = useState<Array<{ id: string; title: string; type: string; content: string; lang?: string }>>([]);
-  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  type Suggestion = { prompt: string; text?: string };
+  type Artifact = { id: string; title: string; type: string; content: string; lang?: string };
+  const [suggestionsMap, setSuggestionsMap] = useState<Record<string, Suggestion[]>>({});
+  const suggestions = suggestionsMap[currentThreadId] ?? initialSuggestions;
+  const [artifactsMap, setArtifactsMap] = useState<Record<string, Artifact[]>>({});
+  const [activeArtifactIds, setActiveArtifactIds] = useState<Record<string, string | null>>({});
+  const artifacts = artifactsMap[currentThreadId] ?? [];
+  const activeArtifactId = activeArtifactIds[currentThreadId] ?? null;
 
   // ── ClaudeAgentSDK 能力对齐状态 ────────────────────────────────────────────
   type UsageInfo = { costUsd?: number; tokens?: number; contextTokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number };
@@ -543,15 +589,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       return next;
     });
   }, []);
-  const [rateLimit, setRateLimit] = useState<{ status?: string; resetsAt?: string; utilization?: number; type?: string } | null>(null); // #3
-  const [statusText, setStatusText] = useState<string | null>(null);                // #4 当前状态行
+  type RateLimitState = { status?: string; resetsAt?: string; utilization?: number; type?: string };
+  const [rateLimitMap, setRateLimitMap] = useState<Record<string, RateLimitState | null>>({});
+  const [statusTextMap, setStatusTextMap] = useState<Record<string, string | null>>({});
+  const rateLimit = rateLimitMap[currentThreadId] ?? null;
+  const statusText = statusTextMap[currentThreadId] ?? null;
   const [warmingThreads, setWarmingThreads] = useState<Set<string>>(new Set());      // 每线程冷启动中
   const [warmingResumingThreads, setWarmingResumingThreads] = useState<Set<string>>(new Set()); // 冷启动中且为"恢复历史"（非全新）
   const [serverCommandsByThread, setServerCommandsByThread] = useState<Record<string, Array<{ name: string; description?: string }>>>({});
   const streamingIdsRef = useRef<Record<string, string | null>>({});
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
-  type PendingServiceSubmission = {
+  type PendingSubmission = {
     id: string;
     requiresService: boolean;
     userMessageId: string;
@@ -564,20 +613,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     selectionVisible: boolean;
     original?: AppendMessage;
   };
-  const pendingServiceRef = useRef<PendingServiceSubmission[]>([]);
-  const serviceInFlightRef = useRef<{ id: string; threadId: string; runId?: string } | null>(null);
-  const serviceSubmissionSeq = useRef(0);
+  const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
+  const deferredSubmissionInFlightRef = useRef<{ id: string; threadId: string; runId?: string } | null>(null);
+  const deferredSubmissionSeq = useRef(0);
   const messageIdSeq = useRef(0);
-  const [pendingServiceSubmissions, setPendingServiceSubmissions] = useState(0);
-  const drainServiceQueueRef = useRef<() => void>(() => {});
-  const advanceServiceQueueRef = useRef<(threadId: string, runId: string, flushMessages: boolean) => void>(() => {});
-  const cancelPendingServiceSubmissions = useCallback((threadId?: string) => {
+  const [pendingServiceSubmissions, setPendingSubmissions] = useState(0);
+  const drainPendingSubmissionsRef = useRef<() => void>(() => {});
+  const advancePendingSubmissionsRef = useRef<(threadId: string, runId: string, flushMessages: boolean) => void>(() => {});
+  const cancelPendingSubmissions = useCallback((threadId?: string) => {
     const removed = threadId
-      ? pendingServiceRef.current.filter((item) => item.threadId === threadId)
-      : pendingServiceRef.current;
+      ? pendingSubmissionsRef.current.filter((item) => item.threadId === threadId)
+      : pendingSubmissionsRef.current;
     if (removed.length === 0) return;
-    pendingServiceRef.current = threadId
-      ? pendingServiceRef.current.filter((item) => item.threadId !== threadId)
+    pendingSubmissionsRef.current = threadId
+      ? pendingSubmissionsRef.current.filter((item) => item.threadId !== threadId)
       : [];
     bridge.current.cancelReservedSubmissions(removed.map((item) => item.id));
     const removedByThread = new Map<string, Set<string>>();
@@ -595,7 +644,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
       return next;
     });
-    setPendingServiceSubmissions(pendingServiceRef.current.length);
+    setPendingSubmissions(pendingSubmissionsRef.current.length);
   }, [inputId]);
   const actionAckRefs = useRef(new Map<string, {
     threadId: string;
@@ -632,7 +681,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const makeActionRequestId = () => `action-${Date.now()}-${++actionRequestSeq.current}`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deliverTextRef  = useRef<((text: string, threadId: string) => void) | null>(null);
-  const hasReasoningRef = useRef(false); // thinking arrived before text chunks
   // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
   // ① 多 tab storage 同步时保护正在跑的线程不被磁盘旧值覆盖；
   // per-thread run 序号也用于拒绝晚到的历史快照覆盖请求后启动的 live run。
@@ -683,10 +731,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   // ── 切换到第一个可用线程或新建 ────────────────────────────────────────────
   const switchAwayFrom = useCallback(
-    (removedId: string, currentThreads: ExternalStoreThreadData<"regular">[]) => {
+    (
+      removedId: string,
+      currentThreads: ExternalStoreThreadData<"regular">[],
+      preserveRemovedDraft = true,
+    ) => {
       const remaining = currentThreads.filter((t) => t.id !== removedId);
       if (remaining.length > 0) {
-        setCurrentThreadId(remaining[0].id);
+        switchCurrentThread(remaining[0].id, preserveRemovedDraft);
       } else {
       const newId = makeThreadId();
         thisSessionThreadIds.current.add(newId);
@@ -700,10 +752,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           saveThreads(inputId, usesClientPersistence, next);
           return next;
         });
-        setCurrentThreadId(newId);
+        switchCurrentThread(newId, preserveRemovedDraft);
       }
     },
-    [inputId]
+    [inputId, switchCurrentThread]
   );
 
   // ── 注册 clear（新建线程）────────────────────────────────────────────────
@@ -721,7 +773,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         saveThreads(inputId, usesClientPersistence, next);
         return next;
       });
-      setCurrentThreadId(newId);
+      switchCurrentThread(newId);
     });
 
     // ── 注册 :action-result（permission 静默状态 / 普通动作 ack）───────────────
@@ -868,17 +920,34 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
     // ── #3 限流告警 ───────────────────────────────────────────────────────────
     bridge.current.onRateLimit((d) => {
-      // status 正常(allowed/ok)时清除 banner;受限时显示
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      if (deletedThreadIdsRef.current.has(tid)) return;
       const limited = d.status && !/^(allowed|ok|none)$/i.test(d.status);
-      setRateLimit(limited ? { status: d.status, resetsAt: d.resetsAt, utilization: d.utilization, type: d.type } : null);
+      setRateLimitMap((previous) => ({
+        ...previous,
+        [tid]: limited
+          ? { status: d.status, resetsAt: d.resetsAt, utilization: d.utilization, type: d.type }
+          : null,
+      }));
     });
     // ── #4 系统状态行 ─────────────────────────────────────────────────────────
     bridge.current.onStatus((d) => {
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      if (deletedThreadIdsRef.current.has(tid)) return;
       const label = d.text || (d.status === "thinking_tokens" ? "Thinking\u2026"
         : d.status === "init" ? "Initializing\u2026" : d.status);
-      setStatusText(label ?? null);
+      setStatusTextMap((previous) => ({ ...previous, [tid]: label ?? null }));
     });
     // ── 每线程冷启动指示 ──────────────────────────────────────────────────────
+    bridge.current.onRunState((d) => {
+      if (!d.threadId || !d.runId || deletedThreadIdsRef.current.has(d.threadId)) return;
+      if (activeTaskRunIdsRef.current[d.threadId] !== d.runId) return;
+      setThreadRunPhase(d.threadId, d.phase);
+      if (d.phase === "running") setThreadRunning(d.threadId, true);
+      if (d.phase === "complete" || d.phase === "error" || d.phase === "cancelled") {
+        setThreadRunning(d.threadId, false);
+      }
+    });
     bridge.current.onWarming((d) => {
       const tid = d.threadId ?? currentThreadIdRef.current;
       setWarmingThreads((prev) => {
@@ -914,24 +983,27 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
     // ── #5 命令自动发现 ───────────────────────────────────────────────────────
     // Plan 48B: R 端 on_suggestions(...) 经 :suggestions 频道随时推送 follow-up 建议。
-    // 只应用于当前线程(或无 threadId);下一轮 startRun 会清空(见 setSuggestions([]))。
+    // Store by owner thread even when it is currently in the background.
     bridge.current.onSuggestions((d) => {
-      if (d.threadId && d.threadId !== currentThreadIdRef.current) return;
-      setSuggestions(normalizeSuggestions(d.suggestions as unknown[]));
+      const tid = d.threadId ?? currentThreadIdRef.current;
+      if (deletedThreadIdsRef.current.has(tid)) return;
+      setSuggestionsMap((previous) => ({
+        ...previous,
+        [tid]: normalizeSuggestions(d.suggestions as unknown[]),
+      }));
     });
-    bridge.current.onServiceStatus((data) => {
-      if (!isServiceStatus(data.status)) return;
-      const next: ServiceState = {
-        status: data.status,
-        autoStart: data.autoStart !== false,
-        ...(typeof data.message === "string" ? { message: data.message } : {}),
-      };
-      serviceStateRef.current = next;
-      setServiceState(next);
-      setAutoStartCopilotApiState(next.autoStart);
-      if (next.status === "disabled") cancelPendingServiceSubmissions();
-      if (next.status === "ready") queueMicrotask(() => drainServiceQueueRef.current());
-    });
+    if (copilotBridge.current) {
+      copilotBridge.current.onStatus((next) => {
+        serviceStateRef.current = next;
+        setServiceState(next);
+        setAutoStartCopilotApiState(next.autoStart);
+        if (next.status === "disabled") cancelPendingSubmissions();
+        if (next.status === "ready") queueMicrotask(() => drainPendingSubmissionsRef.current());
+      });
+      // The addin-owned R service does not start until this status subscriber is
+      // installed, so no initial checking/starting/ready publication can be lost.
+      copilotBridge.current.sendReady();
+    }
     bridge.current.onServerCommands((d) => {
       const tid = d.threadId ?? currentThreadIdRef.current;
       const cmds = (d.commands ?? []) as Array<Record<string, unknown>>;
@@ -962,8 +1034,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // A queued submission belongs to the cwd visible when Send was clicked.
       // Never deliver either readiness-deferred or clock-queued text after the
       // addin switches projects.
-      cancelPendingServiceSubmissions();
+      cancelPendingSubmissions();
       messageQueueRef.current.clear();
+      composerDraftsRef.current.clear();
+      runtimeRef.current?.thread.composer.setText("");
       // 切目录 → 丢弃旧目录的本地新建线程，避免与新目录 sessions 混显。
       thisSessionThreadIds.current.clear();
     });
@@ -981,7 +1055,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // has a valid mainThreadId.
       if (sessions.length === 0) {
         if (persistence !== "server") return;
-        cancelPendingServiceSubmissions();
+        cancelPendingSubmissions();
         messageQueueRef.current.clear();
         for (const timer of sessionLoadRetryTimers.current.values()) {
           window.clearTimeout(timer);
@@ -1010,7 +1084,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         setThreads([{ id: newId, status: "regular", title: "New chat" }]);
         setArchivedThreads([]);
         setMessagesMap({ [newId]: [] });
-        setCurrentThreadId(newId);
+        composerDraftsRef.current.clear();
+        switchCurrentThread(newId, false);
         return;
       }
 
@@ -1086,7 +1161,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (!serverIds.has(cur) && !thisSessionThreadIds.current.has(cur)) {
         if (activeSessions.length > 0) {
           const firstSessionId = activeSessions[0].id;
-          setCurrentThreadId(firstSessionId);
+          switchCurrentThread(firstSessionId, false);
           requestSessionLoad(firstSessionId);
         }
       } else if (activeIds.has(cur)) {
@@ -1177,7 +1252,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // deferred (service/clock paths) check and requeue before reaching here.
       if (activeRunsRef.current.has(threadId)) return false;
       setThreadRunning(threadId, true);
-      setSuggestions([]);
+      if (usesRunStateProtocol) setThreadRunPhase(threadId, "connecting");
+      setSuggestionsMap((previous) => ({ ...previous, [threadId]: [] }));
       streamingIdsRef.current[threadId] = null;
 
       // 登记本 run：active 集合用于多 tab 同步保护；run 序号和 ID 用于拒绝
@@ -1197,7 +1273,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             streamingIdsRef.current[threadId] = `assistant-${Date.now()}`;
           }
           const msgId = streamingIdsRef.current[threadId];
-          hasReasoningRef.current = true;
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const existing = threadMsgs.find((m) => m.id === msgId);
@@ -1483,27 +1558,27 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onArtifact: (artifact) => {
-          setArtifacts((prev) => {
-            const idx = prev.findIndex((a) => a.id === artifact.id);
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = artifact;
-              return next;
-            }
-            return [...prev, artifact];
+          if (deletedThreadIdsRef.current.has(threadId)) return;
+          setArtifactsMap((previous) => {
+            const owned = previous[threadId] ?? [];
+            const idx = owned.findIndex((item) => item.id === artifact.id);
+            const next = [...owned];
+            if (idx >= 0) next[idx] = artifact;
+            else next.push(artifact);
+            return { ...previous, [threadId]: next };
           });
-          setActiveArtifactId(artifact.id); // 新/更新的 artifact 自动打开面板
+          setActiveArtifactIds((previous) => ({ ...previous, [threadId]: artifact.id }));
         },
-        onDone: (doneSuggestions, incomingRunId) => {
+        onDone: (doneSuggestions, incomingRunId, cancelled = false) => {
           if (incomingRunId && incomingRunId !== runId) return;
           streamingIdsRef.current[threadId] = null;
-          hasReasoningRef.current = false;
           // 只有当前 thread 仍是发起此 run 的 thread 时才清 running 状态
           // 避免用户切换 thread 后旧 handler 的 onDone 把新 thread 的 running 错误清掉
-          if (currentThreadIdRef.current === threadId) {
-                  setStatusText(null);  // #4 run 结束清状态行
-            if (doneSuggestions && doneSuggestions.length > 0) setSuggestions(doneSuggestions);
+          setStatusTextMap((previous) => ({ ...previous, [threadId]: null }));
+          if (!cancelled && doneSuggestions && doneSuggestions.length > 0) {
+            setSuggestionsMap((previous) => ({ ...previous, [threadId]: doneSuggestions }));
           }
+          if (usesRunStateProtocol) setThreadRunPhase(threadId, cancelled ? "cancelled" : "complete");
           // 仅当本 run 仍是该线程最新 run 时才注销 callbacks / 清 active 标记。
           // 避免 run 重入（edit 后立即 reload 等）时旧 run 的 onDone 误删新 run 的 callbacks。
           if (isLatestRun()) {
@@ -1513,7 +1588,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             setThreadRunning(threadId, false);
             bridge.current.setRunCallbacks(threadId, null);
           }
-          advanceServiceQueueRef.current(threadId, runId, true);
+          advancePendingSubmissionsRef.current(threadId, runId, true);
           setMessagesMap((prev) => {
             // 收口：把任何未完成的 tool-call part 标记中断。正常结束时无半截卡
             // （changed=false，零影响）；中断 drain 时 R 可能漏发 on_tool_result，
@@ -1529,7 +1604,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         onError: (errMsg, incomingRunId) => {
           if (incomingRunId && incomingRunId !== runId) return;
           streamingIdsRef.current[threadId] = null;
-          hasReasoningRef.current = false;
+          if (usesRunStateProtocol) setThreadRunPhase(threadId, "error");
           if (isLatestRun()) {
             activeRunsRef.current.delete(threadId);
             delete activeTaskRunIdsRef.current[threadId];
@@ -1537,7 +1612,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             setThreadRunning(threadId, false);
             bridge.current.setRunCallbacks(threadId, null);
           }
-          advanceServiceQueueRef.current(threadId, runId, false);
+          advancePendingSubmissionsRef.current(threadId, runId, false);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const { messages: settled } = markStaleToolCalls(threadMsgs, "Interrupted");
@@ -1561,9 +1636,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [inputId] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const dispatchServiceSubmission = useCallback((submission: PendingServiceSubmission) => {
+  const dispatchPendingSubmission = useCallback((submission: PendingSubmission) => {
     return startRun(submission.threadId, (runId) => {
-      const inFlight = serviceInFlightRef.current;
+      const inFlight = deferredSubmissionInFlightRef.current;
       if (inFlight?.id === submission.id) inFlight.runId = runId;
       bridge.current.sendUserMessage(
         submission.sendText,
@@ -1577,46 +1652,46 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
   }, [startRun, capabilityContract.ide]);
 
-  const drainServiceQueue = useCallback(() => {
-    if (serviceInFlightRef.current) return;
-    const nextSubmission = pendingServiceRef.current[0];
+  const drainPendingSubmissions = useCallback(() => {
+    if (deferredSubmissionInFlightRef.current) return;
+    const nextSubmission = pendingSubmissionsRef.current[0];
     if (!nextSubmission) return;
     if (nextSubmission.requiresService && serviceStateRef.current?.status !== "ready") return;
     if (activeRunsRef.current.has(nextSubmission.threadId)) return;
-    const submission = pendingServiceRef.current.shift()!;
+    const submission = pendingSubmissionsRef.current.shift()!;
     // Remove before dispatch so repeated ready notifications cannot send twice.
-    setPendingServiceSubmissions(pendingServiceRef.current.length);
-    serviceInFlightRef.current = { id: submission.id, threadId: submission.threadId };
-    if (!dispatchServiceSubmission(submission)) {
-      serviceInFlightRef.current = null;
-      pendingServiceRef.current.unshift(submission);
-      setPendingServiceSubmissions(pendingServiceRef.current.length);
+    setPendingSubmissions(pendingSubmissionsRef.current.length);
+    deferredSubmissionInFlightRef.current = { id: submission.id, threadId: submission.threadId };
+    if (!dispatchPendingSubmission(submission)) {
+      deferredSubmissionInFlightRef.current = null;
+      pendingSubmissionsRef.current.unshift(submission);
+      setPendingSubmissions(pendingSubmissionsRef.current.length);
     }
-  }, [dispatchServiceSubmission]);
-  drainServiceQueueRef.current = drainServiceQueue;
+  }, [dispatchPendingSubmission]);
+  drainPendingSubmissionsRef.current = drainPendingSubmissions;
   useEffect(() => {
-    if (serviceState?.status === "ready") drainServiceQueue();
-  }, [serviceState?.status, drainServiceQueue]);
+    if (serviceState?.status === "ready") drainPendingSubmissions();
+  }, [serviceState?.status, drainPendingSubmissions]);
 
-  const advanceServiceQueue = useCallback((threadId: string, runId: string, flushMessages: boolean) => {
-    const inFlight = serviceInFlightRef.current;
+  const advancePendingSubmissions = useCallback((threadId: string, runId: string, flushMessages: boolean) => {
+    const inFlight = deferredSubmissionInFlightRef.current;
     if (inFlight?.threadId === threadId) {
       if (inFlight.runId !== runId) return;
-      serviceInFlightRef.current = null;
+      deferredSubmissionInFlightRef.current = null;
     }
     // Keep global submission FIFO moving, but only service/deferred work for
     // this thread blocks its own clock queue. Other threads may run concurrently.
-    if (pendingServiceRef.current.length > 0) {
-      queueMicrotask(() => drainServiceQueueRef.current());
+    if (pendingSubmissionsRef.current.length > 0) {
+      queueMicrotask(() => drainPendingSubmissionsRef.current());
     }
-    if (pendingServiceRef.current.some((item) => item.threadId === threadId)) return;
+    if (pendingSubmissionsRef.current.some((item) => item.threadId === threadId)) return;
     if (!flushMessages) return;
     const queued = messageQueueRef.current.get(threadId);
     if (!queued || queued.length === 0) return;
     const nextText = queued.shift()!;
     setTimeout(() => {
-      const serviceBusy = serviceInFlightRef.current?.threadId === threadId ||
-        pendingServiceRef.current.some((item) => item.threadId === threadId);
+      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+        pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (activeRunsRef.current.has(threadId) || serviceBusy) {
         const latest = messageQueueRef.current.get(threadId) ?? [];
         latest.unshift(nextText);
@@ -1626,12 +1701,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       deliverTextRef.current?.(nextText, threadId);
     }, 40);
   }, []);
-  advanceServiceQueueRef.current = advanceServiceQueue;
+  advancePendingSubmissionsRef.current = advancePendingSubmissions;
 
   // ── onNew ────────────────────────────────────────────────────────────────
   const onNew = useCallback(
     async (msg: AppendMessage) => {
       if (blockingActionsRef.current[currentThreadId]) return;
+      composerDraftsRef.current.delete(currentThreadId);
       // 气泡显示用原始文本（含 /commandName chip 序列化结果）
       const text = msg.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1690,12 +1766,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         (serviceStateRef.current.status === "checking" ||
          serviceStateRef.current.status === "starting" ||
          serviceStateRef.current.status === "failed");
-      const threadHasQueuedWork = serviceInFlightRef.current?.threadId === threadId ||
-        pendingServiceRef.current.some((item) => item.threadId === threadId);
+      const threadHasQueuedWork = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+        pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       const mustDefer = waitingForService || activeRunsRef.current.has(threadId) || threadHasQueuedWork;
       if (mustDefer) {
-        const submissionId = `service-submission-${Date.now()}-${++serviceSubmissionSeq.current}`;
-        pendingServiceRef.current.push({
+        const submissionId = `service-submission-${Date.now()}-${++deferredSubmissionSeq.current}`;
+        pendingSubmissionsRef.current.push({
           id: submissionId,
           requiresService: waitingForService,
           userMessageId,
@@ -1711,7 +1787,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (capabilityContract.ide) {
           bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current);
         }
-        setPendingServiceSubmissions(pendingServiceRef.current.length);
+        setPendingSubmissions(pendingSubmissionsRef.current.length);
         return;
       }
 
@@ -1734,8 +1810,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // flush 调用(避免 startRun 闭包对后定义函数的时序依赖)。
   const deliverText = useCallback((text: string, threadId: string) => {
     if (!text.trim() || blockingActionsRef.current[threadId]) return;
-    const serviceBusy = serviceInFlightRef.current?.threadId === threadId ||
-      pendingServiceRef.current.some((item) => item.threadId === threadId);
+    const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+      pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
     if (activeRunsRef.current.has(threadId) || serviceBusy) {
       const queued = messageQueueRef.current.get(threadId) ?? [];
       queued.push(text);
@@ -1762,8 +1838,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     const serviceBlocked = serviceStateRef.current !== undefined &&
       ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
     if (serviceBlocked) {
-      const submissionId = `service-submission-${Date.now()}-${++serviceSubmissionSeq.current}`;
-      pendingServiceRef.current.push({
+      const submissionId = `service-submission-${Date.now()}-${++deferredSubmissionSeq.current}`;
+      pendingSubmissionsRef.current.push({
         id: submissionId,
         requiresService: true,
         userMessageId,
@@ -1777,7 +1853,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (capabilityContract.ide) {
         bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current);
       }
-      setPendingServiceSubmissions(pendingServiceRef.current.length);
+      setPendingSubmissions(pendingSubmissionsRef.current.length);
       return;
     }
     startRun(threadId, (runId) => {
@@ -1889,8 +1965,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
         ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
-      const serviceBusy = serviceInFlightRef.current?.threadId === threadId ||
-        pendingServiceRef.current.some((item) => item.threadId === threadId);
+      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+        pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
       const parentId = message.parentId ?? null;
       const { attachmentData, storedAttachments } = extractAttachments(message);
@@ -1934,8 +2010,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
         ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
-      const serviceBusy = serviceInFlightRef.current?.threadId === threadId ||
-        pendingServiceRef.current.some((item) => item.threadId === threadId);
+      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+        pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
       const msgs = messagesMap[threadId] ?? [];
 
@@ -1968,11 +2044,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // Do NOT null streamingIdRef here — in-flight chunks that arrive before R
     // detects the cancel would create a new message bubble (second AI avatar).
     // Let onDone null it naturally once the stream is fully closed.
-    hasReasoningRef.current = false;
     setThreadRunning(threadId, false);
+    if (usesRunStateProtocol) setThreadRunPhase(threadId, "cancelled");
     // Do NOT clear callbacks here — R will still send on_tool_result / on_done
     // during drain mode after interrupt. Let onDone clear them naturally.
-    bridge.current.sendCancel(threadId);
+    bridge.current.sendCancel(threadId, activeTaskRunIdsRef.current[threadId]);
   }, [currentThreadId]);
 
   // ── switchToNewThread（也暴露给外部 slash command 用）─────────────────────
@@ -1989,7 +2065,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       saveThreads(inputId, usesClientPersistence, next);
       return next;
     });
-    setCurrentThreadId(newId);
+    switchCurrentThread(newId);
   }, [inputId]);
 
   // ── 线程重命名（rename）──────────────────────────────────────────────────────
@@ -2025,15 +2101,85 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendRunInConsole(code);
   }, []);
 
+  const clearThreadRuntimeState = useCallback((threadId: string) => {
+    const omitThread = <T,>(previous: Record<string, T>): Record<string, T> => {
+      if (!(threadId in previous)) return previous;
+      const next = { ...previous };
+      delete next[threadId];
+      return next;
+    };
+
+    activeRunsRef.current.delete(threadId);
+    delete activeTaskRunIdsRef.current[threadId];
+    delete runSeqRef.current[threadId];
+    delete streamingIdsRef.current[threadId];
+    manualTitleIds.current.delete(threadId);
+    bridge.current.setRunCallbacks(threadId, null);
+    messageQueueRef.current.delete(threadId);
+
+    const nextPhases = omitThread(runPhaseMapRef.current);
+    runPhaseMapRef.current = nextPhases;
+    setRunPhaseMap(nextPhases);
+    setThreadRunning(threadId, false);
+    setWarmingThreads((previous) => {
+      const next = new Set(previous);
+      next.delete(threadId);
+      return next;
+    });
+    setWarmingResumingThreads((previous) => {
+      const next = new Set(previous);
+      next.delete(threadId);
+      return next;
+    });
+
+    setMessagesMap((previous) => omitThread(previous));
+    setSuggestionsMap((previous) => omitThread(previous));
+    setArtifactsMap((previous) => omitThread(previous));
+    setActiveArtifactIds((previous) => omitThread(previous));
+    setUsageMap((previous) => omitThread(previous));
+    setAgentStateMap((previous) => omitThread(previous));
+    setRateLimitMap((previous) => omitThread(previous));
+    setStatusTextMap((previous) => omitThread(previous));
+    setServerCommandsByThread((previous) => omitThread(previous));
+    setDismissedChecklistRevisions((previous) => omitThread(previous));
+    setLatestTaskActivityIds((previous) => omitThread(previous));
+    setPermissionValues((previous) => omitThread(previous));
+    setPermissionPending((previous) => omitThread(previous));
+    setPermissionErrors((previous) => omitThread(previous));
+    permissionPendingRef.current = omitThread(permissionPendingRef.current);
+    setBlockingActionForThread(threadId);
+
+    for (const [requestId, request] of permissionRequestsRef.current) {
+      if (request.threadId === threadId) permissionRequestsRef.current.delete(requestId);
+    }
+    for (const [requestId, action] of actionAckRefs.current) {
+      if (action.threadId !== threadId) continue;
+      if (action.timeoutId !== undefined) window.clearTimeout(action.timeoutId);
+      actionAckRefs.current.delete(requestId);
+    }
+    if (deferredSubmissionInFlightRef.current?.threadId === threadId) {
+      deferredSubmissionInFlightRef.current = null;
+      queueMicrotask(() => drainPendingSubmissionsRef.current());
+    }
+  }, [setBlockingActionForThread, setThreadRunning]);
+
   // ── threadList adapter ───────────────────────────────────────────────────
+  const threadListThreads = useMemo(() => threads.map((thread) => {
+    const phase = runPhaseMap[thread.id];
+    const activePhase = phase === "queued" || phase === "connecting" || phase === "running";
+    const custom = { ...(thread.custom ?? {}) };
+    if (activePhase) custom.runPhase = phase;
+    else delete custom.runPhase;
+    return { ...thread, custom };
+  }), [threads, runPhaseMap]);
   const threadListAdapter = useMemo(
     () => ({
       threadId: currentThreadId,
-      threads,
+      threads: threadListThreads,
       archivedThreads,
       onSwitchToNewThread: switchToNewThread,
       onSwitchToThread: (threadId: string) => {
-        setCurrentThreadId(threadId);
+        switchCurrentThread(threadId);
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
         // Server-backed history may keep growing after its first hydration (for
         // example a background task finishing). Explicitly switching back starts
@@ -2043,6 +2189,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         }
       },
       onArchive: (threadId: string) => {
+        if (activeRunsRef.current.has(threadId)) {
+          bridge.current.sendCancel(threadId, activeTaskRunIdsRef.current[threadId]);
+        }
+        cancelPendingSubmissions(threadId);
+        messageQueueRef.current.delete(threadId);
+        setBlockingActionForThread(threadId);
         setThreads((prev) => {
           const target = prev.find((t) => t.id === threadId);
           const next = prev.filter((t) => t.id !== threadId);
@@ -2085,8 +2237,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         bridge.current.sendArchiveSession(threadId, false);
       },
       onDelete: (threadId: string) => {
-        cancelPendingServiceSubmissions(threadId);
-        messageQueueRef.current.delete(threadId);
+        if (activeRunsRef.current.has(threadId)) {
+          bridge.current.sendCancel(threadId, activeTaskRunIdsRef.current[threadId]);
+        }
+        deletedThreadIdsRef.current.add(threadId);
+        composerDraftsRef.current.delete(threadId);
+        cancelPendingSubmissions(threadId);
+        clearThreadRuntimeState(threadId);
         clearThreadHistoryTracking(threadId);
         const wasServerSession = !thisSessionThreadIds.current.has(threadId);
         // 从活跃或归档列表中删除
@@ -2097,7 +2254,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           saveThreads(inputId, usesClientPersistence, next);
           deleteMessages(inputId, usesClientPersistence, threadId);
           if (threadId === currentThreadId) {
-            switchAwayFrom(threadId, prev);
+
+            switchAwayFrom(threadId, prev, false);
           }
           return next;
         });
@@ -2116,7 +2274,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         }
       },
     }),
-    [inputId, currentThreadId, threads, archivedThreads, switchAwayFrom, cancelPendingServiceSubmissions]
+    [inputId, currentThreadId, threads, threadListThreads, archivedThreads, switchAwayFrom,
+      cancelPendingSubmissions, clearThreadHistoryTracking, clearThreadRuntimeState,
+      setBlockingActionForThread]
   );
 
   const sendToolApproval = useCallback(
@@ -2231,6 +2391,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const runtime = useExternalStoreRuntime({
     messages,
     isRunning,
+    isSendDisabled: isRunWaiting,
     suggestions,
     onNew,
     onEdit,
@@ -2245,6 +2406,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       feedback: feedbackAdapter.current,
     },
   });
+  runtimeRef.current = runtime;
+
+  useEffect(() => {
+    const composer = runtimeRef.current?.thread.composer;
+    if (!composer) return;
+    const draft = composerDraftsRef.current.get(currentThreadId) ?? "";
+    if (composer.getState().text !== draft) composer.setText(draft);
+  }, [currentThreadId]);
 
   return {
     runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
@@ -2300,23 +2469,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setAutoStartCopilotApi: (value: boolean) => {
       setAutoStartCopilotApiState(value);
       if (!value) {
-        const disabled: ServiceState = { status: "disabled", autoStart: false };
+        const disabled: CopilotServiceState = { status: "disabled", autoStart: false };
         serviceStateRef.current = disabled;
         setServiceState(disabled);
-        cancelPendingServiceSubmissions();
+        cancelPendingSubmissions();
       } else {
-        const checking: ServiceState = {
+        const checking: CopilotServiceState = {
           status: "checking", autoStart: true, message: "Checking copilot-api",
         };
         serviceStateRef.current = checking;
         setServiceState(checking);
       }
-      bridge.current.sendAutoStartCopilotApi(value);
+      copilotBridge.current?.setAutoStart(value);
     },
     serviceState,
     pendingServiceSubmissions,
-    retryService: () => bridge.current.sendRetryService(),
-    cancelPendingServiceSubmissions,
+    retryService: copilotBridge.current ? () => copilotBridge.current?.retry() : undefined,
+    cancelPendingSubmissions,
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,
@@ -2325,8 +2494,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     loadingOlder: historyPageStates[currentThreadId]?.loadingOlder ?? false,
     loadOlderHistory,
     artifacts, activeArtifactId,
-    openArtifact: (id: string) => setActiveArtifactId(id),
-    closeArtifact: () => setActiveArtifactId(null),
+    openArtifact: (id: string) => setActiveArtifactIds((previous) => ({
+      ...previous, [currentThreadId]: id,
+    })),
+    closeArtifact: () => setActiveArtifactIds((previous) => ({
+      ...previous, [currentThreadId]: null,
+    })),
     // ── ClaudeAgentSDK 能力对齐(当前线程视图)────────────────────────────────
     usage: usageMap[currentThreadId],                                    // #1
     agentState: agentStateMap[currentThreadId],                          // Plan 36
@@ -2338,6 +2511,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     statusText,                                                          // #4
     serverCommands: serverCommandsByThread[currentThreadId] ?? [],       // #5
     commands,                                                            // 本地 skills(可 :commands 热更新)
+    runPhase,
+    runPhases: runPhaseMap,
     warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
     warmingResuming: warmingResumingThreads.has(currentThreadId),        // 该冷启动是否为"恢复历史"
     stopTask,

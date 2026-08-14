@@ -42,11 +42,12 @@ export type WorkspaceResults = {
   items: WorkspaceMentionItem[];
 };
 
-export type ServiceStatus = "disabled" | "checking" | "starting" | "ready" | "failed";
-export type ServiceState = {
-  status: ServiceStatus;
-  autoStart: boolean;
-  message?: string;
+export type RunPhase = "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
+export type RunStatePayload = {
+  threadId: string;
+  runId: string;
+  phase: RunPhase;
+  queuePosition?: number;
 };
 
 export type ToolCallPayload = {
@@ -77,7 +78,7 @@ export type RunCallbacks = {
   onData?: (d: { name: string; data: unknown }) => void;
   onGenerativeUi?: (d: { spec: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
-  onDone: (suggestions?: Array<{prompt: string}>, runId?: string) => void;
+  onDone: (suggestions?: Array<{prompt: string}>, runId?: string, cancelled?: boolean) => void;
   onError: (message: string, runId?: string) => void;
 };
 
@@ -109,7 +110,7 @@ export interface ShinyBridge {
   reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean) => void;
   cancelReservedSubmissions: (submissionIds: string[]) => void;
   sendReload: (text: string, threadId: string, runId?: string) => void;
-  sendCancel: (threadId: string) => void;
+  sendCancel: (threadId: string, runId?: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
   sendRename: (threadId: string, title: string) => void;
@@ -125,8 +126,6 @@ export interface ShinyBridge {
   sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
   sendComposerDensity: (value: string) => void;
   sendRunREnabled: (value: boolean) => void;
-  sendAutoStartCopilotApi: (value: boolean) => void;
-  sendRetryService: () => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string, requestId?: string) => void;
@@ -150,7 +149,7 @@ export interface ShinyBridge {
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
   onWarming: (handler: (data: { threadId?: string; active?: boolean; resuming?: boolean }) => void) => void;
-  onServiceStatus: (handler: (data: ServiceState) => void) => void;
+  onRunState: (handler: (data: RunStatePayload) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
   onSuggestions: (handler: (data: { threadId?: string; suggestions?: unknown[] }) => void) => void;
   onCommands: (handler: (data: { commands?: unknown[] }) => void) => void;
@@ -174,8 +173,6 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   type ConsoleResultData = { code: string; ok: boolean; output: string; error: string };
   let consoleResultHandler: ((data: ConsoleResultData) => void) | null = null;
   let bufferedConsoleResult: ConsoleResultData | null = null;
-  let serviceStatusHandler: ((data: ServiceState) => void) | null = null;
-  let bufferedServiceStatus: ServiceState | null = null;
 
   // 按 threadId 取回调。缺 threadId 时：单线程场景回退到唯一回调；多线程则告警 + 放弃
   // （静默路由到"第一个"会在并发时投递到错误线程）。R 端所有消息都应带 threadId。
@@ -195,8 +192,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:done`, (data) => {
-    const d = data as { suggestions?: Array<{prompt: string}>; threadId?: string; runId?: string };
-    routeCallback(d.threadId)?.onDone(d.suggestions, d.runId);
+    const d = data as { suggestions?: Array<{prompt: string}>; threadId?: string; runId?: string; cancelled?: boolean };
+    routeCallback(d.threadId)?.onDone(d.suggestions, d.runId, d.cancelled);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
@@ -283,12 +280,6 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     if (consoleResultHandler) consoleResultHandler(d);
     else bufferedConsoleResult = d;
   });
-  Shiny.addCustomMessageHandler(`${inputId}:service-status`, (data) => {
-    const d = data as ServiceState;
-    if (serviceStatusHandler) serviceStatusHandler(d);
-    else bufferedServiceStatus = d;
-  });
-
   return {
     sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId) {
       Shiny.setInputValue(
@@ -323,10 +314,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendCancel(threadId) {
+    sendCancel(threadId, runId) {
       Shiny.setInputValue(
         `${inputId}_cancel`,
-        { threadId, ts: Date.now() },
+        { threadId, ...(runId && { runId }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -484,12 +475,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     onWarming(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:warming`, (data) => handler(data as never));
     },
-    onServiceStatus(handler) {
-      serviceStatusHandler = handler;
-      if (bufferedServiceStatus) {
-        handler(bufferedServiceStatus);
-        bufferedServiceStatus = null;
-      }
+    onRunState(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:run-state`, (data) => handler(data as RunStatePayload));
     },
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
@@ -542,12 +529,6 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendRunREnabled(value) {
       Shiny.setInputValue(`${inputId}_run_r_enabled`, { value, ts: Date.now() }, { priority: "event" });
-    },
-    sendAutoStartCopilotApi(value) {
-      Shiny.setInputValue(`${inputId}_auto_start_copilot_api`, { value, ts: Date.now() }, { priority: "event" });
-    },
-    sendRetryService() {
-      Shiny.setInputValue(`${inputId}_retry_service`, { ts: Date.now() }, { priority: "event" });
     },
     onProjects(handler) {
       projectsHandler = handler;

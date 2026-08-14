@@ -143,6 +143,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     cancelPendingServiceSubmissions: rt.cancelPendingServiceSubmissions,
     warming: rt.warming,
     warmingResuming: rt.warmingResuming,
+    runPhase: rt.runPhase,
     warmingLabel: config?.warming_label as string | undefined,
     welcomeMessage: config?.welcome_message as string | undefined,
     stopTask: rt.stopTask,

@@ -43,10 +43,6 @@ assistantUIServer(
   on_set_composer_density = NULL,
   run_r_enabled = NULL,
   on_toggle_run_r = NULL,
-  auto_start_copilot_api = NULL,
-  on_toggle_auto_start_copilot_api = NULL,
-  service_status = NULL,
-  on_retry_service = NULL,
   thread_max_width = NULL,
   show_usage = FALSE,
   context_window = NULL,
@@ -62,7 +58,8 @@ assistantUIServer(
   show_timestamps = FALSE,
   modal = FALSE,
   prewarm = FALSE,
-  allow_warmup = TRUE
+  allow_warmup = TRUE,
+  max_concurrent_runs = 1L
 )
 }
 \arguments{
@@ -293,20 +290,6 @@ toggle (\code{NULL} hides it).}
 \item{on_toggle_run_r}{Optional \verb{function(value)} called when the \code{run_r}
 toggle changes.}
 
-\item{auto_start_copilot_api}{Optional logical initial state of the addin-only
-copilot-api auto-start preference (\code{NULL} hides the service controls).}
-
-\item{on_toggle_auto_start_copilot_api}{Optional \verb{function(value)} called when
-the copilot-api auto-start preference changes.}
-
-\item{service_status}{Optional named list describing the addin service state:
-\code{status} is one of \code{"disabled"}, \code{"checking"}, \code{"starting"}, \code{"ready"},
-or \code{"failed"}; optional \code{message} supplies detail. \code{NULL} means the generic
-widget has no service readiness barrier.}
-
-\item{on_retry_service}{Optional zero-argument function called when the user
-retries a failed addin service startup.}
-
 \item{thread_max_width}{Optional CSS length capping the chat content width
 (e.g. \code{"44rem"}, \code{"800px"}). Default \code{NULL} = \strong{full width} (fills the
 pane, like the Claude Code CLI / VS Code). Pass a length to center the
@@ -401,7 +384,16 @@ open (the default lazy connect only happens on the first message). Turn on
 only when the backend is reliably available at load.}
 
 \item{allow_warmup}{Logical (default \code{TRUE}); allow per-thread cold-start
-warmup of the handler.}
+warmup of the handler. Warmups are deduplicated, limited to one at a time,
+deferred while any foreground run is active or queued, and cancelled when
+the Shiny session ends. The backend connect itself may still be synchronous.}
+
+\item{max_concurrent_runs}{Positive integer global limit for runs in different
+threads (default \code{1}, clamped to \code{8}). The requested limit is honored only
+when \code{handler} explicitly declares
+\code{attr(handler, "supports_concurrent_threads") <- TRUE}; all other handlers
+remain globally serial for backward compatibility. Invocations within one
+thread are always strict FIFO and never overlap.}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

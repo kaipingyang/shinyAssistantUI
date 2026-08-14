@@ -35,6 +35,14 @@ function setup(config: Record<string, unknown> = {}) {
   return renderHook(() => useShinyRuntime("test", config));
 }
 
+function setupCopilot(status: "disabled" | "checking" | "starting" | "ready" | "failed" = "checking", autoStart = true) {
+  return setup({
+    addons: {
+      copilotService: { version: 1, state: { status, autoStart } },
+    },
+  });
+}
+
 // 当前线程消息
 function messages(result: ReturnType<typeof setup>["result"]) {
   return result.current.runtime.thread.getState().messages;
@@ -91,11 +99,124 @@ describe("useShinyRuntime — onNew 基本流", () => {
   });
 });
 
+describe("useShinyRuntime — per-thread composer drafts", () => {
+  it("preserves independent unsent text while switching between threads", async () => {
+    const { result } = setup();
+    const threadA = currentThreadId(result);
+
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("draft A");
+      result.current.switchToNewThread();
+    });
+    const threadB = currentThreadId(result);
+    expect(threadB).not.toBe(threadA);
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("draft B");
+      result.current.runtime.threads.switchToThread(threadA);
+    });
+    expect(result.current.runtime.thread.composer.getState().text).toBe("draft A");
+
+    await act(async () => result.current.runtime.threads.switchToThread(threadB));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("draft B");
+  });
+
+  it("does not restore a submitted draft after switching away and back", async () => {
+    const { result } = setup();
+    const threadA = currentThreadId(result);
+
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("send once");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+
+    await act(async () => result.current.switchToNewThread());
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+  });
+
+  it("clears drafts when the addin switches working directories", async () => {
+    const { result } = setup({ working_dir: "/old-project" });
+    const oldThread = currentThreadId(result);
+
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("old project draft");
+      result.current.switchToNewThread();
+    });
+    await fireR("working-dir", { dir: "/new-project", recent: [] });
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+
+    await act(async () => result.current.runtime.threads.switchToThread(oldThread));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+  });
+
+  it("does not resurrect a submitted local slash action", async () => {
+    const { result } = setup({
+      action_items: [{ id: "context", command: "context", label: "Context" }],
+    });
+    const threadA = currentThreadId(result);
+
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("/context");
+      await result.current.runtime.thread.composer.send();
+      result.current.switchToNewThread();
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+    expect(inputs.some((item) => item.id === "test")).toBe(false);
+  });
+
+  it("preserves archived drafts and clears permanently deleted drafts", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadA = "draft-server-a";
+    const threadB = "draft-server-b";
+    const sessions = [
+      { id: threadA, title: "Draft A" },
+      { id: threadB, title: "Draft B" },
+    ];
+    await fireR("sessions", { sessions });
+
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("archive me");
+      result.current.runtime.threads.switchToThread(threadB);
+    });
+    await act(async () => result.current.runtime.threads.getItemById(threadA).archive());
+    await act(async () => result.current.runtime.threads.getItemById(threadA).unarchive());
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("archive me");
+
+    await act(async () => result.current.runtime.threads.switchToThread(threadB));
+    await act(async () => result.current.runtime.threads.getItemById(threadA).delete());
+    await fireR("sessions", { sessions });
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runtime.thread.composer.getState().text).toBe("");
+  });
+});
+
+
+
+describe("useShinyRuntime — optional copilot addin", () => {
+  it("registers no copilot channels and applies no readiness barrier without the addon", async () => {
+    const { result } = setup();
+    expect(handlers.has("test:copilot-service-status")).toBe(false);
+    expect(inputs.some((item) => item.id === "test_copilot_service_ready")).toBe(false);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("generic submit");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["generic submit"]);
+  });
+});
 describe("useShinyRuntime — copilot-api readiness barrier", () => {
   it("exposes authoritative service state updates from the backend", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot();
 
-    await fireR("service-status", {
+    await fireR("copilot-service-status", {
       status: "checking",
       autoStart: true,
       message: "Checking copilot-api",
@@ -106,7 +227,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
       message: "Checking copilot-api",
     });
 
-    await fireR("service-status", {
+    await fireR("copilot-service-status", {
       status: "failed",
       autoStart: true,
       message: "copilot-api did not become ready",
@@ -118,8 +239,8 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("holds an explicit pre-ready submission and dispatches it exactly once when ready", async () => {
-    const { result } = setup();
-    await fireR("service-status", { status: "checking", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
 
     await act(async () => {
       await result.current.runtime.thread.composer.setText("wait for copilot");
@@ -128,17 +249,17 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     const outbound = () => inputs.filter((item) => item.id === "test");
     expect(outbound()).toHaveLength(0);
 
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(outbound()).toHaveLength(1);
     expect(outbound()[0].value.text).toBe("wait for copilot");
 
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(outbound()).toHaveLength(1);
   });
 
   it("releases multiple explicit submissions FIFO, one terminal result at a time", async () => {
-    const { result } = setup();
-    await fireR("service-status", { status: "starting", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "starting", autoStart: true });
 
     for (const text of ["first", "second"]) {
       await act(async () => {
@@ -150,7 +271,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     expect(outbound()).toHaveLength(0);
     expect(result.current.pendingServiceSubmissions).toBe(2);
 
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(outbound().map((item) => item.value.text)).toEqual(["first"]);
     const tid = currentThreadId(result);
     await fireR("done", { threadId: tid });
@@ -160,15 +281,15 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("ignores a stale same-thread terminal and only advances the matching run", async () => {
-    const { result } = setup();
-    await fireR("service-status", { status: "starting", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "starting", autoStart: true });
     for (const text of ["first", "second"]) {
       await act(async () => {
         await result.current.runtime.thread.composer.setText(text);
         await result.current.runtime.thread.composer.send();
       });
     }
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     const outbound = () => inputs.filter((item) => item.id === "test");
     const tid = currentThreadId(result);
     const firstRunId = outbound()[0].value.runId as string;
@@ -181,15 +302,15 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("serializes the service FIFO before a clock-queued message", async () => {
-    const { result } = setup();
-    await fireR("service-status", { status: "starting", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "starting", autoStart: true });
     for (const text of ["service A", "service B"]) {
       await act(async () => {
         await result.current.runtime.thread.composer.setText(text);
         await result.current.runtime.thread.composer.send();
       });
     }
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     const outbound = () => inputs.filter((item) => item.id === "test");
     const tid = currentThreadId(result);
     await act(async () => result.current.enqueueMessage("clock C"));
@@ -207,7 +328,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("serializes Enter submissions made while the same thread is running", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot("ready");
     for (const text of ["running first", "enter second"]) {
       await act(async () => {
         await result.current.runtime.thread.composer.setText(text);
@@ -225,14 +346,14 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("does not let another thread service run starve this thread clock queue", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot();
     const threadA = currentThreadId(result);
-    await fireR("service-status", { status: "checking", autoStart: true });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("service A");
       await result.current.runtime.thread.composer.send();
     });
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     const outbound = () => inputs.filter((item) => item.id === "test");
 
     await act(async () => result.current.switchToNewThread());
@@ -250,16 +371,16 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("derives running UI from the current thread while a background service run proceeds", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot();
     const threadA = currentThreadId(result);
-    await fireR("service-status", { status: "checking", autoStart: true });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("background A");
       await result.current.runtime.thread.composer.send();
       result.current.switchToNewThread();
     });
     const threadB = currentThreadId(result);
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(result.current.runtime.thread.getState().isRunning).toBe(false);
     await act(async () => result.current.runtime.threads.switchToThread(threadA));
     expect(result.current.runtime.thread.getState().isRunning).toBe(true);
@@ -268,7 +389,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("requeues a clock dispatch if another run starts during its delay window", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot("ready");
     await act(async () => {
       await result.current.runtime.thread.composer.setText("first run");
       await result.current.runtime.thread.composer.send();
@@ -293,7 +414,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("waits for an existing ordinary run before draining a ready service submission", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot("ready");
     await act(async () => {
       await result.current.runtime.thread.composer.setText("ordinary run");
       await result.current.runtime.thread.composer.send();
@@ -302,12 +423,12 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     const tid = currentThreadId(result);
     const ordinaryRunId = outbound()[0].value.runId;
 
-    await fireR("service-status", { status: "checking", autoStart: true });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("service queued");
       await result.current.runtime.thread.composer.send();
     });
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(outbound().map((item) => item.value.text)).toEqual(["ordinary run"]);
 
     await fireR("done", { threadId: tid, runId: ordinaryRunId });
@@ -317,7 +438,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("does not let reload bypass pending service work", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot("ready");
     await act(async () => {
       await result.current.runtime.thread.composer.setText("original");
       await result.current.runtime.thread.composer.send();
@@ -328,7 +449,7 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     await fireR("done", { threadId: tid, runId: originalRun });
     const assistant = messages(result).find((message) => message.role === "assistant")!;
 
-    await fireR("service-status", { status: "checking", autoStart: true });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("queued");
       await result.current.runtime.thread.composer.send();
@@ -336,13 +457,13 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     });
     expect(inputs.filter((item) => item.id === "test" && item.value.type === "reload"))
       .toHaveLength(0);
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
       .toEqual(["original", "queued"]);
   });
 
   it("drops clock-queued text when the working directory changes", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot("ready");
     await act(async () => {
       await result.current.runtime.thread.composer.setText("old cwd running");
       await result.current.runtime.thread.composer.send();
@@ -357,8 +478,8 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
   });
 
   it("cancels waiting submissions on cwd change or when auto-start is disabled", async () => {
-    const { result } = setup({ auto_start_copilot_api: true });
-    await fireR("service-status", { status: "failed", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "failed", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("old project");
       await result.current.runtime.thread.composer.send();
@@ -367,11 +488,11 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     await fireR("working-dir", { dir: "/new-project", recent: [] });
     expect(result.current.pendingServiceSubmissions).toBe(0);
     expect(messages(result).filter((message) => message.role === "user")).toHaveLength(0);
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
     expect(inputs.some((item) => item.id === "test_cancel_reserved_submissions")).toBe(true);
 
-    await fireR("service-status", { status: "failed", autoStart: true });
+    await fireR("copilot-service-status", { status: "failed", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("disabled wait");
       await result.current.runtime.thread.composer.send();
@@ -389,13 +510,13 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     });
     expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
       .toEqual(["after disable"]);
-    await fireR("service-status", { status: "disabled", autoStart: false });
+    await fireR("copilot-service-status", { status: "disabled", autoStart: false });
     expect(result.current.pendingServiceSubmissions).toBe(0);
   });
 
   it("enters checking immediately when auto-start is re-enabled", async () => {
-    const { result } = setup({ auto_start_copilot_api: false });
-    await fireR("service-status", { status: "disabled", autoStart: false });
+    const { result } = setupCopilot("disabled", false);
+    await fireR("copilot-service-status", { status: "disabled", autoStart: false });
     await act(async () => result.current.setAutoStartCopilotApi?.(true));
     expect(result.current.serviceState?.status).toBe("checking");
 
@@ -405,14 +526,14 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     });
     expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
     expect(result.current.pendingServiceSubmissions).toBe(1);
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
       .toEqual(["wait after enable"]);
   });
 
   it("retains waiting submissions through failure and never auto-sends an ordinary draft", async () => {
-    const { result } = setup();
-    await fireR("service-status", { status: "checking", autoStart: true });
+    const { result } = setupCopilot();
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
     await act(async () => {
       await result.current.runtime.thread.composer.setText("draft only");
     });
@@ -421,17 +542,17 @@ describe("useShinyRuntime — copilot-api readiness barrier", () => {
     await act(async () => {
       await result.current.runtime.thread.composer.send();
     });
-    await fireR("service-status", { status: "failed", autoStart: true });
+    await fireR("copilot-service-status", { status: "failed", autoStart: true });
     expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
     expect(result.current.pendingServiceSubmissions).toBe(1);
 
-    await fireR("service-status", { status: "ready", autoStart: true });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
     expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
       .toEqual(["draft only"]);
   });
 
   it("replaces the current thread server-command snapshot, including an empty clear", async () => {
-    const { result } = setup();
+    const { result } = setupCopilot();
     const tid = currentThreadId(result);
     await fireR("server-commands", {
       threadId: tid,
@@ -2034,4 +2155,177 @@ describe("useShinyRuntime — Claude checklist lifecycle", () => {
     await act(async () => result.current.runtime.threads.switchToThread(threadA));
     expect(result.current.checklist).toBeUndefined();
   });
+});
+
+
+describe("useShinyRuntime — authoritative cross-thread run phases", () => {
+  it("shows Stop only for server-confirmed running, not queued or connecting", async () => {
+    const { result } = setup({ run_state_protocol: 1 });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("phase me");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.find((item) => item.id === "test")!.value;
+    const threadId = outbound.threadId as string;
+    const runId = outbound.runId as string;
+
+    expect(result.current.runPhase).toBe("connecting");
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+
+    await fireR("run-state", { threadId, runId, phase: "queued", queuePosition: 1 });
+    expect(result.current.runPhase).toBe("queued");
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+
+    await fireR("run-state", { threadId, runId, phase: "connecting" });
+    expect(result.current.runPhase).toBe("connecting");
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+
+    await fireR("run-state", { threadId, runId, phase: "running" });
+    expect(result.current.runPhase).toBe("running");
+    expect(result.current.runtime.thread.getState().isRunning).toBe(true);
+  });
+
+  it("stores phase badges and transient backend UI independently by thread", async () => {
+    const { result } = setup({ run_state_protocol: 1 });
+    const threadA = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("A run");
+      await result.current.runtime.thread.composer.send();
+    });
+    const runA = inputs.find((item) => item.id === "test")!.value.runId as string;
+
+    await act(async () => result.current.switchToNewThread());
+    const threadB = currentThreadId(result);
+    await fireR("run-state", { threadId: threadA, runId: runA, phase: "running" });
+    await fireR("suggestions", { threadId: threadA, suggestions: ["Continue A"] });
+    await fireR("status", { threadId: threadA, status: "working", text: "A working" });
+    await fireR("rate-limit", { threadId: threadA, status: "limited", utilization: 0.9 });
+    await fireR("artifact", {
+      threadId: threadA, id: "artifact-A", title: "A report", type: "text", content: "A",
+    });
+
+    expect(result.current.runPhase).toBeUndefined();
+    expect(result.current.statusText).toBeNull();
+    expect(result.current.rateLimit).toBeNull();
+    expect(result.current.artifacts).toEqual([]);
+
+    await act(async () => result.current.runtime.threads.switchToThread(threadA));
+    expect(result.current.runPhase).toBe("running");
+    expect(result.current.statusText).toBe("A working");
+    expect(result.current.rateLimit).toMatchObject({ status: "limited" });
+    expect(result.current.artifacts.map((artifact) => artifact.id)).toEqual(["artifact-A"]);
+    expect(result.current.runtime.thread.getState().suggestions)
+      .toEqual([expect.objectContaining({ prompt: "Continue A" })]);
+
+    expect(result.current.runPhases[threadA]).toBe("running");
+    expect(result.current.runPhases[threadB]).toBeUndefined();
+  });
+
+  it("ignores a stale server phase for an older same-thread run", async () => {
+    const { result } = setup({ run_state_protocol: 1 });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("current");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.find((item) => item.id === "test")!.value;
+    await fireR("run-state", {
+      threadId: outbound.threadId, runId: "older", phase: "complete",
+    });
+    expect(result.current.runPhase).toBe("connecting");
+    expect(result.current.runtime.thread.composer.getState().canSend).toBe(false);
+  });
+});
+
+  it("archives an active thread only after sending an isolated cancel", async () => {
+    const { result } = setup({ persistence: "server", run_state_protocol: 1 });
+    await fireR("sessions", {
+      sessions: [{ id: "active-run", title: "Active run", createdAt: "2026-07-01T00:00:00Z" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread("active-run"));
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("keep running");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.find((item) => item.id === "test")!.value;
+    await fireR("run-state", {
+      threadId: "active-run", runId: outbound.runId, phase: "running",
+    });
+    inputs.length = 0;
+
+    await act(async () => {
+      await result.current.runtime.threads.getItemById("active-run").archive();
+    });
+    expect(inputs.find((item) => item.id === "test_cancel")?.value)
+      .toMatchObject({ threadId: "active-run" });
+    expect(inputs.find((item) => item.id === "test_archive_session")?.value)
+      .toMatchObject({ sessionId: "active-run", archived: true });
+  });
+
+  it("deleting a running thread clears its phase and rejects late phase recreation", async () => {
+    const { result } = setup({ run_state_protocol: 1 });
+    const threadId = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("delete while running");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.find((item) => item.id === "test")!.value;
+    const runId = outbound.runId as string;
+    await fireR("run-state", { threadId, runId, phase: "running" });
+    expect(result.current.runPhases[threadId]).toBe("running");
+    inputs.length = 0;
+
+    await act(async () => {
+      await result.current.runtime.threads.getItemById(threadId).delete();
+    });
+    expect(inputs.find((item) => item.id === "test_cancel")?.value)
+      .toMatchObject({ threadId });
+    expect(result.current.runPhases[threadId]).toBeUndefined();
+
+    await fireR("run-state", { threadId, runId, phase: "running" });
+    expect(result.current.runPhases[threadId]).toBeUndefined();
+  });
+
+
+it("cancelled backend settlement releases the same thread for another run", async () => {
+  const { result } = setup({ run_state_protocol: 1 });
+  await act(async () => {
+    await result.current.runtime.thread.composer.setText("first cancellable");
+    await result.current.runtime.thread.composer.send();
+  });
+  const first = inputs.find((item) => item.id === "test")!.value;
+  await fireR("run-state", {
+    threadId: first.threadId, runId: first.runId, phase: "cancelled",
+  });
+  await fireR("done", {
+    threadId: first.threadId, runId: first.runId, suggestions: [], cancelled: true,
+  });
+  expect(result.current.runPhase).toBe("cancelled");
+
+  inputs.length = 0;
+  await act(async () => {
+    await result.current.runtime.thread.composer.setText("second after cancel");
+    await result.current.runtime.thread.composer.send();
+  });
+  expect(inputs.find((item) => item.id === "test")?.value.text)
+    .toBe("second after cancel");
+});
+
+
+it("archiving drops readiness-deferred submissions before service recovery", async () => {
+  const { result } = setupCopilot();
+  const threadId = currentThreadId(result);
+  await fireR("copilot-service-status", { status: "failed", autoStart: true });
+  await act(async () => {
+    await result.current.runtime.thread.composer.setText("must never dispatch");
+    await result.current.runtime.thread.composer.send();
+  });
+  expect(result.current.pendingServiceSubmissions).toBe(1);
+  inputs.length = 0;
+  await act(async () => {
+    await result.current.runtime.threads.getItemById(threadId).archive();
+  });
+  expect(result.current.pendingServiceSubmissions).toBe(0);
+  await fireR("copilot-service-status", { status: "ready", autoStart: true });
+  expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+  expect(inputs.some((item) => item.id === "test_cancel_reserved_submissions")).toBe(true);
 });

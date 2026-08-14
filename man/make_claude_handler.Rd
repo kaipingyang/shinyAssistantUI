@@ -31,6 +31,11 @@ selector (a "Default" option is always prepended).}
 }
 \value{
 A \code{coro::async} handler function compatible with \code{\link[=assistantUIServer]{assistantUIServer()}}.
+The returned handler declares \code{supports_concurrent_threads = TRUE}: each
+thread owns a separate Claude client while normal turns and compaction remain
+strict single-consumer operations within that thread. This lets
+\code{assistantUIServer(max_concurrent_runs = ...)} run different threads under
+its bounded global scheduler.
 }
 \description{
 Wraps \code{ClaudeAgentSDK} into an \code{assistantUIServer}-compatible handler.

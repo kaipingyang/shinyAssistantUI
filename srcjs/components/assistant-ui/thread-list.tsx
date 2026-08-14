@@ -244,6 +244,8 @@ const ThreadListSkeleton: FC = () => {
 export const ThreadListItem: FC = () => {
   const id = useAuiState((s) => s.threadListItem.id);
   const title = useAuiState((s) => s.threadListItem.title as string | undefined);
+  const runPhase = useAuiState((s) => s.threadListItem.custom?.runPhase as
+    | "queued" | "connecting" | "running" | undefined);
   const { onRename } = useShinyConfig();
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
@@ -280,6 +282,22 @@ export const ThreadListItem: FC = () => {
           >
             <ThreadListItemPrimitive.Title fallback="New Chat" />
           </span>
+          {runPhase && (
+            <span
+              data-slot="aui_thread-list-run-phase"
+              data-run-phase={runPhase}
+              role="status"
+              title={runPhase === "queued" ? "Waiting" : runPhase === "connecting" ? "Connecting" : "Running"}
+              className={cn(
+                "ms-2 size-2 shrink-0 rounded-full",
+                runPhase === "running" && "bg-primary animate-pulse",
+                runPhase === "connecting" && "bg-amber-500",
+                runPhase === "queued" && "bg-muted-foreground",
+              )}
+            >
+              <span className="sr-only">{runPhase}</span>
+            </span>
+          )}
         </ThreadListItemPrimitive.Trigger>
       )}
       {!renaming && <ThreadListItemMore onRename={startRename} />}

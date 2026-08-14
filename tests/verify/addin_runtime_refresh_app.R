@@ -15,7 +15,8 @@ ui <- fluidPage(
   actionButton("commands_new", "new commands"),
   actionButton("task_start", "task start"),
   tags$div(id = "backend_count", textOutput("count", inline = TRUE)),
-  tags$div(id = "backend_order", textOutput("order", inline = TRUE))
+  tags$div(id = "backend_order", textOutput("order", inline = TRUE)),
+  tags$div(id = "retry_count", textOutput("retries", inline = TRUE))
 )
 
 server <- function(input, output, session) {
@@ -103,36 +104,44 @@ server <- function(input, output, session) {
     }
   }
 
-  ctrl <- assistantUIServer(
-    "chat",
-    handler = handler,
-    persistence = "server",
-    show_thread_list = TRUE,
-    auto_start_copilot_api = TRUE,
-    service_status = list(status = "checking", autoStart = TRUE),
-    on_toggle_auto_start_copilot_api = function(value) invisible(value),
-    on_retry_service = function() service$retry(),
-    on_session_load = load_growing_history
-  )
-
-  # Injected fake worker: polls a fixture-only flag and never calls the real home script.
+  retry_count <- reactiveVal(0L)
+  # Fixture-only health flag and no-op launcher. Automated verification never
+  # invokes or modifies the real ~/auto-start-copilot.sh.
   ready_path <- file.path(tempdir(), paste0("shinyAssistantUI-fake-copilot-ready-", Sys.getpid()))
   unlink(ready_path)
-  worker <- new.env(parent = emptyenv())
-  worker$is_alive <- function() !file.exists(ready_path)
-  worker$get_result <- function() list(status = "ready", message = "fake copilot-api is ready")
-  service <- shinyAssistantUI:::.new_copilot_service(
+  copilot_plugin <- shinyAssistantUI:::.new_copilot_addin_plugin(
     auto_start = TRUE,
-    publish = function(status) ctrl$send_service_status(status),
-    worker_factory = function() worker,
-    schedule = function(fn, delay) later::later(fn, delay = delay),
-    poll_interval = 0.05
+    service_factory = function(auto_start, publish) {
+      service <- shinyAssistantUI:::.new_copilot_service(
+        auto_start = auto_start,
+        publish = publish,
+        health = function() file.exists(ready_path),
+        launch = function() invisible(0L),
+        script_exists = function(path) TRUE,
+        script_executable = function(path) TRUE,
+        schedule = function(fn, delay) later::later(fn, delay = delay),
+        timeout = 0.35,
+        poll_interval = 0.05
+      )
+      retry <- service$retry
+      service$retry <- function() {
+        retry_count(isolate(retry_count()) + 1L)
+        retry()
+      }
+      service
+    }
   )
-  service$start()
-  session$onSessionEnded(function() {
-    service$dispose()
-    unlink(ready_path)
-  })
+  chat_handler <- handler
+  attr(chat_handler, "ui_addons") <- list(copilotService = copilot_plugin$config())
+  ctrl <- assistantUIServer(
+    "chat",
+    handler = chat_handler,
+    persistence = "server",
+    show_thread_list = TRUE,
+    on_session_load = load_growing_history
+  )
+  copilot_plugin$bind(session, "chat_input")
+  session$onSessionEnded(function() unlink(ready_path))
 
   assistantUIServer("plain", handler = handler)
 
@@ -160,12 +169,15 @@ server <- function(input, output, session) {
   session$onFlushed(function() {
     ctrl$send_sessions(list(sessions = list(
       list(id = "checklist-history", title = "Checklist history",
-           preview = "Historical checklist", createdAt = as.numeric(Sys.time()) * 1000)
+           preview = "Historical checklist", createdAt = as.numeric(Sys.time()) * 1000),
+      list(id = "draft-history-b", title = "Draft history B",
+           preview = "Second restored session", createdAt = as.numeric(Sys.time()) * 1000 - 1000)
     )))
   }, once = TRUE)
 
   output$count <- renderText(as.character(count()))
   output$order <- renderText(paste(order(), collapse = "|"))
+  output$retries <- renderText(as.character(retry_count()))
 }
 
 shinyApp(ui, server)
