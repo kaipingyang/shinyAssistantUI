@@ -156,6 +156,21 @@ check("ready checkmark is visibly green", isTRUE(ev(paste0(
   "return !!i&&/text-green-/.test(i.className)})()"
 ))))
 
+layout_detail <- ev(paste0(
+  "(function(){var s=document.querySelector('#chat [data-slot=aui_service_status][data-status=ready]'),",
+  "u=document.querySelector('#chat [data-slot=aui_usage_footer]'),",
+  "r=document.querySelector('#chat [data-slot=aui_composer_meta_footer][data-layout=inline]');",
+  "var sr=s&&s.getBoundingClientRect(),ur=u&&u.getBoundingClientRect();return JSON.stringify({",
+  "service:!!s,usage:!!u,row:!!r,same:!!s&&!!u&&!!r&&s.parentElement===r&&u.parentElement===r,",
+  "serviceTop:sr&&sr.top,usageTop:ur&&ur.top,rowHeight:r&&r.offsetHeight,text:r&&r.innerText})})()"
+))
+check("ready and usage share one compact row", isTRUE(ev(paste0(
+  "(function(){var s=document.querySelector('#chat [data-slot=aui_service_status][data-status=ready]'),",
+  "u=document.querySelector('#chat [data-slot=aui_usage_footer]'),",
+  "r=document.querySelector('#chat [data-slot=aui_composer_meta_footer][data-layout=inline]');",
+  "if(!s||!u||!r)return false;",
+  "return s.parentElement===r&&u.parentElement===r&&r.offsetHeight<=28})()"
+))), layout_detail)
 # Authoritative server command snapshots: old -> [] -> new.
 ev("document.getElementById('commands_old').click()")
 clear_editor(); b$Input$insertText(text = "/")

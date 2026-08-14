@@ -381,6 +381,32 @@ describe("copilot-api service state", () => {
     expect(editorIn(widget).getAttribute("contenteditable")).toBe("true");
   });
 
+  it("places ready status and usage metrics in one compact footer row", () => {
+    const { getByTestId } = render(
+      <Widget
+        id="service-ready-usage"
+        context={{
+          serviceState: { status: "ready" },
+          usage: { costUsd: 1.4781, tokens: 78022, turns: 1, durationMs: 7500 },
+        } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-service-ready-usage");
+    const row = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_composer_meta_footer"][data-layout="inline"]',
+    );
+    const ready = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_service_status"][data-status="ready"]',
+    );
+    const usage = widget.querySelector<HTMLElement>('[data-slot="aui_usage_footer"]');
+
+    expect(row).not.toBeNull();
+    expect(ready?.parentElement).toBe(row);
+    expect(usage?.parentElement).toBe(row);
+    expect(row?.textContent).toContain("copilot-api is ready");
+    expect(row?.textContent).toContain("$1.4781 · 78,022 tokens · 1 turn · 7.5s");
+  });
+
   it.each(["checking", "starting", "failed"] as const)(
     "renders actionable %s state above the Composer",
     (status) => {

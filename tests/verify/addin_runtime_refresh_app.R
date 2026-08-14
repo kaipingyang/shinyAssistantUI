@@ -22,7 +22,7 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   count <- reactiveVal(0L)
   order <- reactiveVal(character())
-  handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, ...) {
+  handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result, on_usage, ...) {
     cat("[HANDLER]", message, "\n", file = stderr())
     count(isolate(count()) + 1L)
     order(c(isolate(order()), message))
@@ -59,6 +59,7 @@ server <- function(input, output, session) {
       )
     }
     on_chunk(paste0("reply:", message))
+    on_usage(cost_usd = 1.4781, tokens = 78022L, turns = 1L, duration_ms = 7500L)
     on_done()
   }
 

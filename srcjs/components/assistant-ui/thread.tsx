@@ -275,8 +275,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-stack" className="flex flex-col gap-1">
               <Composer />
-              <ShinyServiceReadyLine />
-              <ShinyUsageFooter />
+              <ShinyComposerMetaFooter />
             </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
@@ -564,7 +563,7 @@ const ShinyServiceReadyLine: FC = () => {
       data-compact="true"
       role="status"
       aria-live="polite"
-      className="aui-service-ready flex min-h-5 items-center gap-1.5 px-1 py-0.5 text-[11px] text-green-700 dark:text-green-400"
+      className="aui-service-ready flex shrink-0 items-center gap-1.5 whitespace-nowrap py-0.5 text-[11px] text-green-700 dark:text-green-400"
     >
       <span data-slot="aui_service_ready_icon" className="shrink-0 font-bold text-green-600 dark:text-green-400" aria-hidden="true">✓</span>
       <span className="font-medium">copilot-api is ready</span>
@@ -759,11 +758,28 @@ const ShinyUsageFooter: FC = () => {
   if (usage.durationMs != null) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
   return (
     <div
-      className="aui-usage-footer flex items-center justify-end gap-2 px-1 text-xs text-muted-foreground"
+      className="aui-usage-footer ms-auto flex shrink-0 items-center justify-end gap-2 whitespace-nowrap text-xs text-muted-foreground"
       data-slot="aui_usage_footer"
       data-cost-usd={usage.costUsd ?? ""}
     >
       <span>{parts.join(" · ")}</span>
+    </div>
+  );
+};
+
+const ShinyComposerMetaFooter: FC = () => {
+  const { serviceState, usage } = useShinyConfig();
+  const showsReady = serviceState?.status === "ready";
+  const showsUsage = Boolean(usage && (usage.costUsd != null || usage.tokens != null));
+  if (!showsReady && !showsUsage) return null;
+  return (
+    <div
+      data-slot="aui_composer_meta_footer"
+      data-layout="inline"
+      className="flex min-h-5 items-center justify-between gap-3 px-1"
+    >
+      <ShinyServiceReadyLine />
+      <ShinyUsageFooter />
     </div>
   );
 };
