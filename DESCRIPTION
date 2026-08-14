@@ -12,6 +12,7 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 Imports:
+    coro (>= 1.1.0),
     grDevices,
     htmltools,
     shiny,
@@ -23,7 +24,6 @@ Suggests:
     RSQLite,
     base64enc,
     jsonlite,
-    coro,
     promises,
     later,
     ellmer,
