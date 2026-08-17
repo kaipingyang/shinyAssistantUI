@@ -24,6 +24,7 @@ assistantUIServer(
   on_edits = NULL,
   on_archive_session = NULL,
   on_delete_session = NULL,
+  workspace_mode = FALSE,
   working_dir = NULL,
   native_picker = FALSE,
   on_pick_working_dir = NULL,
@@ -234,6 +235,12 @@ sessions stay hidden across reopens (the Claude addin stores this per project).}
 confirms deleting a session. This is destructive: the Claude addin wires it to
 \code{ClaudeAgentSDK::delete_session()}, permanently removing the transcript from
 disk. The UI requires an explicit confirmation before invoking it.}
+
+\item{workspace_mode}{Logical. When \code{TRUE}, enables project-aware thread
+metadata and navigation. Incoming requests may supply an optional \code{project}
+snapshot; handlers, history callbacks, and thread-aware providers receive it
+only when their formals declare \code{project} (or \code{...}), preserving existing
+callback signatures. Defaults to \code{FALSE}.}
 
 \item{working_dir}{Optional initial working directory shown in the
 working-directory picker (addin).}

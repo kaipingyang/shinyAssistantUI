@@ -64,6 +64,8 @@ export type SessionItem = {
   preview: string;
   createdAt: string; // ISO 8601 datetime string
   archived?: boolean; // server-authoritative soft-hide (方案B)
+  project?: string;
+  projectLabel?: string;
 };
 
 export type RunCallbacks = {
@@ -106,18 +108,18 @@ export type HistoryLoadPayload = {
 };
 
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string) => void;
-  reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string) => void;
+  reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean, project?: string) => void;
   cancelReservedSubmissions: (submissionIds: string[]) => void;
-  sendReload: (text: string, threadId: string, runId?: string) => void;
+  sendReload: (text: string, threadId: string, runId?: string, project?: string) => void;
   sendCancel: (threadId: string, runId?: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
-  sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
-  sendRename: (threadId: string, title: string) => void;
-  sendOpenFile: (path: string, line?: number) => void;
-  sendRunInConsole: (code: string) => void;
-  sendArchiveSession: (sessionId: string, archived: boolean) => void;
-  sendDeleteSession: (sessionId: string) => void;
+  sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions, project?: string) => void;
+  sendRename: (threadId: string, title: string, project?: string) => void;
+  sendOpenFile: (path: string, line?: number, threadId?: string, project?: string) => void;
+  sendRunInConsole: (code: string, threadId?: string, project?: string) => void;
+  sendArchiveSession: (sessionId: string, archived: boolean, project?: string) => void;
+  sendDeleteSession: (sessionId: string, project?: string) => void;
   sendPickWorkingDir: () => void;
   sendSetWorkingDir: (path: string) => void;
   sendFilesPaneFollow: (value: boolean) => void;
@@ -128,20 +130,20 @@ export interface ShinyBridge {
   sendRunREnabled: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
-  sendLoadSession: (sessionId: string, threadId: string, requestId?: string) => void;
-  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string) => void;
+  sendLoadSession: (sessionId: string, threadId: string, requestId?: string, project?: string) => void;
+  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string, project?: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
-  sendWarmup: (threadId: string) => void;
-  requestIdeContext: (requestId: string, threadId: string) => void;
-  searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number) => void;
+  sendWarmup: (threadId: string, project?: string) => void;
+  requestIdeContext: (requestId: string, threadId: string, project?: string) => void;
+  searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number, project?: string) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
-  onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string }) => void) => void;
+  onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; contextTokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number }) => void) => void;
   onStateSnapshot: (handler: (data: { threadId?: string; state?: unknown }) => void) => void;
@@ -170,7 +172,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   let bufferedWorkingDir: WorkingDirPayload | null = null;
   let projectsHandler: ((data: ProjectsPayload) => void) | null = null;
   let bufferedProjects: ProjectsPayload | null = null;
-  type ConsoleResultData = { code: string; ok: boolean; output: string; error: string };
+  type ConsoleResultData = { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string };
   let consoleResultHandler: ((data: ConsoleResultData) => void) | null = null;
   let bufferedConsoleResult: ConsoleResultData | null = null;
 
@@ -281,18 +283,18 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     else bufferedConsoleResult = d;
   });
   return {
-    sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId) {
+    sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId, project) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ...(runId && { runId }), ...(submissionId && { submissionId }), ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ...(runId && { runId }), ...(submissionId && { submissionId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    reserveIdeContext(submissionId, threadId, selectionVisible) {
+    reserveIdeContext(submissionId, threadId, selectionVisible, project) {
       Shiny.setInputValue(
         `${inputId}_reserve_submission`,
-        { submissionId, threadId, selectionVisible, ts: Date.now() },
+        { submissionId, threadId, selectionVisible, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
     },
@@ -306,10 +308,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendReload(text, threadId, runId) {
+    sendReload(text, threadId, runId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "reload", text, threadId, ...(runId && { runId }), ts: Date.now() },
+        { type: "reload", text, threadId, ...(runId && { runId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -330,7 +332,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendAction(actionId, threadId, options = {}) {
+    sendAction(actionId, threadId, options = {}, project) {
       Shiny.setInputValue(
         `${inputId}_action`,
         {
@@ -338,64 +340,65 @@ export function createShinyBridge(inputId: string): ShinyBridge {
           threadId,
           requestId: options.requestId,
           silent: options.silent ?? false,
+          ...(project && { project }),
           ts: Date.now(),
         },
         { priority: "event" }
       );
     },
 
-    sendRename(threadId, title) {
+    sendRename(threadId, title, project) {
       Shiny.setInputValue(
         `${inputId}_rename`,
-        { threadId, title, ts: Date.now() },
+        { threadId, title, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendOpenFile(path, line) {
+    sendOpenFile(path, line, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_open_file`,
-        { path, line: line ?? null, ts: Date.now() },
+        { path, line: line ?? null, ...(threadId && { threadId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendRunInConsole(code) {
+    sendRunInConsole(code, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_run_in_console`,
-        { code, ts: Date.now() },
+        { code, ...(threadId && { threadId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendArchiveSession(sessionId, archived) {
+    sendArchiveSession(sessionId, archived, project) {
       Shiny.setInputValue(
         `${inputId}_archive_session`,
-        { sessionId, archived, ts: Date.now() },
+        { sessionId, archived, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendDeleteSession(sessionId) {
+    sendDeleteSession(sessionId, project) {
       Shiny.setInputValue(
         `${inputId}_delete_session`,
-        { sessionId, ts: Date.now() },
+        { sessionId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendLoadSession(sessionId, threadId, requestId) {
+    sendLoadSession(sessionId, threadId, requestId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session", sessionId, threadId, requestId, ts: Date.now() },
+        { type: "load_session", sessionId, threadId, requestId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50, requestId) {
+    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50, requestId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session_page", sessionId, threadId, cursor, limit, requestId, ts: Date.now() },
+        { type: "load_session_page", sessionId, threadId, cursor, limit, requestId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -415,26 +418,26 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         { priority: "event" }
       );
     },
-    sendWarmup(threadId) {
+    sendWarmup(threadId, project) {
       Shiny.setInputValue(
         `${inputId}_warmup`,
-        { threadId, ts: Date.now() },
+        { threadId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    requestIdeContext(requestId, threadId) {
+    requestIdeContext(requestId, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_ide_context_refresh`,
-        { requestId, threadId, ts: Date.now() },
+        { requestId, threadId, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
     },
 
-    searchWorkspace(requestId, threadId, query, kinds = ["file", "folder"], limit = 50) {
+    searchWorkspace(requestId, threadId, query, kinds = ["file", "folder"], limit = 50, project) {
       Shiny.setInputValue(
         `${inputId}_workspace_search`,
-        { requestId, threadId, query, kinds, limit, ts: Date.now() },
+        { requestId, threadId, query, kinds, limit, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
     },

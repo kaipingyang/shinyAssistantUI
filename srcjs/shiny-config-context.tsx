@@ -44,6 +44,8 @@ export interface ShinyConfigCtx {
   commands: ShinyCommand[];
   actionItems: ShinyActionItem[];
   showTimestamps: boolean;
+  /** Plan 81: opt-in multi-project Claude Workspace navigation. */
+  workspaceMode?: boolean;
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;

@@ -4,6 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useShinyConfig } from "@/shiny-config-context";
+import {
+  groupWorkspaceThreads,
+  projectForThread,
+  type WorkspaceThreadGroup,
+} from "@/workspace-threads";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog";
 import {
   AuiIf,
@@ -15,6 +20,8 @@ import {
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  ChevronRightIcon,
+  FolderIcon,
   GitBranchIcon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -31,23 +38,45 @@ import {
 } from "react";
 
 export const ThreadList: FC = () => {
+  const { workspaceMode } = useShinyConfig();
+
   return (
-    <ThreadListRoot>
-      <ThreadListNew />
-      <ThreadListItems />
-      <ArchivedThreadListItems />
-    </ThreadListRoot>
+    <div
+      data-slot="aui_thread-list-outer-scroll"
+      className={cn(
+        "h-full min-h-0",
+        workspaceMode
+          ? "overflow-y-scroll [scrollbar-color:var(--color-muted-foreground)_var(--color-muted)] [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-3 [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/70 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/50 [&::-webkit-scrollbar-track]:bg-muted/50"
+          : "overflow-y-auto",
+      )}
+    >
+      <div
+        data-slot="aui_thread-list-outer-scroll-content"
+        className={cn("min-w-0", workspaceMode && "pe-3")}
+      >
+        <ThreadListRoot>
+          <ThreadListNew />
+          <ThreadListItems />
+          <ArchivedThreadListItems />
+        </ThreadListRoot>
+      </div>
+    </div>
   );
 };
 
 // 方案B：归档区（可恢复）。仅在存在归档线程时显示；每项提供"取消归档"。
 const ArchivedThreadListItems: FC = () => {
   const archivedIds = useAuiState((s) => s.threads.archivedThreadIds);
+  const { workspaceMode } = useShinyConfig();
   if (!archivedIds || archivedIds.length === 0) return null;
   return (
-    <div data-slot="aui_thread-list-archived" className="mt-2 flex flex-col gap-0.5 border-t pt-2">
+    <div data-slot="aui_thread-list-archived" className="mt-2 min-w-0 border-t pt-2">
       <div className="text-muted-foreground px-2.5 pb-1 text-xs font-medium">Archived</div>
-      <ThreadListPrimitive.Items archived components={{ ThreadListItem: ArchivedThreadListItem }} />
+      {workspaceMode ? (
+        <WorkspaceThreadGroups archived />
+      ) : (
+        <ThreadListPrimitive.Items archived components={{ ThreadListItem: ArchivedThreadListItem }} />
+      )}
     </div>
   );
 };
@@ -83,7 +112,7 @@ export const ThreadListRoot: FC<
   return (
     <ThreadListPrimitive.Root
       data-slot="aui_thread-list-root"
-      className={cn("flex flex-col gap-0.5", className)}
+      className={cn("flex min-w-0 flex-col gap-0.5 overflow-hidden", className)}
       {...props}
     />
   );
@@ -122,7 +151,135 @@ const dateGroupLabel = (
 
 type ThreadListGroup = { label: string; indices: number[] };
 
+const WorkspaceProjectGroup: FC<{
+  group: WorkspaceThreadGroup;
+  threadIds: readonly string[];
+  archived: boolean;
+  initiallyExpanded: boolean;
+  Item: FC;
+}> = ({ group, threadIds, archived, initiallyExpanded, Item }) => {
+  // The current project only supplies the mount-time default. After that, each
+  // folder belongs entirely to the user: no current-thread effect and no accordion.
+  const [expanded, setExpanded] = useState(initiallyExpanded);
+  const count = group.indices.length;
+
+  return (
+    <div
+      data-slot="aui_workspace-project-group"
+      data-project={group.project}
+      data-archived={archived ? "true" : "false"}
+      data-expanded={expanded ? "true" : "false"}
+      className="min-w-0"
+    >
+      <button
+        type="button"
+        data-slot="aui_workspace-project-header"
+        data-project={group.project}
+        title={group.project || group.label}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} ${group.label}`}
+        onClick={() => setExpanded((current) => !current)}
+        className="text-muted-foreground hover:bg-muted flex w-full min-w-0 items-center gap-1 rounded-md px-2 pt-3 pb-1 text-start text-xs font-medium transition-colors"
+      >
+        <ChevronRightIcon
+          data-slot="aui_workspace-project-chevron"
+          aria-hidden="true"
+          className={cn(
+            "size-3.5 shrink-0 transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+        <FolderIcon
+          data-slot="aui_workspace-project-folder"
+          aria-hidden="true"
+          className="size-3.5 shrink-0"
+        />
+        <span data-slot="aui_workspace-project-label" className="min-w-0 flex-1 truncate">
+          {group.label}
+        </span>
+        <span
+          data-slot="aui_workspace-thread-count"
+          aria-label={`${count} conversation${count === 1 ? "" : "s"}`}
+          title={`${count} conversation${count === 1 ? "" : "s"}`}
+          className="shrink-0 text-[10px] leading-none tabular-nums opacity-70"
+        >
+          {count}
+        </span>
+        {group.activeRuns > 0 && (
+          <span
+            data-slot="aui_workspace-run-count"
+            className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
+          >
+            {group.activeRuns} run{group.activeRuns === 1 ? "" : "s"}
+          </span>
+        )}
+        {group.activeTasks > 0 && (
+          <span
+            data-slot="aui_workspace-task-count"
+            className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
+          >
+            {group.activeTasks} task{group.activeTasks === 1 ? "" : "s"}
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div
+          data-slot="aui_workspace-project-threads"
+          className="ms-2 max-h-64 min-w-0 overflow-y-auto overscroll-contain border-s ps-1 pe-0.5"
+        >
+          {group.indices.map((index) => (
+            <ThreadListPrimitive.ItemByIndex
+              key={threadIds[index]}
+              index={index}
+              archived={archived}
+              components={{ ThreadListItem: Item }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const WorkspaceThreadGroups: FC<{ archived?: boolean }> = ({ archived = false }) => {
+  const threadIds = useAuiState((s) =>
+    archived ? s.threads.archivedThreadIds : s.threads.threadIds,
+  );
+  const mainThreadId = useAuiState((s) => s.threads.mainThreadId);
+  const threadItems = useAuiState((s) => s.threads.threadItems);
+  const currentThread = useMemo(
+    () => threadItems.find((item) => item.id === mainThreadId),
+    [mainThreadId, threadItems],
+  );
+  const currentProject = currentThread
+    ? projectForThread(currentThread, "")
+    : undefined;
+  const groups = useMemo(() => {
+    const itemsById = new Map(threadItems.map((item) => [item.id, item]));
+    return groupWorkspaceThreads(threadIds, itemsById);
+  }, [threadIds, threadItems]);
+  const Item = archived ? ArchivedThreadListItem : ThreadListItem;
+
+  return groups.map((group) => (
+    <WorkspaceProjectGroup
+      key={group.project || group.label}
+      group={group}
+      threadIds={threadIds}
+      archived={archived}
+      initiallyExpanded={
+        !archived && currentProject !== undefined && group.project === currentProject
+      }
+      Item={Item}
+    />
+  ));
+};
+
 const ThreadListItemGroups: FC = () => {
+  const { workspaceMode } = useShinyConfig();
+  return workspaceMode ? <WorkspaceThreadGroups /> : <DateThreadListItemGroups />;
+};
+
+const DateThreadListItemGroups: FC = () => {
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const threadItems = useAuiState((s) => s.threads.threadItems);
 
@@ -194,7 +351,7 @@ export const ThreadListNew = forwardRef<
         variant="ghost"
         data-slot="aui_thread-list-new"
         className={cn(
-          "hover:bg-muted data-active:bg-muted h-8 justify-start gap-2 rounded-md px-2.5 text-sm font-normal",
+          "hover:bg-muted data-active:bg-muted h-8 min-w-0 justify-start gap-2 rounded-md px-2.5 text-sm font-normal",
           className,
         )}
         {...props}
@@ -207,7 +364,7 @@ export const ThreadListNew = forwardRef<
             />
             <span
               data-slot="aui_thread-list-new-label"
-              className={cn("whitespace-nowrap", labelClassName)}
+              className={cn("min-w-0 truncate whitespace-nowrap", labelClassName)}
             >
               New Thread
             </span>

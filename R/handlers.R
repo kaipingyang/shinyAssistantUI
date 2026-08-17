@@ -1422,8 +1422,10 @@ make_ellmer_session_loader <- function(store) {
 #' @param session_map_path Path to the `.rds` file used to persist
 #'   `thread_id -> session_id` mappings. Defaults to
 #'   `".claude_session_map.rds"` in the current working directory.
-#' @param cwd_provider Optional zero-argument function returning the current
-#'   working directory to connect the CLI in (used by the addin's dir picker).
+#' @param cwd_provider Optional function returning the working directory used
+#'   when a thread's CLI client connects. It may declare `thread_id` and
+#'   `project`; arguments are filtered by formals, so existing zero-argument
+#'   providers remain compatible.
 #' @param thinking_provider Optional zero-argument function returning the current
 #'   thinking level to apply on connect.
 #' @param models Optional character vector of model ids to offer in the model
@@ -1576,7 +1578,7 @@ make_claude_handler <- function(options       = NULL,
   compact_in_progress <- list()
   reset_clients_pending <- FALSE
 
-  make_opts <- function(thread_id, resume_sid = NULL) {
+  make_opts <- function(thread_id, resume_sid = NULL, project = NULL) {
     # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
     #        "YOLO"(yolo)  = bypassPermissions + 丢弃 --permission-prompt-tool。
     .pm      <- permission_mode_for(thread_id)
@@ -1586,7 +1588,9 @@ make_claude_handler <- function(options       = NULL,
       permission_mode             = if (.ask_all) "default" else if (.yolo) "bypassPermissions" else .pm,
       permission_prompt_tool_name = if (.yolo) NULL else (options$permission_prompt_tool_name %||% "stdio"),
       include_partial_messages    = options$include_partial_messages %||% TRUE,
-      cwd                         = (if (is.function(cwd_provider)) cwd_provider() else NULL) %||% options$cwd,
+      cwd                         = (if (is.function(cwd_provider)) {
+        .call_thread_provider(cwd_provider, thread_id, project)
+      } else NULL) %||% options$cwd,
       system_prompt               = options$system_prompt,
       thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
       model                       = internal_model() %||% options$model,
@@ -1611,7 +1615,7 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
-  get_client <- function(thread_id) {
+  get_client <- function(thread_id, project = NULL) {
     if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
 
     strict_sid <- strict_resume_sids[[thread_id]]
@@ -1620,11 +1624,15 @@ make_claude_handler <- function(options       = NULL,
       stored_sid = stored_sid,
       strict_sid = strict_sid,
       connect_resume = function(sid) {
-        resumed <- connect_new_client(thread_id, make_opts(thread_id, sid))
+        resumed <- connect_new_client(
+          thread_id, make_opts(thread_id, sid, project)
+        )
         if (!is.null(strict_sid)) strict_resume_sids[[thread_id]] <<- NULL
         resumed
       },
-      connect_fresh = function() connect_new_client(thread_id, make_opts(thread_id)),
+      connect_fresh = function() {
+        connect_new_client(thread_id, make_opts(thread_id, project = project))
+      },
       on_normal_resume_failure = function(e) {
         message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
         session_map <<- tryCatch(
@@ -1891,7 +1899,7 @@ make_claude_handler <- function(options       = NULL,
     on_tool_call_start = NULL, on_tool_call_delta = NULL,
     on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
     on_commands = NULL, on_warming = NULL,
-    ide_context = NULL
+    ide_context = NULL, project = NULL
   ) {
     if (isTRUE(compact_in_progress[[thread_id]])) {
       on_error("Conversation compaction is still running; retry after it finishes")
@@ -1918,7 +1926,7 @@ make_claude_handler <- function(options       = NULL,
       coro::await(later_promise(0.05))
     }
     client <- tryCatch(
-      get_client(thread_id),
+      get_client(thread_id, project),
       error = function(e) { on_error(conditionMessage(e)); NULL }
     )
     if (cold && !is.null(on_warming)) on_warming(FALSE)  # 连上(或失败)即清除指示器
@@ -2534,8 +2542,8 @@ make_claude_handler <- function(options       = NULL,
     )
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
-  attr(handler_fn, "warmup") <- function(thread_id) {
-    get_client(thread_id)
+  attr(handler_fn, "warmup") <- function(thread_id, project = NULL) {
+    get_client(thread_id, project)
     invisible(NULL)
   }
   # 暴露"按 session 断开 client"，供 addin 删除会话前调用（见 .claude_delete_session）。

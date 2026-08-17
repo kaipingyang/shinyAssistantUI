@@ -100,7 +100,8 @@
 #' @noRd
 .claude_chat_app <- function(project, ctx = NULL, options = NULL,
                               permission_mode = "default", prewarm = FALSE,
-                              models = NULL, console_url = NULL) {
+                              models = NULL, console_url = NULL,
+                              workspace = FALSE, workspace_projects = NULL) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
     stop("The Claude Code addin needs the 'ClaudeAgentSDK' package. Install it first.",
          call. = FALSE)
@@ -125,11 +126,28 @@
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
   archived_path <- .claude_addin_path("archived.rds")
-  # 当前工作目录（可切换）。用普通环境持有，cwd_provider 在连接时读取；工作目录选择器
-  # （Phase 3b）改它并触发 reset_clients + 重推 sessions。默认 = 初始 project。
+  # Ordinary Chat keeps its historical single mutable cwd. Workspace uses a
+  # thread-bound router so changing the selected project cannot reroute existing
+  # or queued conversations.
+  projects_path <- .claude_addin_path("projects.rds")
   dir_state <- new.env(parent = emptyenv())
   dir_state$cwd <- project
-  cur_dir <- function() dir_state$cwd
+  workspace_router <- if (isTRUE(workspace)) {
+    .new_workspace_project_router(
+      c(workspace_projects, .read_saved_projects(projects_path)),
+      initial = project
+    )
+  } else {
+    NULL
+  }
+  cur_dir <- if (isTRUE(workspace)) workspace_router$current else function() dir_state$cwd
+  project_for <- function(thread_id = NULL, project = NULL) {
+    if (isTRUE(workspace)) {
+      workspace_router$project_for(thread_id, project)
+    } else {
+      cur_dir()
+    }
+  }
   # Files 面板跟随偏好（持久化，默认 TRUE）：切目录时是否同步 RStudio Files 面板。
   follow_pref <- new.env(parent = emptyenv())
   follow_pref$on <- {
@@ -148,7 +166,7 @@
   }
   handler <- make_claude_handler(
     options          = options,
-    cwd_provider     = cur_dir,
+    cwd_provider     = if (isTRUE(workspace)) project_for else cur_dir,
     models           = models,
     session_map_path = session_map_path
   )
@@ -156,8 +174,35 @@
   if (!is.null(run_r_server))
     tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
   skills <- tryCatch(load_claude_skills(project_dir = cur_dir()), error = function(e) list())
-  workspace_search <- .make_addin_workspace_search_provider(cur_dir)
-  workspace_index_peek <- attr(workspace_search, "peek_index")
+  if (isTRUE(workspace)) {
+    workspace_searchers <- new.env(parent = emptyenv())
+    searcher_for <- function(project) {
+      project <- .canonical_workspace_project(project)
+      if (is.null(project)) return(NULL)
+      searcher <- get0(project, envir = workspace_searchers, inherits = FALSE)
+      if (is.null(searcher)) {
+        searcher <- .make_addin_workspace_search_provider(project)
+        assign(project, searcher, envir = workspace_searchers)
+      }
+      searcher
+    }
+    workspace_search <- function(query = "", kinds = c("file", "folder"),
+                                 limit = 50L, thread_id = NULL, project = NULL) {
+      target <- project_for(thread_id, project)
+      searcher <- searcher_for(target)
+      if (is.null(searcher)) return(list())
+      searcher(query = query, kinds = kinds, limit = limit)
+    }
+    workspace_index_peek <- function(project) {
+      searcher <- searcher_for(project)
+      if (is.null(searcher)) return(NULL)
+      peek <- attr(searcher, "peek_index")
+      if (is.function(peek)) peek() else NULL
+    }
+  } else {
+    workspace_search <- .make_addin_workspace_search_provider(cur_dir)
+    workspace_index_peek <- attr(workspace_search, "peek_index")
+  }
 
   ui <- .claude_chat_ui()
   server <- function(input, output, session) {
@@ -170,7 +215,7 @@
     }, ignoreInit = TRUE)
 
     # 启动时把 Files 面板同步到初始工作目录(受开关控制;延迟以确保会话就绪 + 避开 RPC 竞争)。
-    if (isTRUE(follow_pref$on)) .addin_files_pane_navigate_soon(dir_state$cwd, delay = 0.8)
+    if (isTRUE(follow_pref$on)) .addin_files_pane_navigate_soon(cur_dir(), delay = 0.8)
 
     # 工作目录选择器：RStudio 有原生目录弹窗；apply_working_dir 由下方定义（惰性引用 ctrl/push_sessions）。
     native_picker <- requireNamespace("rstudioapi", quietly = TRUE) &&
@@ -178,19 +223,31 @@
     on_pick_wd <- function() {
       if (!native_picker) return(invisible(NULL))
       d <- tryCatch(rstudioapi::selectDirectory(caption = "Select working directory",
-                                                path = dir_state$cwd),
+                                                path = cur_dir()),
                     error = function(e) NULL)
       if (!is.null(d) && nzchar(d)) apply_working_dir(d)
     }
     on_set_wd <- function(path) apply_working_dir(path)
 
     # 收藏夹（持久化 home）。保存当前目录 / 删除，改后回推列表。apply/ctrl 惰性引用。
-    projects_path <- .claude_addin_path("projects.rds")
     on_save_project <- function() {
-      ctrl$send_projects(.add_saved_project(projects_path, dir_state$cwd))
+      saved <- .add_saved_project(projects_path, cur_dir())
+      if (isTRUE(workspace)) {
+        workspace_router$add(cur_dir())
+        ctrl$send_projects(workspace_router$projects())
+      } else {
+        ctrl$send_projects(saved)
+      }
     }
     on_remove_project <- function(path) {
-      ctrl$send_projects(.remove_saved_project(projects_path, path))
+      saved <- .remove_saved_project(projects_path, path)
+      if (isTRUE(workspace)) {
+        workspace_router$remove(path)
+        ctrl$send_projects(workspace_router$projects())
+        push_sessions()
+      } else {
+        ctrl$send_projects(saved)
+      }
     }
 
     # The inner handler reconnects the current CLI thread after /reload-skills.
@@ -205,7 +262,7 @@
       if (!identical(args$message, "/reload-skills")) return(result)
       refresh_local <- function(value = NULL) {
         ctrl$send_commands(tryCatch(
-          load_claude_skills(project_dir = cur_dir()),
+          load_claude_skills(project_dir = project_for(args$thread_id, args$project)),
           error = function(e) list()
         ))
         value
@@ -229,6 +286,26 @@
     ui_addons$copilotService <- copilot_plugin$config()
     attr(server_handler, "ui_addons") <- ui_addons
 
+    base_session_loader <- make_claude_session_loader(
+      session_map_path = session_map_path
+    )
+    session_loader <- if (isTRUE(workspace)) {
+      function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L,
+               project = NULL) {
+        target <- project_for(thread_id, project)
+        .call_compatible_callback(base_session_loader, list(
+          session_id = session_id,
+          thread_id = thread_id,
+          send_thread = send_thread,
+          cursor = cursor,
+          limit = limit,
+          project = target
+        ))
+      }
+    } else {
+      base_session_loader
+    }
+
     ctrl <- assistantUIServer(
       "chat", handler = server_handler,
       show_thread_list = TRUE,
@@ -237,11 +314,16 @@
       show_usage       = TRUE,   # 组合框下方环形显示上下文用量
       context_window   = 200000L, # Claude 默认上下文窗口
       usage_style      = "ring",
+      workspace_mode    = isTRUE(workspace),
       working_dir      = cur_dir(),
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
       on_set_working_dir  = on_set_wd,
-      projects          = .read_saved_projects(.claude_addin_path("projects.rds")),
+      projects          = if (isTRUE(workspace)) {
+        workspace_router$projects()
+      } else {
+        .read_saved_projects(projects_path)
+      },
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
       # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
@@ -274,19 +356,25 @@
         tryCatch(saveRDS(follow_pref$on, .claude_addin_path("follow_files.rds")),
                  error = function(e) NULL)
         # 刚开启 → 立即把 Files 面板跟到当前目录（Bug2：开启动作本身也导航）。
-        if (isTRUE(v)) .addin_files_pane_navigate_soon(dir_state$cwd)
+        if (isTRUE(v)) .addin_files_pane_navigate_soon(cur_dir())
       },
       # 角度 B:自动批准 run_r 开关(仅当 run_r 已注册才暴露;初始关)。
       auto_run = if (!is.null(run_r_server)) FALSE else NULL,
       on_toggle_auto_run = if (!is.null(run_r_server)) function(v) {
         tryCatch(attr(handler, "set_autorun")(isTRUE(v)), error = function(e) NULL)
       } else NULL,
-      on_session_load  = make_claude_session_loader(session_map_path = session_map_path),
+      on_session_load  = session_loader,
       commands         = skills,
       action_items     = .claude_action_items(),
       on_open_file     = if (native_picker) {
-        function(path, line = NULL) {
-          .addin_open_file(path, line, cur_dir(), workspace_index_peek)
+        function(path, line = NULL, thread_id = NULL, project = NULL) {
+          target <- project_for(thread_id, project)
+          peek <- if (isTRUE(workspace)) {
+            function() workspace_index_peek(target)
+          } else {
+            workspace_index_peek
+          }
+          .addin_open_file(path, line, target, peek)
         }
       } else NULL,
       on_run_in_console = if (requireNamespace("rstudioapi", quietly = TRUE) &&
@@ -297,32 +385,38 @@
         else
           function(code) { .addin_send_to_console(code); list(ok = TRUE, output = "", error = NULL) }
       } else NULL,
-      on_edits         = function(edits) .addin_show_edit_markers(edits, cur_dir()),
-      on_rename        = function(thread_id, title)
-        .claude_rename_session(thread_id, title, session_map_path, cur_dir()),
-      on_archive_session = function(session_id, archived) {
+      on_edits         = function(edits, thread_id = NULL, project = NULL) {
+        .addin_show_edit_markers(edits, project_for(thread_id, project))
+      },
+      on_rename        = function(thread_id, title, project = NULL)
+        .claude_rename_session(
+          thread_id, title, session_map_path, project_for(thread_id, project)
+        ),
+      on_archive_session = function(session_id, archived, project = NULL) {
         # 仅服务端持久化软隐藏；前端已本地乐观更新（移入/移出归档区）。
         # 不再重推会话列表——重推会把"当前对话已生成的 server session"与其客户端新线程
         # 双显（同标题两条）。重开时初始推送（带 archived 标记）才是权威来源。
-        .toggle_archived_id(archived_path, cur_dir(), session_id, archived)
+        .toggle_archived_id(
+          archived_path, project_for(session_id, project), session_id, archived
+        )
       },
-      on_delete_session = function(session_id) {
+      on_delete_session = function(session_id, project = NULL) {
         # 删前断开该 session 的 client（避免 CLI 写回）；真删失败不再静默——重推让它重现。
         .claude_delete_session(
-          session_id, project = cur_dir(), handler = handler,
+          session_id, project = project_for(session_id, project), handler = handler,
           archived_path = archived_path, session_map_path = session_map_path,
           on_reappear = function() tryCatch(push_sessions(), error = function(e) NULL)
         )
       },
-      ide_context_provider = function() {
+      ide_context_provider = function(thread_id = NULL, project = NULL) {
         # 提交前保存活动文档（有路径的；untitled 跳过）→ Claude 编辑基于最新、且不丢未保存改动。
         .addin_save_dirty_docs()
-        .addin_editor_context(cur_dir())
+        .addin_editor_context(project_for(thread_id, project))
       },
       workspace_search_provider = workspace_search,
       warming_label    = "Starting Claude Code\u2026",
       prewarm          = prewarm,
-      max_concurrent_runs = 2L
+      max_concurrent_runs = if (isTRUE(workspace)) 4L else 2L
     )
 
     # Binding is session-local. The plugin starts its independent service only
@@ -332,12 +426,22 @@
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
     # 才运行，ctrl 已赋值）。按当前工作目录 cur_dir() 分桶。
     push_sessions <- function() {
-      ctrl$send_sessions(list(
-        sessions = list_claude_sessions(
+      sessions <- if (isTRUE(workspace)) {
+        snapshot <- .workspace_session_snapshot(
+          workspace_router$projects(),
+          archived_path = archived_path
+        )
+        for (item in snapshot) {
+          workspace_router$project_for(item$id, item$project)
+        }
+        snapshot
+      } else {
+        .call_compatible_callback(list_claude_sessions, list(
           directory = cur_dir(),
           archived_ids = .read_archived_ids(archived_path, cur_dir())
-        )
-      ))
+        ))
+      }
+      ctrl$send_sessions(list(sessions = sessions))
     }
 
     # on_session_load 只负责用户点击后加载消息；侧栏列表必须另行注入。
@@ -370,6 +474,19 @@
       # 显式点选目录：只要同步开就刷新 Files 面板——即使还是当前目录（Bug2）。
       # 用 _soon 延迟一拍,避开"selectDirectory 模态后紧跟调用被吞"。
       if (isTRUE(follow_pref$on)) .addin_files_pane_navigate_soon(nd)
+      if (isTRUE(workspace)) {
+        if (identical(nd, cur_dir())) return(invisible(nd))
+        workspace_router$select(nd)
+        tryCatch(
+          ctrl$send_commands(load_claude_skills(project_dir = nd)),
+          error = function(e) NULL
+        )
+        recent <- add_recent(nd)
+        ctrl$send_working_dir(nd, as.list(recent))
+        ctrl$send_projects(workspace_router$projects())
+        push_sessions()
+        return(invisible(nd))
+      }
       if (identical(nd, dir_state$cwd)) return(invisible(nd))   # cwd 未变 → 跳过重连/收藏/推送
       dir_state$cwd <- nd
       tryCatch(attr(handler, "reset_clients")(), error = function(e) NULL)
@@ -533,14 +650,16 @@
 # 在 job 进程里运行：读参数 → 构建同一个 .claude_chat_app → runApp(非阻塞浏览器)。
 .claude_run_in_job <- function(spec_path, port, host = "127.0.0.1") {
   spec <- readRDS(spec_path)
-  app <- .claude_chat_app(
-    project         = spec$project,
-    options         = spec$options,
+  app <- .call_compatible_callback(.claude_chat_app, list(
+    project = spec$project,
+    options = spec$options,
     permission_mode = spec$permission_mode %||% "default",
-    prewarm         = isTRUE(spec$prewarm),
-    models          = spec$models,
-    console_url     = spec$console_url
-  )
+    prewarm = isTRUE(spec$prewarm),
+    models = spec$models,
+    console_url = spec$console_url,
+    workspace = isTRUE(spec$workspace),
+    workspace_projects = spec$workspace_projects
+  ))
   shiny::runApp(app, port = as.integer(port), host = host, launch.browser = FALSE)
 }
 
@@ -566,7 +685,12 @@
     rstudioapi::viewer(tryCatch(rstudioapi::translateLocalUrl(u, absolute = TRUE),
                                 error = function(e) u))
 
-  job_run(script_path, name = "Claude Code Chat", workingDir = spec$project)
+  job_name <- as.character(spec$job_name %||% if (isTRUE(spec$workspace)) {
+    "Claude Workspace"
+  } else {
+    "Claude Code Chat"
+  })[[1L]]
+  job_run(script_path, name = job_name, workingDir = spec$project)
   url <- sprintf("http://%s:%d", host, port)
   ready <- isTRUE(wait_ready(host, port))
   if (ready) show_viewer(url)
@@ -630,38 +754,111 @@ claude_addin <- function(project         = NULL,
                          models          = NULL,
                          options         = NULL,
                          background      = TRUE) {
-  viewer          <- match.arg(viewer)
-  permission_mode <- match.arg(permission_mode)
-  project <- project %||% .addin_project()
+  .launch_claude_addin(
+    project = project,
+    viewer = match.arg(viewer),
+    permission_mode = match.arg(permission_mode),
+    prewarm = prewarm,
+    models = models,
+    options = options,
+    background = background
+  )
+}
 
+#' Open a multi-project Claude Workspace inside RStudio
+#'
+#' Launches the same Claude Code chat core as [claude_addin()] in workspace mode.
+#' Sessions are grouped and routed by project, and up to four different threads
+#' may run concurrently. Existing saved projects are included automatically.
+#'
+#' @inheritParams claude_addin
+#' @param projects Optional character vector of additional project directories.
+#'   Paths are canonicalized and deduplicated; missing paths remain registered
+#'   but are not queried until they become available.
+#' @return Invisibly, the result of [shiny::runGadget()] or the background-job
+#'   launcher metadata.
+#' @export
+#' @examples
+#' \dontrun{
+#'   claude_workspace_addin()
+#'   claude_workspace_addin(projects = c("~/project-a", "~/project-b"))
+#' }
+claude_workspace_addin <- function(
+    project = NULL,
+    projects = NULL,
+    viewer = c("pane", "dialog", "browser"),
+    permission_mode = c("default", "plan", "acceptEdits", "bypassPermissions"),
+    prewarm = FALSE,
+    models = NULL,
+    options = NULL,
+    background = TRUE) {
+  .launch_claude_addin(
+    project = project,
+    viewer = match.arg(viewer),
+    permission_mode = match.arg(permission_mode),
+    prewarm = prewarm,
+    models = models,
+    options = options,
+    background = background,
+    workspace = TRUE,
+    projects = projects
+  )
+}
+
+.launch_claude_addin <- function(project, viewer, permission_mode, prewarm,
+                                 models, options, background, workspace = FALSE,
+                                 projects = NULL) {
+  project <- project %||% .addin_project()
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
 
-  # 默认后台模式(Plan 20)：Shiny 跑进 RStudio/Positron background job → R console 空出来;
-  # IDE 集成经"子进程回连主会话"仍工作(已真机验证)。app 必须在 job 里构建,故只传参数。
-  # 能起 job 就起;环境不支持(非 RStudio/Positron、纯浏览器)则优雅回退到 gadget/浏览器。
   can_background <- isTRUE(background) && in_rstudio &&
     ("jobRunScript" %in% getNamespaceExports("rstudioapi"))
   if (can_background) {
-    # 在主会话启动 nanonext R-console 环境服务器（later 轮询,console 空闲时服务）,
-    # 让 job 里"Run in Console"能在你的活 .GlobalEnv 执行并把结果回传 Claude(Plan 21/A)。
     console_url <- NULL
-    if (requireNamespace("nanonext", quietly = TRUE) && requireNamespace("later", quietly = TRUE)) {
-      u <- paste0("ipc://", tempfile("claude-addin-console-", fileext = ".sock"))
-      if (isTRUE(.addin_start_r_console_server(u, envir = globalenv()))) console_url <- u
+    if (requireNamespace("nanonext", quietly = TRUE) &&
+        requireNamespace("later", quietly = TRUE)) {
+      url <- paste0("ipc://", tempfile("claude-addin-console-", fileext = ".sock"))
+      if (isTRUE(.addin_start_r_console_server(url, envir = globalenv()))) {
+        console_url <- url
+      }
     }
-    spec <- list(project = project, options = options, permission_mode = permission_mode,
-                 prewarm = prewarm, models = models, console_url = console_url)
+    spec <- list(
+      project = project,
+      options = options,
+      permission_mode = permission_mode,
+      prewarm = prewarm,
+      models = models,
+      console_url = console_url,
+      workspace = isTRUE(workspace),
+      workspace_projects = projects,
+      job_name = if (isTRUE(workspace)) "Claude Workspace" else "Claude Code Chat"
+    )
     return(invisible(.run_claude_bg_job(spec)))
   }
 
-  app <- .claude_chat_app(project, options = options,
-                          permission_mode = permission_mode, prewarm = prewarm,
-                          models = models)
-  vw <- if (!in_rstudio) shiny::browserViewer()
-        else switch(viewer,
-                    pane    = shiny::paneViewer(minHeight = 600),
-                    dialog  = shiny::dialogViewer("Claude Code", width = 1000, height = 800),
-                    browser = shiny::browserViewer())
-  invisible(.run_claude_gadget(app, vw))
+  app <- .claude_chat_app(
+    project,
+    options = options,
+    permission_mode = permission_mode,
+    prewarm = prewarm,
+    models = models,
+    workspace = workspace,
+    workspace_projects = projects
+  )
+  viewer_function <- if (!in_rstudio) {
+    shiny::browserViewer()
+  } else {
+    switch(
+      viewer,
+      pane = shiny::paneViewer(minHeight = 600),
+      dialog = shiny::dialogViewer(
+        if (isTRUE(workspace)) "Claude Workspace" else "Claude Code",
+        width = 1000,
+        height = 800
+      ),
+      browser = shiny::browserViewer()
+    )
+  }
+  invisible(.run_claude_gadget(app, viewer_function))
 }

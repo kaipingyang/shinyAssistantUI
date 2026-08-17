@@ -44,6 +44,7 @@ import {
   resolveToolFileReference,
 } from "./helpers";
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
+import { projectLabel, sessionsToWorkspaceThreads } from "./workspace-threads";
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -155,6 +156,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     ? configuredPersistence
     : "client";
   const usesClientPersistence = persistence === "client";
+  const workspaceMode = config?.workspace_mode === true;
+  const initialSelectedProject = typeof config?.working_dir === "string" ? config.working_dir : "";
+  const workingDirRef = useRef(initialSelectedProject);
+  const threadProjectsRef = useRef(new Map<string, string>());
+  const projectForThreadId = useCallback((threadId: string): string | undefined => {
+    if (!workspaceMode) return undefined;
+    return threadProjectsRef.current.get(threadId) || workingDirRef.current || undefined;
+  }, [workspaceMode]);
 
   // 从 config 提取 commands（本地 skills），用于 /commandName → cmd.prompt 展开 + slash 菜单。
   // 用 state 而非 useMemo：切换工作目录时 R 会重载该项目的 skills 并经 :commands 热更新。
@@ -308,7 +317,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     updateHistoryPage(threadId, (previous) => ({
       ...previous, reading: true, hasMore: false, cursor: null, loadingOlder: false,
     }));
-    bridge.current.sendLoadSession(threadId, threadId, requestId);
+    bridge.current.sendLoadSession(threadId, threadId, requestId, projectForThreadId(threadId));
     const timer = window.setTimeout(() => {
       const pending = historyReplaceRequestsRef.current.get(threadId);
       if (pending?.requestId === requestId) {
@@ -322,7 +331,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
     }, 15_000);
     sessionLoadRetryTimers.current.set(threadId, timer);
-  }, [updateHistoryPage]);
+  }, [updateHistoryPage, projectForThreadId]);
 
   useEffect(() => () => {
     for (const timer of sessionLoadRetryTimers.current.values()) {
@@ -344,8 +353,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const ideRequestSeq = useRef(0);
   // 工作目录选择器（addin）：初始值来自 config；切换后由 :working-dir 消息更新。
   const [workingDir, setWorkingDirState] = useState<string>(
-    () => (typeof config?.working_dir === "string" ? config.working_dir : ""),
+    () => initialSelectedProject,
   );
+  workingDirRef.current = workingDir;
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const nativePicker = config?.native_picker === true;
   // Files 面板跟随开关（addin/RStudio）。undefined = 无此能力（不显示开关）。
@@ -462,7 +472,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     updateHistoryPage(threadId, (previous) => ({ ...previous, loadingOlder: true }));
     const requestId = `history-page-${Date.now()}-${++historyRequestSeqRef.current}`;
     historyOlderRequestsRef.current.set(threadId, requestId);
-    bridge.current.sendLoadSessionPage(threadId, threadId, page.cursor, 50, requestId);
+    bridge.current.sendLoadSessionPage(threadId, threadId, page.cursor, 50, requestId, projectForThreadId(threadId));
     const existingTimer = olderPageRetryTimers.current.get(threadId);
     if (existingTimer !== undefined) window.clearTimeout(existingTimer);
     const timer = window.setTimeout(() => {
@@ -474,14 +484,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
     }, 15_000);
     olderPageRetryTimers.current.set(threadId, timer);
-  }, [updateHistoryPage]);
+  }, [updateHistoryPage, projectForThreadId]);
 
   const requestIdeContextFor = useCallback((threadId: string) => {
     if (!capabilityContract.ide) return;
     const requestId = `ide-${Date.now()}-${++ideRequestSeq.current}`;
     latestIdeRequest.current = requestId;
-    bridge.current.requestIdeContext(requestId, threadId);
-  }, [capabilityContract.ide]);
+    bridge.current.requestIdeContext(requestId, threadId, projectForThreadId(threadId));
+  }, [capabilityContract.ide, projectForThreadId]);
 
   const refreshIdeContext = useCallback(() => {
     requestIdeContextFor(currentThreadIdRef.current);
@@ -502,16 +512,21 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     workspaceDebounceRef.current = window.setTimeout(() => {
       const requestId = `workspace-${Date.now()}-${++workspaceRequestSeq.current}`;
       latestWorkspaceRequest.current = requestId;
-      bridge.current.searchWorkspace(requestId, threadId, query, ["file", "folder"], 50);
+      bridge.current.searchWorkspace(requestId, threadId, query, ["file", "folder"], 50, projectForThreadId(threadId));
     }, 150);
-  }, [capabilityContract.workspace]);
+  }, [capabilityContract.workspace, projectForThreadId]);
 
   // 确保初始线程在列表里
   useEffect(() => {
     setThreads((prev) => {
       if (prev.some((t) => t.id === currentThreadId)) return prev;
+      const project = workspaceMode ? workingDirRef.current || undefined : undefined;
+      if (project) threadProjectsRef.current.set(currentThreadId, project);
       const next = [
-        { id: currentThreadId, status: "regular" as const, title: "New chat" },
+        {
+          id: currentThreadId, status: "regular" as const, title: "New chat",
+          ...(project ? { custom: { project, projectLabel: projectLabel(project) } } : {}),
+        },
         ...prev,
       ];
       saveThreads(inputId, usesClientPersistence, next);
@@ -599,7 +614,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [serverCommandsByThread, setServerCommandsByThread] = useState<Record<string, Array<{ name: string; description?: string }>>>({});
   const streamingIdsRef = useRef<Record<string, string | null>>({});
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
-  const messageQueueRef = useRef<Map<string, string[]>>(new Map()); // 每线程排队消息
+  type QueuedMessage = { text: string; sendText: string; project?: string };
+  const messageQueueRef = useRef<Map<string, QueuedMessage[]>>(new Map()); // 每线程排队消息
   type PendingSubmission = {
     id: string;
     requiresService: boolean;
@@ -611,10 +627,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     storedAttachments: unknown[];
     quote?: QuoteInfo;
     selectionVisible: boolean;
+    project?: string;
     original?: AppendMessage;
   };
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
-  const deferredSubmissionInFlightRef = useRef<{ id: string; threadId: string; runId?: string } | null>(null);
+  const deferredSubmissionInFlightRef = useRef(new Map<string, { id: string; runId?: string }>());
   const deferredSubmissionSeq = useRef(0);
   const messageIdSeq = useRef(0);
   const [pendingServiceSubmissions, setPendingSubmissions] = useState(0);
@@ -680,7 +697,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const permissionRequestsRef = useRef(new Map<string, { threadId: string; requested: string }>());
   const makeActionRequestId = () => `action-${Date.now()}-${++actionRequestSeq.current}`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const deliverTextRef  = useRef<((text: string, threadId: string) => void) | null>(null);
+  const deliverTextRef  = useRef<((text: string, threadId: string, project?: string, sendText?: string) => void) | null>(null);
   // 正在 streaming 的 threadId 集合（含后台并发 run）。用于：
   // ① 多 tab storage 同步时保护正在跑的线程不被磁盘旧值覆盖；
   // per-thread run 序号也用于拒绝晚到的历史快照覆盖请求后启动的 live run。
@@ -963,7 +980,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     });
     // "Run in Console" 结果回流：自动提交一条消息把代码+输出报告给 Claude(Plan 21/A)。
     bridge.current.onConsoleResult((d) => {
-      const threadId = currentThreadIdRef.current;
+      const threadId = d.threadId ?? currentThreadIdRef.current;
       const code = String(d?.code ?? "");
       const ok = d?.ok === true;
       const body = ok
@@ -975,7 +992,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         ok ? "Output:" : "It errored:",
         "```", body, "```",
       ].join("\n");
-      deliverTextRef.current?.(text, threadId);
+      deliverTextRef.current?.(text, threadId, d.project ?? projectForThreadId(threadId));
     });
     // 本地 skills 热更新(切换工作目录时 R 重载该项目 .claude 的 skills 并经 :commands 下发)。
     bridge.current.onCommands((d) => {
@@ -1029,17 +1046,19 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // ── 注册 :working-dir（工作目录切换：更新显示 + 清本次实例的本地线程，
     //    随后到达的 :sessions 会用新目录的会话替换整份列表）──────────────────
     bridge.current.onWorkingDir((d) => {
-      if (typeof d?.dir === "string") setWorkingDirState(d.dir);
+      if (typeof d?.dir === "string") {
+        workingDirRef.current = d.dir;
+        setWorkingDirState(d.dir);
+      }
       if (Array.isArray(d?.recent)) setRecentDirs(d.recent as string[]);
-      // A queued submission belongs to the cwd visible when Send was clicked.
-      // Never deliver either readiness-deferred or clock-queued text after the
-      // addin switches projects.
-      cancelPendingSubmissions();
-      messageQueueRef.current.clear();
-      composerDraftsRef.current.clear();
-      runtimeRef.current?.thread.composer.setText("");
-      // 切目录 → 丢弃旧目录的本地新建线程，避免与新目录 sessions 混显。
-      thisSessionThreadIds.current.clear();
+      if (!workspaceMode) {
+        // Ordinary Chat owns one cwd, so queued work and local threads cannot cross it.
+        cancelPendingSubmissions();
+        messageQueueRef.current.clear();
+        composerDraftsRef.current.clear();
+        runtimeRef.current?.thread.composer.setText("");
+        thisSessionThreadIds.current.clear();
+      }
     });
     bridge.current.onProjects((d) => {
       if (Array.isArray(d?.projects)) setProjects(d.projects as string[]);
@@ -1081,7 +1100,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         const newId = makeThreadId();
         thisSessionThreadIds.current.clear();
         thisSessionThreadIds.current.add(newId);
-        setThreads([{ id: newId, status: "regular", title: "New chat" }]);
+        const project = workspaceMode ? workingDirRef.current || undefined : undefined;
+        if (project) threadProjectsRef.current.set(newId, project);
+        setThreads([{
+          id: newId, status: "regular", title: "New chat",
+          ...(project ? { custom: { project, projectLabel: projectLabel(project) } } : {}),
+        }]);
         setArchivedThreads([]);
         setMessagesMap({ [newId]: [] });
         composerDraftsRef.current.clear();
@@ -1090,6 +1114,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
 
       const serverIds = new Set(sessions.map((s) => s.id));
+      for (const session of sessions) {
+        if (session.project) threadProjectsRef.current.set(session.id, session.project);
+      }
       for (const trackedId of Array.from(sessionLoadStates.current.keys())) {
         if (!serverIds.has(trackedId)) clearThreadHistoryTracking(trackedId);
       }
@@ -1122,12 +1149,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const archivedSessions = sessions.filter((s) => s.archived);
       const activeIds = new Set(activeSessions.map((s) => s.id));
 
-      const serverThreads: ExternalStoreThreadData<"regular">[] = activeSessions.map((s) => ({
-        id: s.id, status: "regular" as const, title: s.title || s.id,
-      }));
-      const serverArchived: ExternalStoreThreadData<"archived">[] = archivedSessions.map((s) => ({
-        id: s.id, status: "archived" as const, title: s.title || s.id,
-      }));
+      const serverThreads = sessionsToWorkspaceThreads(activeSessions, "regular");
+      const serverArchived = sessionsToWorkspaceThreads(archivedSessions, "archived");
 
       setThreads((prev) => {
         // 保留本次 session 新建且尚未上传 server 的线程（例如用户正在输入）
@@ -1238,7 +1261,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendReady();
     // 预热当前(初始)线程:让 R 后台连接该线程的 client,使首条消息不再冷启动。
     // R 侧仅在 prewarm=TRUE 且 handler 暴露 warmup 时响应(ellmer 等无 warmup → no-op)。
-    bridge.current.sendWarmup(currentThreadIdRef.current);
+    bridge.current.sendWarmup(
+      currentThreadIdRef.current,
+      projectForThreadId(currentThreadIdRef.current),
+    );
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -1638,7 +1664,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   const dispatchPendingSubmission = useCallback((submission: PendingSubmission) => {
     return startRun(submission.threadId, (runId) => {
-      const inFlight = deferredSubmissionInFlightRef.current;
+      const inFlight = deferredSubmissionInFlightRef.current.get(submission.threadId);
       if (inFlight?.id === submission.id) inFlight.runId = runId;
       bridge.current.sendUserMessage(
         submission.sendText,
@@ -1648,25 +1674,39 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         submission.quote,
         runId,
         submission.id,
+        submission.project,
       );
     });
   }, [startRun, capabilityContract.ide]);
 
   const drainPendingSubmissions = useCallback(() => {
-    if (deferredSubmissionInFlightRef.current) return;
-    const nextSubmission = pendingSubmissionsRef.current[0];
-    if (!nextSubmission) return;
-    if (nextSubmission.requiresService && serviceStateRef.current?.status !== "ready") return;
-    if (activeRunsRef.current.has(nextSubmission.threadId)) return;
-    const submission = pendingSubmissionsRef.current.shift()!;
-    // Remove before dispatch so repeated ready notifications cannot send twice.
-    setPendingSubmissions(pendingSubmissionsRef.current.length);
-    deferredSubmissionInFlightRef.current = { id: submission.id, threadId: submission.threadId };
-    if (!dispatchPendingSubmission(submission)) {
-      deferredSubmissionInFlightRef.current = null;
-      pendingSubmissionsRef.current.unshift(submission);
-      setPendingSubmissions(pendingSubmissionsRef.current.length);
+    let changed = false;
+    for (let index = 0; index < pendingSubmissionsRef.current.length;) {
+      const submission = pendingSubmissionsRef.current[index];
+      if (submission.requiresService && serviceStateRef.current?.status !== "ready") {
+        index += 1;
+        continue;
+      }
+      if (deferredSubmissionInFlightRef.current.has(submission.threadId) ||
+          activeRunsRef.current.has(submission.threadId)) {
+        index += 1;
+        continue;
+      }
+
+      pendingSubmissionsRef.current.splice(index, 1);
+      deferredSubmissionInFlightRef.current.set(
+        submission.threadId,
+        { id: submission.id },
+      );
+      if (!dispatchPendingSubmission(submission)) {
+        deferredSubmissionInFlightRef.current.delete(submission.threadId);
+        pendingSubmissionsRef.current.splice(index, 0, submission);
+        index += 1;
+      } else {
+        changed = true;
+      }
     }
+    if (changed) setPendingSubmissions(pendingSubmissionsRef.current.length);
   }, [dispatchPendingSubmission]);
   drainPendingSubmissionsRef.current = drainPendingSubmissions;
   useEffect(() => {
@@ -1674,13 +1714,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [serviceState?.status, drainPendingSubmissions]);
 
   const advancePendingSubmissions = useCallback((threadId: string, runId: string, flushMessages: boolean) => {
-    const inFlight = deferredSubmissionInFlightRef.current;
-    if (inFlight?.threadId === threadId) {
+    const inFlight = deferredSubmissionInFlightRef.current.get(threadId);
+    if (inFlight) {
       if (inFlight.runId !== runId) return;
-      deferredSubmissionInFlightRef.current = null;
+      deferredSubmissionInFlightRef.current.delete(threadId);
     }
-    // Keep global submission FIFO moving, but only service/deferred work for
-    // this thread blocks its own clock queue. Other threads may run concurrently.
+    // A terminal only releases this thread. The drain may concurrently start
+    // eligible work for other threads while preserving each thread's FIFO.
     if (pendingSubmissionsRef.current.length > 0) {
       queueMicrotask(() => drainPendingSubmissionsRef.current());
     }
@@ -1688,17 +1728,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!flushMessages) return;
     const queued = messageQueueRef.current.get(threadId);
     if (!queued || queued.length === 0) return;
-    const nextText = queued.shift()!;
+    const nextMessage = queued.shift()!;
     setTimeout(() => {
-      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+      const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
         pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (activeRunsRef.current.has(threadId) || serviceBusy) {
         const latest = messageQueueRef.current.get(threadId) ?? [];
-        latest.unshift(nextText);
+        latest.unshift(nextMessage);
         messageQueueRef.current.set(threadId, latest);
         return;
       }
-      deliverTextRef.current?.(nextText, threadId);
+      deliverTextRef.current?.(
+        nextMessage.text,
+        threadId,
+        nextMessage.project,
+        nextMessage.sendText,
+      );
     }, 40);
   }, []);
   advancePendingSubmissionsRef.current = advancePendingSubmissions;
@@ -1726,6 +1771,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const sendText = expandSlashCommands(text, commands);
 
       const threadId = currentThreadId;
+      const project = projectForThreadId(threadId);
 
       // 第一条消息自动命名线程（在任何 updater 外直接读当前 state）
       const isFirstMsg = (messagesMap[threadId] ?? []).length === 0;
@@ -1766,7 +1812,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         (serviceStateRef.current.status === "checking" ||
          serviceStateRef.current.status === "starting" ||
          serviceStateRef.current.status === "failed");
-      const threadHasQueuedWork = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+      const threadHasQueuedWork = deferredSubmissionInFlightRef.current.has(threadId) ||
         pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       const mustDefer = waitingForService || activeRunsRef.current.has(threadId) || threadHasQueuedWork;
       if (mustDefer) {
@@ -1782,10 +1828,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           storedAttachments,
           quote,
           selectionVisible: selectionVisibleRef.current,
+          project,
           original: msg,
         });
         if (capabilityContract.ide) {
-          bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current);
+          bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current, project);
         }
         setPendingSubmissions(pendingSubmissionsRef.current.length);
         return;
@@ -1799,6 +1846,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
           quote,
           runId,
+          undefined,
+          project,
         );
       });
     },
@@ -1808,13 +1857,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── 消息队列:文本-only 投递(队列 flush 用)+ 入队 ─────────────────────────────
   // deliverText 追加用户气泡到指定线程并 startRun 发送(无附件)。存入 ref 供 onDone
   // flush 调用(避免 startRun 闭包对后定义函数的时序依赖)。
-  const deliverText = useCallback((text: string, threadId: string) => {
+  const deliverText = useCallback((
+    text: string,
+    threadId: string,
+    projectSnapshot?: string,
+    sendTextSnapshot?: string,
+  ) => {
     if (!text.trim() || blockingActionsRef.current[threadId]) return;
-    const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+    const project = workspaceMode
+      ? projectSnapshot || projectForThreadId(threadId)
+      : undefined;
+    const sendText = sendTextSnapshot ?? expandSlashCommands(text, commands);
+    const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
       pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
     if (activeRunsRef.current.has(threadId) || serviceBusy) {
       const queued = messageQueueRef.current.get(threadId) ?? [];
-      queued.push(text);
+      queued.push({ text, sendText, project });
       messageQueueRef.current.set(threadId, queued);
       return;
     }
@@ -1824,7 +1882,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       invokeActionRef.current?.(slashAction);
       return;
     }
-    const sendText = expandSlashCommands(text, commands);
     const userMessageId = `user-${Date.now()}-${++messageIdSeq.current}`;
     setMessagesMap((prev) => {
       const threadMsgs = prev[threadId] ?? [];
@@ -1849,9 +1906,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         attachmentData: [],
         storedAttachments: [],
         selectionVisible: selectionVisibleRef.current,
+        project,
       });
       if (capabilityContract.ide) {
-        bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current);
+        bridge.current.reserveIdeContext(submissionId, threadId, selectionVisibleRef.current, project);
       }
       setPendingSubmissions(pendingSubmissionsRef.current.length);
       return;
@@ -1863,9 +1921,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
         undefined,
         runId,
+        undefined,
+        project,
       );
     });
-  }, [inputId, commands, actionItems, startRun, requestIdeContextFor, capabilityContract.ide]);
+  }, [inputId, commands, actionItems, startRun, requestIdeContextFor, capabilityContract.ide, workspaceMode, projectForThreadId]);
   deliverTextRef.current = deliverText;
 
   // 入队:AI 运行中时把消息排队,当前 run 结束后自动发送(见 onDone flush)。
@@ -1873,9 +1933,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!text.trim()) return;
     const tid = currentThreadIdRef.current;
     const q = messageQueueRef.current.get(tid) ?? [];
-    q.push(text);
+    q.push({
+      text,
+      sendText: expandSlashCommands(text, commands),
+      project: projectForThreadId(tid),
+    });
     messageQueueRef.current.set(tid, q);
-  }, []);
+  }, [commands, projectForThreadId]);
 
   // ── invokeAction:客户端动作(如 /model /clear),不发给 AI ────────────────────
   // 在对话里记录一条"用户操作"气泡 + 一条系统确认(ack)气泡,并把 action id 发给 R
@@ -1945,7 +2009,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }, COMPACT_CLIENT_TIMEOUT_MS);
     }
     actionAckRefs.current.set(requestId, target);
-    bridge.current.sendAction(item.id, threadId, { requestId });
+    bridge.current.sendAction(
+      item.id,
+      threadId,
+      { requestId },
+      projectForThreadId(threadId),
+    );
   }, [inputId, setBlockingActionForThread]);
   invokeActionRef.current = invokeAction;
 
@@ -1965,7 +2034,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
         ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
-      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+      const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
         pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
       const parentId = message.parentId ?? null;
@@ -1997,10 +2066,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
           undefined,
           runId,
+          undefined,
+          projectForThreadId(threadId),
         );
       });
     },
-    [inputId, startRun, commands] // eslint-disable-line react-hooks/exhaustive-deps
+    [inputId, startRun, commands, projectForThreadId] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // ── onReload ─────────────────────────────────────────────────────────────  // parentId = 触发本次 assistant 回复的 user 消息 ID
@@ -2010,7 +2081,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
         ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
-      const serviceBusy = deferredSubmissionInFlightRef.current?.threadId === threadId ||
+      const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
         pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
       const msgs = messagesMap[threadId] ?? [];
@@ -2033,9 +2104,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return idx >= 0 ? prev.slice(0, idx + 1) : prev;
       });
 
-      startRun(threadId, (runId) => bridge.current.sendReload(userText, threadId, runId));
+      startRun(threadId, (runId) => bridge.current.sendReload(
+        userText,
+        threadId,
+        runId,
+        projectForThreadId(threadId),
+      ));
     },
-    [currentThreadId, messagesMap, setCurrentMessages, startRun]
+    [currentThreadId, messagesMap, setCurrentMessages, startRun, projectForThreadId]
   );
 
   // ── onCancel ─────────────────────────────────────────────────────────────
@@ -2055,10 +2131,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const switchToNewThread = useCallback(() => {
     const newId = makeThreadId();
     thisSessionThreadIds.current.add(newId);
+    const project = workspaceMode ? workingDirRef.current || undefined : undefined;
+    if (project) threadProjectsRef.current.set(newId, project);
     const newThread: ExternalStoreThreadData<"regular"> = {
       id: newId,
       status: "regular",
       title: "New chat",
+      ...(project ? { custom: { project, projectLabel: projectLabel(project) } } : {}),
     };
     setThreads((prev) => {
       const next = [newThread, ...prev];
@@ -2066,7 +2145,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       return next;
     });
     switchCurrentThread(newId);
-  }, [inputId]);
+  }, [inputId, workspaceMode]);
 
   // ── 线程重命名（rename）──────────────────────────────────────────────────────
   // manualTitleIds：被用户手动改过标题的线程,首条消息自动命名时不再覆盖。
@@ -2086,20 +2165,27 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       saveArchivedThreads(inputId, usesClientPersistence, next);
       return next;
     });
-    bridge.current.sendRename(threadId, title);
-  }, [inputId]);
+    bridge.current.sendRename(threadId, title, projectForThreadId(threadId));
+  }, [inputId, projectForThreadId]);
 
   // ── 点击文件引用 → 优先用本线程最近工具调用的精确路径，再请求 IDE 打开 ──────
   const openFile = useCallback((path: string, line?: number) => {
     if (!path) return;
-    bridge.current.sendOpenFile(resolveToolFileReference(path, messages), line);
-  }, [messages]);
+    const threadId = currentThreadIdRef.current;
+    bridge.current.sendOpenFile(
+      resolveToolFileReference(path, messages),
+      line,
+      threadId,
+      projectForThreadId(threadId),
+    );
+  }, [messages, projectForThreadId]);
   // 代码块"Run in Console"：在用户活 R 会话执行(addin/RStudio；config.console_run 开启才暴露)。
   const consoleRunEnabled = config?.console_run === true;
   const runInConsole = useCallback((code: string) => {
     if (!code) return;
-    bridge.current.sendRunInConsole(code);
-  }, []);
+    const threadId = currentThreadIdRef.current;
+    bridge.current.sendRunInConsole(code, threadId, projectForThreadId(threadId));
+  }, [projectForThreadId]);
 
   const clearThreadRuntimeState = useCallback((threadId: string) => {
     const omitThread = <T,>(previous: Record<string, T>): Record<string, T> => {
@@ -2157,8 +2243,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (action.timeoutId !== undefined) window.clearTimeout(action.timeoutId);
       actionAckRefs.current.delete(requestId);
     }
-    if (deferredSubmissionInFlightRef.current?.threadId === threadId) {
-      deferredSubmissionInFlightRef.current = null;
+    if (deferredSubmissionInFlightRef.current.delete(threadId)) {
       queueMicrotask(() => drainPendingSubmissionsRef.current());
     }
   }, [setBlockingActionForThread, setThreadRunning]);
@@ -2170,8 +2255,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     const custom = { ...(thread.custom ?? {}) };
     if (activePhase) custom.runPhase = phase;
     else delete custom.runPhase;
+    if (workspaceMode) {
+      const taskCount = selectThreadTaskMonitor(taskMonitorState, thread.id).active.length;
+      if (taskCount > 0) custom.activeTaskCount = taskCount;
+      else delete custom.activeTaskCount;
+    }
     return { ...thread, custom };
-  }), [threads, runPhaseMap]);
+  }), [threads, runPhaseMap, taskMonitorState, workspaceMode]);
   const threadListAdapter = useMemo(
     () => ({
       threadId: currentThreadId,
@@ -2180,6 +2270,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       onSwitchToNewThread: switchToNewThread,
       onSwitchToThread: (threadId: string) => {
         switchCurrentThread(threadId);
+        const project = projectForThreadId(threadId);
+        if (workspaceMode && project && project !== workingDirRef.current) {
+          workingDirRef.current = project;
+          setWorkingDirState(project);
+          bridge.current.sendSetWorkingDir(project);
+        }
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
         // Server-backed history may keep growing after its first hydration (for
         // example a background task finishing). Explicitly switching back starts
@@ -2215,7 +2311,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           return next;
         });
         // 方案B：通知服务端持久化软隐藏（可恢复）。
-        bridge.current.sendArchiveSession(threadId, true);
+        bridge.current.sendArchiveSession(threadId, true, projectForThreadId(threadId));
       },
       onUnarchive: (threadId: string) => {
         setArchivedThreads((prev) => {
@@ -2234,7 +2330,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           }
           return next;
         });
-        bridge.current.sendArchiveSession(threadId, false);
+        bridge.current.sendArchiveSession(threadId, false, projectForThreadId(threadId));
       },
       onDelete: (threadId: string) => {
         if (activeRunsRef.current.has(threadId)) {
@@ -2270,13 +2366,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         // 方案B：server 上真实存在的 session 才通知后端真删磁盘 transcript（不可逆）。
         // 本次新建、从未上传 server 的空白线程只在本地移除。
         if (wasServerSession) {
-          bridge.current.sendDeleteSession(threadId);
+          bridge.current.sendDeleteSession(threadId, projectForThreadId(threadId));
         }
       },
     }),
     [inputId, currentThreadId, threads, threadListThreads, archivedThreads, switchAwayFrom,
       cancelPendingSubmissions, clearThreadHistoryTracking, clearThreadRuntimeState,
-      setBlockingActionForThread]
+      setBlockingActionForThread, workspaceMode, projectForThreadId]
   );
 
   const sendToolApproval = useCallback(
@@ -2304,17 +2400,18 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendAction(`permissions:${nextValue}`, threadId, {
       requestId,
       silent: true,
-    });
+    }, projectForThreadId(threadId));
   }, [permissionCapability]);
 
   const setThinking = useCallback((nextValue: string) => {
     if (!thinkingCapability) return;
     if (!thinkingCapability.options.some((o) => o.value === nextValue)) return;
     setThinkingValue(nextValue);   // 乐观显示；R 侧改状态并重连（下条消息 resume 生效）
-    bridge.current.sendAction(`thinking:${nextValue}`, currentThreadIdRef.current, {
+    const threadId = currentThreadIdRef.current;
+    bridge.current.sendAction(`thinking:${nextValue}`, threadId, {
       requestId: makeActionRequestId(),
       silent: true,
-    });
+    }, projectForThreadId(threadId));
   }, [thinkingCapability]);
   const thinking = thinkingCapability
     ? {
@@ -2328,10 +2425,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (!modelCapability) return;
     if (!modelCapability.options.some((o) => o.value === nextValue)) return;
     setModelValue(nextValue);   // 乐观显示；R 侧 set_model 热切换（无需重连）
-    bridge.current.sendAction(`model:${nextValue}`, currentThreadIdRef.current, {
+    const threadId = currentThreadIdRef.current;
+    bridge.current.sendAction(`model:${nextValue}`, threadId, {
       requestId: makeActionRequestId(),
       silent: true,
-    });
+    }, projectForThreadId(threadId));
   }, [modelCapability]);
   const model = modelCapability
     ? {
@@ -2431,7 +2529,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     recentDirs,
     nativePicker,
     pickWorkingDir: () => bridge.current.sendPickWorkingDir(),
-    setWorkingDir: (path: string) => bridge.current.sendSetWorkingDir(path),
+    setWorkingDir: (path: string) => {
+      if (workspaceMode) {
+        workingDirRef.current = path;
+        setWorkingDirState(path);
+      }
+      bridge.current.sendSetWorkingDir(path);
+    },
     projects,
     saveProject: () => bridge.current.sendSaveProject(),
     removeProject: (path: string) => bridge.current.sendRemoveProject(path),
@@ -2513,6 +2617,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     commands,                                                            // 本地 skills(可 :commands 热更新)
     runPhase,
     runPhases: runPhaseMap,
+    workspaceMode,
     warming: warmingThreads.has(currentThreadId),                        // 每线程冷启动
     warmingResuming: warmingResumingThreads.has(currentThreadId),        // 该冷启动是否为"恢复历史"
     stopTask,

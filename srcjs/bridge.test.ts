@@ -302,3 +302,54 @@ describe("bridge authoritative run-state", () => {
     ]);
   });
 });
+
+
+describe("bridge workspace project snapshots", () => {
+  it("adds an optional project to project-sensitive requests", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage("hi", "t1", undefined, undefined, undefined, undefined, undefined, "/work/a");
+    b.reserveIdeContext("sub-1", "t1", true, "/work/a");
+    b.sendRename("t1", "Renamed", "/work/a");
+    b.sendArchiveSession("t1", true, "/work/a");
+    b.sendDeleteSession("t1", "/work/a");
+    b.sendLoadSession("t1", "t1", "load-1", "/work/a");
+    b.sendLoadSessionPage("t1", "t1", 2, 50, "page-1", "/work/a");
+    b.requestIdeContext("ctx-1", "t1", "/work/a");
+    b.searchWorkspace("ws-1", "t1", "app", ["file"], 10, "/work/a");
+
+    for (const event of inputValues) {
+      expect(event.value).toMatchObject({ project: "/work/a" });
+    }
+  });
+
+  it("keeps ordinary requests backward compatible when project is absent", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage("hi", "t1");
+    b.sendLoadSession("t1", "t1");
+    expect(inputValues.every((event) => !("project" in (event.value as Record<string, unknown>))))
+      .toBe(true);
+  });
+});
+
+
+describe("bridge Workspace project snapshots", () => {
+  it("forwards project on warmup, action, reload, open-file, and console events", () => {
+    const b = createShinyBridge("chat");
+    b.sendWarmup("thread-a", "/work/a");
+    b.sendAction("context", "thread-a", { requestId: "request-a" }, "/work/a");
+    b.sendReload("again", "thread-a", "run-a", "/work/a");
+    b.sendOpenFile("R/app.R", 12, "thread-a", "/work/a");
+    b.sendRunInConsole("getwd()", "thread-a", "/work/a");
+
+    expect(inputValues.find((item) => item.id === "chat_warmup")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_action")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat")?.value)
+      .toMatchObject({ type: "reload", threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_open_file")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_run_in_console")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+  });
+});

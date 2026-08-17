@@ -2329,3 +2329,186 @@ it("archiving drops readiness-deferred submissions before service recovery", asy
   expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
   expect(inputs.some((item) => item.id === "test_cancel_reserved_submissions")).toBe(true);
 });
+
+
+describe("useShinyRuntime — Claude Workspace projects", () => {
+  const workspaceConfig = {
+    workspace_mode: true,
+    persistence: "server",
+    working_dir: "/work/a",
+    run_state_protocol: 1,
+  };
+
+  it("preserves session project metadata in ExternalStore custom", async () => {
+    const { result } = setup(workspaceConfig);
+    await fireR("sessions", {
+      sessions: [{
+        id: "session-a", title: "A", preview: "", createdAt: "2026-08-01T00:00:00Z",
+        project: "/work/a", projectLabel: "Project A",
+      }],
+    });
+
+    expect(result.current.runtime.threads.getItemById("session-a").getState().custom)
+      .toMatchObject({ project: "/work/a", projectLabel: "Project A" });
+  });
+
+  it("snapshots the selected project for new threads and immediate submissions", async () => {
+    const { result } = setup(workspaceConfig);
+    const firstThread = currentThreadId(result);
+    expect(result.current.runtime.threads.getItemById(firstThread).getState().custom)
+      .toMatchObject({ project: "/work/a" });
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("from A");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.find((event) => event.id === "test")?.value)
+      .toMatchObject({ threadId: firstThread, project: "/work/a" });
+
+    await fireR("working-dir", { dir: "/work/b", recent: [] });
+    await act(async () => result.current.switchToNewThread());
+    const secondThread = currentThreadId(result);
+    expect(result.current.runtime.threads.getItemById(secondThread).getState().custom)
+      .toMatchObject({ project: "/work/b" });
+  });
+
+  it("keeps all project threads when the workspace selection changes", async () => {
+    const { result } = setup(workspaceConfig);
+    await fireR("sessions", {
+      sessions: [
+        { id: "a-1", title: "A", project: "/work/a", projectLabel: "A" },
+        { id: "b-1", title: "B", project: "/work/b", projectLabel: "B" },
+      ],
+    });
+    await fireR("working-dir", { dir: "/work/b", recent: [] });
+
+    const state = result.current.runtime.threads.getState();
+    expect(state.threadIds).toEqual(expect.arrayContaining(["a-1", "b-1"]));
+  });
+
+  it("keeps a deferred submission bound to its click-time project", async () => {
+    const { result } = setup({
+      ...workspaceConfig,
+      addons: {
+        copilotService: { version: 1, state: { status: "checking", autoStart: true } },
+      },
+    });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("queued in A");
+      await result.current.runtime.thread.composer.send();
+    });
+    expect(inputs.filter((event) => event.id === "test")).toHaveLength(0);
+
+    await fireR("working-dir", { dir: "/work/b", recent: [] });
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
+
+    expect(inputs.find((event) => event.id === "test")?.value)
+      .toMatchObject({ text: "queued in A", project: "/work/a" });
+  });
+
+  it("projects active run and Task counts into thread custom metadata", async () => {
+    const { result } = setup(workspaceConfig);
+    const threadId = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("count work");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.find((event) => event.id === "test")!.value;
+    await fireR("run-state", { threadId, runId: outbound.runId, phase: "running" });
+    await fireR("task", {
+      threadId, runId: outbound.runId, taskId: "task-1", kind: "task",
+      description: "Work", status: "running",
+    });
+
+    expect(result.current.runtime.threads.getItemById(threadId).getState().custom)
+      .toMatchObject({ project: "/work/a", runPhase: "running", activeTaskCount: 1 });
+  });
+});
+
+
+describe("useShinyRuntime — Workspace routing regressions", () => {
+  const config = {
+    workspace_mode: true,
+    persistence: "server",
+    working_dir: "/work/a",
+    run_state_protocol: 1,
+    action_items: [{ id: "context", command: "context", label: "Context" }],
+  };
+
+  it("dispatches ready-gated submissions for different threads concurrently", async () => {
+    const { result } = setup({
+      ...config,
+      addons: { copilotService: { version: 1, state: { status: "checking", autoStart: true } } },
+    });
+    await fireR("copilot-service-status", { status: "checking", autoStart: true });
+    const threadA = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("queued A");
+      await result.current.runtime.thread.composer.send();
+      result.current.switchToNewThread();
+    });
+    const threadB = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("queued B");
+      await result.current.runtime.thread.composer.send();
+    });
+
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
+    const outbound = inputs.filter((item) => item.id === "test");
+    expect(outbound.map((item) => item.value.text)).toEqual(["queued A", "queued B"]);
+    expect(new Set(outbound.map((item) => item.value.threadId)))
+      .toEqual(new Set([threadA, threadB]));
+  });
+
+  it("keeps the queued project command expansion captured before project switching", async () => {
+    const { result } = setup({
+      ...config,
+      commands: [{ name: "skill", prompt: "PROMPT_A", description: "A" }],
+    });
+    const threadA = currentThreadId(result);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("running A");
+      await result.current.runtime.thread.composer.send();
+      result.current.enqueueMessage("/skill");
+    });
+    const first = inputs.find((item) => item.id === "test")!.value;
+    await fireR("working-dir", { dir: "/work/b", recent: [] });
+    await fireR("commands", {
+      commands: [{ name: "skill", prompt: "PROMPT_B", description: "B" }],
+    });
+    await fireR("done", { threadId: threadA, runId: first.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .toEqual(["running A", "PROMPT_A"]);
+  });
+
+  it("forwards the owning project for warmup, action, open-file, and reload", async () => {
+    const { result } = setup(config);
+    const threadA = currentThreadId(result);
+    expect(inputs.find((item) => item.id === "test_warmup")?.value)
+      .toMatchObject({ threadId: threadA, project: "/work/a" });
+
+    await act(async () => result.current.invokeAction({ id: "context", label: "Context" }));
+    expect(inputs.find((item) => item.id === "test_action")?.value)
+      .toMatchObject({ threadId: threadA, project: "/work/a" });
+
+    await act(async () => result.current.openFile("R/app.R", 4));
+    expect(inputs.find((item) => item.id === "test_open_file")?.value)
+      .toMatchObject({ threadId: threadA, project: "/work/a" });
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("reload me");
+      await result.current.runtime.thread.composer.send();
+    });
+    const sent = inputs.filter((item) => item.id === "test").at(-1)!.value;
+    await fireR("chunk", { text: "answer", threadId: threadA });
+    await fireR("done", { threadId: threadA, runId: sent.runId });
+    const assistant = messages(result).find((message) => message.role === "assistant")!;
+    await act(async () => result.current.runtime.thread.getMessageById(assistant.id).reload());
+    expect(inputs.filter((item) => item.id === "test" && item.value.type === "reload").at(-1)?.value)
+      .toMatchObject({ threadId: threadA, project: "/work/a" });
+  });
+});

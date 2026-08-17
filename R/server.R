@@ -223,6 +223,11 @@
 #'
 #' @param on_edits Optional `function(edits)` called when the assistant proposes
 #'   file edits (used by the addin to show edit markers).
+#' @param workspace_mode Logical. When `TRUE`, enables project-aware thread
+#'   metadata and navigation. Incoming requests may supply an optional `project`
+#'   snapshot; handlers, history callbacks, and thread-aware providers receive it
+#'   only when their formals declare `project` (or `...`), preserving existing
+#'   callback signatures. Defaults to `FALSE`.
 #' @param working_dir Optional initial working directory shown in the
 #'   working-directory picker (addin).
 #' @param native_picker Logical; whether a native directory chooser is available
@@ -299,6 +304,7 @@ assistantUIServer <- function(id, handler,
                               on_edits          = NULL,
                               on_archive_session = NULL,
                               on_delete_session = NULL,
+                              workspace_mode    = FALSE,
                               working_dir       = NULL,
                               native_picker     = FALSE,
                               on_pick_working_dir = NULL,
@@ -349,7 +355,7 @@ assistantUIServer <- function(id, handler,
   force(on_rename)
   force(on_open_file)
   force(on_archive_session)
-  force(on_delete_session)
+  force(on_delete_session); force(workspace_mode)
   # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
   # 且用户未自定义 on_action,则自动接线,使 /model、/clear 等客户端动作开箱即用。
   # 只有该 dispatcher 实际生效时才发布配套 capability；否则 UI 会把 permission
@@ -404,6 +410,7 @@ assistantUIServer <- function(id, handler,
     dark_mode        = dark_mode,
     show_timestamps  = show_timestamps,
     modal            = modal,
+    workspace_mode   = isTRUE(workspace_mode),
     run_state_protocol = 1L,
     max_concurrent_runs = effective_concurrency
   )
@@ -488,7 +495,7 @@ assistantUIServer <- function(id, handler,
   # 旧版：静态回调，所有 thread 共用一个 callbacks slot，切 thread 时旧 handler
   # 的 onDone 会错误清掉新 thread 的 running 状态，旧消息也可能串入新 thread。
   # 新版：每次 ExtendedTask 启动时动态构建，消息携带 threadId，JS 按 threadId 路由。
-  make_callbacks <- function(thread_id, run_id = NULL) {
+  make_callbacks <- function(thread_id, run_id = NULL, project = NULL) {
     # 任务 D：per-run 编辑揭示 tracker——run 结束只揭示最近一次成功编辑的文件。
     edit_reveal <- .new_edit_reveal_tracker()
     mark_running <- function() send_run_state(thread_id, run_id, "running")
@@ -504,13 +511,22 @@ assistantUIServer <- function(id, handler,
         if (!is.null(on_open_file)) {
           reveal_path <- edit_reveal$flush()
           if (!is.null(reveal_path)) {
-            tryCatch(on_open_file(reveal_path, NULL), error = function(e) NULL)
+            tryCatch(.call_compatible_callback(on_open_file, list(
+              path = reveal_path,
+              line = NULL,
+              thread_id = thread_id,
+              project = project
+            )), error = function(e) NULL)
           }
         }
         # 本轮所有成功编辑 → on_edits（addin 用于 Markers 面板可跳转清单）。始终 take 以清空累积。
         run_edits <- edit_reveal$take_edits()
         if (!is.null(on_edits) && length(run_edits))
-          tryCatch(on_edits(run_edits), error = function(e) NULL)
+          tryCatch(.call_compatible_callback(on_edits, list(
+            edits = run_edits,
+            thread_id = thread_id,
+            project = project
+          )), error = function(e) NULL)
         session$sendCustomMessage(paste0(input_id, ":done"),
                                   list(suggestions = suggestions, threadId = thread_id,
                                        runId = run_id))
@@ -537,7 +553,9 @@ assistantUIServer <- function(id, handler,
         # 仅单个 Edit;MultiEdit 多段不同起始行,暂不注入(前端退回 1-based)。
         if (identical(tool_name, "Edit") && is.null(annotations$diffStartLine)) {
           sl <- tryCatch(
-            .tool_edit_start_line(args$file_path, args$old_string, working_dir),
+            .tool_edit_start_line(
+              args$file_path, args$old_string, project %||% working_dir
+            ),
             error = function(e) NULL
           )
           if (!is.null(sl)) annotations$diffStartLine <- sl
@@ -690,7 +708,9 @@ assistantUIServer <- function(id, handler,
         submission_id,
         .read_ide_context(
           ide_context_provider,
-          selection_visible = !identical(msg$selectionVisible, FALSE)
+          selection_visible = !identical(msg$selectionVisible, FALSE),
+          thread_id = msg$threadId,
+          project = msg$project
         ),
         envir = reserved_ide_contexts
       )
@@ -710,7 +730,12 @@ assistantUIServer <- function(id, handler,
     shiny::observeEvent(session$input[[paste0(input_id, "_ide_context_refresh")]], {
       msg <- session$input[[paste0(input_id, "_ide_context_refresh")]]
       if (is.null(msg)) return()
-      context <- .read_ide_context(ide_context_provider, selection_visible = TRUE)
+      context <- .read_ide_context(
+        ide_context_provider,
+        selection_visible = TRUE,
+        thread_id = msg$threadId,
+        project = msg$project
+      )
       payload <- .ide_context_metadata(context) %||% list()
       payload$requestId <- msg$requestId
       payload$threadId <- msg$threadId
@@ -809,11 +834,14 @@ assistantUIServer <- function(id, handler,
       args <- list(
         query = as.character(msg$query %||% ""),
         kinds = as.character(msg$kinds %||% c("file", "folder")),
-        limit = max(1L, min(100L, limit))
+        limit = max(1L, min(100L, limit)),
+        thread_id = msg$threadId,
+        project = msg$project
       )
-      params <- names(formals(workspace_search_provider))
-      call_args <- if ("..." %in% params) args else args[names(args) %in% params]
-      items <- tryCatch(do.call(workspace_search_provider, call_args), error = function(e) list())
+      items <- tryCatch(
+        .call_compatible_callback(workspace_search_provider, args),
+        error = function(e) list()
+      )
       session$sendCustomMessage(
         paste0(input_id, ":workspace-results"),
         list(requestId = msg$requestId, threadId = msg$threadId, items = items %||% list())
@@ -864,10 +892,13 @@ assistantUIServer <- function(id, handler,
                message = message, status = status, value = value)
         )
       }
-      all_args <- list(id = msg$id, thread_id = tid, send_action_result = send_action_result)
-      pars <- names(formals(on_action))
-      call_args <- if ("..." %in% pars) all_args else all_args[names(all_args) %in% pars]
-      do.call(on_action, call_args)
+      all_args <- list(
+        id = msg$id,
+        thread_id = tid,
+        project = msg$project,
+        send_action_result = send_action_result
+      )
+      .call_compatible_callback(on_action, all_args)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -886,7 +917,11 @@ assistantUIServer <- function(id, handler,
     shiny::observeEvent(session$input[[paste0(input_id, "_rename")]], {
       rn <- session$input[[paste0(input_id, "_rename")]]
       if (is.null(rn)) return()
-      on_rename(rn$threadId, rn$title)
+      .call_compatible_callback(on_rename, list(
+        thread_id = rn$threadId,
+        title = rn$title,
+        project = rn$project
+      ))
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -897,7 +932,12 @@ assistantUIServer <- function(id, handler,
       if (is.null(of) || is.null(of$path) || !nzchar(of$path)) return()
       line <- suppressWarnings(as.integer(of$line))
       if (length(line) != 1L || is.na(line)) line <- NULL
-      tryCatch(on_open_file(of$path, line), error = function(e) NULL)
+      tryCatch(.call_compatible_callback(on_open_file, list(
+        path = of$path,
+        line = line,
+        thread_id = of$threadId,
+        project = of$project
+      )), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
   # 代码块"Run in Console" → 在用户的活 R 会话执行,并把捕获结果回传前端(喂给 Claude)。
@@ -908,14 +948,22 @@ assistantUIServer <- function(id, handler,
       code <- if (is.list(msg)) msg$code else msg
       code <- as.character(code %||% "")
       if (!nzchar(code)) return()
-      res <- tryCatch(on_run_in_console(code),
-                      error = function(e) list(ok = FALSE, output = "", error = conditionMessage(e)))
+      res <- tryCatch(
+        .call_compatible_callback(on_run_in_console, list(
+          code = code,
+          thread_id = msg$threadId,
+          project = msg$project
+        )),
+        error = function(e) list(ok = FALSE, output = "", error = conditionMessage(e))
+      )
       if (is.list(res)) {
         session$sendCustomMessage(paste0(input_id, ":console-result"), list(
           code   = code,
           ok     = isTRUE(res$ok),
           output = as.character(res$output %||% ""),
-          error  = as.character(res$error %||% "")
+          error  = as.character(res$error %||% ""),
+          threadId = msg$threadId,
+          project = msg$project
         ))
       }
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
@@ -955,7 +1003,11 @@ assistantUIServer <- function(id, handler,
         cancel_warmup(ev$sessionId)
         cancel_thread_work(ev$sessionId)
       }
-      tryCatch(on_archive_session(ev$sessionId, isTRUE(ev$archived)), error = function(e) NULL)
+      tryCatch(.call_compatible_callback(on_archive_session, list(
+        session_id = ev$sessionId,
+        archived = isTRUE(ev$archived),
+        project = ev$project
+      )), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -967,7 +1019,10 @@ assistantUIServer <- function(id, handler,
       cancel_warmup(ev$sessionId)
       cancel_thread_work(ev$sessionId)
       if (!is.null(run_scheduler)) run_scheduler$cancel_thread(ev$sessionId)
-      tryCatch(on_delete_session(ev$sessionId), error = function(e) NULL)
+      tryCatch(.call_compatible_callback(on_delete_session, list(
+        session_id = ev$sessionId,
+        project = ev$project
+      )), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -982,7 +1037,8 @@ assistantUIServer <- function(id, handler,
   # One ExtendedTask per thread preserves native same-thread FIFO. The scheduler
   # permit queue lets different threads progress cooperatively up to the effective
   # limit (forced to 1 for handlers without the explicit concurrency capability).
-  execute_run <- function(thread_id, run_id, msg_text, is_reload, attachments, ide_context) {
+  execute_run <- function(thread_id, run_id, msg_text, is_reload, attachments,
+                          ide_context, project = NULL) {
     # This invocation owns the thread-level cancellation resources until its
     # returned promise settles. Queued/stale run IDs must not touch that owner.
     assign(thread_id, run_id, envir = active_run_ids)
@@ -990,7 +1046,7 @@ assistantUIServer <- function(id, handler,
     if (exists(thread_id, envir = cancel_fns, inherits = FALSE)) {
       rm(list = thread_id, envir = cancel_fns)
     }
-    cbs <- make_callbacks(thread_id, run_id)
+    cbs <- make_callbacks(thread_id, run_id, project)
     is_cancelled <- function() {
       identical(get0(thread_id, envir = active_run_ids), run_id) &&
         isTRUE(get0(thread_id, envir = cancel_flags))
@@ -1032,7 +1088,8 @@ assistantUIServer <- function(id, handler,
       is_cancelled      = is_cancelled,
       wait_for_approval = wait_for_approval,
       register_cancel   = register_cancel,
-      ide_context       = ide_context
+      ide_context       = ide_context,
+      project           = project
     )
     handler_params <- names(formals(handler))
     call_args <- if ("..." %in% handler_params) all_args
@@ -1107,6 +1164,7 @@ assistantUIServer <- function(id, handler,
   if (is.function(.teardown_fn))
     session$onSessionEnded(function() tryCatch(.teardown_fn(), error = function(e) NULL))
   warmup_states <- new.env(parent = emptyenv())
+  warmup_projects <- new.env(parent = emptyenv())
   warmup_queue <- character()
   warmup_active <- FALSE
   warmup_current_thread <- NULL
@@ -1144,9 +1202,10 @@ assistantUIServer <- function(id, handler,
       return(invisible(FALSE))
     }
     assign(thread_id, "warming", envir = warmup_states)
+    project <- get0(thread_id, envir = warmup_projects, inherits = FALSE)
     warmup_active <<- TRUE
     warmup_current_thread <<- thread_id
-    cbs <- make_callbacks(thread_id)
+    cbs <- make_callbacks(thread_id, project = project)
     # Historical warmup restores an existing conversation, hence resuming=TRUE.
     tryCatch(cbs$on_warming(TRUE, TRUE), error = function(e) NULL)
     # Yield so the indicator can flush before the SDK's synchronous connect.
@@ -1170,7 +1229,10 @@ assistantUIServer <- function(id, handler,
       }
       succeeded <- tryCatch(
         {
-          .warmup_fn(thread_id)
+          .call_compatible_callback(.warmup_fn, list(
+            thread_id = thread_id,
+            project = project
+          ))
           TRUE
         },
         interrupt = function(e) FALSE,
@@ -1184,18 +1246,24 @@ assistantUIServer <- function(id, handler,
       } else if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
         rm(list = thread_id, envir = warmup_states)
       }
+      if (exists(thread_id, envir = warmup_projects, inherits = FALSE)) {
+        rm(list = thread_id, envir = warmup_projects)
+      }
       schedule_warmup_pump()
       invisible(NULL)
     }, 0.05)
     invisible(TRUE)
   }
-  schedule_warmup <- function(thread_id, delay = 0) {
+  schedule_warmup <- function(thread_id, project = NULL, delay = 0) {
     # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧
     # 首条消息 ~55s 卡顿(见 Plan 22)。此时禁用一切 warm-ahead,让连接发生在首条
     # 消息发送时(connect+send 相邻 = 快路径)。
     if (!isTRUE(allow_warmup) || warmup_closed) return(invisible(FALSE))
     if (!is.function(.warmup_fn) || is.null(thread_id) ||
         !nzchar(thread_id %||% "")) return(invisible(FALSE))
+    if (!is.null(project) && length(project) && nzchar(as.character(project[[1L]]))) {
+      assign(thread_id, as.character(project[[1L]]), envir = warmup_projects)
+    }
     state <- get0(thread_id, envir = warmup_states, inherits = FALSE)
     if (!is.null(state) && state %in% c("queued", "warming", "warmed")) {
       return(invisible(FALSE))
@@ -1225,6 +1293,9 @@ assistantUIServer <- function(id, handler,
     }
     if (exists(thread_id, envir = warmup_states, inherits = FALSE)) {
       rm(list = thread_id, envir = warmup_states)
+    }
+    if (exists(thread_id, envir = warmup_projects, inherits = FALSE)) {
+      rm(list = thread_id, envir = warmup_projects)
     }
     schedule_warmup_pump()
     invisible(TRUE)
@@ -1273,11 +1344,12 @@ assistantUIServer <- function(id, handler,
         )
         # Restoring the SDK conversation is a distinct second phase. Loading an
         # older UI page must not reconnect or warm the same thread again.
-        if (is_initial_history) schedule_warmup(msg$threadId)
+        if (is_initial_history) schedule_warmup(msg$threadId, msg$project)
       }
       .call_history_callback(on_session_load, list(
         session_id = msg$sessionId,
         thread_id = msg$threadId,
+        project = msg$project,
         send_thread = send_thread,
         cursor = if (is_older_history) msg$cursor else NULL,
         limit = msg$limit %||% 50L
@@ -1303,7 +1375,12 @@ assistantUIServer <- function(id, handler,
     ide_context <- if (is_reload) NULL
       else if (has_reserved_context) reserved_context
       else if (is.function(ide_context_provider))
-        .read_ide_context(ide_context_provider, selection_visible)
+        .read_ide_context(
+          ide_context_provider,
+          selection_visible,
+          thread_id = thread_id,
+          project = msg$project
+        )
       else NULL
 
     # 划词引用:UI 划选的文本经 msg$quote({text,messageId})随本次提交带来;非 reload 时
@@ -1319,7 +1396,8 @@ assistantUIServer <- function(id, handler,
       user_text,
       is_reload,
       msg$attachments %||% list(),
-      ide_context
+      ide_context,
+      msg$project
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
@@ -1329,7 +1407,7 @@ assistantUIServer <- function(id, handler,
     shiny::observeEvent(session$input[[paste0(input_id, "_warmup")]], {
       msg <- session$input[[paste0(input_id, "_warmup")]]
       tid <- if (is.list(msg)) msg$threadId else NULL
-      schedule_warmup(tid, delay = 0.1)
+      schedule_warmup(tid, if (is.list(msg)) msg$project else NULL, delay = 0.1)
     }, once = TRUE, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
@@ -1414,9 +1492,13 @@ assistantUIServer <- function(id, handler,
   normalized
 }
 
-.read_ide_context <- function(provider, selection_visible = TRUE) {
+.read_ide_context <- function(provider, selection_visible = TRUE,
+                              thread_id = NULL, project = NULL) {
   if (!is.function(provider)) return(NULL)
-  raw <- tryCatch(provider(), error = function(e) NULL)
+  raw <- tryCatch(
+    .call_thread_provider(provider, thread_id, project),
+    error = function(e) NULL
+  )
   .normalize_ide_context(raw, selection_visible = selection_visible)
 }
 

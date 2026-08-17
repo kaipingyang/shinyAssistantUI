@@ -106,6 +106,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     commands: mergeSlashCommands(rt.commands ?? configuredCommands, rt.serverCommands, actionItems),
     actionItems,
     showTimestamps: config?.show_timestamps === true,
+    workspaceMode: rt.workspaceMode,
     onEnqueue: rt.enqueueMessage,
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
@@ -140,7 +141,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     serviceState: rt.serviceState,
     pendingServiceSubmissions: rt.pendingServiceSubmissions,
     retryService: rt.retryService,
-    cancelPendingServiceSubmissions: rt.cancelPendingServiceSubmissions,
+    cancelPendingServiceSubmissions: rt.cancelPendingSubmissions,
     warming: rt.warming,
     warmingResuming: rt.warmingResuming,
     runPhase: rt.runPhase,
@@ -217,7 +218,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
           {showThreadList && (
             <ThreadSidebar collapsed={sidebar.collapsed} onToggle={sidebar.toggle}>
               <WorkingDirBar />
-              <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1">
                 <ThreadList />
               </div>
               <SidebarSettings />
