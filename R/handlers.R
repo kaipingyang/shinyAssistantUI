@@ -2342,10 +2342,31 @@ make_claude_handler <- function(options       = NULL,
           # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
           # approve_tool/deny_tool 仍用 request_id。
           tuid <- msg$tool_use_id %||% msg$request_id
+          streamed_tool_input <- list()
           for (bidx in ls(tb)) {
             if (identical(tb[[bidx]]$id, tuid)) {
-              tb[[bidx]]$approval_handled <- TRUE; break
+              tb[[bidx]]$approval_handled <- TRUE
+              streamed_tool_input <- tryCatch(
+                jsonlite::fromJSON(tb[[bidx]]$args_buf, simplifyVector = FALSE),
+                error = function(e) list()
+              )
+              if (!is.list(streamed_tool_input) || is.null(names(streamed_tool_input))) {
+                streamed_tool_input <- list()
+              }
+              break
             }
+          }
+          # PermissionRequest 的 tool_input 可能为空/partial，但同一 tool_use_id 的
+          # input_json_delta 已包含完整参数。顶层浅覆盖可让 Permission 字段权威，
+          # 同时避免 modifyList 递归合并 questions 这类 JSON array/无名 list。
+          permission_tool_input <- msg$tool_input
+          if (is.null(permission_tool_input)) permission_tool_input <- list()
+          effective_tool_input <- streamed_tool_input
+          if (!is.list(permission_tool_input) ||
+              (length(permission_tool_input) > 0L && is.null(names(permission_tool_input)))) {
+            effective_tool_input <- permission_tool_input
+          } else if (length(permission_tool_input) > 0L) {
+            effective_tool_input[names(permission_tool_input)] <- permission_tool_input
           }
           approval_annotations <- list(
             requiresApproval = TRUE,
@@ -2365,12 +2386,12 @@ make_claude_handler <- function(options       = NULL,
             )
           }
           remember_edit_call(
-            tuid, msg$tool_name, msg$tool_input, approval_annotations
+            tuid, msg$tool_name, effective_tool_input, approval_annotations
           )
           on_tool_call(
             tool_call_id = tuid,
             tool_name = msg$tool_name,
-            args = msg$tool_input,
+            args = effective_tool_input,
             annotations = approval_annotations
           )
 
@@ -2392,16 +2413,16 @@ make_claude_handler <- function(options       = NULL,
               decision_record <- list(status = "approved", answers = decision$answers)
             }
             .record_tool_decision(decisions_path, tuid, decision_record)
-            # Plan 47 B:交互表单收集的值合并进 tool_input 经 updated_input 回传(泛化,非 AskUserQuestion 专用)。
+            # Plan 47 B:交互表单收集的值合并进 effective tool input 经 updated_input 回传。
             if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
-              ui <- utils::modifyList(msg$tool_input %||% list(), decision$updatedInput)
+              ui <- utils::modifyList(effective_tool_input %||% list(), decision$updatedInput)
               update_edit_effective_args(tuid, ui)
               client$approve_tool(msg$request_id, updated_input = ui)
               pending_tool_ids <- c(pending_tool_ids, tuid)
             } else
             # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
             if (!is.null(decision$answers) && length(decision$answers)) {
-              ui <- msg$tool_input %||% list()
+              ui <- effective_tool_input %||% list()
               ui$answers <- decision$answers
               update_edit_effective_args(tuid, ui)
               client$approve_tool(msg$request_id, updated_input = ui)

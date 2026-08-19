@@ -1,3 +1,12 @@
+# shinyAssistantUI 0.5.4
+
+- **修复 AskUserQuestion 严重回归**：当 Claude 的 `PermissionRequestMessage`
+  只携带空或部分 `tool_input` 时，后端现在会按同一 `tool_use_id` 恢复已经完整
+  流式到达的参数，并让 permission 快照按顶层字段覆盖。问题、选项和自定义回答卡
+  不再退化为 “Unable to display these questions”；提交答案、实时记录和历史恢复保持
+  一致。新增真实事件顺序的协议回归测试，以及 installed-package Chromium 验证，
+  累计监测整个交互过程未出现无效卡并要求零 console/runtime error。
+
 # shinyAssistantUI 0.5.3
 
 - **Multi-project Claude Workspace (Plans 81–86)**: the new **Claude Workspace**
