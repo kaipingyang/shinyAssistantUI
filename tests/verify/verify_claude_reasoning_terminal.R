@@ -10,19 +10,24 @@ script_path <- if (length(file_arg)) {
   normalizePath("tests/verify/verify_claude_reasoning_terminal.R")
 }
 PROJ <- normalizePath(file.path(dirname(script_path), "../.."))
+HOME_LIBRARY <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
+EXPECTED_VERSION <- unname(read.dcf(file.path(PROJ, "DESCRIPTION"), fields = "Version")[[1L]])
 PORT <- httpuv::randomPort()
 LOG_OUT <- tempfile(paste0("claude-reasoning-terminal-", Sys.getpid(), "-"), fileext = ".out")
 LOG_ERR <- tempfile(paste0("claude-reasoning-terminal-", Sys.getpid(), "-"), fileext = ".err")
 on.exit(unlink(c(LOG_OUT, LOG_ERR)), add = TRUE)
 
-proc <- callr::r_bg(function(proj, port) {
+proc <- callr::r_bg(function(proj, port, home_library) {
+  .libPaths(c(home_library, .libPaths()))
   suppressMessages({ library(shiny); library(shinyAssistantUI) })
+  cat("installed=", find.package("shinyAssistantUI"), "\n", sep = "")
+  cat("installed_version=", as.character(packageVersion("shinyAssistantUI")), "\n", sep = "")
   app <- source(
     file.path(proj, "tests/verify/claude_reasoning_terminal_app.R"),
     local = new.env()
   )$value
   shiny::runApp(app, host = "127.0.0.1", port = port, launch.browser = FALSE)
-}, args = list(proj = PROJ, port = PORT), stdout = LOG_OUT, stderr = LOG_ERR)
+}, args = list(proj = PROJ, port = PORT, home_library = HOME_LIBRARY), stdout = LOG_OUT, stderr = LOG_ERR)
 on.exit(try(proc$kill(), silent = TRUE), add = TRUE)
 
 for (i in seq_len(120L)) {
@@ -102,15 +107,25 @@ check(
   wait_until("!!document.querySelector('#chat [data-slot=aui_chain-of-thought]')")
 )
 check(
-  "terminal error is visible to the user",
+  "generic continuation is a visible user bubble",
   wait_until(paste0(
-    "document.querySelector('#chat').innerText.includes(",
-    "'⚠ Error: Upstream ended without a user-visible response.')"
-  )),
-  ev("document.querySelector('#chat').innerText")
+    "Array.from(document.querySelectorAll('#chat [data-role=user]'))",
+    ".some(e=>e.innerText.includes('Please provide the final user-visible response now.'))"
+  ))
 )
 check(
-  "thinking-only turn leaves running state",
+  "thinking-only turn recovers final visible text",
+  wait_until(paste0(
+    "Array.from(document.querySelectorAll('#chat [data-role=assistant]'))",
+    ".at(-1)?.innerText.includes('Recovered final answer.')"
+  ))
+)
+check(
+  "thinking-only recovery shows no terminal error",
+  isTRUE(ev("!document.querySelector('#chat').innerText.includes('⚠ Error:')"))
+)
+check(
+  "recovered turn leaves running state",
   wait_until(paste0(
     "!!document.querySelector('#chat .aui-composer-send') && ",
     "!document.querySelector('#chat .aui-composer-cancel') && ",
@@ -118,12 +133,12 @@ check(
   ))
 )
 
-send_text("retry with final")
+send_text("control final")
 check(
-  "composer accepts a second message after terminal error",
+  "composer accepts a normal message after recovery",
   wait_until(paste0(
     "Array.from(document.querySelectorAll('#chat [data-role=user]'))",
-    ".some(e=>e.innerText.includes('retry with final'))"
+    ".some(e=>e.innerText.includes('control final'))"
   ))
 )
 check(
@@ -139,6 +154,22 @@ check(
     "!!document.querySelector('#chat .aui-composer-send') && ",
     "!document.querySelector('#chat .aui-composer-cancel')"
   ))
+)
+logs <- if (file.exists(LOG_OUT)) readLines(LOG_OUT, warn = FALSE) else character()
+installed_path <- sub("^installed=", "", grep("^installed=", logs, value = TRUE))
+installed_version <- sub(
+  "^installed_version=", "", grep("^installed_version=", logs, value = TRUE)
+)
+check(
+  "fixture uses Home installed package",
+  length(installed_path) == 1L &&
+    identical(installed_path[[1L]], file.path(HOME_LIBRARY, "shinyAssistantUI")),
+  paste(installed_path, collapse = " | ")
+)
+check(
+  "installed package version matches source",
+  length(installed_version) == 1L && identical(installed_version[[1L]], EXPECTED_VERSION),
+  paste("expected=", EXPECTED_VERSION, "installed=", paste(installed_version, collapse = " | "))
 )
 Sys.sleep(0.5)
 check(

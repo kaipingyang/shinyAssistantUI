@@ -2658,5 +2658,28 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
       message.role === "user" && JSON.stringify(message.content).includes("Please continue from the completed tool results"));
     expect(continuationIndex).toBeGreaterThan(noticeIndex);
     expect(afterDone.some((message) => JSON.stringify(message.content).includes("queued follow-up"))).toBe(false);
+
+    const secondRunId = outbound[1].value.runId;
+    await fireR("auto-continue", {
+      threadId: tid,
+      runId: secondRunId,
+      notice: "Claude finished thinking without a visible response. Continuing automatically…",
+      prompt: "Please provide the final user-visible response now.",
+    });
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(2);
+
+    await fireR("done", { threadId: tid, runId: secondRunId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 70)); });
+
+    const twiceContinued = inputs.filter((item) => item.id === "test");
+    expect(twiceContinued).toHaveLength(3);
+    expect(twiceContinued[2].value.text).toBe("Please provide the final user-visible response now.");
+    const afterSecondDone = messages(result);
+    const genericContinuationIndex = afterSecondDone.findIndex((message) =>
+      message.role === "user" && JSON.stringify(message.content).includes("final user-visible response"));
+    expect(genericContinuationIndex).toBeGreaterThan(continuationIndex);
+    expect(afterSecondDone.filter((message) =>
+      message.role === "assistant" && JSON.stringify(message.content).includes("Continuing automatically"))).toHaveLength(2);
+    expect(afterSecondDone.some((message) => JSON.stringify(message.content).includes("queued follow-up"))).toBe(false);
   });
 });

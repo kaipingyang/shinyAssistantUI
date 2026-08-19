@@ -1486,6 +1486,14 @@ make_ellmer_session_loader <- function(store) {
   "Please continue from the completed tool results and provide the final response. ",
   "Do not repeat completed tool calls."
 )
+.CLAUDE_EMPTY_RESPONSE_NOTICE <- paste0(
+  "Claude finished thinking but did not produce a user-visible response. ",
+  "Continuing automatically\u2026"
+)
+.CLAUDE_EMPTY_RESPONSE_PROMPT <- paste0(
+  "Please provide the final user-visible response now. ",
+  "Do not continue with reasoning only."
+)
 
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
@@ -2054,6 +2062,8 @@ make_claude_handler <- function(options       = NULL,
     malformed_text_seen      <- FALSE
     terminal_error           <- NULL
     auto_continue_requested  <- FALSE
+    auto_continue_notice     <- NULL
+    auto_continue_prompt     <- NULL
     intentional_deny         <- FALSE
     pending_tool_ids         <- character(0)
     tb                       <- new.env(parent = emptyenv())
@@ -2554,10 +2564,16 @@ make_claude_handler <- function(options       = NULL,
                 }
               }
               if (!identical(message, "/reload-skills")) {
+                is_tool_recovery <- identical(message, .CLAUDE_AUTO_CONTINUE_PROMPT)
+                is_generic_recovery <- identical(message, .CLAUDE_EMPTY_RESPONSE_PROMPT)
                 if (awaiting_post_tool_text) {
+                  # A recovery turn that starts another tool must not recursively
+                  # create a fresh tool-postlude recovery chain.
                   if (is.function(on_auto_continue) &&
-                      !identical(message, .CLAUDE_AUTO_CONTINUE_PROMPT)) {
+                      !is_tool_recovery && !is_generic_recovery) {
                     auto_continue_requested <- TRUE
+                    auto_continue_notice <- .CLAUDE_AUTO_CONTINUE_NOTICE
+                    auto_continue_prompt <- .CLAUDE_AUTO_CONTINUE_PROMPT
                   } else {
                     terminal_error <- paste0(
                       "Upstream ended after a tool call without a final ",
@@ -2565,10 +2581,24 @@ make_claude_handler <- function(options       = NULL,
                     )
                   }
                 } else if (!visible_text_seen) {
-                  terminal_error <- paste0(
-                    "Upstream ended without a user-visible response. ",
-                    "Please retry the request."
-                  )
+                  # Ordinary thinking-only turns and a thinking-only tool recovery
+                  # each get one generic recovery. The generic prompt cannot retry
+                  # itself, bounding a tool path to at most two continuations.
+                  if (is.function(on_auto_continue) && !is_generic_recovery) {
+                    auto_continue_requested <- TRUE
+                    auto_continue_notice <- .CLAUDE_EMPTY_RESPONSE_NOTICE
+                    auto_continue_prompt <- .CLAUDE_EMPTY_RESPONSE_PROMPT
+                  } else if (is_generic_recovery) {
+                    terminal_error <- paste0(
+                      "Automatic continuation also ended without a user-visible ",
+                      "response. Please retry the request."
+                    )
+                  } else {
+                    terminal_error <- paste0(
+                      "Upstream ended without a user-visible response. ",
+                      "Please retry the request."
+                    )
+                  }
                 }
               }
             }
@@ -2695,8 +2725,8 @@ make_claude_handler <- function(options       = NULL,
     } else {
       if (isTRUE(auto_continue_requested)) {
         on_auto_continue(
-          notice = .CLAUDE_AUTO_CONTINUE_NOTICE,
-          prompt = .CLAUDE_AUTO_CONTINUE_PROMPT
+          notice = auto_continue_notice,
+          prompt = auto_continue_prompt
         )
       }
       on_done()

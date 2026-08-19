@@ -224,21 +224,20 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     thinking_stream("I should answer the user now."),
     result(stop_reason = "end_turn")
   ))
-  expect_false(thinking_only$done)
+  expect_true(thinking_only$done)
+  expect_null(thinking_only$error)
   expect_length(thinking_only$chunks, 0L)
-  expect_match(thinking_only$error, "user-visible response", ignore.case = TRUE)
+  expect_length(thinking_only$auto_continue, 1L)
+  expect_match(thinking_only$auto_continue[[1L]]$prompt, "visible|final response", ignore.case = TRUE)
 
   thinking_with_whitespace <- run_turn(list(
     thinking_stream("I should answer after thinking."),
     stream(" \n"),
     result(stop_reason = "end_turn")
   ))
-  expect_false(thinking_with_whitespace$done)
-  expect_match(
-    thinking_with_whitespace$error,
-    "without a user-visible response",
-    ignore.case = TRUE
-  )
+  expect_true(thinking_with_whitespace$done)
+  expect_null(thinking_with_whitespace$error)
+  expect_length(thinking_with_whitespace$auto_continue, 1L)
   expect_identical(trimws(paste0(thinking_with_whitespace$chunks, collapse = "")), "")
 
   buffered_whitespace_before_tool <- run_turn(list(
@@ -271,6 +270,37 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_match(continuation_prompt, "completed tool results", ignore.case = TRUE)
   expect_match(stalled_after_tool$auto_continue[[1L]]$notice, "Continuing automatically")
 
+  # Reported chain: the visible tool-recovery user turn itself finishes with
+  # reasoning only. It gets one distinct generic recovery, not an immediate error.
+  thinking_tool_continuation <- run_turn(
+    list(
+      thinking_stream("I have the answer and should now state it."),
+      result(stop_reason = "end_turn")
+    ),
+    message = continuation_prompt
+  )
+  expect_true(thinking_tool_continuation$done)
+  expect_null(thinking_tool_continuation$error)
+  expect_length(thinking_tool_continuation$auto_continue, 1L)
+  generic_prompt <- thinking_tool_continuation$auto_continue[[1L]]$prompt
+  expect_false(identical(generic_prompt, continuation_prompt))
+  expect_match(generic_prompt, "visible|final response", ignore.case = TRUE)
+
+  # The generic recovery is the hard bound: if it also returns thinking-only,
+  # fail once and never enqueue a third continuation.
+  stalled_generic_continuation <- run_turn(
+    list(
+      thinking_stream("Still no visible response."),
+      result(stop_reason = "end_turn")
+    ),
+    message = generic_prompt
+  )
+  expect_false(stalled_generic_continuation$done)
+  expect_match(stalled_generic_continuation$error, "user-visible response|continuation", ignore.case = TRUE)
+  expect_length(stalled_generic_continuation$auto_continue, 0L)
+
+  # A recovery turn that starts a new tool and again omits the final text keeps
+  # the existing terminal error instead of entering another tool-recovery loop.
   stalled_continuation <- run_turn(
     list(
       partial_tool_start(),
@@ -283,6 +313,19 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_false(stalled_continuation$done)
   expect_match(stalled_continuation$error, "after a tool call", ignore.case = TRUE)
   expect_length(stalled_continuation$auto_continue, 0L)
+
+  stalled_generic_with_tool <- run_turn(
+    list(
+      partial_tool_start(),
+      partial_tool_stop(),
+      thinking_stream("The generic recovery still omitted visible text."),
+      result(stop_reason = "end_turn")
+    ),
+    message = generic_prompt
+  )
+  expect_false(stalled_generic_with_tool$done)
+  expect_match(stalled_generic_with_tool$error, "after a tool call", ignore.case = TRUE)
+  expect_length(stalled_generic_with_tool$auto_continue, 0L)
 
   final_after_tool <- run_turn(list(
     partial_tool_start(),

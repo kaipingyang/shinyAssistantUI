@@ -1,3 +1,13 @@
+# shinyAssistantUI 0.5.5
+
+- **修复工具后 thinking-only 导致续接中断**：工具完成但缺少最终回复时，原有
+  tool-postlude 续接若仍只产生 thinking，现在会再进行一次独立的 generic 续接，
+  明确要求输出用户可见的最终回复。普通 thinking-only 回合最多恢复一次，工具路径
+  最多按 `tool-postlude → generic` 恢复两次；generic 仍无可见文本或恢复回合再次留下
+  未解决的工具边界时会确定性终止，不会无限重试。两个续接 prompt 均作为正常可见
+  用户消息进入队列。新增 R 状态机、连续前端队列及 Home installed-package Chromium
+  回归验证，覆盖三回合顺序、可见续接气泡、最终回复与零 console/runtime error。
+
 # shinyAssistantUI 0.5.4
 
 - **修复 AskUserQuestion 严重回归**：当 Claude 的 `PermissionRequestMessage`
