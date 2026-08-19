@@ -281,3 +281,38 @@ describe("ToolArgsView streaming markdown", () => {
     expect(container.querySelector('[data-arg-view="markdown"]')?.getAttribute("data-args-streaming")).toBe("false");
   });
 });
+
+
+describe("ToolArgsView Edit diff line-number truthfulness", () => {
+  it("hides the gutter while startLine is unknown instead of showing a fake 1", () => {
+    const { container } = render(
+      <ToolArgsView view={{
+        kind: "diff",
+        oldContent: "target <- old",
+        newContent: "target <- new",
+        fileName: "demo.R",
+        startLine: undefined,
+      } as never} />,
+    );
+    expect(container.querySelector('[data-arg-view="diff"]')).not.toBeNull();
+    expect(container.querySelector('[data-slot="diff-viewer-line-number"]')).toBeNull();
+  });
+
+  it("shows the recovered real gutter once startLine arrives", () => {
+    const { container } = render(
+      <ToolArgsView view={{
+        kind: "diff",
+        oldContent: "target <- old",
+        newContent: "target <- new",
+        fileName: "demo.R",
+        startLine: 4,
+      } as never} />,
+    );
+    const numbers = Array.from(
+      container.querySelectorAll('[data-slot="diff-viewer-line-number"]'),
+      (node) => node.textContent?.trim(),
+    );
+    expect(numbers).toEqual(["4", "4"]);
+    expect(numbers).not.toContain("1");
+  });
+});

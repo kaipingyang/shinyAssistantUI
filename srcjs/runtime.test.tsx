@@ -73,6 +73,7 @@ describe("useShinyRuntime — onNew 基本流", () => {
       await result.current.runtime.thread.composer.setText("hi");
       await result.current.runtime.thread.composer.send();
     });
+
     const tid = currentThreadId(result);
     await fireR("chunk", { text: "Hello ", threadId: tid });
     await fireR("chunk", { text: "world", threadId: tid });
@@ -762,6 +763,55 @@ describe("useShinyRuntime — tool 流式三段", () => {
     expect(tc.artifact).toMatchObject({
       parentToolCallId: null,
       defaultOpen: true,
+      argsStreaming: false,
+    });
+  });
+
+  it("preserves Edit diffStartLine through canonical and result updates", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("edit it");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("tool-call-start", {
+      toolCallId: "edit-line",
+      toolName: "Edit",
+      annotations: { parentToolCallId: null },
+      threadId: tid,
+    });
+    await fireR("tool-call", {
+      toolCallId: "edit-line",
+      toolName: "Edit",
+      args: { file_path: "demo.R", old_string: "old", new_string: "new" },
+      argsText: '{"file_path":"demo.R","old_string":"old","new_string":"new"}',
+      annotations: { requiresApproval: true },
+      threadId: tid,
+    });
+    await fireR("tool-call", {
+      toolCallId: "edit-line",
+      toolName: "Edit",
+      args: { file_path: "demo.R", old_string: "old", new_string: "new" },
+      argsText: '{"file_path":"demo.R","old_string":"old","new_string":"new"}',
+      annotations: { diffStartLine: 42 },
+      threadId: tid,
+    });
+    await fireR("tool-result", {
+      toolCallId: "edit-line",
+      result: "done",
+      isError: false,
+      threadId: tid,
+    });
+
+    const toolCalls = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .filter((p) => p.type === "tool-call" && p.toolCallId === "edit-line");
+    expect(toolCalls).toHaveLength(1);
+    const tc = toolCalls[0];
+    expect(tc.artifact).toMatchObject({
+      parentToolCallId: null,
+      requiresApproval: true,
+      diffStartLine: 42,
       argsStreaming: false,
     });
   });
@@ -2510,5 +2560,103 @@ describe("useShinyRuntime — Workspace routing regressions", () => {
     await act(async () => result.current.runtime.thread.getMessageById(assistant.id).reload());
     expect(inputs.filter((item) => item.id === "test" && item.value.type === "reload").at(-1)?.value)
       .toMatchObject({ threadId: threadA, project: "/work/a" });
+  });
+});
+
+
+describe("useShinyRuntime — Workspace folder-scoped new chat", () => {
+  it("atomically creates a thread in the requested project without loading history", async () => {
+    const { result } = setup({
+      workspace_mode: true,
+      persistence: "server",
+      working_dir: "/work/a",
+    });
+    await fireR("sessions", {
+      sessions: [
+        { id: "a-history", title: "A", project: "/work/a" },
+        { id: "b-history", title: "B", project: "/work/b" },
+      ],
+      projectOrder: ["/work/a", "/work/b"],
+    });
+    inputs.length = 0;
+
+    await act(async () => result.current.newThreadInProject("/work/b"));
+
+    const threadId = currentThreadId(result);
+    expect(result.current.runtime.threads.getItemById(threadId).getState().custom)
+      .toMatchObject({ project: "/work/b" });
+    expect(result.current.workingDir).toBe("/work/b");
+    expect(result.current.workspaceProjectOrder).toEqual(["/work/a", "/work/b"]);
+    expect(inputs.filter((event) => event.id === "test_set_working_dir"))
+      .toHaveLength(1);
+    expect(inputs.find((event) => event.id === "test_set_working_dir")?.value)
+      .toMatchObject({ path: "/work/b" });
+    expect(inputs.some((event) =>
+      event.id === "test" && event.value?.type === "load_session"
+    )).toBe(false);
+  });
+});
+
+
+describe("useShinyRuntime — assistant text size preference", () => {
+  it("accepts the Medium preset and sends canonical optimistic changes", () => {
+    const { result } = setup({ assistant_text_size: "compact" });
+    expect(result.current.assistantTextSize).toBe("compact");
+
+    act(() => result.current.setAssistantTextSize("small"));
+    expect(result.current.assistantTextSize).toBe("small");
+    expect(inputs.find((item) => item.id === "test_assistant_text_size")?.value)
+      .toMatchObject({ value: "small" });
+  });
+
+  it("normalizes the legacy Large preset to Default", () => {
+    const { result } = setup({ assistant_text_size: "large" });
+    expect(result.current.assistantTextSize).toBe("medium");
+  });
+
+  it("ignores an unsupported initial value", () => {
+    const { result } = setup({ assistant_text_size: "tiny" });
+    expect(result.current.assistantTextSize).toBeUndefined();
+  });
+});
+
+
+describe("useShinyRuntime — transparent auto-continuation", () => {
+  it("shows a notice, then sends one visible user continuation before queued follow-ups", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("inspect with a tool");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    const firstRunId = inputs.find((item) => item.id === "test")!.value.runId;
+    act(() => result.current.enqueueMessage("queued follow-up"));
+
+    await fireR("auto-continue", {
+      threadId: tid,
+      runId: firstRunId,
+      notice: "Claude completed the tool call but did not produce a final response. Continuing automatically…",
+      prompt: "Please continue from the completed tool results and provide the final response. Do not repeat completed tool calls.",
+    });
+
+    const beforeDone = messages(result);
+    const noticeIndex = beforeDone.findIndex((message) =>
+      message.role === "assistant" && JSON.stringify(message.content).includes("Continuing automatically"));
+    expect(noticeIndex).toBeGreaterThanOrEqual(0);
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(1);
+
+    await fireR("done", { threadId: tid, runId: firstRunId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 70)); });
+
+    const outbound = inputs.filter((item) => item.id === "test");
+    expect(outbound).toHaveLength(2);
+    expect(outbound[1].value.text).toBe(
+      "Please continue from the completed tool results and provide the final response. Do not repeat completed tool calls.",
+    );
+    const afterDone = messages(result);
+    const continuationIndex = afterDone.findIndex((message) =>
+      message.role === "user" && JSON.stringify(message.content).includes("Please continue from the completed tool results"));
+    expect(continuationIndex).toBeGreaterThan(noticeIndex);
+    expect(afterDone.some((message) => JSON.stringify(message.content).includes("queued follow-up"))).toBe(false);
   });
 });

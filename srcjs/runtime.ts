@@ -18,7 +18,7 @@ import type {
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
 import type {
-  ShinyBridge, SessionItem, IdeContextMeta, WorkspaceMentionItem,
+  ShinyBridge, SessionsPayload, IdeContextMeta, WorkspaceMentionItem,
   AttachmentData, QuoteInfo, RunPhase,
 } from "./bridge";
 import {
@@ -37,7 +37,12 @@ import {
   requestTaskStop,
   selectThreadTaskMonitor,
 } from "./task-monitor";
-import type { PermissionModeOption, PermissionModeState } from "./shiny-config-context";
+import {
+  normalizeAssistantTextSize,
+  type AssistantTextSize,
+  type PermissionModeOption,
+  type PermissionModeState,
+} from "./shiny-config-context";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
@@ -378,6 +383,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => (config?.composer_density === "compact" || config?.composer_density === "comfortable"
       ? config.composer_density : undefined),
   );
+  const [assistantTextSize, setAssistantTextSizeState] = useState<AssistantTextSize | undefined>(
+    () => normalizeAssistantTextSize(config?.assistant_text_size),
+  );
   const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
     () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
   );
@@ -391,6 +399,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
+  const [workspaceProjectOrder, setWorkspaceProjectOrder] = useState<string[]>([]);
   const workspaceRequestSeq = useRef(0);
   const workspaceDebounceRef = useRef<number | null>(null);
   const latestIdeRequest = useRef<string | null>(null);
@@ -616,6 +625,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   type QueuedMessage = { text: string; sendText: string; project?: string };
   const messageQueueRef = useRef<Map<string, QueuedMessage[]>>(new Map()); // 每线程排队消息
+  const autoContinueRunIdsRef = useRef(new Set<string>());
   type PendingSubmission = {
     id: string;
     requiresService: boolean;
@@ -1049,6 +1059,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (typeof d?.dir === "string") {
         workingDirRef.current = d.dir;
         setWorkingDirState(d.dir);
+        if (workspaceMode) {
+          setWorkspaceProjectOrder((previous) =>
+            previous.includes(d.dir!) ? previous : [d.dir!, ...previous]
+          );
+        }
       }
       if (Array.isArray(d?.recent)) setRecentDirs(d.recent as string[]);
       if (!workspaceMode) {
@@ -1067,7 +1082,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // 策略：server 列表到达时【替换】localStorage 线程，而非追加。
     // 只保留本次 React 实例新建（thisSessionThreadIds）且尚未在 server 上的线程，
     // 避免旧 localStorage 孤儿线程（t_XXXX）和 server sessions（UUID）同时显示。
-    bridge.current.onSessions(({ sessions }: { sessions: SessionItem[] }) => {
+    bridge.current.onSessions(({ sessions, projectOrder }: SessionsPayload) => {
+      if (workspaceMode && Array.isArray(projectOrder)) {
+        setWorkspaceProjectOrder(Array.from(new Set(
+          projectOrder.filter((project): project is string =>
+            typeof project === "string" && project.length > 0
+          ),
+        )));
+      }
       // In explicit server mode even an empty snapshot is authoritative: discard
       // every previously displayed server/local thread instead of treating the
       // payload as "no update". Keep one fresh blank thread so the runtime always
@@ -1594,6 +1616,32 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...previous, [threadId]: next };
           });
           setActiveArtifactIds((previous) => ({ ...previous, [threadId]: artifact.id }));
+        },
+        onAutoContinue: (data) => {
+          if (data.runId && data.runId !== runId) return;
+          const recoveryId = data.runId ?? runId;
+          if (autoContinueRunIdsRef.current.has(recoveryId)) return;
+          autoContinueRunIdsRef.current.add(recoveryId);
+          setMessagesMap((prev) => {
+            const threadMsgs = prev[threadId] ?? [];
+            const updated: ThreadMessageLike[] = [
+              ...threadMsgs,
+              {
+                id: `auto-continue-notice-${recoveryId}`,
+                role: "assistant" as const,
+                content: [{ type: "text" as const, text: `⚠ ${data.notice}` }],
+              },
+            ];
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+            return { ...prev, [threadId]: updated };
+          });
+          const queued = messageQueueRef.current.get(threadId) ?? [];
+          queued.unshift({
+            text: data.prompt,
+            sendText: data.prompt,
+            project: projectForThreadId(threadId),
+          });
+          messageQueueRef.current.set(threadId, queued);
         },
         onDone: (doneSuggestions, incomingRunId, cancelled = false) => {
           if (incomingRunId && incomingRunId !== runId) return;
@@ -2127,11 +2175,28 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     bridge.current.sendCancel(threadId, activeTaskRunIdsRef.current[threadId]);
   }, [currentThreadId]);
 
-  // ── switchToNewThread（也暴露给外部 slash command 用）─────────────────────
-  const switchToNewThread = useCallback(() => {
+  // ── new thread creation ──────────────────────────────────────────────────
+  // Workspace folder actions pass an explicit project so thread ownership does
+  // not depend on whichever workingDir happened to be selected previously.
+  const createNewThread = useCallback((projectOverride?: string) => {
+    const explicitProject = typeof projectOverride === "string" && projectOverride.length > 0
+      ? projectOverride
+      : undefined;
+    if (workspaceMode && explicitProject) {
+      const projectChanged = explicitProject !== workingDirRef.current;
+      workingDirRef.current = explicitProject;
+      setWorkingDirState(explicitProject);
+      setWorkspaceProjectOrder((previous) =>
+        previous.includes(explicitProject) ? previous : [explicitProject, ...previous]
+      );
+      if (projectChanged) bridge.current.sendSetWorkingDir(explicitProject);
+    }
+
     const newId = makeThreadId();
     thisSessionThreadIds.current.add(newId);
-    const project = workspaceMode ? workingDirRef.current || undefined : undefined;
+    const project = workspaceMode
+      ? explicitProject ?? (workingDirRef.current || undefined)
+      : undefined;
     if (project) threadProjectsRef.current.set(newId, project);
     const newThread: ExternalStoreThreadData<"regular"> = {
       id: newId,
@@ -2139,13 +2204,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       title: "New chat",
       ...(project ? { custom: { project, projectLabel: projectLabel(project) } } : {}),
     };
-    setThreads((prev) => {
-      const next = [newThread, ...prev];
+    setThreads((previous) => {
+      const next = [newThread, ...previous];
       saveThreads(inputId, usesClientPersistence, next);
       return next;
     });
     switchCurrentThread(newId);
-  }, [inputId, workspaceMode]);
+  }, [inputId, usesClientPersistence, workspaceMode]);
+
+  // Upstream ThreadListPrimitive.New remains parameterless for ordinary Chat.
+  const switchToNewThread = useCallback(() => createNewThread(), [createNewThread]);
+  const newThreadInProject = useCallback(
+    (project: string) => createNewThread(project),
+    [createNewThread],
+  );
 
   // ── 线程重命名（rename）──────────────────────────────────────────────────────
   // manualTitleIds：被用户手动改过标题的线程,首条消息自动命名时不再覆盖。
@@ -2514,7 +2586,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [currentThreadId]);
 
   return {
-    runtime, sendToolApproval, switchToNewThread, renameThread, openFile, enqueueMessage,
+    runtime, sendToolApproval, switchToNewThread, newThreadInProject,
+    renameThread, openFile, enqueueMessage,
     runInConsole, consoleRunEnabled,
     invokeAction, permissionMode, thinking, model,
     blockingAction: blockingActions[currentThreadId],
@@ -2533,10 +2606,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (workspaceMode) {
         workingDirRef.current = path;
         setWorkingDirState(path);
+        setWorkspaceProjectOrder((previous) =>
+          previous.includes(path) ? previous : [path, ...previous]
+        );
       }
       bridge.current.sendSetWorkingDir(path);
     },
     projects,
+    workspaceProjectOrder,
     saveProject: () => bridge.current.sendSaveProject(),
     removeProject: (path: string) => bridge.current.sendRemoveProject(path),
     filesPaneFollow,
@@ -2563,6 +2640,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setComposerDensity: (value: "comfortable" | "compact") => {
       setComposerDensityState(value);
       bridge.current.sendComposerDensity(value);
+    },
+    assistantTextSize,
+    setAssistantTextSize: (value: AssistantTextSize) => {
+      setAssistantTextSizeState(value);
+      bridge.current.sendAssistantTextSize(value);
     },
     runREnabled,
     setRunREnabled: (value: boolean) => {

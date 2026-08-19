@@ -1,22 +1,31 @@
-# shinyAssistantUI 0.5.2.9000 (dev branch)
+# shinyAssistantUI 0.5.3
 
-- **Claude image/terminal reply fallback (Plan 64)**: Claude turns no longer finish with an
-  empty or truncated assistant reply when a backend returns final `AssistantMessage` or
-  `ResultMessage$result` text missing from partial stream events. Only the non-overlapping
-  terminal suffix is appended, so normal streaming is not duplicated. Error results use the
-  existing error UI, while an intentional user Deny remains a normal stopped turn.
+- **Multi-project Claude Workspace (Plans 81–86)**: the new **Claude Workspace**
+  addin keeps project-scoped histories and concurrent runs in one chat surface. Projects are
+  grouped into independent folders with per-project New Chat controls, collapse-all, bounded
+  inner scrolling, activity-based startup order, and natural-sorted Favorites. Workspace
+  registry membership is separate from persistent Favorites, newly selected folders move to the
+  front, zero-history projects remain usable, and history loading/deletion resolves against the
+  session's owning project.
 
+- **Assistant and tool text sizing (Plans 87 and 89)**: Settings now offers explicit **Small**
+  (12px), **Medium** (14px), and **Default** (16px) assistant text levels. Tool cards scale with
+  the selected level while user messages, the composer, and surrounding UI remain unchanged.
+  Legacy preferences normalize safely, and the Settings panel stays scrollable with a sticky
+  header in short Viewer panes.
 
-- **codeagent Data Shield-safe adapter and showcase (Plan 65)**: `make_codeagent_handler()`
-  now maps codeagent usage, sends image attachments as native ellmer content, and forwards all
-  images from rich tool results. With Data Shield active, assistant output is held server-side,
-  scanned as a complete response, and only then released; prompt scans fail closed, while
-  thinking, raw tool arguments, provider tool IDs, unscanned tool values, approval inputs, and
-  parallel rich-display payloads cannot bypass that boundary. Shield-backed turns are not passed
-  to the optional persistence adapter. Error/cancel terminal states no longer also report normal
-  completion, and handler teardown closes per-thread shields.
-  Example 27 is now a per-session workbench/Data Shield showcase covering permissions, Stop,
-  usage, rich R results, images, project skills, and configured MCP/agent tools.
+- **Transparent continuation and stable tool cards (Plan 88)**: when Claude successfully finishes
+  tools but omits a final user-visible response, the runtime performs one bounded, visible
+  continuation instead of leaving the turn stranded. Expanded tool cards and their Markdown,
+  table, diff, and result scroll positions now survive streaming remounts.
+
+- **Stable Edit diff line numbers (Plan 90)**: Edit cards retain their real source line through
+  live Manual, Auto-edit, Bypass, and YOLO flows and through restored history. Auto-executed edits
+  recover from Claude's authoritative pre-edit `originalFile` snapshot, while history uses a
+  minimal metadata sidecar. Unknown or ambiguous locations no longer display a misleading line
+  1 gutter; CRLF, duplicate blocks, `replaceAll`, errors, and parallel tool results are handled
+  conservatively.
+
 # shinyAssistantUI 0.5.2
 
 - **Project-prefixed file links (Plan 62)**: when the add-in is already rooted at a

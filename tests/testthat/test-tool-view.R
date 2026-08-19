@@ -71,3 +71,80 @@ test_that(".tool_edit_start_line resolves relative path against base_dir", {
   writeLines(c("x", "target_line", "y"), file.path(d, "rel.R"))
   expect_equal(shinyAssistantUI:::.tool_edit_start_line("rel.R", "target_line", d), 2L)
 })
+
+
+test_that(".tool_edit_start_line normalizes CRLF and rejects ambiguous duplicate blocks", {
+  f <- tempfile(fileext = ".R")
+  writeBin(charToRaw("top\r\ntarget\r\nnext\r\nmiddle\r\ntarget\r\nnext\r\n"), f)
+  on.exit(unlink(f), add = TRUE)
+  expect_null(
+    shinyAssistantUI:::.tool_edit_start_line(f, "target\r\nnext")
+  )
+})
+
+
+
+test_that(".tool_edit_start_line rejects files above the 5MB guard", {
+  file <- tempfile(fileext = ".R")
+  on.exit(unlink(file), add = TRUE)
+  connection <- file(file, open = "wb")
+  on.exit(try(close(connection), silent = TRUE), add = TRUE)
+  writeBin(raw(5e6 + 1L), connection)
+  close(connection)
+  expect_null(shinyAssistantUI:::.tool_edit_start_line(file, "target"))
+})
+test_that(".tool_edit_start_line never guesses from the first line of a mismatched multiline block", {
+  f <- tempfile(fileext = ".R")
+  writeLines(c("top", "target", "different", "bottom"), f)
+  on.exit(unlink(f), add = TRUE)
+  expect_null(
+    shinyAssistantUI:::.tool_edit_start_line(f, "target\nexpected")
+  )
+})
+
+
+test_that(".tool_edit_start_line_from_content recovers a unique pre-edit line", {
+  original <- paste(c("line1", "line2", "line3", "target <- old", "line5"), collapse = "\r\n")
+  expect_identical(
+    shinyAssistantUI:::.tool_edit_start_line_from_content(
+      original, "target <- old"
+    ),
+    4L
+  )
+  expect_null(
+    shinyAssistantUI:::.tool_edit_start_line_from_content(
+      "target <- old\nother\ntarget <- old", "target <- old"
+    )
+  )
+  expect_null(
+    shinyAssistantUI:::.tool_edit_start_line_from_content(
+      strrep("x", 5e6 + 1L), "x"
+    )
+  )
+})
+
+test_that(".claude_edit_result_recovery uses only successful unique Edit evidence", {
+  args <- list(
+    file_path = "demo.R", old_string = "target <- old",
+    new_string = "target <- new", replace_all = FALSE
+  )
+  result <- list(
+    filePath = "demo.R", oldString = "target <- old",
+    newString = "target <- new",
+    originalFile = "line1\nline2\nline3\ntarget <- old\nline5\n",
+    replaceAll = FALSE
+  )
+  recovered <- shinyAssistantUI:::.claude_edit_result_recovery(result, args)
+  expect_identical(recovered$diffStartLine, 4L)
+  expect_identical(recovered$args, args)
+
+  result$replaceAll <- TRUE
+  expect_identical(
+    shinyAssistantUI:::.claude_edit_result_recovery(result, args)$diffStartLine,
+    4L
+  )
+
+  result$originalFile <- "target <- old\nother\ntarget <- old\n"
+  expect_null(shinyAssistantUI:::.claude_edit_result_recovery(result, args))
+  expect_null(shinyAssistantUI:::.claude_edit_result_recovery("Edited", args))
+})

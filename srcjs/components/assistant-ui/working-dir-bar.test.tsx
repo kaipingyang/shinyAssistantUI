@@ -70,3 +70,28 @@ describe("WorkingDirBar auto-run toggle", () => {
     expect(setAutoRunEnabled).toHaveBeenCalledWith(true);
   });
 });
+
+
+describe("WorkingDirBar favorites ordering", () => {
+  it("renders a case-insensitive natural name order without mutating input", () => {
+    const projects = [
+      "/work/zeta",
+      "/work/project-10",
+      "/work/Alpha",
+      "/work/project-2",
+    ];
+    const original = [...projects];
+    const { container } = renderBar({ projects });
+
+    fireEvent.click(screen.getByRole("button", { name: /Favorites \(4\)/ }));
+    expect(Array.from(container.querySelectorAll("[data-slot=aui_project_item]"))
+      .map((node) => node.getAttribute("data-project")))
+      .toEqual([
+        "/work/Alpha",
+        "/work/project-2",
+        "/work/project-10",
+        "/work/zeta",
+      ]);
+    expect(projects).toEqual(original);
+  });
+});

@@ -247,8 +247,8 @@
 # 重命名会话的 seam（同步侧栏标题到 SDK session 存储，可单测 mock）。
 .rename_claude_session <- function(session_id, title, directory = NULL)
   ClaudeAgentSDK::rename_session(session_id, title, directory = directory)
-.get_claude_session_messages <- function(session_id) {
-  ClaudeAgentSDK::get_session_messages(session_id)
+.get_claude_session_messages <- function(session_id, directory = NULL) {
+  ClaudeAgentSDK::get_session_messages(session_id, directory = directory)
 }
 
 .read_claude_session_map <- function(path) {
@@ -327,9 +327,58 @@
   tryCatch(.atomic_save_rds(cur, path), error = function(e) NULL)
   invisible(NULL)
 }
+
+# ── 工具稳定元数据持久化 ────────────────────────────────────────────────────
+# Claude transcript 不保存 shinyAssistantUI 注入的 annotations。Edit 的真实 diff
+# 起始行只能在文件修改前计算，因此按全局唯一 tool_use id 持久保存最小白名单字段，
+# 供历史 loader 重建；不保存 inputId、审批文案或其它瞬时 annotations。
+.claude_tool_metadata_path <- function(session_map_path) {
+  if (is.null(session_map_path) || !nzchar(session_map_path %||% "")) return(NULL)
+  file.path(dirname(session_map_path), "tool_metadata.rds")
+}
+
+.read_tool_metadata <- function(path) {
+  if (is.null(path) || !nzchar(path %||% "") || !file.exists(path)) return(list())
+  tryCatch({
+    value <- readRDS(path)
+    if (is.list(value)) value else list()
+  }, error = function(e) list())
+}
+
+.normalize_diff_start_line <- function(value) {
+  if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+      !is.finite(value) || value <= 0 || value != floor(value) ||
+      value > .Machine$integer.max) return(NULL)
+  as.integer(value)
+}
+
+.record_tool_metadata <- function(path, tool_call_id, tool_name, annotations = list()) {
+  if (is.null(path) || !nzchar(path %||% "") ||
+      !is.character(tool_call_id) || length(tool_call_id) != 1L ||
+      is.na(tool_call_id) || !nzchar(tool_call_id) ||
+      !identical(tool_name, "Edit")) return(invisible(NULL))
+  line <- .normalize_diff_start_line(annotations$diffStartLine)
+  if (is.null(line)) return(invisible(NULL))
+  current <- .read_tool_metadata(path)
+  current[[tool_call_id]] <- list(diffStartLine = line)
+  tryCatch(.atomic_save_rds(current, path), error = function(e) NULL)
+  invisible(NULL)
+}
+
+.prune_tool_metadata <- function(path, tool_call_ids) {
+  if (is.null(path) || !length(tool_call_ids)) return(invisible(NULL))
+  current <- .read_tool_metadata(path)
+  if (!length(current)) return(invisible(NULL))
+  current[as.character(tool_call_ids)] <- NULL
+  tryCatch(.atomic_save_rds(current, path), error = function(e) NULL)
+  invisible(NULL)
+}
 # 读某 session 的所有 tool_use id(删除前调用,此时 transcript 还在)。
-.session_tool_use_ids <- function(session_id) {
-  msgs <- tryCatch(.get_claude_session_messages(session_id), error = function(e) list())
+.session_tool_use_ids <- function(session_id, directory = NULL) {
+  msgs <- tryCatch(
+    .get_claude_session_messages(session_id, directory = directory),
+    error = function(e) list()
+  )
   ids <- character(0)
   for (m in msgs) {
     if (identical(m$type, "assistant") && is.list(m$message$content)) {
@@ -594,7 +643,7 @@
 
   pieces <- unique(trimws(pieces[nzchar(trimws(pieces))]))
   if (!length(pieces)) return("Claude request failed without an error message.")
-  paste(pieces, collapse = " — ")
+  paste(pieces, collapse = " - ")
 }
 
 .claude_drain_timeout_seconds <- function() 10
@@ -1336,6 +1385,24 @@ make_ellmer_session_loader <- function(store) {
 # Extract client-tool results emitted by ClaudeAgentSDK as UserMessage content.
 # `tool_use_result` preserves structured TaskCreate ids when the CLI supplies
 # them; textual ToolResultBlock content remains a backward-compatible fallback.
+# Recover an Edit diff line from the CLI's authoritative pre-edit snapshot.
+# The caller is responsible for the successful-result gate and safe tool-id binding.
+.claude_edit_result_recovery <- function(result, cached_args) {
+  if (!is.list(result) || !is.list(cached_args)) return(NULL)
+  scalar_string <- function(value) {
+    is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
+  }
+  if (!scalar_string(result$originalFile) || !scalar_string(result$oldString)) {
+    return(NULL)
+  }
+  start_line <- .tool_edit_start_line_from_content(
+    result$originalFile,
+    result$oldString
+  )
+  if (is.null(start_line)) return(NULL)
+  list(args = cached_args, diffStartLine = start_line)
+}
+
 .claude_user_tool_results <- function(message) {
   if (!inherits(message, "UserMessage") || !is.list(message$content)) return(list())
   blocks <- Filter(function(block) inherits(block, "ToolResultBlock"), message$content)
@@ -1411,6 +1478,15 @@ make_ellmer_session_loader <- function(store) {
   connect_fresh()
 }
 
+.CLAUDE_AUTO_CONTINUE_NOTICE <- paste0(
+  "Claude completed the tool call but did not produce a final response. ",
+  "Continuing automatically\u2026"
+)
+.CLAUDE_AUTO_CONTINUE_PROMPT <- paste0(
+  "Please continue from the completed tool results and provide the final response. ",
+  "Do not repeat completed tool calls."
+)
+
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
 #' Wraps `ClaudeAgentSDK` into an `assistantUIServer`-compatible handler.
@@ -1453,6 +1529,8 @@ make_ellmer_session_loader <- function(store) {
 #' }
 #' }
 #'
+
+
 #' @export
 make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
@@ -1620,6 +1698,7 @@ make_claude_handler <- function(options       = NULL,
 
     strict_sid <- strict_resume_sids[[thread_id]]
     stored_sid <- read_session_id(thread_id)
+
     client <- .claude_connect_with_resume_policy(
       stored_sid = stored_sid,
       strict_sid = strict_sid,
@@ -1897,6 +1976,7 @@ make_claude_handler <- function(options       = NULL,
     on_tool_call, on_tool_result, on_thinking,
     is_cancelled, wait_for_approval,
     on_tool_call_start = NULL, on_tool_call_delta = NULL,
+    on_auto_continue = NULL,
     on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
     on_commands = NULL, on_warming = NULL,
     ide_context = NULL, project = NULL
@@ -1973,9 +2053,37 @@ make_claude_handler <- function(options       = NULL,
     awaiting_post_tool_text  <- FALSE
     malformed_text_seen      <- FALSE
     terminal_error           <- NULL
+    auto_continue_requested  <- FALSE
     intentional_deny         <- FALSE
     pending_tool_ids         <- character(0)
-    tb               <- new.env(parent = emptyenv())
+    tb                       <- new.env(parent = emptyenv())
+    pending_edit_calls       <- new.env(parent = emptyenv())
+
+    remember_edit_call <- function(id, name, args, annotations) {
+      id <- as.character(id %||% "")
+      if (!nzchar(id) || !identical(as.character(name %||% ""), "Edit")) {
+        return(invisible(NULL))
+      }
+      pending_edit_calls[[id]] <- list(
+        name = name,
+        args = args %||% list(),
+        annotations = annotations %||% list()
+      )
+      invisible(NULL)
+    }
+    update_edit_effective_args <- function(id, args) {
+      id <- as.character(id %||% "")
+      if (!nzchar(id) || is.null(pending_edit_calls[[id]])) return(invisible(NULL))
+      pending_edit_calls[[id]]$args <- args %||% list()
+      invisible(NULL)
+    }
+    remove_pending_edit_call <- function(id) {
+      id <- as.character(id %||% "")
+      if (nzchar(id) && exists(id, envir = pending_edit_calls, inherits = FALSE)) {
+        rm(list = id, envir = pending_edit_calls)
+      }
+      invisible(NULL)
+    }
 
     emit_guarded_text <- function(text, resolves_post_tool = TRUE) {
       if (!nzchar(text)) return(invisible(NULL))
@@ -2129,12 +2237,17 @@ make_claude_handler <- function(options       = NULL,
                 jsonlite::fromJSON(blk$args_buf, simplifyVector = FALSE),
                 error = function(e) list()
               )
-              on_tool_call(tool_call_id=blk$id, tool_name=blk$name,
-                           args=args_parsed,
-                           annotations=c(
-                             if (isTRUE(blk$server)) list(serverTool=TRUE) else list(),
-                             list(parentToolCallId=blk$parent)
-                           ))
+              annotations <- c(
+                if (isTRUE(blk$server)) list(serverTool = TRUE) else list(),
+                list(parentToolCallId = blk$parent)
+              )
+              remember_edit_call(blk$id, blk$name, args_parsed, annotations)
+              on_tool_call(
+                tool_call_id = blk$id,
+                tool_name = blk$name,
+                args = args_parsed,
+                annotations = annotations
+              )
               tb[[bidx]]$emitted <- TRUE
             }
           }
@@ -2149,7 +2262,26 @@ make_claude_handler <- function(options       = NULL,
             tuid <- as.character(tool_result$tool_use_id %||% "")
             if (!nzchar(tuid)) next
             if (structured_tool_seen) tool_result_boundary_seen <- TRUE
+            pending_edit <- pending_edit_calls[[tuid]]
+            if (!isTRUE(tool_result$is_error) && !is.null(pending_edit)) {
+              recovery <- tryCatch(
+                .claude_edit_result_recovery(tool_result$result, pending_edit$args),
+                error = function(error) NULL
+              )
+              if (!is.null(recovery)) {
+                on_tool_call(
+                  tool_call_id = tuid,
+                  tool_name = pending_edit$name,
+                  args = recovery$args,
+                  annotations = utils::modifyList(
+                    pending_edit$annotations,
+                    list(diffStartLine = recovery$diffStartLine)
+                  )
+                )
+              }
+            }
             on_tool_result(tuid, tool_result$result, is_error = tool_result$is_error)
+            remove_pending_edit_call(tuid)
             pending_tool_ids <- setdiff(pending_tool_ids, tuid)
             for (key in ls(tb)) {
               if (identical(as.character(tb[[key]]$id), tuid)) rm(list = key, envir = tb)
@@ -2192,7 +2324,7 @@ make_claude_handler <- function(options       = NULL,
           final_text <- .claude_assistant_text(msg)
           if (nzchar(final_text) &&
               (length(assistant_terminal_parts) == 0L ||
-               !identical(tail(assistant_terminal_parts, 1L), final_text))) {
+               !identical(utils::tail(assistant_terminal_parts, 1L), final_text))) {
             assistant_terminal_parts <- c(assistant_terminal_parts, final_text)
           }
           if (isTRUE(message_resolves_post_tool)) {
@@ -2215,18 +2347,31 @@ make_claude_handler <- function(options       = NULL,
               tb[[bidx]]$approval_handled <- TRUE; break
             }
           }
+          approval_annotations <- list(
+            requiresApproval = TRUE,
+            suggestions = msg$suggestions %||% list(),
+            # v0.2.1:审批卡片主文案/按钮标签/副标题
+            title = msg$title,
+            displayName = msg$display_name,
+            description = msg$description
+          )
+          tuid_key <- as.character(tuid %||% "")
+          prior_edit <- NULL
+          if (nzchar(tuid_key)) prior_edit <- pending_edit_calls[[tuid_key]]
+          if (!is.null(prior_edit)) {
+            approval_annotations <- utils::modifyList(
+              prior_edit$annotations,
+              approval_annotations
+            )
+          }
+          remember_edit_call(
+            tuid, msg$tool_name, msg$tool_input, approval_annotations
+          )
           on_tool_call(
             tool_call_id = tuid,
-            tool_name    = msg$tool_name,
-            args         = msg$tool_input,
-            annotations  = list(
-              requiresApproval = TRUE,
-              suggestions      = msg$suggestions %||% list(),
-              # v0.2.1:审批卡片主文案/按钮标签/副标题
-              title        = msg$title,
-              displayName  = msg$display_name,
-              description  = msg$description
-            )
+            tool_name = msg$tool_name,
+            args = msg$tool_input,
+            annotations = approval_annotations
           )
 
           decision <- coro::await(wait_for_approval(tuid))
@@ -2250,6 +2395,7 @@ make_claude_handler <- function(options       = NULL,
             # Plan 47 B:交互表单收集的值合并进 tool_input 经 updated_input 回传(泛化,非 AskUserQuestion 专用)。
             if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
               ui <- utils::modifyList(msg$tool_input %||% list(), decision$updatedInput)
+              update_edit_effective_args(tuid, ui)
               client$approve_tool(msg$request_id, updated_input = ui)
               pending_tool_ids <- c(pending_tool_ids, tuid)
             } else
@@ -2257,6 +2403,7 @@ make_claude_handler <- function(options       = NULL,
             if (!is.null(decision$answers) && length(decision$answers)) {
               ui <- msg$tool_input %||% list()
               ui$answers <- decision$answers
+              update_edit_effective_args(tuid, ui)
               client$approve_tool(msg$request_id, updated_input = ui)
               pending_tool_ids <- c(pending_tool_ids, tuid)
             } else {
@@ -2387,10 +2534,15 @@ make_claude_handler <- function(options       = NULL,
               }
               if (!identical(message, "/reload-skills")) {
                 if (awaiting_post_tool_text) {
-                  terminal_error <- paste0(
-                    "Upstream ended after a tool call without a final ",
-                    "user-visible response. Please retry the request."
-                  )
+                  if (is.function(on_auto_continue) &&
+                      !identical(message, .CLAUDE_AUTO_CONTINUE_PROMPT)) {
+                    auto_continue_requested <- TRUE
+                  } else {
+                    terminal_error <- paste0(
+                      "Upstream ended after a tool call without a final ",
+                      "user-visible response. Please retry the request."
+                    )
+                  }
                 } else if (!visible_text_seen) {
                   terminal_error <- paste0(
                     "Upstream ended without a user-visible response. ",
@@ -2520,6 +2672,12 @@ make_claude_handler <- function(options       = NULL,
     if (!is.null(terminal_error)) {
       on_error(terminal_error)
     } else {
+      if (isTRUE(auto_continue_requested)) {
+        on_auto_continue(
+          notice = .CLAUDE_AUTO_CONTINUE_NOTICE,
+          prompt = .CLAUDE_AUTO_CONTINUE_PROMPT
+        )
+      }
       on_done()
     }
   })
@@ -2545,6 +2703,13 @@ make_claude_handler <- function(options       = NULL,
   attr(handler_fn, "warmup") <- function(thread_id, project = NULL) {
     get_client(thread_id, project)
     invisible(NULL)
+  }
+  attr(handler_fn, "record_tool_metadata") <- function(
+      tool_call_id, tool_name, annotations, thread_id = NULL, project = NULL) {
+    .record_tool_metadata(
+      .claude_tool_metadata_path(session_map_path),
+      tool_call_id, tool_name, annotations
+    )
   }
   # 暴露"按 session 断开 client"，供 addin 删除会话前调用（见 .claude_delete_session）。
   attr(handler_fn, "release_session") <- release_session
@@ -2650,13 +2815,17 @@ list_claude_sessions <- function(directory = here::here(), limit = 100L,
 #' @param session_map_path Path to the session map `.rds` file (same path
 #'   passed to [make_claude_handler()]).
 #'
-#' @return A function with signature `function(session_id, thread_id, send_thread)`.
+#' @return A function with signature
+#'   `function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L, project = NULL)`.
+#'   `project` is the owning Workspace directory; when omitted, the legacy global
+#'   Claude session lookup remains in effect.
 #'
 #' @export
 make_claude_session_loader <- function(session_map_path = ".claude_session_map.rds") {
   snapshots <- .new_history_snapshot_cache(3L)
 
-  function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L) {
+  function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L,
+           project = NULL) {
     # Pre-fill the mapping before the initial page is delivered so asynchronous
     # warmup resumes this historical SDK session instead of starting fresh.
     if (is.null(cursor) && !is.null(session_id) && nzchar(session_id %||% "")) {
@@ -2666,7 +2835,23 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
       )
     }
 
-    cache_key <- as.character(session_id %||% thread_id)
+    directory <- if (is.null(project) || !length(project) ||
+                         is.na(project[[1L]]) || !nzchar(as.character(project[[1L]]))) {
+      NULL
+    } else {
+      as.character(project[[1L]])
+    }
+    directory_key <- if (is.null(directory)) {
+      ""
+    } else {
+      tryCatch(
+        normalizePath(path.expand(directory), winslash = "/", mustWork = FALSE),
+        error = function(e) directory
+      )
+    }
+    # The same session id must never share a converted snapshot across projects.
+    cache_key <- paste(directory_key, as.character(session_id %||% thread_id), sep = "
+")
     # `cursor = NULL` starts a new browser traversal. Re-read the transcript so
     # sessions that kept appending after an earlier open do not remain pinned to
     # a stale tail. Non-NULL cursors continue against one immutable snapshot,
@@ -2678,12 +2863,16 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
       # memory; this reduces browser transfer/render work, but not the SDK's
       # one-time full-file parsing cost.
       loaded <- tryCatch(
-        list(ok = TRUE, messages = .get_claude_session_messages(session_id)),
+        list(ok = TRUE, messages = .get_claude_session_messages(
+          session_id, directory = directory
+        )),
         error = function(e) list(ok = FALSE)
       )
       if (isTRUE(loaded$ok)) {
         snapshots$set(cache_key, .claude_msgs_to_thread(
-          loaded$messages, .read_tool_decisions(.claude_decisions_path(session_map_path))
+          loaded$messages,
+          decisions = .read_tool_decisions(.claude_decisions_path(session_map_path)),
+          metadata = .read_tool_metadata(.claude_tool_metadata_path(session_map_path))
         ))
       } else if (!snapshots$has(cache_key)) {
         # Preserve a prior successful traversal across transient filesystem/SDK
@@ -2821,7 +3010,7 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 }
 
 # ── ClaudeAgentSDK JSONL → ThreadMessageLike（内部辅助）──────────────────────
-.claude_msgs_to_thread <- function(msgs, decisions = list()) {
+.claude_msgs_to_thread <- function(msgs, decisions = list(), metadata = list()) {
   result <- list()
   # 预扫:收集 user 轮里的 tool_result(按 tool_use_id),供历史工具卡显示真实结果/审批态
   # (之前一律写死 "Session ended",看不出跑了什么/是否被拒)。
@@ -2892,9 +3081,21 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
             if (identical(blk[["name"]], "AskUserQuestion") && length(dec_answers)) {
               args_val$answers <- dec_answers
             }
+            metadata_h <- if (identical(blk[["name"]], "Edit") &&
+                              is.character(tuid_h) && length(tuid_h) == 1L && nzchar(tuid_h)) {
+              metadata[[tuid_h]]
+            } else {
+              NULL
+            }
+            diff_start_line <- if (is.list(metadata_h)) {
+              .normalize_diff_start_line(metadata_h$diffStartLine)
+            } else {
+              NULL
+            }
             artifact_h <- c(
               list(isError = is_err),
-              if (!is.null(dec_status)) list(approvalResult = dec_status) else list()
+              if (!is.null(dec_status)) list(approvalResult = dec_status) else list(),
+              if (!is.null(diff_start_line)) list(diffStartLine = diff_start_line) else list()
             )
             parts[[length(parts) + 1L]] <- list(
               type       = "tool-call",

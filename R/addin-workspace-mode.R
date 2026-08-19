@@ -66,9 +66,98 @@
   if (!nzchar(label) || identical(label, ".")) project else label
 }
 
+.workspace_natural_key <- function(value) {
+  value <- tolower(enc2utf8(as.character(value)))
+  vapply(value, function(item) {
+    parts <- regmatches(
+      item,
+      gregexpr("[0-9]+|[^0-9]+", item, perl = TRUE)
+    )[[1L]]
+    encoded <- vapply(parts, function(part) {
+      if (!grepl("^[0-9]+$", part)) return(paste0("t", part))
+      number <- sub("^0+", "", part)
+      if (!nzchar(number)) number <- "0"
+      paste0("n", sprintf("%010d", nchar(number)), ":", number)
+    }, character(1))
+    paste(encoded, collapse = "")
+  }, character(1))
+}
+
+.workspace_natural_project_order <- function(projects) {
+  projects <- .canonical_workspace_projects(projects)
+  if (length(projects) < 2L) return(projects)
+  labels <- vapply(projects, .workspace_project_label, character(1))
+  projects[order(
+    .workspace_natural_key(labels),
+    .workspace_natural_key(projects),
+    projects,
+    method = "radix"
+  )]
+}
+
+.workspace_activity_time <- function(value) {
+  if (is.null(value) || !length(value)) return(NA_real_)
+  value <- value[[1L]]
+  if (inherits(value, "POSIXt")) return(as.numeric(value))
+  if (is.numeric(value)) {
+    value <- suppressWarnings(as.numeric(value))
+    if (!is.finite(value)) return(NA_real_)
+    if (abs(value) >= 1e11) value <- value / 1000
+    return(value)
+  }
+  value <- as.character(value)
+  if (is.na(value) || !nzchar(value)) return(NA_real_)
+  numeric_value <- suppressWarnings(as.numeric(value))
+  if (is.finite(numeric_value)) {
+    if (abs(numeric_value) >= 1e11) numeric_value <- numeric_value / 1000
+    return(numeric_value)
+  }
+  parsed <- tryCatch(
+    as.POSIXct(value, tz = "UTC", tryFormats = c(
+      "%Y-%m-%dT%H:%M:%OSZ",
+      "%Y-%m-%dT%H:%M:%OS%z",
+      "%Y-%m-%d %H:%M:%OS"
+    )),
+    error = function(e) as.POSIXct(NA)
+  )
+  as.numeric(parsed)
+}
+
+.workspace_project_activity_order <- function(projects, sessions, current = NULL) {
+  current <- .canonical_workspace_project(current)
+  projects <- .canonical_workspace_projects(c(current, projects))
+  if (!length(projects)) return(character())
+
+  activity <- stats::setNames(rep(-Inf, length(projects)), projects)
+  for (session in sessions %||% list()) {
+    project <- .canonical_workspace_project(session$project)
+    if (is.null(project) || !project %in% projects) next
+    timestamp <- .workspace_activity_time(session$createdAt)
+    if (is.finite(timestamp)) activity[[project]] <- max(activity[[project]], timestamp)
+  }
+
+  remaining <- if (is.null(current)) projects else setdiff(projects, current)
+  active <- remaining[is.finite(activity[remaining])]
+  inactive <- remaining[!is.finite(activity[remaining])]
+  if (length(active)) {
+    natural_active <- .workspace_natural_project_order(active)
+    active <- natural_active[order(
+      -activity[natural_active],
+      seq_along(natural_active),
+      method = "radix"
+    )]
+  }
+  c(
+    if (!is.null(current) && current %in% projects) current else character(),
+    active,
+    .workspace_natural_project_order(inactive)
+  )
+}
+
 .new_workspace_project_router <- function(projects, initial = NULL) {
   state <- new.env(parent = emptyenv())
   state$projects <- .canonical_workspace_projects(c(initial, projects))
+  state$order_initialized <- FALSE
   initial <- .canonical_workspace_project(initial)
   if (is.null(initial) && length(state$projects)) initial <- state$projects[[1L]]
   if (!is.null(initial) && !initial %in% state$projects) {
@@ -114,6 +203,14 @@
   list(
     projects = function() state$projects,
     current = function() state$current,
+    order_initialized = function() state$order_initialized,
+    reorder = function(projects) {
+      ordered <- .canonical_workspace_projects(projects)
+      ordered <- ordered[ordered %in% state$projects]
+      state$projects <- c(ordered, setdiff(state$projects, ordered))
+      state$order_initialized <- TRUE
+      state$projects
+    },
     add = add,
     remove = function(project) {
       project <- .canonical_workspace_project(project)
@@ -125,8 +222,15 @@
       state$projects
     },
     select = function(project) {
-      project <- add(project)
-      if (!is.null(project)) state$current <- project
+      project <- .canonical_workspace_project(project)
+      if (is.null(project)) return(NULL)
+      # An explicitly selected NEW folder is the user's immediate focus, so put
+      # it first. Existing projects keep their stable relative order to avoid
+      # the tree jumping on every history-thread switch.
+      if (!project %in% state$projects) {
+        state$projects <- c(project, state$projects)
+      }
+      state$current <- project
       project
     },
     bind = bind,

@@ -25,6 +25,7 @@ function mkCallbacks(): RunCallbacks & { calls: Record<string, unknown[]> } {
     onChunk: rec("chunk"), onThinking: rec("thinking"),
     onToolCall: rec("toolCall"), onToolCallStart: rec("toolCallStart"),
     onToolCallDelta: rec("toolCallDelta"), onToolResult: rec("toolResult"),
+    onAutoContinue: rec("autoContinue"),
     onDone: rec("done"), onError: rec("error"),
   };
 }
@@ -99,6 +100,7 @@ describe("bridge 多线程路由", () => {
     const b = createShinyBridge("chat");
     const cb = mkCallbacks();
     b.setRunCallbacks("t1", cb);
+
     handlers["chat:tool-result"]({ toolCallId: "tc1", result: "ok", threadId: "t1" });
     expect(cb.calls.toolResult).toEqual([["tc1", "ok", false]]);
   });
@@ -158,10 +160,14 @@ describe("bridge inputId 前缀隔离（多 widget）", () => {
 describe("bridge sessions 缓冲回放", () => {
   it("handler 注册前到达的 :sessions 被缓冲，注册时回放", () => {
     const b = createShinyBridge("chat");
-    handlers["chat:sessions"]({ sessions: [{ id: "s1", title: "t", preview: "p", createdAt: "2026" }] });
-    const received: unknown[] = [];
+    handlers["chat:sessions"]({
+      sessions: [{ id: "s1", title: "t", preview: "p", createdAt: "2026" }],
+      projectOrder: ["/work/c", "/work/a"],
+    });
+    const received: Array<{ projectOrder?: string[] }> = [];
     b.onSessions((d) => received.push(d));
     expect(received).toHaveLength(1);
+    expect(received[0]?.projectOrder).toEqual(["/work/c", "/work/a"]);
   });
 
   it("handler 已注册则直接调用不缓冲", () => {
@@ -351,5 +357,39 @@ describe("bridge Workspace project snapshots", () => {
       .toMatchObject({ threadId: "thread-a", project: "/work/a" });
     expect(inputValues.find((item) => item.id === "chat_run_in_console")?.value)
       .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+  });
+});
+
+
+describe("assistant text size bridge", () => {
+  it("sends the selected enum through the widget-specific input", () => {
+    const bridge = createShinyBridge("chat");
+    bridge.sendAssistantTextSize("small");
+    const event = inputValues.find((item) => item.id === "chat_assistant_text_size");
+    expect(event).toBeTruthy();
+    expect(event!.value).toMatchObject({ value: "small" });
+  });
+});
+
+
+describe("bridge transparent auto-continuation", () => {
+  it("routes the visible notice and prompt to the owning run", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:auto-continue"]({
+      threadId: "t1",
+      runId: "run-1",
+      notice: "Continuing automatically…",
+      prompt: "Please continue from the completed tool results.",
+    });
+    expect(cb.calls.autoContinue).toEqual([[
+      {
+        threadId: "t1",
+        runId: "run-1",
+        notice: "Continuing automatically…",
+        prompt: "Please continue from the completed tool results.",
+      },
+    ]]);
   });
 });

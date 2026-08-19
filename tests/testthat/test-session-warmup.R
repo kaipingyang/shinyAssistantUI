@@ -164,7 +164,7 @@ test_that("Claude session loader caches one converted snapshot and pages newest-
   ))
 
   local_mocked_bindings(
-    .get_claude_session_messages = function(session_id) {
+    .get_claude_session_messages = function(session_id, directory = NULL) {
       reads <<- reads + 1L
       raw
     }
@@ -284,7 +284,7 @@ test_that("Claude session loader refreshes an appended transcript on each initia
   ))
 
   local_mocked_bindings(
-    .get_claude_session_messages = function(session_id) {
+    .get_claude_session_messages = function(session_id, directory = NULL) {
       reads <<- reads + 1L
       raw
     }
@@ -352,7 +352,7 @@ test_that("Claude session refresh keeps the last successful snapshot on read fai
   path <- tempfile(fileext = ".rds")
   reads <- 0L
   local_mocked_bindings(
-    .get_claude_session_messages = function(session_id) {
+    .get_claude_session_messages = function(session_id, directory = NULL) {
       reads <<- reads + 1L
       if (reads > 1L) stop("transient transcript read failure")
       list(list(
@@ -476,4 +476,38 @@ test_that("deleting a thread removes its queued warmup before foreground release
     finish_run(); session$flushReact(); run_later_queue(0.3)
     expect_length(warmups, 0L)
   })
+})
+
+
+test_that("Claude session loader routes Workspace history by project directory", {
+  path <- tempfile(fileext = ".rds")
+  reads <- list()
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id, directory = NULL) {
+      reads[[length(reads) + 1L]] <<- list(
+        session_id = session_id, directory = directory
+      )
+      suffix <- basename(directory %||% "global")
+      list(list(
+        type = "user", uuid = paste0("user-", suffix),
+        message = list(content = paste("history from", suffix))
+      ))
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  capture <- function(messages, ...) messages
+  project_a <- file.path(tempdir(), "workspace-history-a")
+  project_b <- file.path(tempdir(), "workspace-history-b")
+
+  page_a <- loader("shared-session", "thread-a", capture, project = project_a)
+  page_b <- loader("shared-session", "thread-b", capture, project = project_b)
+
+  expect_identical(
+    vapply(reads, `[[`, character(1), "directory"),
+    c(project_a, project_b)
+  )
+  expect_identical(page_a[[1L]]$id, "h-user-workspace-history-a")
+  expect_identical(page_b[[1L]]$id, "h-user-workspace-history-b")
+  expect_length(reads, 2L)
 })

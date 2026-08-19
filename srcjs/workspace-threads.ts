@@ -65,6 +65,8 @@ export function sessionsToWorkspaceThreads<T extends ThreadStatus>(
 export function groupWorkspaceThreads(
   threadIds: readonly string[],
   itemsById: ReadonlyMap<string, WorkspaceThreadLike | undefined>,
+  projectOrder: readonly string[] = [],
+  includeEmptyProjects = false,
 ): WorkspaceThreadGroup[] {
   const groups: WorkspaceThreadGroup[] = [];
   const byProject = new Map<string, WorkspaceThreadGroup>();
@@ -96,5 +98,35 @@ export function groupWorkspaceThreads(
     }
   });
 
-  return groups;
+  if (includeEmptyProjects) {
+    for (const project of projectOrder) {
+      if (!nonEmptyString(project) || byProject.has(project)) continue;
+      const group = {
+        project,
+        label: projectLabel(project),
+        indices: [],
+        activeRuns: 0,
+        activeTasks: 0,
+      };
+      byProject.set(project, group);
+      groups.push(group);
+    }
+  }
+
+  if (projectOrder.length === 0) return groups;
+  const rank = new Map<string, number>();
+  projectOrder.forEach((project, index) => {
+    if (!rank.has(project)) rank.set(project, index);
+  });
+  return groups
+    .map((group, firstSeen) => ({ group, firstSeen }))
+    .sort((left, right) => {
+      const leftRank = rank.get(left.group.project);
+      const rightRank = rank.get(right.group.project);
+      if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
+      if (leftRank !== undefined) return -1;
+      if (rightRank !== undefined) return 1;
+      return left.firstSeen - right.firstSeen;
+    })
+    .map(({ group }) => group);
 }

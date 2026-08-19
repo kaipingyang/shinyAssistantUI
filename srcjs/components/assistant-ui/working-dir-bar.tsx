@@ -34,7 +34,17 @@ export const WorkingDirBar: FC = () => {
     if (p && setWorkingDir) setWorkingDir(p);
     setEditing(false);
   };
-  const saved = projects ?? [];
+  const favoriteCollator = new Intl.Collator(undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  const saved = [...(projects ?? [])].sort((left, right) => {
+    const byName = favoriteCollator.compare(dirBase(left), dirBase(right));
+    if (byName !== 0) return byName;
+    const byPath = favoriteCollator.compare(left, right);
+    if (byPath !== 0) return byPath;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
   const isSaved = saved.includes(workingDir);
 
   return (

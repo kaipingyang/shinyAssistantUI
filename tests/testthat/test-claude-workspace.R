@@ -170,6 +170,7 @@ test_that("chat app keeps ordinary defaults and enables workspace defaults", {
   project <- withr::local_tempdir()
   other <- withr::local_tempdir()
   captured <- list()
+  sent_sessions <- list()
 
   local_mocked_bindings(
     make_claude_handler = function(options, cwd_provider = NULL, models = NULL,
@@ -187,7 +188,9 @@ test_that("chat app keeps ordinary defaults and enables workspace defaults", {
     assistantUIServer = function(...) {
       captured[[length(captured) + 1L]] <<- list(...)
       list(
-        send_sessions = function(...) NULL,
+        send_sessions = function(payload) {
+          sent_sessions[[length(sent_sessions) + 1L]] <<- payload
+        },
         send_commands = function(...) NULL,
         send_working_dir = function(...) NULL,
         send_projects = function(...) NULL
@@ -207,7 +210,36 @@ test_that("chat app keeps ordinary defaults and enables workspace defaults", {
   expect_identical(captured[[1L]]$max_concurrent_runs, 2L)
   expect_true(captured[[2L]]$workspace_mode)
   expect_identical(captured[[2L]]$max_concurrent_runs, 4L)
-  expect_setequal(captured[[2L]]$projects, c(normalizePath(project), normalizePath(other)))
+  # `projects` is the explicit persisted Favorites payload, not the session-local
+  # Workspace registry. A fresh HOME has no favorites even though A/B are registered.
+  expect_identical(captured[[2L]]$projects, character())
+  workspace_payloads <- Filter(
+    function(payload) !is.null(payload$projectOrder),
+    sent_sessions
+  )
+  expect_length(workspace_payloads, 1L)
+  expect_identical(
+    unlist(workspace_payloads[[1L]]$projectOrder, use.names = FALSE),
+    normalizePath(c(project, other), winslash = "/")
+  )
+})
+
+test_that("selecting a new Workspace project prepends it without reordering existing projects", {
+  one <- withr::local_tempdir()
+  two <- withr::local_tempdir()
+  three <- withr::local_tempdir()
+  router <- .new_workspace_project_router(c(one, two), initial = one)
+
+  router$select(three)
+  expected <- normalizePath(c(three, one, two), winslash = "/")
+  expect_identical(router$projects(), expected)
+  expect_identical(router$current(), expected[[1L]])
+
+  # Selecting an already-registered project updates current without making the
+  # folder tree jump on every history click.
+  router$select(two)
+  expect_identical(router$projects(), expected)
+  expect_identical(router$current(), normalizePath(two, winslash = "/"))
 })
 
 test_that("background job preserves workspace spec and display name", {
@@ -389,4 +421,63 @@ test_that("warmup snapshots the thread project before delayed execution", {
       thread_id = "thread-a", project = "/work/a"
     )))
   })
+})
+
+
+test_that("Workspace startup order prioritizes current then recent project activity", {
+  root <- withr::local_tempdir()
+  current <- file.path(root, "current")
+  recent <- file.path(root, "recent")
+  older <- file.path(root, "older")
+  project_10 <- file.path(root, "project-10")
+  project_2 <- file.path(root, "project-2")
+  same_a <- file.path(root, "a", "same")
+  same_z <- file.path(root, "z", "same")
+  invisible(vapply(
+    c(current, recent, older, project_10, project_2, same_a, same_z),
+    dir.create,
+    logical(1),
+    recursive = TRUE
+  ))
+  recent_seconds <- as.numeric(as.POSIXct("2026-08-16 12:00:00", tz = "UTC"))
+  sessions <- list(
+    list(id = "older", project = older, createdAt = "2026-08-15T12:00:00Z"),
+    list(id = "recent-old", project = recent, createdAt = recent_seconds * 1000),
+    list(id = "recent-new", project = recent, createdAt = recent_seconds),
+    list(id = "invalid", project = project_10, createdAt = "not-a-time")
+  )
+
+  ordered <- .workspace_project_activity_order(
+    c(project_10, same_z, older, current, project_2, recent, same_a),
+    sessions,
+    current = current
+  )
+
+  expect_identical(
+    ordered,
+    normalizePath(
+      c(current, recent, older, project_2, project_10, same_a, same_z),
+      winslash = "/"
+    )
+  )
+})
+
+test_that("Workspace freezes startup order while new projects still prepend", {
+  one <- withr::local_tempdir()
+  two <- withr::local_tempdir()
+  three <- withr::local_tempdir()
+  router <- .new_workspace_project_router(c(one, two), initial = one)
+
+  router$reorder(c(two, one))
+  expected <- normalizePath(c(two, one), winslash = "/")
+  expect_identical(router$projects(), expected)
+
+  router$select(one)
+  expect_identical(router$projects(), expected)
+
+  router$select(three)
+  expect_identical(
+    router$projects(),
+    normalizePath(c(three, two, one), winslash = "/")
+  )
 })

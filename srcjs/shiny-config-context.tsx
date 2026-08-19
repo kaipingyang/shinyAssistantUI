@@ -13,6 +13,16 @@ export interface PermissionModeOption {
   description?: string;
   disabled?: boolean;
 }
+
+export type AssistantTextSize = "small" | "compact" | "medium";
+
+/** Canonicalize persisted/server values while preserving the old medium=Default contract. */
+export const normalizeAssistantTextSize = (value: unknown): AssistantTextSize | undefined => {
+  if (value === "large") return "medium";
+  return value === "small" || value === "compact" || value === "medium"
+    ? value
+    : undefined;
+};
 export interface PermissionModeState {
   value: string;
   options: PermissionModeOption[];
@@ -46,6 +56,10 @@ export interface ShinyConfigCtx {
   showTimestamps: boolean;
   /** Plan 81: opt-in multi-project Claude Workspace navigation. */
   workspaceMode?: boolean;
+  /** Session-local project registry order; independent from Favorites. */
+  workspaceProjectOrder?: string[];
+  /** Create a blank thread atomically bound to one Workspace project. */
+  newThreadInProject?: (project: string) => void;
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
@@ -123,6 +137,9 @@ export interface ShinyConfigCtx {
   /** Plan 45: composer height preset — "comfortable" (default) | "compact" (flat, ~shinychat). */
   composerDensity?: "comfortable" | "compact";
   setComposerDensity?: (value: "comfortable" | "compact") => void;
+  /** Plan 87: assistant response text size; medium preserves the existing 16px default. */
+  assistantTextSize?: AssistantTextSize;
+  setAssistantTextSize?: (value: AssistantTextSize) => void;
   /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
   runREnabled?: boolean;
   setRunREnabled?: (value: boolean) => void;

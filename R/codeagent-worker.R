@@ -26,9 +26,8 @@
 .ca_worker_body <- function(libpath, renviron, config, port) {
   .libPaths(c(libpath, .Library))
   if (nzchar(renviron) && file.exists(renviron)) readRenviron(renviron)
-  suppressMessages({
-    library(ellmer); library(codeagent); library(promises); library(later); library(jsonlite)
-  })
+  worker_packages <- c("ellmer", "codeagent", "promises", "later", "jsonlite")
+  invisible(lapply(worker_packages, loadNamespace))
   `%||%` <- function(x, y) if (is.null(x)) y else x
   con <- socketConnection(host = "127.0.0.1", port = port, server = TRUE,
                           blocking = FALSE, open = "r+b")

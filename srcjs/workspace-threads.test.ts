@@ -40,3 +40,44 @@ describe("workspace thread metadata", () => {
       .toBe("/work/current");
   });
 });
+
+
+it("uses explicit Workspace project order ahead of thread first-seen order", () => {
+  const orderedSessions = [
+    { id: "a-local", title: "A local", preview: "", createdAt: "", project: "/work/a" },
+    { id: "c-1", title: "C one", preview: "", createdAt: "", project: "/work/c" },
+    { id: "b-1", title: "B one", preview: "", createdAt: "", project: "/work/b" },
+    { id: "unknown", title: "Unknown", preview: "", createdAt: "", project: "/work/unknown" },
+  ];
+  const threads = sessionsToWorkspaceThreads(orderedSessions, "regular");
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
+  const groups = groupWorkspaceThreads(
+    threads.map((thread) => thread.id),
+    byId,
+    ["/work/c", "/work/a", "/work/b"],
+  );
+
+  expect(groups.map((group) => group.project)).toEqual([
+    "/work/c", "/work/a", "/work/b", "/work/unknown",
+  ]);
+});
+
+
+it("materializes empty active Workspace projects from registry order", () => {
+  const threads = sessionsToWorkspaceThreads([
+    { id: "a-1", title: "A", preview: "", createdAt: "", project: "/work/a" },
+  ], "regular");
+  const byId = new Map(threads.map((thread) => [thread.id, thread]));
+  const groups = groupWorkspaceThreads(
+    threads.map((thread) => thread.id),
+    byId,
+    ["/work/a", "/work/empty"],
+    true,
+  );
+
+  expect(groups.map((group) => ({ project: group.project, count: group.indices.length })))
+    .toEqual([
+      { project: "/work/a", count: 1 },
+      { project: "/work/empty", count: 0 },
+    ]);
+});

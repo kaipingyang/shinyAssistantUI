@@ -4,7 +4,7 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   skip_if_not_installed("promises")
   skip_if_not_installed("later")
 
-  run_turn <- function(messages, is_cancelled = function() FALSE) {
+  run_turn <- function(messages, is_cancelled = function() FALSE, message = "") {
     queue <- messages
     client <- new.env(parent = emptyenv())
     client$connect <- function() invisible(NULL)
@@ -37,15 +37,21 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     captured$chunks <- character()
     captured$done <- FALSE
     captured$error <- NULL
+    captured$auto_continue <- list()
     captured$tool_starts <- character(0)
     captured$tool_results <- list()
 
     handler(
-      message = "", thread_id = "image-thread",
+      message = message, thread_id = "image-thread",
       attachments = list(list(type = "image", data = "data:image/png;base64,AAAA")),
       on_chunk = function(text) captured$chunks <- c(captured$chunks, text),
       on_done = function(...) captured$done <- TRUE,
       on_error = function(message) captured$error <- message,
+      on_auto_continue = function(notice, prompt) {
+        captured$auto_continue[[length(captured$auto_continue) + 1L]] <- list(
+          notice = notice, prompt = prompt
+        )
+      },
       on_tool_call = function(...) NULL,
       on_tool_result = function(tool_call_id, result, is_error) {
         captured$tool_results[[length(captured$tool_results) + 1L]] <- list(
@@ -241,12 +247,9 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     partial_tool_stop(),
     result(stop_reason = "end_turn")
   ))
-  expect_false(buffered_whitespace_before_tool$done)
-  expect_match(
-    buffered_whitespace_before_tool$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
+  expect_true(buffered_whitespace_before_tool$done)
+  expect_null(buffered_whitespace_before_tool$error)
+  expect_length(buffered_whitespace_before_tool$auto_continue, 1L)
   expect_identical(
     trimws(paste0(buffered_whitespace_before_tool$chunks, collapse = "")),
     ""
@@ -260,9 +263,26 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     thinking_stream("The search timed out; I should ask confirmation questions."),
     result(stop_reason = "end_turn")
   ))
-  expect_false(stalled_after_tool$done)
+  expect_true(stalled_after_tool$done)
+  expect_null(stalled_after_tool$error)
   expect_identical(stalled_after_tool$chunks, "I will verify the assumption first.")
-  expect_match(stalled_after_tool$error, "after a tool call", ignore.case = TRUE)
+  expect_length(stalled_after_tool$auto_continue, 1L)
+  continuation_prompt <- stalled_after_tool$auto_continue[[1L]]$prompt
+  expect_match(continuation_prompt, "completed tool results", ignore.case = TRUE)
+  expect_match(stalled_after_tool$auto_continue[[1L]]$notice, "Continuing automatically")
+
+  stalled_continuation <- run_turn(
+    list(
+      partial_tool_start(),
+      partial_tool_stop(),
+      thinking_stream("I still did not provide visible text."),
+      result(stop_reason = "end_turn")
+    ),
+    message = continuation_prompt
+  )
+  expect_false(stalled_continuation$done)
+  expect_match(stalled_continuation$error, "after a tool call", ignore.case = TRUE)
+  expect_length(stalled_continuation$auto_continue, 0L)
 
   final_after_tool <- run_turn(list(
     partial_tool_start(),
@@ -295,13 +315,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     partial_tool_stop(),
     result(text = "I will verify first.", stop_reason = "end_turn")
   ))
-  expect_false(result_replays_pre_tool_text$done)
+  expect_true(result_replays_pre_tool_text$done)
+  expect_null(result_replays_pre_tool_text$error)
+  expect_length(result_replays_pre_tool_text$auto_continue, 1L)
   expect_identical(result_replays_pre_tool_text$chunks, "I will verify first.")
-  expect_match(
-    result_replays_pre_tool_text$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
 
   assistant_replays_pre_tool_text <- run_turn(list(
     stream("I will verify first."),
@@ -310,13 +327,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     assistant("I will verify first."),
     result(stop_reason = "end_turn")
   ))
-  expect_false(assistant_replays_pre_tool_text$done)
+  expect_true(assistant_replays_pre_tool_text$done)
+  expect_null(assistant_replays_pre_tool_text$error)
+  expect_length(assistant_replays_pre_tool_text$auto_continue, 1L)
   expect_identical(assistant_replays_pre_tool_text$chunks, "I will verify first.")
-  expect_match(
-    assistant_replays_pre_tool_text$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
 
   assistant_tool_replays_pre_tool_text <- run_turn(list(
     stream("Preface"),
@@ -328,13 +342,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     ),
     result(stop_reason = "end_turn")
   ))
-  expect_false(assistant_tool_replays_pre_tool_text$done)
+  expect_true(assistant_tool_replays_pre_tool_text$done)
+  expect_null(assistant_tool_replays_pre_tool_text$error)
+  expect_length(assistant_tool_replays_pre_tool_text$auto_continue, 1L)
   expect_identical(assistant_tool_replays_pre_tool_text$chunks, "Preface")
-  expect_match(
-    assistant_tool_replays_pre_tool_text$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
 
   whitespace_normalized_replay <- run_turn(list(
     stream("Preface"),
@@ -342,13 +353,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     partial_tool_stop(),
     result(text = "\nPreface", stop_reason = "end_turn")
   ))
-  expect_false(whitespace_normalized_replay$done)
+  expect_true(whitespace_normalized_replay$done)
+  expect_null(whitespace_normalized_replay$error)
+  expect_length(whitespace_normalized_replay$auto_continue, 1L)
   expect_identical(whitespace_normalized_replay$chunks, "Preface")
-  expect_match(
-    whitespace_normalized_replay$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
 
   repeated_final_after_tool_result <- run_turn(list(
     stream("I predict 42."),
@@ -372,13 +380,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     ),
     result(stop_reason = "end_turn")
   ))
-  expect_false(assistant_preface_before_tool$done)
+  expect_true(assistant_preface_before_tool$done)
+  expect_null(assistant_preface_before_tool$error)
+  expect_length(assistant_preface_before_tool$auto_continue, 1L)
   expect_identical(assistant_preface_before_tool$chunks, "Preface before tool.")
-  expect_match(
-    assistant_preface_before_tool$error,
-    "after a tool call",
-    ignore.case = TRUE
-  )
 
   result_final_after_tool <- run_turn(list(
     partial_tool_start(),

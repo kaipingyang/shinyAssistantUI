@@ -11,7 +11,10 @@ make_claude_session_loader(session_map_path = ".claude_session_map.rds")
 passed to \code{\link[=make_claude_handler]{make_claude_handler()}}).}
 }
 \value{
-A function with signature \verb{function(session_id, thread_id, send_thread)}.
+A function with signature
+\verb{function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L, project = NULL)}.
+\code{project} is the owning Workspace directory; when omitted, the legacy global
+Claude session lookup remains in effect.
 }
 \description{
 Returns a function suitable for the \code{on_session_load} argument of

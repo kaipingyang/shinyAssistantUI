@@ -42,6 +42,8 @@ assistantUIServer(
   on_set_mode_visibility = NULL,
   composer_density = NULL,
   on_set_composer_density = NULL,
+  assistant_text_size = NULL,
+  on_set_assistant_text_size = NULL,
   run_r_enabled = NULL,
   on_toggle_run_r = NULL,
   thread_max_width = NULL,
@@ -290,6 +292,13 @@ visibility changes.}
 
 \item{on_set_composer_density}{Optional \verb{function(value)} called when the
 composer height preset changes.}
+
+\item{assistant_text_size}{Optional character \code{"small"}, \code{"compact"}
+(Medium), or \code{"medium"} (Default) assistant response/tool text-size preset.
+The legacy value \code{"large"} is accepted and normalized to Default.}
+
+\item{on_set_assistant_text_size}{Optional \verb{function(value)} called when the
+assistant response text-size preset changes.}
 
 \item{run_r_enabled}{Optional logical initial state of the \code{run_r} MCP tool
 toggle (\code{NULL} hides it).}

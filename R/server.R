@@ -1,3 +1,15 @@
+
+# Assistant text-size canonical values keep the historical `medium` = Default
+# contract. `compact` is the new visible Medium tier; legacy `large` falls back
+# to Default so persisted Plan 87 preferences remain valid without exposing Large.
+.normalize_assistant_text_size <- function(value) {
+  if (is.null(value) || !length(value)) return(NULL)
+  value <- as.character(value)[[1L]]
+  if (is.na(value) || !nzchar(value)) return(NULL)
+  if (identical(value, "large")) return("medium")
+  if (value %in% c("small", "compact", "medium")) value else NULL
+}
+
 #' Assistant UI Server Module
 #'
 #' Handles the server-side logic for an [assistantUIOutput()] widget: receives
@@ -260,6 +272,11 @@
 #'   `"compact"` composer height preset.
 #' @param on_set_composer_density Optional `function(value)` called when the
 #'   composer height preset changes.
+#' @param assistant_text_size Optional character `"small"`, `"compact"`
+#'   (Medium), or `"medium"` (Default) assistant response/tool text-size preset.
+#'   The legacy value `"large"` is accepted and normalized to Default.
+#' @param on_set_assistant_text_size Optional `function(value)` called when the
+#'   assistant response text-size preset changes.
 #' @param run_r_enabled Optional logical initial state of the `run_r` MCP tool
 #'   toggle (`NULL` hides it).
 #' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
@@ -322,6 +339,8 @@ assistantUIServer <- function(id, handler,
                               on_set_mode_visibility = NULL,
                               composer_density = NULL,
                               on_set_composer_density = NULL,
+                              assistant_text_size = NULL,
+                              on_set_assistant_text_size = NULL,
                               run_r_enabled = NULL,
                               on_toggle_run_r = NULL,
                               thread_max_width = NULL,
@@ -445,6 +464,18 @@ assistantUIServer <- function(id, handler,
   # Plan 45:输入框高度预设(comfortable/compact)。
   if (!is.null(composer_density))
     config$composer_density <- as.character(composer_density)[[1L]]
+  # Plan 89: Small/Medium/Default assistant + tool typography. Keep legacy
+  # `medium` as Default and normalize old `large` to Default.
+  if (!is.null(assistant_text_size)) {
+    normalized_text_size <- .normalize_assistant_text_size(assistant_text_size)
+    if (is.null(normalized_text_size)) {
+      stop(
+        "`assistant_text_size` must be \"small\", \"compact\" (Medium), or \"medium\" (Default).",
+        call. = FALSE
+      )
+    }
+    config$assistant_text_size <- normalized_text_size
+  }
   # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
   if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
@@ -544,6 +575,14 @@ assistantUIServer <- function(id, handler,
                                   list(message = msg, threadId = thread_id,
                                        runId = run_id))
       },
+      on_auto_continue = function(notice, prompt) {
+        mark_running()
+        session$sendCustomMessage(
+          paste0(input_id, ":auto-continue"),
+          list(notice = notice, prompt = prompt, threadId = thread_id,
+               runId = run_id)
+        )
+      },
       on_tool_call = function(tool_call_id, tool_name, args = list(), annotations = list()) {
         mark_running()
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
@@ -559,6 +598,19 @@ assistantUIServer <- function(id, handler,
             error = function(e) NULL
           )
           if (!is.null(sl)) annotations$diffStartLine <- sl
+        }
+        metadata_recorder <- attr(handler, "record_tool_metadata")
+        if (is.function(metadata_recorder)) {
+          tryCatch(
+            .call_compatible_callback(metadata_recorder, list(
+              tool_call_id = tool_call_id,
+              tool_name = tool_name,
+              annotations = annotations,
+              thread_id = thread_id,
+              project = project %||% working_dir
+            )),
+            error = function(e) NULL
+          )
         }
         edit_reveal$note_call(tool_call_id, tool_name, args)
         session$sendCustomMessage(
@@ -817,6 +869,15 @@ assistantUIServer <- function(id, handler,
       tryCatch(on_set_composer_density(as.character(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
+  if (is.function(on_set_assistant_text_size)) {
+    shiny::observeEvent(session$input[[paste0(input_id, "_assistant_text_size")]], {
+      msg <- session$input[[paste0(input_id, "_assistant_text_size")]]
+      if (is.null(msg)) return()
+      value <- .normalize_assistant_text_size(if (is.list(msg)) msg$value else msg)
+      if (is.null(value)) return()
+      tryCatch(on_set_assistant_text_size(value), error = function(e) NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
   if (is.function(on_toggle_run_r)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_run_r_enabled")]], {
       msg <- session$input[[paste0(input_id, "_run_r_enabled")]]
@@ -1065,6 +1126,7 @@ assistantUIServer <- function(id, handler,
       on_chunk          = cbs$on_chunk,
       on_done           = cbs$on_done,
       on_error          = cbs$on_error_fn,
+      on_auto_continue  = cbs$on_auto_continue,
       on_tool_call      = cbs$on_tool_call,
       on_tool_call_start = cbs$on_tool_call_start,
       on_tool_call_delta = cbs$on_tool_call_delta,

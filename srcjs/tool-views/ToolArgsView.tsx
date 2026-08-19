@@ -71,7 +71,7 @@ const MarkdownToolView: FC<{ view: MarkdownView; isRunning: boolean }> = ({ view
         </button>
       </div>
       {mode === "preview" ? (
-        <div data-markdown-preview="true" className="max-h-96 overflow-auto p-3 text-sm">
+        <div data-markdown-preview="true" data-tool-scroll-region="markdown-preview" className="max-h-96 overflow-auto p-3 text-sm">
           <TextMessagePartProvider text={view.text} isRunning={isRunning}>
             <MarkdownText />
           </TextMessagePartProvider>
@@ -79,6 +79,7 @@ const MarkdownToolView: FC<{ view: MarkdownView; isRunning: boolean }> = ({ view
       ) : (
         <div
           data-markdown-source="true"
+          data-tool-scroll-region="markdown-source"
           data-source-language={view.sourceLanguage ?? "markdown"}
           className="bg-muted/30 text-foreground/90 max-h-96 overflow-auto p-3 font-mono text-xs"
         >
@@ -157,6 +158,7 @@ const DelimitedTableToolView: FC<{ view: TableView }> = ({ view }) => {
       {mode === "source" ? (
         <pre
           data-table-source="true"
+          data-tool-scroll-region="table-source"
           className="bg-muted/30 text-foreground/90 max-h-96 overflow-auto p-3 font-mono text-xs whitespace-pre"
         >
           {view.text}
@@ -166,7 +168,7 @@ const DelimitedTableToolView: FC<{ view: TableView }> = ({ view }) => {
           Empty {label} file
         </div>
       ) : (
-        <div data-table-preview="true" className="max-h-96 overflow-auto">
+        <div data-table-preview="true" data-tool-scroll-region="table-preview" className="max-h-96 overflow-auto">
           <table className="w-max min-w-full border-separate border-spacing-0 text-left text-xs">
             <thead>
               <tr>
@@ -219,6 +221,7 @@ export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view
       <div
         data-arg-view="diff"
         data-slot="aui_edit_diff"
+        data-tool-scroll-region="diff"
         className="mt-1 max-h-96 overflow-y-auto"
       >
         <DiffViewer
@@ -226,6 +229,7 @@ export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view
           newFile={{ content: view.newContent, name: view.fileName }}
           viewMode="unified"
           startLine={view.startLine}
+          showLineNumbers={view.startLine !== undefined}
         />
       </div>
     );

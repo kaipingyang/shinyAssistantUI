@@ -5,7 +5,18 @@ suppressPackageStartupMessages({
   library(later)
 })
 
-projects <- c("/workspace/project-a", "/workspace/project-b")
+projects <- c(
+  "/workspace/project-a",
+  "/workspace/project-b",
+  "/workspace/project-d",
+  "/workspace/project-e"
+)
+new_project <- "/workspace/project-c"
+initial_favorites <- c(
+  "/favorites/item-10",
+  "/workspace/project-b",
+  "/favorites/item-2"
+)
 
 workspace_handler <- function(message, thread_id, project, on_chunk, on_done,
                               on_task, ...) {
@@ -39,6 +50,66 @@ ui <- assistantUIPage(
 )
 
 server <- function(input, output, session) {
+  state <- new.env(parent = emptyenv())
+  state$favorites <- initial_favorites
+  state$selected <- projects[[1L]]
+
+  project_sessions <- function(project) {
+    if (identical(project, projects[[1L]])) {
+      return(c(
+        list(list(
+          id = "session-a", title = "Alpha session", preview = "A history",
+          createdAt = "2026-08-14T00:00:00Z", project = project,
+          projectLabel = "Project Alpha"
+        )),
+        lapply(seq_len(13L), function(i) list(
+          id = sprintf("session-a-%02d", i),
+          title = sprintf("Alpha history %02d", i),
+          preview = sprintf("A history %02d", i),
+          createdAt = sprintf("2026-08-14T00:00:%02dZ", i),
+          project = project,
+          projectLabel = "Project Alpha"
+        ))
+      ))
+    }
+    if (identical(project, projects[[2L]])) {
+      return(list(list(
+        id = "session-b", title = "Beta session", preview = "B history",
+        createdAt = "2026-08-14T00:01:00Z", project = project,
+        projectLabel = "Project Beta"
+      )))
+    }
+    if (identical(project, projects[[3L]])) {
+      return(list(list(
+        id = "session-d", title = "Delta session", preview = "D history",
+        createdAt = "2026-08-14T00:03:00Z", project = project,
+        projectLabel = "Project Delta"
+      )))
+    }
+    if (identical(project, new_project)) {
+      return(list(list(
+        id = "session-c", title = "Gamma session", preview = "C history",
+        createdAt = "2026-08-14T00:02:00Z", project = project,
+        projectLabel = "Project Gamma"
+      )))
+    }
+    list()
+  }
+  state$registry <- shinyAssistantUI:::.workspace_project_activity_order(
+    projects,
+    unlist(lapply(projects, project_sessions), recursive = FALSE),
+    current = projects[[1L]]
+  )
+  build_sessions <- function() {
+    unlist(lapply(state$registry, project_sessions), recursive = FALSE)
+  }
+  push_sessions <- function() {
+    ctrl$send_sessions(list(
+      sessions = build_sessions(),
+      projectOrder = as.list(state$registry)
+    ))
+  }
+
   ctrl <- assistantUIServer(
     "chat",
     handler = workspace_handler,
@@ -46,35 +117,31 @@ server <- function(input, output, session) {
     persistence = "server",
     workspace_mode = TRUE,
     working_dir = projects[[1L]],
-    projects = projects,
+    native_picker = FALSE,
+    # The UI payload is explicit Favorites only, not the Workspace registry.
+    projects = state$favorites,
+    on_set_working_dir = function(path) {
+      state$selected <- path
+      if (!path %in% state$registry) {
+        state$registry <- c(path, state$registry)
+      }
+      ctrl$send_working_dir(path, list())
+      ctrl$send_projects(state$favorites)
+      push_sessions()
+    },
+    on_save_project = function() {
+      state$favorites <- unique(c(state$selected, state$favorites))
+      ctrl$send_projects(state$favorites)
+    },
+    on_remove_project = function(path) {
+      state$favorites <- setdiff(state$favorites, path)
+      ctrl$send_projects(state$favorites)
+      # Deliberately retain state$registry and all project sessions.
+    },
     on_session_load = history_loader,
     max_concurrent_runs = 4L
   )
-  session$onFlushed(function() {
-    alpha_sessions <- c(
-      list(list(
-        id = "session-a", title = "Alpha session", preview = "A history",
-        createdAt = "2026-08-14T00:00:00Z", project = projects[[1L]],
-        projectLabel = "Project Alpha"
-      )),
-      lapply(seq_len(13L), function(i) list(
-        id = sprintf("session-a-%02d", i),
-        title = sprintf("Alpha history %02d", i),
-        preview = sprintf("A history %02d", i),
-        createdAt = sprintf("2026-08-14T00:00:%02dZ", i),
-        project = projects[[1L]],
-        projectLabel = "Project Alpha"
-      ))
-    )
-    ctrl$send_sessions(list(sessions = c(
-      alpha_sessions,
-      list(list(
-        id = "session-b", title = "Beta session", preview = "B history",
-        createdAt = "2026-08-14T00:01:00Z", project = projects[[2L]],
-        projectLabel = "Project Beta"
-      ))
-    )))
-  }, once = TRUE)
+  session$onFlushed(function() push_sessions(), once = TRUE)
 }
 
 shinyApp(ui, server)

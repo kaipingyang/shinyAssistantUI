@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
+import { _clearToolCardStateForTests } from "./tool-ui/tool-card-frame";
 import { registerApprovalHandler, _clearApprovalHandlers } from "./approval-registry";
 
 afterEach(() => {
@@ -145,5 +146,49 @@ describe("ShinyToolFallback result viewport", () => {
     expect(viewport?.className).toContain("max-h-96");
     expect(viewport?.className).toContain("overflow-auto");
     expect(viewport?.textContent).toContain("line 200");
+  });
+});
+
+
+describe("ShinyToolFallback persistent tool view state", () => {
+  afterEach(() => _clearToolCardStateForTests());
+
+  it("restores a Write Markdown preview scroll position after the card remounts", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const clientDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 1000 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 100 });
+    const props = {
+      toolName: "Write",
+      toolCallId: "write-md-scroll",
+      argsText: "{}",
+      args: { file_path: "report.md", content: "# Report\n\n" + "Paragraph\n\n".repeat(100) },
+      result: "File written",
+      status: { type: "complete" },
+      artifact: { inputId: "chatA" },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    try {
+      const first = render(<ShinyToolFallback {...props} />);
+      const firstPreview = first.container.querySelector<HTMLElement>("[data-markdown-preview=true]")!;
+      expect(firstPreview).toBeTruthy();
+      firstPreview.scrollTop = 900;
+      fireEvent.scroll(firstPreview);
+      first.unmount();
+
+      const second = render(<ShinyToolFallback {...props} />);
+      const secondPreview = second.container.querySelector<HTMLElement>("[data-markdown-preview=true]")!;
+      expect(secondPreview).toBeTruthy();
+      expect(secondPreview).not.toBe(firstPreview);
+      expect(secondPreview.scrollTop).toBe(900);
+      expect(second.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("aria-expanded"))
+        .toBe("true");
+    } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, "scrollHeight", descriptor);
+      else delete (HTMLElement.prototype as any).scrollHeight;
+      if (clientDescriptor) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientDescriptor);
+      else delete (HTMLElement.prototype as any).clientHeight;
+    }
   });
 });

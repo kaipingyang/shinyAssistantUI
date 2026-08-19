@@ -2,7 +2,10 @@ import { useEffect, useId, useRef, useState } from "react";
 import { SettingsIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "../../shiny-config-context";
 import { ModelSelector } from "@/components/assistant-ui/model-selector";
-import type { PermissionModeOption } from "../../shiny-config-context";
+import type {
+  AssistantTextSize,
+  PermissionModeOption,
+} from "../../shiny-config-context";
 
 // 危险模式可见性过滤(Plan 45):关掉 Show Bypass/YOLO 时从选择器隐藏对应项,
 // 但【当前选中值】永不隐藏(否则 select 显示错乱)。
@@ -212,6 +215,36 @@ function ComposerDensityControl() {
   );
 }
 
+function AssistantTextSizeControl() {
+  const { assistantTextSize, setAssistantTextSize } = useShinyConfig();
+  const selectId = useId();
+  if (assistantTextSize === undefined || !setAssistantTextSize) return null;
+  return (
+    <div className="aui-assistant-text-size mt-3 space-y-1.5">
+      <div>
+        <label htmlFor={selectId} className="text-foreground text-xs font-medium">
+          Assistant text size
+        </label>
+        <p className="text-muted-foreground mt-0.5 text-[11px] leading-4">
+          Smaller text shows more of each response on compact screens.
+        </p>
+      </div>
+      <select
+        id={selectId}
+        aria-label="Assistant text size"
+        data-slot="aui_assistant_text_size"
+        className="border-input bg-background text-foreground h-8 w-full rounded-md border px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+        value={assistantTextSize}
+        onChange={(event) => setAssistantTextSize(event.target.value as AssistantTextSize)}
+      >
+        <option value="small">Small</option>
+        <option value="compact">Medium</option>
+        <option value="medium">Default</option>
+      </select>
+    </div>
+  );
+}
+
 // Plan 45:run_r MCP 工具开关(默认开;关掉后 Claude 无法在你的 R 会话执行代码)。
 function RunRToggle() {
   const { runREnabled, setRunREnabled } = useShinyConfig();
@@ -247,7 +280,13 @@ function CopilotAutoStartToggle() {
 }
 
 export function SidebarSettings() {
-  const { permissionMode, thinking, composerDensity, autoStartCopilotApi } = useShinyConfig();
+  const {
+    permissionMode,
+    thinking,
+    composerDensity,
+    assistantTextSize,
+    autoStartCopilotApi,
+  } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -257,20 +296,22 @@ export function SidebarSettings() {
     if (open) dialogRef.current?.focus();
   }, [open]);
 
-  if (!permissionMode && !thinking && composerDensity === undefined && autoStartCopilotApi === undefined) return null;
+  if (!permissionMode && !thinking && composerDensity === undefined &&
+      assistantTextSize === undefined && autoStartCopilotApi === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
   };
 
   return (
-    <div className="aui-sidebar-settings relative border-t pt-2">
+    <div className="aui-sidebar-settings shrink-0 border-t pt-2">
       {open && (
         <div
           ref={dialogRef}
           id={dialogId}
           role="dialog"
           aria-label="Settings"
+          data-slot="aui_settings_dialog"
           tabIndex={-1}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -278,9 +319,12 @@ export function SidebarSettings() {
               close();
             }
           }}
-          className="bg-popover text-popover-foreground absolute inset-x-0 bottom-full z-20 mb-2 w-auto rounded-lg border p-3 shadow-lg outline-none"
+          className="bg-popover text-popover-foreground absolute inset-x-2 bottom-12 z-20 max-h-[calc(100%-4rem)] w-auto overflow-y-auto overscroll-contain rounded-lg border p-3 shadow-lg outline-none [scrollbar-gutter:stable]"
         >
-          <div className="mb-3 flex items-center justify-between">
+          <div
+            data-slot="aui_settings_header"
+            className="bg-popover sticky top-0 z-10 mb-3 flex items-center justify-between"
+          >
             <h2 className="text-sm font-semibold">Settings</h2>
             <button
               type="button"
@@ -295,6 +339,7 @@ export function SidebarSettings() {
           <ModeVisibilityControl />
           <ThinkingControl />
           <ComposerDensityControl />
+          <AssistantTextSizeControl />
           <RunRToggle />
           <CopilotAutoStartToggle />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">

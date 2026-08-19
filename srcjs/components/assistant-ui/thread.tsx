@@ -941,6 +941,7 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
+  const { assistantTextSize = "medium" } = useShinyConfig();
 
   // reserves space for action bar and compensates with `-mb` for consistent msg spacing
   // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
@@ -957,6 +958,7 @@ const AssistantMessage: FC = () => {
     >
       <div
         data-slot="aui_assistant-message-content"
+        data-assistant-text-size={assistantTextSize}
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
@@ -1000,7 +1002,15 @@ const AssistantMessage: FC = () => {
                 );
               }
               case "text":
-                return <MarkdownText />;
+                return (
+                  <div
+                    data-slot="aui_assistant-text"
+                    data-text-size={assistantTextSize}
+                    className="[&_.aui-md-h1]:text-[1.25em] [&_.aui-md-h2]:text-[1.125em] [&_.aui-md-h3]:text-[1em] [&_.aui-md-h4]:text-[1em] [&_.aui-md-h5]:text-[0.875em] [&_.aui-md-h6]:text-[0.875em]"
+                  >
+                    <MarkdownText />
+                  </div>
+                );
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":

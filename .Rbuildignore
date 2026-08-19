@@ -12,10 +12,10 @@
 ^examples$
 ^tests/verify$
 ^assistant-ui-src$
-.*\.png$
+.*\.(png|jpe?g)$
 ^\.ellmer_sessions$
 ^\.claude$
-^\.codegraph
+^\.codegraph($|/)
 ^\.kiro$
 ^inst/www/bundle-stats\.html$
 ^\.claude_session_map.*\.rds$

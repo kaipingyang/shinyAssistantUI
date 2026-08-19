@@ -2,7 +2,7 @@
 // 缩进 + 决策记忆。ShinyToolFallback(默认审批体)和各 per-tool 交互组件(如 AskUserQuestion)
 // 都复用它,交互体经 `approvalBody` 插槽注入 —— 这是官方"per-message inline tool render
 // override"模式的落地(替代已 deprecated 的 makeAssistantToolUI/useAssistantToolUI 注册表)。
-import { useState, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, type ReactNode, type UIEvent } from "react";
 import { useThreadViewport, type ToolCallMessagePartProps } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ShinyToolResult } from "@/shiny-tool-result";
@@ -36,6 +36,23 @@ export const _regKey = (inputId: string | undefined, id: string) => `${inputId ?
 // 重渲染/重挂载时不丢失"✓ Approved"指示。
 const _decisionRegistry = new Map<string, "approved" | "denied">();
 const _decisionOptsRegistry = new Map<string, ToolDecideOpts>();
+
+const _openRegistry = new Map<string, boolean>();
+type ToolScrollState = {
+  scrollTop: number;
+  scrollLeft: number;
+  atBottom: boolean;
+  atRight: boolean;
+};
+const _scrollRegistry = new Map<string, ToolScrollState>();
+
+export function _clearToolCardStateForTests() {
+  _parentRegistry.clear();
+  _decisionRegistry.clear();
+  _decisionOptsRegistry.clear();
+  _openRegistry.clear();
+  _scrollRegistry.clear();
+}
 
 export type ToolDecideOpts = {
   updatedInput?: Record<string, unknown>;
@@ -71,7 +88,11 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   const [decisionOpts, setDecisionOpts] = useState<ToolDecideOpts | undefined>(
     () => _decisionOptsRegistry.get(registryKey),
   );
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpenState] = useState(() => _openRegistry.get(registryKey) ?? defaultOpen);
+  const setOpen = (next: boolean) => {
+    _openRegistry.set(registryKey, next);
+    setOpenState(next);
+  };
   useEffect(() => {
     if (pending && needsApproval && decision === null) setOpen(true);
   }, [pending, needsApproval, decision]);
@@ -121,7 +142,7 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   })();
 
   return {
-    toolName, args, displayArgs, argsText, result, status, ann,
+    toolName, args, displayArgs, argsText, result, status, ann, registryKey,
     pending, needsApproval, decision, decide, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   };
@@ -135,10 +156,40 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
   const { onOpenFile } = useShinyConfig();
   const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
-    toolName, displayArgs, argsText, result, status, ann,
+    toolName, displayArgs, argsText, result, status, ann, registryKey,
     pending, needsApproval, decision, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const captureScroll = (event: UIEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const region = target.dataset.toolScrollRegion;
+    if (!region) return;
+    const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
+    const maxLeft = Math.max(0, target.scrollWidth - target.clientWidth);
+    _scrollRegistry.set(`${registryKey}::${region}`, {
+      scrollTop: target.scrollTop,
+      scrollLeft: target.scrollLeft,
+      atBottom: maxTop > 0 && maxTop - target.scrollTop <= 2,
+      atRight: maxLeft > 0 && maxLeft - target.scrollLeft <= 2,
+    });
+  };
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    for (const target of root.querySelectorAll<HTMLElement>("[data-tool-scroll-region]")) {
+      const region = target.dataset.toolScrollRegion;
+      if (!region) continue;
+      const saved = _scrollRegistry.get(`${registryKey}::${region}`);
+      if (!saved) continue;
+      target.scrollTop = saved.atBottom
+        ? Math.max(0, target.scrollHeight - target.clientHeight)
+        : saved.scrollTop;
+      target.scrollLeft = saved.atRight
+        ? Math.max(0, target.scrollWidth - target.clientWidth)
+        : saved.scrollLeft;
+    }
+  });
 
   // 审批卡只在用户原本跟随底部时主动 reveal；如果用户正在上方阅读历史，
   // 不再用无条件 scrollIntoView 把视口劫持回来。审批完成后再次滚到底，
@@ -166,6 +217,8 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
 
   return (
     <div
+      ref={rootRef}
+      onScrollCapture={captureScroll}
       className="aui-shiny-tool"
       data-tool-depth={depth}
       style={depth > 0 ? { marginInlineStart: `${Math.min(depth, 4) * 16}px` } : undefined}
@@ -213,6 +266,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
               <p className="text-muted-foreground text-xs font-medium">Result:</p>
               <div
                 data-slot="tool-result-scroll"
+                data-tool-scroll-region="result"
                 className="mt-1 max-h-96 overflow-auto overscroll-contain"
               >
                 <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />

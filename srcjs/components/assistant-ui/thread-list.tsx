@@ -31,7 +31,9 @@ import {
 import {
   forwardRef,
   Fragment,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentPropsWithoutRef,
   type FC,
@@ -39,6 +41,7 @@ import {
 
 export const ThreadList: FC = () => {
   const { workspaceMode } = useShinyConfig();
+  const [collapseRevision, setCollapseRevision] = useState(0);
 
   return (
     <div
@@ -55,9 +58,22 @@ export const ThreadList: FC = () => {
         className={cn("min-w-0", workspaceMode && "pe-3")}
       >
         <ThreadListRoot>
-          <ThreadListNew />
-          <ThreadListItems />
-          <ArchivedThreadListItems />
+          {workspaceMode ? (
+            <button
+              type="button"
+              data-slot="aui_workspace-collapse-all"
+              aria-label="Collapse all folders"
+              title="Collapse all folders"
+              onClick={() => setCollapseRevision((revision) => revision + 1)}
+              className="text-muted-foreground hover:bg-muted h-8 min-w-0 truncate rounded-md px-2.5 text-start text-sm transition-colors"
+            >
+              Collapse all folders
+            </button>
+          ) : (
+            <ThreadListNew />
+          )}
+          <ThreadListItems collapseRevision={collapseRevision} />
+          <ArchivedThreadListItems collapseRevision={collapseRevision} />
         </ThreadListRoot>
       </div>
     </div>
@@ -65,7 +81,9 @@ export const ThreadList: FC = () => {
 };
 
 // 方案B：归档区（可恢复）。仅在存在归档线程时显示；每项提供"取消归档"。
-const ArchivedThreadListItems: FC = () => {
+const ArchivedThreadListItems: FC<{ collapseRevision: number }> = ({
+  collapseRevision,
+}) => {
   const archivedIds = useAuiState((s) => s.threads.archivedThreadIds);
   const { workspaceMode } = useShinyConfig();
   if (!archivedIds || archivedIds.length === 0) return null;
@@ -73,7 +91,7 @@ const ArchivedThreadListItems: FC = () => {
     <div data-slot="aui_thread-list-archived" className="mt-2 min-w-0 border-t pt-2">
       <div className="text-muted-foreground px-2.5 pb-1 text-xs font-medium">Archived</div>
       {workspaceMode ? (
-        <WorkspaceThreadGroups archived />
+        <WorkspaceThreadGroups archived collapseRevision={collapseRevision} />
       ) : (
         <ThreadListPrimitive.Items archived components={{ ThreadListItem: ArchivedThreadListItem }} />
       )}
@@ -118,8 +136,11 @@ export const ThreadListRoot: FC<
   );
 };
 
-export const ThreadListItems: FC<ComponentPropsWithoutRef<"div">> = ({
+export const ThreadListItems: FC<
+  ComponentPropsWithoutRef<"div"> & { collapseRevision?: number }
+> = ({
   className,
+  collapseRevision = 0,
   ...props
 }) => {
   return (
@@ -132,7 +153,7 @@ export const ThreadListItems: FC<ComponentPropsWithoutRef<"div">> = ({
         <ThreadListSkeleton />
       </AuiIf>
       <AuiIf condition={(s) => !s.threads.isLoading}>
-        <ThreadListItemGroups />
+        <ThreadListItemGroups collapseRevision={collapseRevision} />
       </AuiIf>
     </div>
   );
@@ -156,11 +177,26 @@ const WorkspaceProjectGroup: FC<{
   threadIds: readonly string[];
   archived: boolean;
   initiallyExpanded: boolean;
+  collapseRevision: number;
   Item: FC;
-}> = ({ group, threadIds, archived, initiallyExpanded, Item }) => {
+}> = ({
+  group,
+  threadIds,
+  archived,
+  initiallyExpanded,
+  collapseRevision,
+  Item,
+}) => {
+  const { newThreadInProject } = useShinyConfig();
   // The current project only supplies the mount-time default. After that, each
   // folder belongs entirely to the user: no current-thread effect and no accordion.
   const [expanded, setExpanded] = useState(initiallyExpanded);
+  const previousCollapseRevision = useRef(collapseRevision);
+  useEffect(() => {
+    if (previousCollapseRevision.current === collapseRevision) return;
+    previousCollapseRevision.current = collapseRevision;
+    setExpanded(false);
+  }, [collapseRevision]);
   const count = group.indices.length;
 
   return (
@@ -171,57 +207,75 @@ const WorkspaceProjectGroup: FC<{
       data-expanded={expanded ? "true" : "false"}
       className="min-w-0"
     >
-      <button
-        type="button"
-        data-slot="aui_workspace-project-header"
-        data-project={group.project}
-        title={group.project || group.label}
-        aria-expanded={expanded}
-        aria-label={`${expanded ? "Collapse" : "Expand"} ${group.label}`}
-        onClick={() => setExpanded((current) => !current)}
-        className="text-muted-foreground hover:bg-muted flex w-full min-w-0 items-center gap-1 rounded-md px-2 pt-3 pb-1 text-start text-xs font-medium transition-colors"
-      >
-        <ChevronRightIcon
-          data-slot="aui_workspace-project-chevron"
-          aria-hidden="true"
-          className={cn(
-            "size-3.5 shrink-0 transition-transform",
-            expanded && "rotate-90",
-          )}
-        />
-        <FolderIcon
-          data-slot="aui_workspace-project-folder"
-          aria-hidden="true"
-          className="size-3.5 shrink-0"
-        />
-        <span data-slot="aui_workspace-project-label" className="min-w-0 flex-1 truncate">
-          {group.label}
-        </span>
-        <span
-          data-slot="aui_workspace-thread-count"
-          aria-label={`${count} conversation${count === 1 ? "" : "s"}`}
-          title={`${count} conversation${count === 1 ? "" : "s"}`}
-          className="shrink-0 text-[10px] leading-none tabular-nums opacity-70"
+      <div className="flex min-w-0 items-end gap-0.5">
+        <button
+          type="button"
+          data-slot="aui_workspace-project-header"
+          data-project={group.project}
+          title={group.project || group.label}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${group.label}`}
+          onClick={() => setExpanded((current) => !current)}
+          className="text-muted-foreground hover:bg-muted flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 pt-3 pb-1 text-start text-xs font-medium transition-colors"
         >
-          {count}
-        </span>
-        {group.activeRuns > 0 && (
-          <span
-            data-slot="aui_workspace-run-count"
-            className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
-          >
-            {group.activeRuns} run{group.activeRuns === 1 ? "" : "s"}
+          <ChevronRightIcon
+            data-slot="aui_workspace-project-chevron"
+            aria-hidden="true"
+            className={cn(
+              "size-3.5 shrink-0 transition-transform",
+              expanded && "rotate-90",
+            )}
+          />
+          <FolderIcon
+            data-slot="aui_workspace-project-folder"
+            aria-hidden="true"
+            className="size-3.5 shrink-0"
+          />
+          <span data-slot="aui_workspace-project-label" className="min-w-0 flex-1 truncate">
+            {group.label}
           </span>
-        )}
-        {group.activeTasks > 0 && (
           <span
-            data-slot="aui_workspace-task-count"
-            className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
+            data-slot="aui_workspace-thread-count"
+            aria-label={`${count} conversation${count === 1 ? "" : "s"}`}
+            title={`${count} conversation${count === 1 ? "" : "s"}`}
+            className="shrink-0 text-[10px] leading-none tabular-nums opacity-70"
           >
-            {group.activeTasks} task{group.activeTasks === 1 ? "" : "s"}
+            {count}
           </span>
+          {group.activeRuns > 0 && (
+            <span
+              data-slot="aui_workspace-run-count"
+              className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
+            >
+              {group.activeRuns} run{group.activeRuns === 1 ? "" : "s"}
+            </span>
+          )}
+          {group.activeTasks > 0 && (
+            <span
+              data-slot="aui_workspace-task-count"
+              className="bg-muted shrink-0 rounded px-1 py-0.5 text-[10px] leading-none tabular-nums"
+            >
+              {group.activeTasks} task{group.activeTasks === 1 ? "" : "s"}
+            </span>
+          )}
+        </button>
+        {!archived && group.project && newThreadInProject && (
+          <button
+            type="button"
+            data-slot="aui_workspace-project-new"
+            data-project={group.project}
+            aria-label={`New chat in ${group.label}`}
+            title={`New chat in ${group.label}`}
+            onClick={() => {
+              setExpanded(true);
+              newThreadInProject(group.project);
+            }}
+            className="text-muted-foreground hover:bg-muted hover:text-foreground mb-0.5 flex size-7 shrink-0 items-center justify-center rounded-md transition-colors"
+          >
+            <PlusIcon className="size-3.5" />
+          </button>
         )}
-      </button>
+      </div>
       {expanded && (
         <div
           data-slot="aui_workspace-project-threads"
@@ -241,7 +295,11 @@ const WorkspaceProjectGroup: FC<{
   );
 };
 
-const WorkspaceThreadGroups: FC<{ archived?: boolean }> = ({ archived = false }) => {
+const WorkspaceThreadGroups: FC<{
+  archived?: boolean;
+  collapseRevision?: number;
+}> = ({ archived = false, collapseRevision = 0 }) => {
+  const { workspaceProjectOrder, workingDir } = useShinyConfig();
   const threadIds = useAuiState((s) =>
     archived ? s.threads.archivedThreadIds : s.threads.threadIds,
   );
@@ -252,12 +310,17 @@ const WorkspaceThreadGroups: FC<{ archived?: boolean }> = ({ archived = false })
     [mainThreadId, threadItems],
   );
   const currentProject = currentThread
-    ? projectForThread(currentThread, "")
-    : undefined;
+    ? projectForThread(currentThread, workingDir || "")
+    : workingDir || undefined;
   const groups = useMemo(() => {
     const itemsById = new Map(threadItems.map((item) => [item.id, item]));
-    return groupWorkspaceThreads(threadIds, itemsById);
-  }, [threadIds, threadItems]);
+    return groupWorkspaceThreads(
+      threadIds,
+      itemsById,
+      workspaceProjectOrder,
+      !archived,
+    );
+  }, [archived, threadIds, threadItems, workspaceProjectOrder]);
   const Item = archived ? ArchivedThreadListItem : ThreadListItem;
 
   return groups.map((group) => (
@@ -266,6 +329,7 @@ const WorkspaceThreadGroups: FC<{ archived?: boolean }> = ({ archived = false })
       group={group}
       threadIds={threadIds}
       archived={archived}
+      collapseRevision={collapseRevision}
       initiallyExpanded={
         !archived && currentProject !== undefined && group.project === currentProject
       }
@@ -274,9 +338,15 @@ const WorkspaceThreadGroups: FC<{ archived?: boolean }> = ({ archived = false })
   ));
 };
 
-const ThreadListItemGroups: FC = () => {
+const ThreadListItemGroups: FC<{ collapseRevision: number }> = ({
+  collapseRevision,
+}) => {
   const { workspaceMode } = useShinyConfig();
-  return workspaceMode ? <WorkspaceThreadGroups /> : <DateThreadListItemGroups />;
+  return workspaceMode ? (
+    <WorkspaceThreadGroups collapseRevision={collapseRevision} />
+  ) : (
+    <DateThreadListItemGroups />
+  );
 };
 
 const DateThreadListItemGroups: FC = () => {

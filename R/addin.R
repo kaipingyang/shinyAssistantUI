@@ -232,22 +232,15 @@
     # 收藏夹（持久化 home）。保存当前目录 / 删除，改后回推列表。apply/ctrl 惰性引用。
     on_save_project <- function() {
       saved <- .add_saved_project(projects_path, cur_dir())
-      if (isTRUE(workspace)) {
-        workspace_router$add(cur_dir())
-        ctrl$send_projects(workspace_router$projects())
-      } else {
-        ctrl$send_projects(saved)
-      }
+      # Workspace membership is session-local; Favorites are explicit and
+      # persisted. Saving may ensure registry membership, but only `saved` is UI.
+      if (isTRUE(workspace)) workspace_router$add(cur_dir())
+      ctrl$send_projects(saved)
     }
     on_remove_project <- function(path) {
       saved <- .remove_saved_project(projects_path, path)
-      if (isTRUE(workspace)) {
-        workspace_router$remove(path)
-        ctrl$send_projects(workspace_router$projects())
-        push_sessions()
-      } else {
-        ctrl$send_projects(saved)
-      }
+      # Unstarring must not remove the folder or its history from this Workspace.
+      ctrl$send_projects(saved)
     }
 
     # The inner handler reconnects the current CLI thread after /reload-skills.
@@ -319,11 +312,9 @@
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
       on_set_working_dir  = on_set_wd,
-      projects          = if (isTRUE(workspace)) {
-        workspace_router$projects()
-      } else {
-        .read_saved_projects(projects_path)
-      },
+      # `projects` is the Favorites protocol consumed by WorkingDirBar. The
+      # Workspace registry remains private to workspace_router.
+      projects          = .read_saved_projects(projects_path),
       on_save_project   = on_save_project,
       on_remove_project = on_remove_project,
       # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
@@ -342,6 +333,11 @@
       composer_density = settings_state$v$composerDensity,
       on_set_composer_density = function(d) {
         settings_state$v$composerDensity <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      },
+      assistant_text_size = settings_state$v$assistantTextSize,
+      on_set_assistant_text_size = function(value) {
+        settings_state$v$assistantTextSize <- .normalize_assistant_text_size(value) %||% "medium"
         tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
       },
       run_r_enabled = if (!is.null(run_r_server)) settings_state$v$runREnabled else NULL,
@@ -426,22 +422,35 @@
     # 统一的会话推送：带 archived 标记（服务端权威）。闭包惰性引用 ctrl（用户点击时
     # 才运行，ctrl 已赋值）。按当前工作目录 cur_dir() 分桶。
     push_sessions <- function() {
-      sessions <- if (isTRUE(workspace)) {
+      payload <- if (isTRUE(workspace)) {
         snapshot <- .workspace_session_snapshot(
           workspace_router$projects(),
           archived_path = archived_path
         )
+        if (!isTRUE(workspace_router$order_initialized())) {
+          workspace_router$reorder(.workspace_project_activity_order(
+            workspace_router$projects(),
+            snapshot,
+            current = cur_dir()
+          ))
+        }
+        project_order <- workspace_router$projects()
+        if (length(snapshot)) {
+          snapshot_projects <- vapply(snapshot, `[[`, character(1), "project")
+          snapshot <- snapshot[order(match(snapshot_projects, project_order))]
+        }
         for (item in snapshot) {
           workspace_router$project_for(item$id, item$project)
         }
-        snapshot
+        list(sessions = snapshot, projectOrder = as.list(project_order))
       } else {
-        .call_compatible_callback(list_claude_sessions, list(
+        sessions <- .call_compatible_callback(list_claude_sessions, list(
           directory = cur_dir(),
           archived_ids = .read_archived_ids(archived_path, cur_dir())
         ))
+        list(sessions = sessions)
       }
-      ctrl$send_sessions(list(sessions = sessions))
+      ctrl$send_sessions(payload)
     }
 
     # on_session_load 只负责用户点击后加载消息；侧栏列表必须另行注入。
@@ -483,7 +492,7 @@
         )
         recent <- add_recent(nd)
         ctrl$send_working_dir(nd, as.list(recent))
-        ctrl$send_projects(workspace_router$projects())
+        ctrl$send_projects(.read_saved_projects(projects_path))
         push_sessions()
         return(invisible(nd))
       }
@@ -512,8 +521,11 @@
                                    archived_path, session_map_path,
                                    on_reappear = function() invisible(NULL)) {
   tryCatch(attr(handler, "release_session")(session_id), error = function(e) NULL)
-  # 删前抓该 session 的 tool_use id(transcript 还在);删成功后清理其审批决策条目(Plan 46)。
-  decision_ids <- tryCatch(.session_tool_use_ids(session_id), error = function(e) character(0))
+  # 删前抓该 session 的 tool_use id（transcript 还在）；Workspace 必须在对应项目目录查找。
+  tool_ids <- tryCatch(
+    .session_tool_use_ids(session_id, directory = project),
+    error = function(e) character(0)
+  )
   ok <- tryCatch({ .delete_claude_session(session_id, directory = project); TRUE },
                  error = function(e) {
                    warning("[CLAUDE] delete_session failed: ", conditionMessage(e), call. = FALSE)
@@ -522,7 +534,9 @@
   if (isTRUE(ok)) {
     .toggle_archived_id(archived_path, project, session_id, FALSE)
     tryCatch(.remove_claude_session_map(session_map_path, session_id), error = function(e) NULL)
-    tryCatch(.prune_tool_decisions(.claude_decisions_path(session_map_path), decision_ids),
+    tryCatch(.prune_tool_decisions(.claude_decisions_path(session_map_path), tool_ids),
+             error = function(e) NULL)
+    tryCatch(.prune_tool_metadata(.claude_tool_metadata_path(session_map_path), tool_ids),
              error = function(e) NULL)
   } else {
     tryCatch(on_reappear(), error = function(e) NULL)

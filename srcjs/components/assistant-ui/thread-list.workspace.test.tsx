@@ -24,14 +24,22 @@ const baseContext: ShinyConfigCtx = {
 
 function Harness({
   workspaceMode,
+  workspaceProjectOrder,
+  workingDir,
+  initialThreadId,
+  newThreadInProject,
   threads,
   archivedThreads = [],
 }: {
   workspaceMode: boolean;
+  workspaceProjectOrder?: string[];
+  workingDir?: string;
+  initialThreadId?: string;
+  newThreadInProject?: (project: string) => void;
   threads: ExternalStoreThreadData<"regular">[];
   archivedThreads?: ExternalStoreThreadData<"archived">[];
 }) {
-  const [threadId, setThreadId] = useState(threads[0]?.id ?? "new");
+  const [threadId, setThreadId] = useState(initialThreadId ?? threads[0]?.id ?? "new");
   const runtime = useExternalStoreRuntime({
     messages: [] as ThreadMessageLike[],
     isRunning: false,
@@ -52,7 +60,13 @@ function Harness({
   });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ShinyConfigContext.Provider value={{ ...baseContext, workspaceMode }}>
+      <ShinyConfigContext.Provider value={{
+        ...baseContext,
+        workspaceMode,
+        workspaceProjectOrder,
+        workingDir,
+        newThreadInProject,
+      }}>
         <div className="w-40 overflow-hidden"><ThreadList /></div>
       </ShinyConfigContext.Provider>
     </AssistantRuntimeProvider>
@@ -128,8 +142,38 @@ describe("ThreadList workspace grouping", () => {
       .toContain("min-w-0");
     expect(container.querySelector("[data-slot=aui_workspace-project-label]")?.className)
       .toContain("truncate");
-    expect(container.querySelector("[data-slot=aui_thread-list-new]")?.className)
+    expect(container.querySelector("[data-slot=aui_thread-list-new]")).toBeNull();
+    expect(container.querySelector("[data-slot=aui_workspace-collapse-all]")?.className)
       .toContain("min-w-0");
+  });
+
+  it("opens the working-directory folder when the startup thread is not materialized yet", async () => {
+    const threads: ExternalStoreThreadData<"regular">[] = [
+      { id: "a-history", status: "regular", title: "A history", custom: {
+        project: "/work/a", projectLabel: "Project A",
+      } },
+      { id: "b-history", status: "regular", title: "B history", custom: {
+        project: "/work/b", projectLabel: "Project B",
+      } },
+    ];
+    const { container } = render(
+      <Harness
+        workspaceMode
+        workingDir="/work/a"
+        initialThreadId="new"
+        threads={threads}
+      />,
+    );
+
+    await waitFor(() => expect(
+      container.querySelectorAll("[data-slot=aui_workspace-project-header]").length,
+    ).toBe(2));
+    expect(container.querySelector(
+      "[data-project='/work/a'] [data-slot=aui_workspace-project-header]",
+    )?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(
+      "[data-project='/work/b'] [data-slot=aui_workspace-project-header]",
+    )?.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("initializes only the current project open, then leaves every folder under user control", async () => {
@@ -246,4 +290,125 @@ describe("ThreadList workspace grouping", () => {
     expect(outerContent.className).not.toContain("pe-3");
   });
 
+});
+
+
+describe("ThreadList explicit Workspace project order", () => {
+  it("puts a newly registered project ahead of an older active local thread", async () => {
+    const threads: ExternalStoreThreadData<"regular">[] = [
+      { id: "a-local", status: "regular", title: "A local", custom: {
+        project: "/work/a", projectLabel: "Project A",
+      } },
+      { id: "c-history", status: "regular", title: "C history", custom: {
+        project: "/work/c", projectLabel: "Project C",
+      } },
+      { id: "b-history", status: "regular", title: "B history", custom: {
+        project: "/work/b", projectLabel: "Project B",
+      } },
+    ];
+    const { container } = render(
+      <Harness
+        workspaceMode
+        workspaceProjectOrder={["/work/c", "/work/a", "/work/b"]}
+        threads={threads}
+      />,
+    );
+
+    await waitFor(() => expect(
+      container.querySelectorAll("[data-slot=aui_workspace-project-group]").length,
+    ).toBe(3));
+    expect(Array.from(container.querySelectorAll(
+      "[data-slot=aui_workspace-project-group]",
+    )).map((node) => node.getAttribute("data-project")))
+      .toEqual(["/work/c", "/work/a", "/work/b"]);
+  });
+});
+
+
+describe("Workspace folder-scoped new chat controls", () => {
+  it("replaces the global New Thread with per-folder add and Collapse all", async () => {
+    const newThreadInProject = vi.fn();
+    const threads: ExternalStoreThreadData<"regular">[] = [
+      { id: "a-1", status: "regular", title: "A", custom: {
+        project: "/work/a", projectLabel: "Project A",
+      } },
+      { id: "b-1", status: "regular", title: "B", custom: {
+        project: "/work/b", projectLabel: "Project B",
+      } },
+    ];
+    const archivedThreads: ExternalStoreThreadData<"archived">[] = [{
+      id: "a-old", status: "archived", title: "A old", custom: {
+        project: "/work/a", projectLabel: "Project A",
+      },
+    }];
+    const { container } = render(
+      <Harness
+        workspaceMode
+        workspaceProjectOrder={["/work/a", "/work/b", "/work/empty"]}
+        newThreadInProject={newThreadInProject}
+        threads={threads}
+        archivedThreads={archivedThreads}
+      />,
+    );
+
+    await waitFor(() => expect(
+      container.querySelectorAll(
+        "[data-slot=aui_workspace-project-group]:not([data-archived='true'])",
+      ).length,
+    ).toBe(3));
+    expect(container.querySelector("[data-slot=aui_thread-list-new]")).toBeNull();
+    expect(container.querySelector("[data-slot=aui_workspace-collapse-all]"))
+      .not.toBeNull();
+    expect(container.querySelectorAll(
+      "[data-slot=aui_workspace-project-group]:not([data-archived='true']) [data-slot=aui_workspace-project-new]",
+    ).length).toBe(3);
+    expect(container.querySelector(
+      "[data-archived='true'] [data-slot=aui_workspace-project-new]",
+    )).toBeNull();
+    expect(container.querySelector(
+      "[data-project='/work/empty'] [data-slot=aui_workspace-thread-count]",
+    )?.textContent).toBe("0");
+
+    const groupA = container.querySelector(
+      "[data-project='/work/a']:not([data-archived='true'])",
+    ) as HTMLElement;
+    const groupB = container.querySelector(
+      "[data-project='/work/b']:not([data-archived='true'])",
+    ) as HTMLElement;
+    const headerA = groupA.querySelector(
+      "[data-slot=aui_workspace-project-header]",
+    ) as HTMLButtonElement;
+    const headerB = groupB.querySelector(
+      "[data-slot=aui_workspace-project-header]",
+    ) as HTMLButtonElement;
+    const addB = groupB.querySelector(
+      "[data-slot=aui_workspace-project-new]",
+    ) as HTMLButtonElement;
+
+    expect(headerA.getAttribute("aria-expanded")).toBe("true");
+    expect(headerB.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(addB);
+    expect(newThreadInProject).toHaveBeenCalledWith("/work/b");
+    expect(headerB.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(container.querySelector(
+      "[data-slot=aui_workspace-collapse-all]",
+    ) as HTMLButtonElement);
+    await waitFor(() => expect(Array.from(container.querySelectorAll(
+      "[data-slot=aui_workspace-project-header]",
+    )).every((node) => node.getAttribute("aria-expanded") === "false")).toBe(true));
+  });
+
+  it("keeps the top-level New Thread in ordinary Chat", async () => {
+    const threads: ExternalStoreThreadData<"regular">[] = [{
+      id: "chat", status: "regular", title: "Chat",
+    }];
+    const { container } = render(<Harness workspaceMode={false} threads={threads} />);
+
+    await waitFor(() => expect(
+      container.querySelector("[data-slot=aui_thread-list-new]"),
+    ).not.toBeNull());
+    expect(container.querySelector("[data-slot=aui_workspace-collapse-all]"))
+      .toBeNull();
+  });
 });

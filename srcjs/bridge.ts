@@ -50,6 +50,13 @@ export type RunStatePayload = {
   queuePosition?: number;
 };
 
+export type AutoContinuePayload = {
+  threadId: string;
+  runId?: string;
+  notice: string;
+  prompt: string;
+};
+
 export type ToolCallPayload = {
   toolCallId: string;
   toolName: string;
@@ -80,6 +87,7 @@ export type RunCallbacks = {
   onData?: (d: { name: string; data: unknown }) => void;
   onGenerativeUi?: (d: { spec: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
+  onAutoContinue?: (data: AutoContinuePayload) => void;
   onDone: (suggestions?: Array<{prompt: string}>, runId?: string, cancelled?: boolean) => void;
   onError: (message: string, runId?: string) => void;
 };
@@ -107,6 +115,11 @@ export type HistoryLoadPayload = {
   prepend?: boolean;
 };
 
+export type SessionsPayload = {
+  sessions: SessionItem[];
+  projectOrder?: string[];
+};
+
 export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string) => void;
   reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean, project?: string) => void;
@@ -127,6 +140,7 @@ export interface ShinyBridge {
   sendDefaultPermissionMode: (value: string) => void;
   sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
   sendComposerDensity: (value: string) => void;
+  sendAssistantTextSize: (value: string) => void;
   sendRunREnabled: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
@@ -140,7 +154,7 @@ export interface ShinyBridge {
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
-  onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
+  onSessions: (handler: (data: SessionsPayload) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string }) => void) => void;
@@ -162,11 +176,11 @@ export interface ShinyBridge {
 export function createShinyBridge(inputId: string): ShinyBridge {
   // 按 threadId 存储 callbacks，支持多 thread 并发（切 thread 不丢失旧 handler 回调）
   const callbacksMap = new Map<string, RunCallbacks>();
-  let sessionsHandler: ((data: { sessions: SessionItem[] }) => void) | null = null;
+  let sessionsHandler: ((data: SessionsPayload) => void) | null = null;
   let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
-  let bufferedSessions: { sessions: SessionItem[] } | null = null;
+  let bufferedSessions: SessionsPayload | null = null;
   // 工作目录（addin 工作目录选择器）：同 :sessions，可能早到 → 缓冲回放。
   let workingDirHandler: ((data: WorkingDirPayload) => void) | null = null;
   let bufferedWorkingDir: WorkingDirPayload | null = null;
@@ -201,6 +215,13 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
     const d = data as { message: string; threadId?: string; runId?: string };
     routeCallback(d.threadId)?.onError(d.message, d.runId);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:auto-continue`, (data) => {
+    const d = data as Partial<AutoContinuePayload>;
+    if (typeof d.threadId !== "string" || typeof d.notice !== "string" ||
+        typeof d.prompt !== "string") return;
+    routeCallback(d.threadId)?.onAutoContinue?.(d as AutoContinuePayload);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:thinking`, (data) => {
@@ -254,7 +275,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:sessions`, (data) => {
-    const d = data as { sessions: SessionItem[] };
+    const d = data as SessionsPayload;
     if (sessionsHandler) {
       sessionsHandler(d);
     } else {
@@ -529,6 +550,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendComposerDensity(value) {
       Shiny.setInputValue(`${inputId}_composer_density`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendAssistantTextSize(value) {
+      Shiny.setInputValue(`${inputId}_assistant_text_size`, { value, ts: Date.now() }, { priority: "event" });
     },
     sendRunREnabled(value) {
       Shiny.setInputValue(`${inputId}_run_r_enabled`, { value, ts: Date.now() }, { priority: "event" });
