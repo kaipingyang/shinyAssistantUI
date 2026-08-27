@@ -64,7 +64,7 @@ export type ToolDecideOpts = {
 
 // 共享工具卡状态 + 审批决策派发(供外壳与各交互体消费)。
 export function useToolCard(props: ToolCallMessagePartProps) {
-  const { toolName, args, argsText, result, status, artifact, toolCallId } = props;
+  const { toolName, args, argsText, result, status, timing, artifact, toolCallId } = props;
   const ann = artifact as Record<string, unknown> | undefined;
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
@@ -142,7 +142,7 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   })();
 
   return {
-    toolName, args, displayArgs, argsText, result, status, ann, registryKey,
+    toolName, args, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, decide, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   };
@@ -156,7 +156,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
   const { onOpenFile } = useShinyConfig();
   const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
-    toolName, displayArgs, argsText, result, status, ann, registryKey,
+    toolName, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
@@ -195,6 +195,12 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
   // 不再用无条件 scrollIntoView 把视口劫持回来。审批完成后再次滚到底，
   // 让后续 tool/text stream 重新进入 assistant-ui 的 auto-follow 状态。
   const showApproval = pending && needsApproval && decision === null;
+  // ExternalStore marks earlier assistant messages complete when a newer tool
+  // message is appended. A tool without a result is still running; preserve
+  // requires-action/incomplete, but never present a pending sibling as done.
+  const triggerStatus = pending && (!status || status.type === "complete")
+    ? ({ type: "running" } as const)
+    : status;
   const approvalRef = useRef<HTMLDivElement>(null);
   const viewport = useThreadViewport({ optional: true });
   const isAtBottom = viewport?.isAtBottom ?? false;
@@ -254,7 +260,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
         </div>
       )}
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
-        <ToolFallback.Trigger toolName={displayTitle} status={status} />
+        <ToolFallback.Trigger toolName={displayTitle} status={triggerStatus} timing={timing} />
         <ToolFallback.Content>
           <ToolArgsView
             view={resolveToolView(toolName, displayArgs, argsText, ann)}

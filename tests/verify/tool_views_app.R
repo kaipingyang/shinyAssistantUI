@@ -56,6 +56,12 @@ handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result,
   emit("wf1", "WebFetch", list(url = "https://example.com/guide", prompt = "summarize"))
   emit("u1", "Mystery", list(foo = 1, bar = list(2, 3)))
   later::later(function() {
+  emit("ws-json", "WebSearch", list(query = "synthetic weather marker"), list(
+    query = "synthetic weather marker",
+    results = list(list(title = "Synthetic result", url = "https://example.com/weather")),
+    durationSeconds = 1.25,
+    searchCount = 1L
+  ))
     on_tool_call_delta("w-stream", '\\n- final\\n"}')
     on_tool_call(
       "w-stream", "Write",
@@ -71,6 +77,7 @@ handler <- function(message, on_chunk, on_done, on_tool_call, on_tool_result,
 }
 
 ui <- assistantUIPage(
+  tags$head(tags$link(rel = "icon", href = "data:,")),
   div(style = "width: 680px;", assistantUIOutput("chat", height = "82vh"))
 )
 server <- function(input, output, session) {

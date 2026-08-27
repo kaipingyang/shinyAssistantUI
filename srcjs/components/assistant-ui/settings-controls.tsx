@@ -114,17 +114,35 @@ export function ModelPickerDialog() {
     ...(o.description ? { description: o.description } : {}),
     ...(o.disabled ? { disabled: true } : {}),
   }));
+  const requestedLabel = model.options.find((option) => option.value === model.requested)?.label
+    ?? model.requested;
   return (
-    <ModelSelector
-      models={models}
-      value={model.value}
-      onValueChange={(v) => model.setValue(v)}
-      open={model.pickerOpen}
-      onOpenChange={model.setPickerOpen}
-      searchable={models.length > 8}
-      variant="ghost"
-      size="sm"
-    />
+    <div
+      data-slot="aui_model_control"
+      data-pending={model.pending ? "true" : "false"}
+      className="flex items-center gap-1.5"
+    >
+      <ModelSelector
+        models={models}
+        value={model.value}
+        onValueChange={(v) => model.setValue(v)}
+        open={model.pickerOpen}
+        onOpenChange={model.setPickerOpen}
+        searchable={models.length > 8}
+        variant="ghost"
+        size="sm"
+      />
+      {model.pending && (
+        <span data-slot="aui_model_pending" role="status" className="text-muted-foreground text-[11px]">
+          Applying {requestedLabel || "model"}…
+        </span>
+      )}
+      {!model.pending && model.error && (
+        <span data-slot="aui_model_error" role="alert" className="text-destructive text-[11px]" title={model.error}>
+          Model change failed
+        </span>
+      )}
+    </div>
   );
 }
 

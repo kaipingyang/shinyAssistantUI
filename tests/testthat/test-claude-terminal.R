@@ -4,7 +4,8 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   skip_if_not_installed("promises")
   skip_if_not_installed("later")
 
-  run_turn <- function(messages, is_cancelled = function() FALSE, message = "") {
+  run_turn <- function(messages, is_cancelled = function() FALSE, message = "",
+                       continuation_kind = NULL, legacy_callback = FALSE) {
     queue <- messages
     client <- new.env(parent = emptyenv())
     client$connect <- function() invisible(NULL)
@@ -22,7 +23,8 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     local_mocked_bindings(
       .new_claude_options = function(...) list(...),
       .new_claude_client = function(options) client,
-      .claude_drain_timeout_seconds = function() 0.01
+      .claude_drain_timeout_seconds = function() 0.01,
+      .package = "shinyAssistantUI"
     )
 
     handler <- make_claude_handler(
@@ -33,6 +35,8 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       ),
       session_map_path = tempfile(fileext = ".rds")
     )
+    cleanup <- attr(handler, "cleanup")
+    if (is.function(cleanup)) on.exit(cleanup(), add = TRUE)
     captured <- new.env(parent = emptyenv())
     captured$chunks <- character()
     captured$done <- FALSE
@@ -41,17 +45,24 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     captured$tool_starts <- character(0)
     captured$tool_results <- list()
 
-    handler(
+    capture_auto_continue <- function(notice, prompt, kind = NULL) {
+      captured$auto_continue[[length(captured$auto_continue) + 1L]] <- list(
+        notice = notice, prompt = prompt, kind = kind
+      )
+    }
+    auto_continue_callback <- if (isTRUE(legacy_callback)) {
+      function(notice, prompt) capture_auto_continue(notice, prompt)
+    } else {
+      capture_auto_continue
+    }
+
+    handler_args <- list(
       message = message, thread_id = "image-thread",
       attachments = list(list(type = "image", data = "data:image/png;base64,AAAA")),
       on_chunk = function(text) captured$chunks <- c(captured$chunks, text),
       on_done = function(...) captured$done <- TRUE,
       on_error = function(message) captured$error <- message,
-      on_auto_continue = function(notice, prompt) {
-        captured$auto_continue[[length(captured$auto_continue) + 1L]] <- list(
-          notice = notice, prompt = prompt
-        )
-      },
+      on_auto_continue = auto_continue_callback,
       on_tool_call = function(...) NULL,
       on_tool_result = function(tool_call_id, result, is_error) {
         captured$tool_results[[length(captured$tool_results) + 1L]] <- list(
@@ -65,6 +76,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       is_cancelled = is_cancelled,
       wait_for_approval = function(...) promises::promise_resolve(list(approved = FALSE))
     )
+    if (!is.null(continuation_kind)) {
+      handler_args$continuation_kind <- continuation_kind
+    }
+    do.call(handler, handler_args)
 
     for (i in seq_len(2000)) {
       later::run_now()
@@ -85,23 +100,28 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       stop_reason = stop_reason
     )
   }
-  assistant <- function(text) ClaudeAgentSDK::AssistantMessage(
+  assistant <- function(text, parent = NULL) ClaudeAgentSDK::AssistantMessage(
     content = list(ClaudeAgentSDK::TextBlock(text)),
-    model = "mock-model", session_id = "session-terminal-test"
+    model = "mock-model", session_id = "session-terminal-test",
+    parent_tool_use_id = parent
   )
   assistant_blocks <- function(...) ClaudeAgentSDK::AssistantMessage(
     content = list(...), model = "mock-model",
     session_id = "session-terminal-test"
   )
+  thinking_block <- function(text = "Private reasoning.") {
+    ClaudeAgentSDK::ThinkingBlock(text, signature = "test-signature")
+  }
   tool_block <- function(id = "assistant-tool") ClaudeAgentSDK::ToolUseBlock(
     id = id, name = "Read", input = list(file_path = "R/handlers.R")
   )
-  stream <- function(text) ClaudeAgentSDK::StreamEvent(
+  stream <- function(text, parent = NULL) ClaudeAgentSDK::StreamEvent(
     uuid = "stream-event", session_id = "session-terminal-test",
     event = list(
       type = "content_block_delta", index = 0,
       delta = list(type = "text_delta", text = text)
-    )
+    ),
+    parent_tool_use_id = parent
   )
   permission <- function() ClaudeAgentSDK::PermissionRequestMessage(
     request_id = "permission-request",
@@ -109,14 +129,16 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     tool_input = list(command = "echo test"),
     tool_use_id = "tool-use-terminal-test"
   )
-  partial_tool_start <- function() ClaudeAgentSDK::StreamEvent(
-    uuid = "partial-tool-event", session_id = "session-terminal-test",
+  partial_tool_start <- function(id = "partial-tool", name = "Bash",
+                                 parent = NULL, index = 0) ClaudeAgentSDK::StreamEvent(
+    uuid = paste0("partial-tool-event-", id), session_id = "session-terminal-test",
     event = list(
-      type = "content_block_start", index = 0,
+      type = "content_block_start", index = index,
       content_block = list(
-        type = "tool_use", id = "partial-tool", name = "Bash"
+        type = "tool_use", id = id, name = name
       )
-    )
+    ),
+    parent_tool_use_id = parent
   )
   thinking_stream <- function(text) ClaudeAgentSDK::StreamEvent(
     uuid = "thinking-event", session_id = "session-terminal-test",
@@ -125,9 +147,9 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       delta = list(type = "thinking_delta", thinking = text)
     )
   )
-  partial_tool_stop <- function() ClaudeAgentSDK::StreamEvent(
-    uuid = "partial-tool-stop", session_id = "session-terminal-test",
-    event = list(type = "content_block_stop", index = 0)
+  partial_tool_stop <- function(index = 0) ClaudeAgentSDK::StreamEvent(
+    uuid = paste0("partial-tool-stop-", index), session_id = "session-terminal-test",
+    event = list(type = "content_block_stop", index = index)
   )
   task_completed <- function() ClaudeAgentSDK::TaskNotificationMessage(
     subtype = "task_notification", data = list(), task_id = "background-1",
@@ -166,6 +188,30 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_identical(streamed$chunks, "Already streamed.")
   expect_true(streamed$done)
   expect_null(streamed$error)
+
+  parented_parallel_agents <- run_turn(list(
+    stream("agent one leaked ", parent = "agent-one"),
+    partial_tool_start(
+      id = "nested-read", name = "Read", parent = "agent-one", index = 7
+    ),
+    partial_tool_stop(index = 7),
+    stream("agent two leaked ", parent = "agent-two"),
+    stream("Top-level summary."),
+    result(text = "Top-level summary.")
+  ))
+  expect_identical(parented_parallel_agents$chunks, "Top-level summary.")
+  expect_identical(parented_parallel_agents$tool_starts, "nested-read")
+  expect_true(parented_parallel_agents$done)
+  expect_null(parented_parallel_agents$error)
+
+  parented_assistant_terminal <- run_turn(list(
+    assistant("Hidden subagent transcript.", parent = "agent-one"),
+    assistant("Visible final answer."),
+    result(text = "Visible final answer.")
+  ))
+  expect_identical(parented_assistant_terminal$chunks, "Visible final answer.")
+  expect_true(parented_assistant_terminal$done)
+  expect_null(parented_assistant_terminal$error)
 
   trailing_newline <- run_turn(list(
     assistant("Answer\n"),
@@ -215,7 +261,10 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
     assistant("Second answer."),
     result(text = "First answer. Second answer.")
   ))
-  expect_identical(multiple_assistants$chunks, "First answer. Second answer.")
+  expect_identical(
+    multiple_assistants$chunks,
+    c("First answer. ", "Second answer.")
+  )
   expect_true(multiple_assistants$done)
   expect_null(multiple_assistants$error)
 
@@ -229,6 +278,7 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_length(thinking_only$chunks, 0L)
   expect_length(thinking_only$auto_continue, 1L)
   expect_match(thinking_only$auto_continue[[1L]]$prompt, "visible|final response", ignore.case = TRUE)
+  expect_identical(thinking_only$auto_continue[[1L]]$kind, "generic")
 
   thinking_with_whitespace <- run_turn(list(
     thinking_stream("I should answer after thinking."),
@@ -238,6 +288,7 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_true(thinking_with_whitespace$done)
   expect_null(thinking_with_whitespace$error)
   expect_length(thinking_with_whitespace$auto_continue, 1L)
+  expect_identical(thinking_with_whitespace$auto_continue[[1L]]$kind, "generic")
   expect_identical(trimws(paste0(thinking_with_whitespace$chunks, collapse = "")), "")
 
   buffered_whitespace_before_tool <- run_turn(list(
@@ -249,6 +300,7 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_true(buffered_whitespace_before_tool$done)
   expect_null(buffered_whitespace_before_tool$error)
   expect_length(buffered_whitespace_before_tool$auto_continue, 1L)
+  expect_identical(buffered_whitespace_before_tool$auto_continue[[1L]]$kind, "tool-postlude")
   expect_identical(
     trimws(paste0(buffered_whitespace_before_tool$chunks, collapse = "")),
     ""
@@ -269,15 +321,17 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   continuation_prompt <- stalled_after_tool$auto_continue[[1L]]$prompt
   expect_match(continuation_prompt, "completed tool results", ignore.case = TRUE)
   expect_match(stalled_after_tool$auto_continue[[1L]]$notice, "Continuing automatically")
+  expect_identical(stalled_after_tool$auto_continue[[1L]]$kind, "tool-postlude")
 
-  # Reported chain: the visible tool-recovery user turn itself finishes with
-  # reasoning only. It gets one distinct generic recovery, not an immediate error.
+  # The tool-postlude recovery that itself finishes without visible text advances
+  # to the distinct generic stage based on hidden metadata, not prompt identity.
   thinking_tool_continuation <- run_turn(
     list(
       thinking_stream("I have the answer and should now state it."),
       result(stop_reason = "end_turn")
     ),
-    message = continuation_prompt
+    message = continuation_prompt,
+    continuation_kind = "tool-postlude"
   )
   expect_true(thinking_tool_continuation$done)
   expect_null(thinking_tool_continuation$error)
@@ -285,22 +339,137 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   generic_prompt <- thinking_tool_continuation$auto_continue[[1L]]$prompt
   expect_false(identical(generic_prompt, continuation_prompt))
   expect_match(generic_prompt, "visible|final response", ignore.case = TRUE)
+  expect_identical(thinking_tool_continuation$auto_continue[[1L]]$kind, "generic")
 
-  # The generic recovery is the hard bound: if it also returns thinking-only,
-  # fail once and never enqueue a third continuation.
+  # Regression: generic recovery may also finish without visible text. It gets
+  # exactly one final user-equivalent minimal continuation instead of erroring.
   stalled_generic_continuation <- run_turn(
     list(
       thinking_stream("Still no visible response."),
       result(stop_reason = "end_turn")
     ),
-    message = generic_prompt
+    message = generic_prompt,
+    continuation_kind = "generic"
   )
-  expect_false(stalled_generic_continuation$done)
-  expect_match(stalled_generic_continuation$error, "user-visible response|continuation", ignore.case = TRUE)
-  expect_length(stalled_generic_continuation$auto_continue, 0L)
+  expect_true(stalled_generic_continuation$done)
+  expect_null(stalled_generic_continuation$error)
+  expect_length(stalled_generic_continuation$auto_continue, 1L)
+  minimal_prompt <- stalled_generic_continuation$auto_continue[[1L]]$prompt
+  expect_identical(minimal_prompt, "继续")
+  expect_identical(stalled_generic_continuation$auto_continue[[1L]]$kind, "minimal")
 
-  # A recovery turn that starts a new tool and again omits the final text keeps
-  # the existing terminal error instead of entering another tool-recovery loop.
+  # Successful zero-output generic results use the same minimal fallback.
+  empty_generic_continuation <- run_turn(
+    list(result(stop_reason = "end_turn")),
+    message = generic_prompt,
+    continuation_kind = "generic"
+  )
+  expect_true(empty_generic_continuation$done)
+  expect_null(empty_generic_continuation$error)
+  expect_identical(empty_generic_continuation$auto_continue[[1L]]$prompt, "继续")
+  expect_identical(empty_generic_continuation$auto_continue[[1L]]$kind, "minimal")
+
+  minimal_success <- run_turn(
+    list(assistant("最终可见回答。"), result(stop_reason = "end_turn")),
+    message = minimal_prompt,
+    continuation_kind = "minimal"
+  )
+  expect_true(minimal_success$done)
+  expect_null(minimal_success$error)
+  expect_identical(minimal_success$chunks, "最终可见回答。")
+  expect_length(minimal_success$auto_continue, 0L)
+
+  # Minimal is the hard bound: no fourth continuation is possible.
+  stalled_minimal_continuation <- run_turn(
+    list(
+      thinking_stream("The minimal continuation still omitted visible text."),
+      result(stop_reason = "end_turn")
+    ),
+    message = minimal_prompt,
+    continuation_kind = "minimal"
+  )
+  expect_false(stalled_minimal_continuation$done)
+  expect_match(stalled_minimal_continuation$error, "user-visible response|continuation", ignore.case = TRUE)
+  expect_length(stalled_minimal_continuation$auto_continue, 0L)
+
+  # A successful end_turn containing only structured thinking is a distinct
+  # terminal failure after the bounded recovery chain. Thinking text may look
+  # like a tool call, but it is never parsed or executed as one.
+  thinking_only_terminal <- run_turn(
+    list(
+      assistant_blocks(
+        thinking_block("<invoke name=\"Bash\">{\"command\":\"do-not-run\"}</invoke>"),
+        ClaudeAgentSDK::TextBlock(" \n")
+      ),
+      result(stop_reason = "end_turn")
+    ),
+    message = minimal_prompt,
+    continuation_kind = "minimal"
+  )
+  expect_false(thinking_only_terminal$done)
+  expect_match(thinking_only_terminal$error, "thinking-only", ignore.case = TRUE)
+  expect_match(thinking_only_terminal$error, "retry", ignore.case = TRUE)
+  expect_match(thinking_only_terminal$error, "/compact", fixed = TRUE)
+  expect_match(thinking_only_terminal$error, "switch.*model", ignore.case = TRUE)
+  expect_length(thinking_only_terminal$auto_continue, 0L)
+  expect_length(thinking_only_terminal$tool_starts, 0L)
+  expect_length(thinking_only_terminal$tool_results, 0L)
+  expect_identical(trimws(paste0(thinking_only_terminal$chunks, collapse = "")), "")
+
+  # Incomplete thinking caused by an output-token limit is not the successful
+  # thinking-only/end_turn classification.
+  for (limit_reason in c("max_tokens", "max_output_tokens")) {
+    incomplete_thinking <- run_turn(
+      list(
+        assistant_blocks(thinking_block("Incomplete reasoning.")),
+        result(stop_reason = limit_reason)
+      ),
+      message = minimal_prompt,
+      continuation_kind = "minimal"
+    )
+    expect_false(incomplete_thinking$done, info = limit_reason)
+    expect_match(
+      incomplete_thinking$error,
+      "user-visible response|continuation",
+      ignore.case = TRUE,
+      info = limit_reason
+    )
+    expect_false(
+      grepl("thinking-only", incomplete_thinking$error, ignore.case = TRUE),
+      info = limit_reason
+    )
+    expect_length(incomplete_thinking$auto_continue, 0L)
+  }
+
+  # Visible text never identifies an internal stage. A human typing exactly
+  # “继续”, or an unknown metadata value, remains an ordinary turn.
+  manual_continue <- run_turn(
+    list(thinking_stream("Manual continue also needs recovery."), result(stop_reason = "end_turn")),
+    message = "继续"
+  )
+  expect_true(manual_continue$done)
+  expect_null(manual_continue$error)
+  expect_identical(manual_continue$auto_continue[[1L]]$kind, "generic")
+
+  unknown_kind <- run_turn(
+    list(thinking_stream("Unknown kind is ordinary."), result(stop_reason = "end_turn")),
+    message = generic_prompt,
+    continuation_kind = "forged-unknown"
+  )
+  expect_true(unknown_kind$done)
+  expect_null(unknown_kind$error)
+  expect_identical(unknown_kind$auto_continue[[1L]]$kind, "generic")
+
+  legacy_callback <- run_turn(
+    list(thinking_stream("Old callback remains valid."), result(stop_reason = "end_turn")),
+    legacy_callback = TRUE
+  )
+  expect_true(legacy_callback$done)
+  expect_null(legacy_callback$error)
+  expect_length(legacy_callback$auto_continue, 1L)
+
+  # Any internal recovery stage that starts a new tool and again omits final
+  # text fails closed instead of entering another tool-postlude loop.
   stalled_continuation <- run_turn(
     list(
       partial_tool_start(),
@@ -308,7 +477,8 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       thinking_stream("I still did not provide visible text."),
       result(stop_reason = "end_turn")
     ),
-    message = continuation_prompt
+    message = continuation_prompt,
+    continuation_kind = "tool-postlude"
   )
   expect_false(stalled_continuation$done)
   expect_match(stalled_continuation$error, "after a tool call", ignore.case = TRUE)
@@ -321,11 +491,26 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       thinking_stream("The generic recovery still omitted visible text."),
       result(stop_reason = "end_turn")
     ),
-    message = generic_prompt
+    message = generic_prompt,
+    continuation_kind = "generic"
   )
   expect_false(stalled_generic_with_tool$done)
   expect_match(stalled_generic_with_tool$error, "after a tool call", ignore.case = TRUE)
   expect_length(stalled_generic_with_tool$auto_continue, 0L)
+
+  stalled_minimal_with_tool <- run_turn(
+    list(
+      partial_tool_start(),
+      partial_tool_stop(),
+      thinking_stream("The minimal recovery still omitted visible text."),
+      result(stop_reason = "end_turn")
+    ),
+    message = minimal_prompt,
+    continuation_kind = "minimal"
+  )
+  expect_false(stalled_minimal_with_tool$done)
+  expect_match(stalled_minimal_with_tool$error, "after a tool call", ignore.case = TRUE)
+  expect_length(stalled_minimal_with_tool$auto_continue, 0L)
 
   final_after_tool <- run_turn(list(
     partial_tool_start(),
@@ -485,7 +670,11 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
   expect_false(failed_partial_tool$done)
   expect_match(failed_partial_tool$error, "Backend failed", fixed = TRUE)
 
-  expect_identical(.claude_terminal_suffix(character(), "terminal"), "terminal")
-  expect_identical(.claude_terminal_suffix(NA_character_, "terminal"), "terminal")
-  expect_identical(.claude_terminal_suffix("stream", NA_character_), "")
+  terminal_suffix <- getFromNamespace(
+    ".claude_terminal_suffix",
+    "shinyAssistantUI"
+  )
+  expect_identical(terminal_suffix(character(), "terminal"), "terminal")
+  expect_identical(terminal_suffix(NA_character_, "terminal"), "terminal")
+  expect_identical(terminal_suffix("stream", NA_character_), "")
 })

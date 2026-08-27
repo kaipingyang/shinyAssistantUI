@@ -197,6 +197,31 @@ describe("bridge 出站消息", () => {
     expect(inputValues[0].value).toMatchObject({ threadId: "t1", runId: "run-1" });
   });
 
+
+  it("sendUserMessage carries hidden continuation kind without changing visible text", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage(
+      "继续", "t1", undefined, undefined, undefined,
+      "run-minimal", undefined, undefined, "minimal",
+    );
+    expect(inputValues[0]).toMatchObject({ id: "chat" });
+    expect(inputValues[0].value).toMatchObject({
+      text: "继续", threadId: "t1", runId: "run-minimal", continuationKind: "minimal",
+    });
+  });
+
+  it("routes a valid hidden auto-continuation kind", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:auto-continue"]({
+      threadId: "t1", runId: "run-1", notice: "retry", prompt: "继续", kind: "minimal",
+    });
+    expect(cb.calls.autoContinue).toEqual([[
+      expect.objectContaining({ prompt: "继续", kind: "minimal" }),
+    ]]);
+  });
+
   it("sendToolApproval 带 toolCallId + approved", () => {
     const b = createShinyBridge("chat");
     b.sendToolApproval("tc1", true, { suggestionIdx: 2 });
@@ -391,5 +416,54 @@ describe("bridge transparent auto-continuation", () => {
         prompt: "Please continue from the completed tool results.",
       },
     ]]);
+  });
+});
+
+
+describe("bridge proactive-messages global subscription", () => {
+  const snapshot = (threadId: string, revision: number, id: string) => ({
+    version: 1,
+    operation: "replace",
+    threadId,
+    revision,
+    messages: [
+      { id, role: "assistant", content: [{ type: "text", text: id }] },
+    ],
+  });
+
+  it("buffers every early payload FIFO until the global subscriber registers", () => {
+    const bridge = createShinyBridge("chat");
+    const first = snapshot("thread-a", 1, "first");
+    const second = snapshot("thread-a", 2, "second");
+
+    handlers["chat:proactive-messages"](first);
+    handlers["chat:proactive-messages"](second);
+
+    const received: unknown[] = [];
+    bridge.onProactiveMessages((payload) => received.push(payload));
+
+    expect(received).toEqual([first, second]);
+  });
+
+  it("keeps early queues and subscribers isolated by widget inputId", () => {
+    const bridgeA = createShinyBridge("chatA");
+    const bridgeB = createShinyBridge("chatB");
+    const payloadA = snapshot("shared-thread", 1, "widget-a");
+    const payloadB = snapshot("shared-thread", 1, "widget-b");
+
+    handlers["chatA:proactive-messages"](payloadA);
+    handlers["chatB:proactive-messages"](payloadB);
+
+    const receivedA: unknown[] = [];
+    const receivedB: unknown[] = [];
+    bridgeA.onProactiveMessages((payload) => receivedA.push(payload));
+    bridgeB.onProactiveMessages((payload) => receivedB.push(payload));
+
+    expect(receivedA).toEqual([payloadA]);
+    expect(receivedB).toEqual([payloadB]);
+
+    handlers["chatA:proactive-messages"](snapshot("shared-thread", 2, "widget-a-live"));
+    expect(receivedA).toHaveLength(2);
+    expect(receivedB).toEqual([payloadB]);
   });
 });

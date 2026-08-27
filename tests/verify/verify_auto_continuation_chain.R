@@ -1,3 +1,6 @@
+#!/usr/bin/env Rscript
+site_library <- "/posit_share/site_library_u/4.4.3"
+if (dir.exists(site_library)) .libPaths(c(.libPaths(), site_library))
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
 home_library <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
@@ -90,10 +93,10 @@ check("initial user message was submitted",
       wait_for("Array.from(document.querySelectorAll('[data-role=user]')).some(e=>(e.innerText||'').includes('start chain'))", 15))
 check("first backend turn started",
       wait_for("(document.getElementById('calls')?.innerText||'').includes('start chain')", 15))
-check("third backend turn produced final visible text",
+check("fourth backend turn produced final visible text",
       wait_for("document.body.innerText.includes('CHAIN_COMPLETE')", 30))
-check("backend received exactly three ordered submissions", isTRUE(value(
-  "(function(){const t=document.getElementById('calls')?.innerText||'';return t.split('---').length===3&&t.includes('start chain')&&t.includes('completed tool results')&&t.includes('final user-visible response')})()"
+check("backend received exactly four ordered submissions", isTRUE(value(
+  "(function(){const t=document.getElementById('calls')?.innerText||'';const p=t.split('---').map(x=>x.trim());return p.length===4&&p[0].includes('ordinary::start chain')&&p[1].includes('tool-postlude::Please continue from the completed tool results')&&p[2].includes('generic::Please provide the final user-visible response now')&&p[3].includes('minimal::继续')})()"
 )))
 check("tool-postlude continuation is a visible user bubble", isTRUE(value(
   "Array.from(document.querySelectorAll('[data-role=user]')).some(e=>(e.innerText||'').includes('completed tool results'))"
@@ -101,8 +104,11 @@ check("tool-postlude continuation is a visible user bubble", isTRUE(value(
 check("generic continuation is a visible user bubble", isTRUE(value(
   "Array.from(document.querySelectorAll('[data-role=user]')).some(e=>(e.innerText||'').includes('final user-visible response'))"
 )))
-check("two automatic continuation notices are visible", isTRUE(value(
-  "Array.from(document.querySelectorAll('[data-role=assistant]')).filter(e=>(e.innerText||'').includes('Continuing automatically')).length===2"
+check("minimal continuation is exactly one visible user bubble", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-role=user]')).filter(e=>(e.innerText||'').trim()==='继续').length===1"
+)))
+check("three automatic continuation notices are visible", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-role=assistant]')).filter(e=>/Continuing automatically|Retrying once with a minimal continuation/.test(e.innerText||'')).length===3"
 )))
 check("no user-visible error card", isTRUE(value(
   "!document.body.innerText.includes('Error: Upstream ended')&&!document.body.innerText.includes('Please retry the request')"

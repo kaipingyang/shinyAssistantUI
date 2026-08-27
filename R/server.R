@@ -412,6 +412,12 @@ assistantUIServer <- function(id, handler,
   effective_concurrency <- .effective_max_concurrent_runs(handler, requested_concurrency)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
+  normalize_continuation_kind <- function(value) {
+    valid <- c("tool-postlude", "generic", "minimal")
+    if (is.null(value) || length(value) != 1L || is.na(value[[1L]])) return(NULL)
+    value <- as.character(value[[1L]])
+    if (value %in% valid) value else NULL
+  }
 
   # dark_mode 归一化:TRUE/FALSE/"auto"
   if (is.logical(dark_mode)) dark_mode <- isTRUE(dark_mode)
@@ -509,15 +515,34 @@ assistantUIServer <- function(id, handler,
   cancel_warmup <- function(thread_id) invisible(FALSE)
   run_states <- new.env(parent = emptyenv())
   terminal_run_phases <- c("complete", "error", "cancelled")
-  send_run_state <- function(thread_id, run_id, phase, queue_position = NULL) {
+  send_run_state <- function(thread_id, run_id, phase, queue_position = NULL,
+                             stage = NULL) {
     if (is.null(run_id) || !nzchar(run_id %||% "")) return(invisible(FALSE))
     previous <- get0(run_id, envir = run_states, inherits = FALSE)
     if (!is.null(previous) && previous$phase %in% terminal_run_phases) {
       return(invisible(FALSE))
     }
-    assign(run_id, list(thread_id = thread_id, phase = phase), envir = run_states)
+    if (!is.null(previous) && identical(previous$phase, "running") &&
+        phase %in% c("queued", "connecting")) {
+      return(invisible(FALSE))
+    }
+    if (!is.null(previous) && identical(previous$stage, "finalizing") &&
+        identical(stage, "streaming")) {
+      return(invisible(FALSE))
+    }
+    normalized_queue <- if (is.null(queue_position)) NULL else as.integer(queue_position)
+    if (!is.null(previous) && identical(previous$phase, phase) &&
+        identical(previous$stage, stage) &&
+        identical(previous$queue_position, normalized_queue)) {
+      return(invisible(TRUE))
+    }
+    assign(run_id, list(
+      thread_id = thread_id, phase = phase, stage = stage,
+      queue_position = normalized_queue
+    ), envir = run_states)
     payload <- list(threadId = thread_id, runId = run_id, phase = phase)
-    if (!is.null(queue_position)) payload$queuePosition <- as.integer(queue_position)
+    if (!is.null(stage)) payload$stage <- stage
+    if (!is.null(normalized_queue)) payload$queuePosition <- normalized_queue
     session$sendCustomMessage(paste0(input_id, ":run-state"), payload)
     invisible(TRUE)
   }
@@ -529,9 +554,23 @@ assistantUIServer <- function(id, handler,
   make_callbacks <- function(thread_id, run_id = NULL, project = NULL) {
     # 任务 D：per-run 编辑揭示 tracker——run 结束只揭示最近一次成功编辑的文件。
     edit_reveal <- .new_edit_reveal_tracker()
-    mark_running <- function() send_run_state(thread_id, run_id, "running")
-    settle_run <- function(phase) send_run_state(thread_id, run_id, phase)
+    settled <- FALSE
+    mark_running <- function() {
+      if (settled) return(invisible(FALSE))
+      send_run_state(thread_id, run_id, "running", stage = "streaming")
+    }
+    settle_run <- function(phase) {
+      if (settled) return(invisible(FALSE))
+      accepted <- send_run_state(thread_id, run_id, phase)
+      settled <<- TRUE
+      invisible(accepted)
+    }
     list(
+      on_run_phase = function(stage) {
+        if (settled) return(invisible(FALSE))
+        phase <- if (stage %in% c("streaming", "finalizing")) "running" else "connecting"
+        send_run_state(thread_id, run_id, phase, stage = stage)
+      },
       on_chunk = function(text) {
         mark_running()
         session$sendCustomMessage(paste0(input_id, ":chunk"),
@@ -565,7 +604,6 @@ assistantUIServer <- function(id, handler,
       # Plan 48B: handler 可随时推送 follow-up 建议(不必等 on_done),渲染在最新回复下方。
       # suggestions = 字符列表 或 list(list(prompt=, text=))；前端归一化。
       on_suggestions = function(suggestions = list()) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":suggestions"),
                                   list(suggestions = suggestions, threadId = thread_id))
       },
@@ -575,12 +613,16 @@ assistantUIServer <- function(id, handler,
                                   list(message = msg, threadId = thread_id,
                                        runId = run_id))
       },
-      on_auto_continue = function(notice, prompt) {
-        mark_running()
+      on_auto_continue = function(notice, prompt, kind = NULL) {
+        payload <- list(
+          notice = notice, prompt = prompt, threadId = thread_id,
+          runId = run_id
+        )
+        kind <- normalize_continuation_kind(kind)
+        if (!is.null(kind)) payload$kind <- kind
         session$sendCustomMessage(
           paste0(input_id, ":auto-continue"),
-          list(notice = notice, prompt = prompt, threadId = thread_id,
-               runId = run_id)
+          payload
         )
       },
       on_tool_call = function(tool_call_id, tool_name, args = list(), annotations = list()) {
@@ -689,10 +731,48 @@ assistantUIServer <- function(id, handler,
                                        content = content, lang = lang, threadId = thread_id))
       },
       # ── ClaudeAgentSDK 能力对齐 ────────────────────────────────────────────
+      # Persistent/proactive SDK events are not owned by the foreground run.
+      # Keep these closures alive after the handler returns, but never mutate run
+      # state: the browser reconciles the full transcript independently.
+      on_proactive_messages = function(messages, revision, after_run_id = NULL) {
+        session$sendCustomMessage(
+          paste0(input_id, ":proactive-messages"),
+          list(
+            version = 1L,
+            operation = "replace",
+            threadId = thread_id,
+            revision = as.integer(revision),
+            afterRunId = after_run_id,
+            messages = messages
+          )
+        )
+      },
+      on_proactive_task = function(task_id, kind, description = NULL, status = NULL,
+                                   tool_name = NULL, summary = NULL) {
+        session$sendCustomMessage(
+          paste0(input_id, ":task"),
+          list(taskId = task_id, kind = kind, description = description,
+               status = status, toolName = tool_name, summary = summary,
+               threadId = thread_id, runId = NULL)
+        )
+      },
+      on_proactive_rate_limit = function(status = NULL, resets_at = NULL,
+                                         utilization = NULL, type = NULL) {
+        session$sendCustomMessage(
+          paste0(input_id, ":rate-limit"),
+          list(status = status, resetsAt = resets_at, utilization = utilization,
+               type = type, threadId = thread_id)
+        )
+      },
+      on_proactive_status = function(status, text = NULL) {
+        session$sendCustomMessage(
+          paste0(input_id, ":status"),
+          list(status = status, text = text, threadId = thread_id)
+        )
+      },
       # #1 成本/用量:ResultMessage 的 total_cost_usd / tokens / turns / duration。
       on_usage = function(cost_usd = NULL, tokens = NULL, context_tokens = NULL, turns = NULL,
                           duration_ms = NULL, model = NULL, context_window = NULL) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":usage"),
                                   list(costUsd = cost_usd, tokens = tokens,
                                        contextTokens = context_tokens, turns = turns,
@@ -703,7 +783,6 @@ assistantUIServer <- function(id, handler,
       # #2 子agent/Task 进度:kind = "started" | "progress" | "notification"。
       on_task = function(task_id, kind, description = NULL, status = NULL,
                          tool_name = NULL, summary = NULL) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":task"),
                                   list(taskId = task_id, kind = kind, description = description,
                                        status = status, toolName = tool_name, summary = summary,
@@ -711,7 +790,6 @@ assistantUIServer <- function(id, handler,
       },
       # #3 限流告警。
       on_rate_limit = function(status = NULL, resets_at = NULL, utilization = NULL, type = NULL) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":rate-limit"),
                                   list(status = status, resetsAt = resets_at,
                                        utilization = utilization, type = type,
@@ -719,20 +797,20 @@ assistantUIServer <- function(id, handler,
       },
       # #4 系统状态行:subtype = status/thinking_tokens/init 等。
       on_status = function(status, text = NULL) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":status"),
                                   list(status = status, text = text, threadId = thread_id))
       },
       # #5 命令自动发现:get_server_info() 拉到的 CLI slash 命令 + output styles。
       on_commands = function(commands = list(), output_styles = list()) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":server-commands"),
                                   list(commands = commands, outputStyles = output_styles,
                                        threadId = thread_id))
       },
       # 每线程冷启动指示:client 首次连接(spawn CLI 子进程)期间 active=TRUE。
       on_warming = function(active, resuming = FALSE) {
-        if (isTRUE(active)) send_run_state(thread_id, run_id, "connecting") else mark_running()
+        if (isTRUE(active)) {
+          send_run_state(thread_id, run_id, "connecting", stage = "cold-connect")
+        }
         session$sendCustomMessage(paste0(input_id, ":warming"),
                                   list(active = isTRUE(active), resuming = isTRUE(resuming),
                                        threadId = thread_id))
@@ -740,7 +818,6 @@ assistantUIServer <- function(id, handler,
       # Agent 共享状态(Plan 36):handler 调 on_state(list) 推送任意 per-thread 状态快照,
       # 前端 useShinyAgentState() 订阅。
       on_state = function(state) {
-        mark_running()
         session$sendCustomMessage(paste0(input_id, ":state-snapshot"),
                                   list(state = state, threadId = thread_id))
       }
@@ -1099,7 +1176,7 @@ assistantUIServer <- function(id, handler,
   # permit queue lets different threads progress cooperatively up to the effective
   # limit (forced to 1 for handlers without the explicit concurrency capability).
   execute_run <- function(thread_id, run_id, msg_text, is_reload, attachments,
-                          ide_context, project = NULL) {
+                          ide_context, project = NULL, continuation_kind = NULL) {
     # This invocation owns the thread-level cancellation resources until its
     # returned promise settles. Queued/stale run IDs must not touch that owner.
     assign(thread_id, run_id, envir = active_run_ids)
@@ -1123,6 +1200,7 @@ assistantUIServer <- function(id, handler,
     all_args <- list(
       message           = msg_text,
       thread_id         = thread_id,
+      run_id            = run_id,
       on_chunk          = cbs$on_chunk,
       on_done           = cbs$on_done,
       on_error          = cbs$on_error_fn,
@@ -1141,7 +1219,12 @@ assistantUIServer <- function(id, handler,
       on_task           = cbs$on_task,
       on_rate_limit     = cbs$on_rate_limit,
       on_status         = cbs$on_status,
+      on_proactive_messages = cbs$on_proactive_messages,
+      on_proactive_task = cbs$on_proactive_task,
+      on_proactive_rate_limit = cbs$on_proactive_rate_limit,
+      on_proactive_status = cbs$on_proactive_status,
       on_warming        = cbs$on_warming,
+      on_run_phase      = cbs$on_run_phase,
       on_state          = cbs$on_state,
       on_commands       = cbs$on_commands,
       on_suggestions    = cbs$on_suggestions,
@@ -1151,7 +1234,8 @@ assistantUIServer <- function(id, handler,
       wait_for_approval = wait_for_approval,
       register_cancel   = register_cancel,
       ide_context       = ide_context,
-      project           = project
+      project           = project,
+      continuation_kind = continuation_kind
     )
     handler_params <- names(formals(handler))
     call_args <- if ("..." %in% handler_params) all_args
@@ -1167,6 +1251,9 @@ assistantUIServer <- function(id, handler,
       promises::promise_resolve(NULL)
     }
     release_run_ownership <- function(value = NULL) {
+      if (exists(run_id, envir = run_states, inherits = FALSE)) {
+        rm(list = run_id, envir = run_states)
+      }
       if (identical(get0(thread_id, envir = active_run_ids), run_id)) {
         rm(list = thread_id, envir = active_run_ids)
         if (exists(thread_id, envir = cancel_flags, inherits = FALSE)) {
@@ -1201,6 +1288,9 @@ assistantUIServer <- function(id, handler,
       send_run_state(thread_id, run_id, phase, queue_position)
     },
     on_cancelled_settled = function(thread_id, run_id) {
+      if (exists(run_id, envir = run_states, inherits = FALSE)) {
+        rm(list = run_id, envir = run_states)
+      }
       session$sendCustomMessage(
         paste0(input_id, ":done"),
         list(suggestions = list(), threadId = thread_id, runId = run_id,
@@ -1317,9 +1407,8 @@ assistantUIServer <- function(id, handler,
     invisible(TRUE)
   }
   schedule_warmup <- function(thread_id, project = NULL, delay = 0) {
-    # 角度 B:run_r 进程内 MCP server 存在时,提前预热(连接后闲置)会触发 CLI 侧
-    # 首条消息 ~55s 卡顿(见 Plan 22)。此时禁用一切 warm-ahead,让连接发生在首条
-    # 消息发送时(connect+send 相邻 = 快路径)。
+    # Host integrations may disable warm-ahead through allow_warmup. The addin's
+    # run_r tool now uses an external stdio MCP server and needs no special gate.
     if (!isTRUE(allow_warmup) || warmup_closed) return(invisible(FALSE))
     if (!is.function(.warmup_fn) || is.null(thread_id) ||
         !nzchar(thread_id %||% "")) return(invisible(FALSE))
@@ -1459,7 +1548,8 @@ assistantUIServer <- function(id, handler,
       is_reload,
       msg$attachments %||% list(),
       ide_context,
-      msg$project
+      msg$project,
+      normalize_continuation_kind(msg$continuationKind)
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 

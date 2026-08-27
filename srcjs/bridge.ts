@@ -43,19 +43,35 @@ export type WorkspaceResults = {
 };
 
 export type RunPhase = "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
+export type RunStage =
+  | "submitting"
+  | "model-switch"
+  | "cold-connect"
+  | "consumer-acquire"
+  | "sending"
+  | "awaiting-model"
+  | "streaming"
+  | "finalizing";
 export type RunStatePayload = {
   threadId: string;
   runId: string;
   phase: RunPhase;
+  stage?: RunStage;
   queuePosition?: number;
 };
+
+export type AutoContinueKind = "tool-postlude" | "generic" | "minimal";
 
 export type AutoContinuePayload = {
   threadId: string;
   runId?: string;
   notice: string;
   prompt: string;
+  kind?: AutoContinueKind;
 };
+
+const isAutoContinueKind = (value: unknown): value is AutoContinueKind =>
+  value === "tool-postlude" || value === "generic" || value === "minimal";
 
 export type ToolCallPayload = {
   toolCallId: string;
@@ -120,8 +136,17 @@ export type SessionsPayload = {
   projectOrder?: string[];
 };
 
+export type ProactiveMessagesPayload = {
+  version: 1;
+  operation: "replace";
+  threadId: string;
+  revision: number;
+  messages: unknown[];
+  afterRunId?: string;
+};
+
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string, continuationKind?: AutoContinueKind) => void;
   reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean, project?: string) => void;
   cancelReservedSubmissions: (submissionIds: string[]) => void;
   sendReload: (text: string, threadId: string, runId?: string, project?: string) => void;
@@ -155,6 +180,7 @@ export interface ShinyBridge {
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: SessionsPayload) => void) => void;
+  onProactiveMessages: (handler: (data: ProactiveMessagesPayload) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string }) => void) => void;
@@ -177,6 +203,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   // 按 threadId 存储 callbacks，支持多 thread 并发（切 thread 不丢失旧 handler 回调）
   const callbacksMap = new Map<string, RunCallbacks>();
   let sessionsHandler: ((data: SessionsPayload) => void) | null = null;
+  let proactiveMessagesHandler: ((data: ProactiveMessagesPayload) => void) | null = null;
+  const bufferedProactiveMessages: ProactiveMessagesPayload[] = [];
   let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
@@ -220,7 +248,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:auto-continue`, (data) => {
     const d = data as Partial<AutoContinuePayload>;
     if (typeof d.threadId !== "string" || typeof d.notice !== "string" ||
-        typeof d.prompt !== "string") return;
+        typeof d.prompt !== "string" ||
+        (d.kind !== undefined && !isAutoContinueKind(d.kind))) return;
     routeCallback(d.threadId)?.onAutoContinue?.(d as AutoContinuePayload);
   });
 
@@ -283,6 +312,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     }
   });
 
+  Shiny.addCustomMessageHandler(`${inputId}:proactive-messages`, (data) => {
+    const d = data as ProactiveMessagesPayload;
+    if (proactiveMessagesHandler) proactiveMessagesHandler(d);
+    else bufferedProactiveMessages.push(d);
+  });
+
   Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
     loadThreadHandler?.(data as HistoryLoadPayload);
   });
@@ -304,10 +339,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     else bufferedConsoleResult = d;
   });
   return {
-    sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId, project) {
+    sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId, project, continuationKind) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ...(runId && { runId }), ...(submissionId && { submissionId }), ...(project && { project }), ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ...(runId && { runId }), ...(submissionId && { submissionId }), ...(project && { project }), ...(continuationKind && { continuationKind }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -523,6 +558,13 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       if (bufferedSessions) {       // 回放缓冲的 :sessions 消息
         handler(bufferedSessions);
         bufferedSessions = null;
+      }
+    },
+
+    onProactiveMessages(handler) {
+      proactiveMessagesHandler = handler;
+      while (bufferedProactiveMessages.length > 0) {
+        handler(bufferedProactiveMessages.shift()!);
       }
     },
 

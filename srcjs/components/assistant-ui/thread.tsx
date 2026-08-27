@@ -107,6 +107,66 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
 };
 
+
+type StreamingViewportMetrics = {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+};
+
+type FollowMessage = {
+  id: string;
+  role: string;
+};
+
+const STREAMING_BOTTOM_TOLERANCE = 8;
+
+export function resolveStreamingFollow(
+  previous: StreamingViewportMetrics,
+  current: StreamingViewportMetrics,
+  wasFollowing: boolean,
+  explicitUpwardIntent = false,
+): boolean {
+  const bottomDistance = current.scrollHeight - current.clientHeight - current.scrollTop;
+  if (bottomDistance <= STREAMING_BOTTOM_TOLERANCE) return true;
+  if (explicitUpwardIntent) return false;
+  const stableHeight = Math.abs(current.scrollHeight - previous.scrollHeight) <= 1;
+  const movedUp = current.scrollTop < previous.scrollTop - 1;
+  if (stableHeight && movedUp) return false;
+  return wasFollowing;
+}
+
+export function hasAppendedUserMessage(
+  previousTailId: string | null,
+  messages: readonly FollowMessage[],
+): boolean {
+  if (!previousTailId) return false;
+  const priorTailIndex = messages.findIndex((message) => message.id === previousTailId);
+  if (priorTailIndex < 0 || priorTailIndex === messages.length - 1) return false;
+  return messages.slice(priorTailIndex + 1).some((message) => message.role === "user");
+}
+
+export function hasNewUserMessage(
+  previousUserIds: ReadonlySet<string>,
+  messages: readonly FollowMessage[],
+): boolean {
+  return messages.some(
+    (message) => message.role === "user" && !previousUserIds.has(message.id),
+  );
+}
+
+const readViewportMetrics = (viewport: HTMLDivElement): StreamingViewportMetrics => ({
+  scrollTop: viewport.scrollTop,
+  scrollHeight: viewport.scrollHeight,
+  clientHeight: viewport.clientHeight,
+});
+
+const scrollViewportToBottomInstant = (viewport: HTMLDivElement): void => {
+  const previousBehavior = viewport.style.scrollBehavior;
+  viewport.style.scrollBehavior = "auto";
+  viewport.scrollTop = viewport.scrollHeight;
+  viewport.style.scrollBehavior = previousBehavior;
+};
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
 const ThreadComponentsContext =
@@ -130,11 +190,42 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth, composerDensity } = useShinyConfig();
+  const {
+    historyHasMore,
+    loadingOlder,
+    loadOlderHistory,
+    submissionRevision = 0,
+    threadMaxWidth,
+    composerDensity,
+  } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const previousLoadingOlderRef = useRef(Boolean(loadingOlder));
+  const followMessages = useAuiState((state) => state.thread.messages);
+  const followMessageRevision = useAuiState((state) => {
+    const messages = state.thread.messages;
+    const userCount = messages.reduce(
+      (count, message) => count + (message.role === "user" ? 1 : 0),
+      0,
+    );
+    const last = messages[messages.length - 1];
+    const textLength = last?.content.reduce(
+      (length, part) => length + (part.type === "text" ? part.text.length : 0),
+      0,
+    ) ?? 0;
+    return `${messages.length}:${userCount}:${last?.id ?? ""}:${last?.content.length ?? 0}:${textLength}`;
+  });
+  const followRunning = useAuiState((state) => state.thread.isRunning);
+  const followingRef = useRef(true);
+  const previousMetricsRef = useRef<StreamingViewportMetrics | null>(null);
+  const previousTailIdRef = useRef<string | null>(null);
+  const previousUserIdsRef = useRef<Set<string>>(new Set());
+  const previousUserCountRef = useRef(0);
+  const previousRunningRef = useRef(followRunning);
+  const previousSubmissionRevisionRef = useRef(submissionRevision);
+  const pointerActiveRef = useRef(false);
+  const upwardWheelRef = useRef(false);
   // 内容溢出（需翻页）时才显示顶部"当前提问"小框，短对话不占布局。
   const [overflowing, setOverflowing] = useState(false);
 
@@ -202,6 +293,26 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     loadOlderHistory();
   };
 
+  const followSubmittedTurn = useCallback(() => {
+    followingRef.current = true;
+    upwardWheelRef.current = false;
+    const scrollLatest = () => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      scrollViewportToBottomInstant(viewport);
+      followingRef.current = true;
+      previousMetricsRef.current = readViewportMetrics(viewport);
+    };
+    scrollLatest();
+    window.requestAnimationFrame(scrollLatest);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (submissionRevision === previousSubmissionRevisionRef.current) return;
+    previousSubmissionRevisionRef.current = submissionRevision;
+    followSubmittedTurn();
+  }, [submissionRevision, followSubmittedTurn]);
+
   useLayoutEffect(() => {
     const wasLoading = previousLoadingOlderRef.current;
     previousLoadingOlderRef.current = Boolean(loadingOlder);
@@ -213,6 +324,52 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     }
     olderAnchorRef.current = null;
   }, [loadingOlder]);
+
+  useLayoutEffect(() => {
+    const currentTailId = followMessages[followMessages.length - 1]?.id ?? null;
+    const submitted = hasAppendedUserMessage(
+      previousTailIdRef.current,
+      followMessages,
+    );
+    const newUserMessage = hasNewUserMessage(
+      previousUserIdsRef.current,
+      followMessages,
+    );
+    const currentUserIds = new Set(
+      followMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.id),
+    );
+    const currentUserCount = followMessages.filter(
+      (message) => message.role === "user",
+    ).length;
+    const userCountIncreased = currentUserCount > previousUserCountRef.current;
+    const runStarted = followRunning && !previousRunningRef.current;
+    previousTailIdRef.current = currentTailId;
+    previousUserIdsRef.current = currentUserIds;
+    previousUserCountRef.current = currentUserCount;
+    previousRunningRef.current = followRunning;
+    const explicitNewTurn = !loadingOlder && (newUserMessage || userCountIncreased);
+    const forceLatest = submitted || explicitNewTurn || runStarted;
+    if (forceLatest) followingRef.current = true;
+    if (loadingOlder && !submitted && !runStarted) return undefined;
+    if (!followingRef.current || (followMessages.length === 0 && !followRunning)) {
+      return undefined;
+    }
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    if (!previousMetricsRef.current) {
+      previousMetricsRef.current = readViewportMetrics(viewport);
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const current = viewportRef.current;
+      if (!current || (!followingRef.current && !forceLatest)) return;
+      scrollViewportToBottomInstant(current);
+      if (forceLatest) followingRef.current = true;
+      previousMetricsRef.current = readViewportMetrics(current);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [followMessageRevision, followMessages, followRunning, loadingOlder]);
 
   return (
     <ThreadPrimitive.Root
@@ -231,8 +388,32 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         data-slot="aui_thread-viewport"
+        onWheelCapture={(event) => {
+          if (event.deltaY < 0) upwardWheelRef.current = true;
+        }}
+        onPointerDownCapture={() => {
+          pointerActiveRef.current = true;
+        }}
+        onPointerUpCapture={() => {
+          pointerActiveRef.current = false;
+        }}
+        onPointerCancelCapture={() => {
+          pointerActiveRef.current = false;
+        }}
         onScroll={(event) => {
-          if (event.currentTarget.scrollTop <= 120) requestOlder();
+          const current = readViewportMetrics(event.currentTarget);
+          const previous = previousMetricsRef.current ?? current;
+          const pointerMovedUp = pointerActiveRef.current &&
+            current.scrollTop < previous.scrollTop - 1;
+          followingRef.current = resolveStreamingFollow(
+            previous,
+            current,
+            followingRef.current,
+            upwardWheelRef.current || pointerMovedUp,
+          );
+          upwardWheelRef.current = false;
+          previousMetricsRef.current = current;
+          if (current.scrollTop <= 120) requestOlder();
         }}
         className="relative flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
@@ -466,19 +647,36 @@ const Composer: FC = () => {
 
 // Per-thread connection / scheduler indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming, warmingResuming, warmingLabel, runPhase } = useShinyConfig();
+  const { warming, warmingResuming, warmingLabel, runPhase, runStage, runQueuePosition, cancelRun } = useShinyConfig();
   const waiting = runPhase === "queued";
-  const connecting = runPhase === "connecting";
-  if (!warming && !waiting && !connecting) return null;
+  const active = waiting || runPhase === "connecting" || (runPhase === "running" && Boolean(runStage));
+  if (!warming && !active) return null;
+  const ordinal = (value: number) => {
+    const mod100 = value % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
+    return `${value}${value % 10 === 1 ? "st" : value % 10 === 2 ? "nd" : value % 10 === 3 ? "rd" : "th"}`;
+  };
+  const stageLabels: Record<string, string> = {
+    submitting: "Preparing request…",
+    "model-switch": "Applying model…",
+    "cold-connect": warmingResuming ? "Resuming session…" : "Starting Claude…",
+    "consumer-acquire": "Waiting for conversation stream…",
+    sending: "Sending request…",
+    "awaiting-model": "Waiting for Claude…",
+    streaming: "Generating…",
+    finalizing: "Finalizing…",
+  };
   const label = warming
-    ? (warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…"))
+    ? (warmingLabel || (runStage ? stageLabels[runStage] : undefined) || (warmingResuming ? "Resuming session…" : "Starting…"))
     : waiting
-      ? "Waiting for an available run slot…"
-      : "Sending request…";
+      ? (runQueuePosition ? `${ordinal(runQueuePosition)} in queue…` : "Waiting for an available run slot…")
+      : stageLabels[runStage ?? ""] || "Sending request…";
   return (
     <div
       data-slot="aui_warming"
       data-run-phase={runPhase}
+      data-run-stage={runStage}
+      data-queue-position={runQueuePosition}
       data-resuming={warmingResuming ? "true" : "false"}
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
@@ -487,6 +685,16 @@ const ShinyWarmingIndicator: FC = () => {
         waiting ? "border-dotted" : "animate-spin border-t-transparent",
       )} />
       <span>{label}</span>
+      {(waiting || runPhase === "connecting") && cancelRun && (
+        <button
+          type="button"
+          data-slot="aui_run_cancel"
+          className="ms-auto rounded px-1.5 py-0.5 text-xs text-foreground hover:bg-muted"
+          onClick={cancelRun}
+        >
+          Cancel
+        </button>
+      )}
     </div>
   );
 };
@@ -624,10 +832,10 @@ const ShinyChecklistPanel: FC = () => {
           <span>Claude checklist</span>
           <span className="text-muted-foreground font-normal">({allItems.length})</span>
         </button>
-        {checklist.allCompleted && dismissChecklist ? (
+        {dismissChecklist ? (
           <button
             type="button"
-            aria-label="Dismiss completed checklist"
+            aria-label="Close checklist"
             title="Close checklist"
             onClick={() => dismissChecklist(checklist.threadId, checklist.revision)}
             className="text-muted-foreground hover:bg-accent hover:text-foreground ms-auto inline-flex size-5 items-center justify-center rounded"
@@ -643,8 +851,9 @@ const ShinyChecklistPanel: FC = () => {
         >
           <ul className="flex flex-col gap-1">
             {shownItems.map((item) => {
-              const complete = item.status === "completed";
-              const running = item.status === "in_progress";
+              const status = String(item.status).trim().toLowerCase();
+              const complete = ["completed", "complete", "done"].includes(status);
+              const running = ["in_progress", "in-progress", "in progress", "running"].includes(status);
               return (
                 <li key={item.id} data-checklist-status={item.status} className="flex items-start gap-2 text-xs">
                   <span className={complete ? "text-green-600" : running ? "text-blue-600" : "text-muted-foreground"}>
@@ -677,9 +886,17 @@ const ShinyChecklistPanel: FC = () => {
   );
 };
 
-const ShinyStatusPanels: FC = () => {
+export const ShinyStatusPanels: FC = () => {
   const { rateLimit, tasks, recentTasks, statusText, stopTask } = useShinyConfig();
   const activeTasks = tasks ?? [];
+  const hasActiveTasks = activeTasks.length > 0;
+  const [taskNow, setTaskNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasActiveTasks) return undefined;
+    setTaskNow(Date.now());
+    const interval = window.setInterval(() => setTaskNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [hasActiveTasks]);
   const latestActivity = recentTasks?.[0];
   const hasAny = rateLimit || activeTasks.length > 0 || latestActivity || statusText;
   if (!hasAny) return null;
@@ -700,6 +917,7 @@ const ShinyStatusPanels: FC = () => {
           key={task.taskId}
           data-slot="aui_task_card"
           data-task-id={task.taskId}
+          data-task-active="true"
           className="aui-task-card flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
         >
           <span className="animate-pulse">⚙️</span>
@@ -707,7 +925,7 @@ const ShinyStatusPanels: FC = () => {
             {task.description || task.summary || `Subagent ${task.taskId.slice(0, 6)}`}
             {task.toolName ? <span className="text-muted-foreground"> · {task.toolName}</span> : null}
             {task.status ? <span className="text-muted-foreground"> · {task.stopping ? "stopping" : task.status}</span> : null}
-            <span className="text-muted-foreground"> · {Math.max(0, Math.round((task.updatedAt - task.startedAt) / 1000))}s</span>
+            <span className="text-muted-foreground"> · {Math.max(0, Math.floor((taskNow - task.startedAt) / 1000))}s</span>
           </span>
           {stopTask && (
             <button
@@ -942,6 +1160,11 @@ const AssistantMessage: FC = () => {
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
   const { assistantTextSize = "medium" } = useShinyConfig();
+  const hasActionableText = useAuiState((s) =>
+    s.message.content.some(
+      (part) => part.type === "text" && part.text.trim().length > 0,
+    ),
+  );
 
   // reserves space for action bar and compensates with `-mb` for consistent msg spacing
   // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
@@ -954,7 +1177,10 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in relative duration-150",
+        hasActionableText && "-mb-7.5 pb-7.5",
+      )}
     >
       <div
         data-slot="aui_assistant-message-content"
@@ -1060,14 +1286,16 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      <div
-        data-slot="aui_assistant-message-footer"
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
-      >
-        <BranchPicker />
-        <AssistantActionBar />
-        <ShinyTimestamp />
-      </div>
+      {hasActionableText && (
+        <div
+          data-slot="aui_assistant-message-footer"
+          className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        >
+          <BranchPicker />
+          <AssistantActionBar />
+          <ShinyTimestamp />
+        </div>
+      )}
     </MessagePrimitive.Root>
   );
 };

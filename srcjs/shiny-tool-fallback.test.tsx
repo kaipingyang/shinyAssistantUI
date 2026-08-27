@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { _clearToolCardStateForTests } from "./tool-ui/tool-card-frame";
 import { registerApprovalHandler, _clearApprovalHandlers } from "./approval-registry";
@@ -192,3 +192,77 @@ describe("ShinyToolFallback persistent tool view state", () => {
     }
   });
 });
+
+
+describe("ShinyToolFallback running activity", () => {
+  function renderRunning(toolName: string, status: "running" | "complete" = "running") {
+    const props = {
+      toolName,
+      toolCallId: `activity-${toolName}`,
+      argsText: "{}",
+      args: {},
+      result: status === "complete" ? "done" : undefined,
+      status: { type: status },
+      artifact: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    return render(<ShinyToolFallback {...props} />);
+  }
+
+  it("uses explicit present-tense activity for a running Bash tool", () => {
+    const { container, getByRole } = renderRunning("Bash");
+    expect(getByRole("button", { name: "Running tool: Bash" })).toBeTruthy();
+    expect(container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("data-status"))
+      .toBe("running");
+    expect(container.querySelector('[data-slot="tool-fallback-trigger-icon"]')?.getAttribute("class"))
+      .toContain("animate-spin");
+    expect(container.querySelector('[data-slot="tool-fallback-trigger-shimmer"]')).not.toBeNull();
+  });
+
+  it("says Agent is working until its tool call completes", () => {
+    const running = renderRunning("Agent");
+    expect(running.getByRole("button", { name: "Agent working: Agent" })).toBeTruthy();
+    expect(running.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("aria-label"))
+      .toContain("Agent working");
+    running.unmount();
+
+    const complete = renderRunning("Agent", "complete");
+    expect(complete.getByRole("button", { name: "Used tool: Agent" })).toBeTruthy();
+    expect(complete.queryByRole("button", { name: /Agent working/ })).toBeNull();
+    expect(complete.container.querySelector('[data-slot="tool-fallback-trigger-shimmer"]')).toBeNull();
+  });
+});
+
+  it("keeps an earlier concurrent tool visibly running while its result is pending", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:10.000Z"));
+    const props = {
+      toolName: "Bash",
+      toolCallId: "concurrent-pending-bash",
+      argsText: "{}",
+      args: {},
+      result: undefined,
+      timing: { startedAt: Date.now() - 1000 },
+      status: { type: "complete" },
+      artifact: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const view = render(<ShinyToolFallback {...props} />);
+    try {
+      expect(view.getByRole("button", { name: "Running tool: Bash" })).toBeTruthy();
+      expect(view.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("data-status"))
+        .toBe("running");
+      expect(view.container.querySelector('[data-slot="tool-fallback-duration"]')?.textContent)
+        .toBe("1.0s");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(view.container.querySelector('[data-slot="tool-fallback-duration"]')?.textContent)
+        .toBe("3.0s");
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });

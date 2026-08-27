@@ -53,6 +53,27 @@ describe("reduceChecklistMessages", () => {
     ]);
   });
 
+  it("canonicalizes protocol status casing, whitespace, and common aliases", () => {
+    const messages = [
+      toolMessage("todo-status", "TodoWrite", {
+        args: {
+          todos: [
+            { content: "case", status: " Completed " },
+            { content: "running", status: "RUNNING" },
+            { content: "done", status: "done" },
+          ],
+        },
+      }),
+    ];
+
+    expect(reduceChecklistMessages(messages).map((item) => item.status)).toEqual([
+      "completed",
+      "in_progress",
+      "completed",
+    ]);
+    expect(buildChecklistSnapshot(messages).allCompleted).toBe(false);
+  });
+
   it("creates a provisional TaskCreate item, adopts its result id, then applies TaskUpdate", () => {
     const createdWithoutResult = reduceChecklistMessages([
       toolMessage("create-call", "TaskCreate", {

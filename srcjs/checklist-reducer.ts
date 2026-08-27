@@ -21,6 +21,16 @@ const isRecord = (value: unknown): value is UnknownRecord =>
 const nonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() ? value : undefined;
 
+function normalizeChecklistStatus(value: unknown): ChecklistStatus {
+  const status = nonEmptyString(value)?.trim().toLowerCase();
+  if (!status) return "pending";
+  if (["completed", "complete", "done"].includes(status)) return "completed";
+  if (["in_progress", "in-progress", "in progress", "running"].includes(status)) {
+    return "in_progress";
+  }
+  return status;
+}
+
 function parseRecord(value: unknown): UnknownRecord | undefined {
   if (isRecord(value)) return value;
   if (typeof value !== "string" || !value.trim()) return undefined;
@@ -61,7 +71,7 @@ function normalizeTodo(value: unknown, id: string): ChecklistItem | undefined {
   return {
     id: nonEmptyString(value.id ?? value.taskId ?? value.task_id) ?? id,
     content,
-    status: nonEmptyString(value.status) ?? "pending",
+    status: normalizeChecklistStatus(value.status),
     ...(activeForm ? { activeForm } : {}),
     ...(description ? { description } : {}),
   };
@@ -112,7 +122,7 @@ export function reduceChecklistMessages(messages: readonly unknown[]): Checklist
         const created: ChecklistItem = {
           id,
           content,
-          status: nonEmptyString(args.status) ?? "pending",
+          status: normalizeChecklistStatus(args.status),
           ...(activeForm ? { activeForm } : {}),
           ...(description ? { description } : {}),
         };
@@ -139,7 +149,7 @@ export function reduceChecklistMessages(messages: readonly unknown[]): Checklist
         pendingTaskCreateBoundary = false;
         const current = items[index];
         const content = nonEmptyString(args.subject ?? args.content) ?? current.content;
-        const status = nonEmptyString(args.status) ?? current.status;
+        const status = normalizeChecklistStatus(args.status ?? current.status);
         const activeForm = nonEmptyString(args.activeForm ?? args.active_form) ?? current.activeForm;
         const description = nonEmptyString(args.description) ?? current.description;
         const updated: ChecklistItem = {

@@ -54,10 +54,12 @@ function currentThreadId(result: ReturnType<typeof setup>["result"]) {
 describe("useShinyRuntime — onNew 基本流", () => {
   it("发消息 → user 气泡 + 出站 setInputValue", async () => {
     const { result } = setup();
+    expect(result.current.submissionRevision).toBe(0);
     await act(async () => {
       await result.current.runtime.thread.composer.setText("hello");
       await result.current.runtime.thread.composer.send();
     });
+    expect(result.current.submissionRevision).toBe(1);
     const msgs = messages(result);
     const userMsg = msgs.find((m) => m.role === "user");
     expect(userMsg).toBeTruthy();
@@ -663,6 +665,8 @@ describe("useShinyRuntime — onError / thinking", () => {
     });
     expect(result.current.recentTasks.map((task) => task.taskId)).toEqual(["before-error"]);
 
+    await fireR("status", { status: "thinking_tokens", threadId: tid });
+    expect(result.current.statusText).toBe("Thinking\u2026");
     await fireR("error", { message: "boom", threadId: tid, runId });
     const msgs = messages(result);
     const err = msgs.find((m) => {
@@ -671,7 +675,35 @@ describe("useShinyRuntime — onError / thinking", () => {
     });
     expect(err).toBeTruthy();
     expect(result.current.recentTasks).toEqual([]);
+    expect(result.current.statusText).toBeNull();
     expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+  });
+
+  it("does not revive transient run status after the run has completed", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("think once");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.filter((item) => item.id === "test").at(-1)!.value;
+    const threadId = outbound.threadId as string;
+    const runId = outbound.runId as string;
+
+    await fireR("status", { threadId, status: "thinking_tokens" });
+    expect(result.current.statusText).toBe("Thinking\u2026");
+    await fireR("status", { threadId, status: "requesting" });
+    expect(result.current.statusText).toBe("requesting");
+
+    await fireR("done", { threadId, runId });
+    expect(result.current.statusText).toBeNull();
+
+    await fireR("status", { threadId, status: "thinking_tokens" });
+    expect(result.current.statusText).toBeNull();
+    await fireR("status", { threadId, status: "requesting" });
+    expect(result.current.statusText).toBeNull();
+
+    await fireR("status", { threadId, status: "working", text: "Background task ready" });
+    expect(result.current.statusText).toBe("Background task ready");
   });
 
   it("thinking → reasoning part 累积", async () => {
@@ -690,7 +722,7 @@ describe("useShinyRuntime — onError / thinking", () => {
 });
 
 describe("useShinyRuntime — tool 流式三段", () => {
-  it("start → 空壳 tool-call；delta → argsText 累积；result → 填充", async () => {
+  it("start → 空壳 tool-call；delta 保留计时；result → 填充并结束计时", async () => {
     const { result } = setup();
     await act(async () => {
       await result.current.runtime.thread.composer.setText("do it");
@@ -701,15 +733,34 @@ describe("useShinyRuntime — tool 流式三段", () => {
     let tc = messages(result).flatMap((m) => (m.content as any[]) ?? []).find((p) => p.type === "tool-call");
     expect(tc).toBeTruthy();
     expect(tc.toolName).toBe("bash");
+    expect(tc.timing?.startedAt).toEqual(expect.any(Number));
+    expect(tc.timing?.completedAt).toBeUndefined();
+    const startedAt = tc.timing.startedAt;
 
     await fireR("tool-call-delta", { toolCallId: "tc1", delta: "{\"cmd", threadId: tid });
     await fireR("tool-call-delta", { toolCallId: "tc1", delta: "\":\"ls\"}", threadId: tid });
     tc = messages(result).flatMap((m) => (m.content as any[]) ?? []).find((p) => p.type === "tool-call");
     expect(tc.argsText).toBe("{\"cmd\":\"ls\"}");
+    expect(tc.timing).toEqual({ startedAt });
 
     await fireR("tool-result", { toolCallId: "tc1", result: "file1\nfile2", threadId: tid });
     tc = messages(result).flatMap((m) => (m.content as any[]) ?? []).find((p) => p.type === "tool-call");
     expect(tc.result).toBe("file1\nfile2");
+    expect(tc.timing.startedAt).toBe(startedAt);
+    expect(tc.timing.completedAt).toBeGreaterThanOrEqual(startedAt);
+
+    await fireR("tool-call", {
+      toolCallId: "tc-no-start",
+      toolName: "get_weather",
+      args: { city: "BJ" },
+      argsText: "{\"city\":\"BJ\"}",
+      threadId: tid,
+    });
+    const noStart = messages(result)
+      .flatMap((m) => (m.content as any[]) ?? [])
+      .find((p) => p.type === "tool-call" && p.toolCallId === "tc-no-start");
+    expect(noStart.timing?.startedAt).toEqual(expect.any(Number));
+    expect(noStart.timing?.completedAt).toBeUndefined();
   });
 
   it("projects growing Write Markdown args before the final canonical tool-call", async () => {
@@ -1168,6 +1219,78 @@ describe("useShinyRuntime — permission mode capability", () => {
 });
 
 
+
+
+describe("useShinyRuntime — model acknowledgement correlation", () => {
+  const modelConfig = {
+    ui_capabilities: {
+      model: {
+        value: "default",
+        options: [
+          { value: "default", label: "Default" },
+          { value: "sonnet", label: "Sonnet" },
+          { value: "opus", label: "Opus" },
+        ],
+      },
+    },
+  };
+
+  it("commits only a matching success and preserves the old value on error", async () => {
+    const { result } = setup(modelConfig);
+    const firstThread = currentThreadId(result);
+    expect(result.current.model?.value).toBe("default");
+
+    await act(async () => { result.current.model?.setValue("sonnet"); });
+    const first = inputs.find((item) => item.id === "test_action")!.value;
+    expect(first).toMatchObject({ id: "model:sonnet", silent: true });
+    expect(result.current.model).toMatchObject({
+      value: "default", pending: true, requested: "sonnet", error: null,
+    });
+
+    await act(async () => { result.current.model?.setValue("opus"); });
+    expect(inputs.filter((item) => item.id === "test_action")).toHaveLength(1);
+
+    await fireR("action-result", {
+      threadId: first.threadId, requestId: first.requestId,
+      actionId: first.id, status: "error", message: "rejected",
+    });
+    expect(result.current.model).toMatchObject({
+      value: "default", pending: false, requested: null, error: "rejected",
+    });
+
+    await act(async () => { result.current.model?.setValue("sonnet"); });
+    const second = inputs.filter((item) => item.id === "test_action")[1].value;
+    await fireR("action-result", {
+      threadId: second.threadId, requestId: second.requestId,
+      actionId: second.id, status: "ok", value: "sonnet",
+    });
+    expect(result.current.model?.value).toBe("sonnet");
+
+    await fireR("action-result", {
+      threadId: first.threadId, requestId: first.requestId,
+      actionId: first.id, status: "ok", value: "opus",
+    });
+    expect(result.current.model?.value).toBe("sonnet");
+
+    await act(async () => { result.current.switchToNewThread(); });
+    const secondThread = currentThreadId(result);
+    expect(secondThread).not.toBe(firstThread);
+    expect(result.current.model?.value).toBe("default");
+    await act(async () => { result.current.model?.setValue("opus"); });
+    const third = inputs.filter((item) => item.id === "test_action")[2].value;
+
+    await act(async () => { result.current.runtime.threads.switchToThread(firstThread); });
+    expect(result.current.model?.value).toBe("sonnet");
+    await fireR("action-result", {
+      threadId: third.threadId, requestId: third.requestId,
+      actionId: third.id, status: "ok", value: "opus",
+    });
+    expect(result.current.model?.value).toBe("sonnet");
+
+    await act(async () => { result.current.runtime.threads.switchToThread(secondThread); });
+    expect(result.current.model?.value).toBe("opus");
+  });
+});
 describe("useShinyRuntime — ordinary action correlation", () => {
   it("keeps user/ack bubbles and updates concurrent actions by requestId", async () => {
     const { result } = setup();
@@ -2286,6 +2409,67 @@ describe("useShinyRuntime — authoritative cross-thread run phases", () => {
   });
 });
 
+
+it("stores additive run stage and queue position while accepting legacy payloads", async () => {
+  const { result } = setup({ run_state_protocol: 1 });
+  await act(async () => {
+    await result.current.runtime.thread.composer.setText("stage me");
+    await result.current.runtime.thread.composer.send();
+  });
+  const outbound = inputs.find((item) => item.id === "test")!.value;
+  const threadId = outbound.threadId as string;
+  const runId = outbound.runId as string;
+
+  expect(result.current.runPhase).toBe("connecting");
+  expect(result.current.runStage).toBe("submitting");
+
+  await fireR("run-state", {
+    threadId, runId, phase: "queued", queuePosition: 3,
+  });
+  expect(result.current.runStage).toBeUndefined();
+  expect(result.current.runQueuePosition).toBe(3);
+
+  await fireR("run-state", {
+    threadId, runId, phase: "connecting", stage: "model-switch",
+  });
+  expect(result.current.runStage).toBe("model-switch");
+  expect(result.current.runQueuePosition).toBeUndefined();
+
+  await fireR("run-state", {
+    threadId, runId, phase: "running", stage: "finalizing",
+  });
+  expect(result.current.runStage).toBe("finalizing");
+
+  await fireR("run-state", { threadId, runId, phase: "complete" });
+  expect(result.current.runStage).toBeUndefined();
+  expect(result.current.runQueuePosition).toBeUndefined();
+});
+
+it("rejects same-run phase regression and late revival after local cancel", async () => {
+  const { result } = setup({ run_state_protocol: 1 });
+  await act(async () => {
+    await result.current.runtime.thread.composer.setText("monotonic");
+    await result.current.runtime.thread.composer.send();
+  });
+  const outbound = inputs.find((item) => item.id === "test")!.value;
+  const threadId = outbound.threadId as string;
+  const runId = outbound.runId as string;
+
+  await fireR("run-state", { threadId, runId, phase: "running", stage: "finalizing" });
+  await fireR("run-state", { threadId, runId, phase: "connecting", stage: "sending" });
+  await fireR("run-state", { threadId, runId, phase: "running", stage: "streaming" });
+  expect(result.current.runPhase).toBe("running");
+  expect(result.current.runStage).toBe("finalizing");
+
+  await act(async () => { await result.current.cancelRun(); });
+  expect(inputs.find((item) => item.id === "test_cancel")?.value)
+    .toMatchObject({ threadId, runId });
+  expect(result.current.runPhase).toBe("cancelled");
+  await fireR("run-state", { threadId, runId, phase: "running", stage: "streaming" });
+  expect(result.current.runPhase).toBe("cancelled");
+  expect(result.current.runStage).toBeUndefined();
+});
+
   it("archives an active thread only after sending an isolated cancel", async () => {
     const { result } = setup({ persistence: "server", run_state_protocol: 1 });
     await fireR("sessions", {
@@ -2622,7 +2806,7 @@ describe("useShinyRuntime — assistant text size preference", () => {
 
 
 describe("useShinyRuntime — transparent auto-continuation", () => {
-  it("shows a notice, then sends one visible user continuation before queued follow-ups", async () => {
+  it("keeps three visible continuation stages ahead of queued follow-ups", async () => {
     const { result } = setup();
     await act(async () => {
       await result.current.runtime.thread.composer.setText("inspect with a tool");
@@ -2637,6 +2821,7 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
       runId: firstRunId,
       notice: "Claude completed the tool call but did not produce a final response. Continuing automatically…",
       prompt: "Please continue from the completed tool results and provide the final response. Do not repeat completed tool calls.",
+      kind: "tool-postlude",
     });
 
     const beforeDone = messages(result);
@@ -2653,6 +2838,7 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
     expect(outbound[1].value.text).toBe(
       "Please continue from the completed tool results and provide the final response. Do not repeat completed tool calls.",
     );
+    expect(outbound[1].value.continuationKind).toBe("tool-postlude");
     const afterDone = messages(result);
     const continuationIndex = afterDone.findIndex((message) =>
       message.role === "user" && JSON.stringify(message.content).includes("Please continue from the completed tool results"));
@@ -2665,6 +2851,7 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
       runId: secondRunId,
       notice: "Claude finished thinking without a visible response. Continuing automatically…",
       prompt: "Please provide the final user-visible response now.",
+      kind: "generic",
     });
     expect(inputs.filter((item) => item.id === "test")).toHaveLength(2);
 
@@ -2674,6 +2861,7 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
     const twiceContinued = inputs.filter((item) => item.id === "test");
     expect(twiceContinued).toHaveLength(3);
     expect(twiceContinued[2].value.text).toBe("Please provide the final user-visible response now.");
+    expect(twiceContinued[2].value.continuationKind).toBe("generic");
     const afterSecondDone = messages(result);
     const genericContinuationIndex = afterSecondDone.findIndex((message) =>
       message.role === "user" && JSON.stringify(message.content).includes("final user-visible response"));
@@ -2681,5 +2869,374 @@ describe("useShinyRuntime — transparent auto-continuation", () => {
     expect(afterSecondDone.filter((message) =>
       message.role === "assistant" && JSON.stringify(message.content).includes("Continuing automatically"))).toHaveLength(2);
     expect(afterSecondDone.some((message) => JSON.stringify(message.content).includes("queued follow-up"))).toBe(false);
+
+    const thirdRunId = twiceContinued[2].value.runId;
+    await fireR("auto-continue", {
+      threadId: tid,
+      runId: thirdRunId,
+      notice: "Claude still did not produce a user-visible response. Retrying once with a minimal continuation…",
+      prompt: "继续",
+      kind: "minimal",
+    });
+    await fireR("done", { threadId: tid, runId: thirdRunId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 70)); });
+
+    const minimallyContinued = inputs.filter((item) => item.id === "test");
+    expect(minimallyContinued).toHaveLength(4);
+    expect(minimallyContinued[3].value).toMatchObject({
+      text: "继续",
+      continuationKind: "minimal",
+    });
+    expect(messages(result).some((message) =>
+      message.role === "user" && JSON.stringify(message.content).includes("queued follow-up"))).toBe(false);
+
+    await fireR("done", { threadId: tid, runId: minimallyContinued[3].value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 70)); });
+    const afterRecovery = inputs.filter((item) => item.id === "test");
+    expect(afterRecovery.map((item) => item.value.text)).toEqual([
+      "inspect with a tool",
+      "Please continue from the completed tool results and provide the final response. Do not repeat completed tool calls.",
+      "Please provide the final user-visible response now.",
+      "继续",
+      "queued follow-up",
+    ]);
+    expect(afterRecovery[4].value.continuationKind).toBeUndefined();
+  });
+
+  it("preserves continuation metadata and priority across service blocking", async () => {
+    const { result } = setupCopilot("ready");
+    for (const text of ["original", "ordinary follow-up"]) {
+      await act(async () => {
+        await result.current.runtime.thread.composer.setText(text);
+        await result.current.runtime.thread.composer.send();
+      });
+    }
+    const outbound = () => inputs.filter((item) => item.id === "test");
+    const tid = currentThreadId(result);
+    const originalRunId = outbound()[0].value.runId;
+    expect(outbound().map((item) => item.value.text)).toEqual(["original"]);
+    expect(result.current.pendingServiceSubmissions).toBe(1);
+
+    await fireR("auto-continue", {
+      threadId: tid,
+      runId: originalRunId,
+      notice: "Retrying once with a minimal continuation…",
+      prompt: "继续",
+      kind: "minimal",
+    });
+    await fireR("copilot-service-status", { status: "starting", autoStart: true });
+    await fireR("done", { threadId: tid, runId: originalRunId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 70)); });
+    expect(outbound().map((item) => item.value.text)).toEqual(["original"]);
+
+    await fireR("copilot-service-status", { status: "ready", autoStart: true });
+    expect(outbound().map((item) => item.value.text)).toEqual(["original", "继续"]);
+    expect(outbound()[1].value.continuationKind).toBe("minimal");
+
+    await fireR("done", { threadId: tid, runId: outbound()[1].value.runId });
+    expect(outbound().map((item) => item.value.text)).toEqual([
+      "original", "继续", "ordinary follow-up",
+    ]);
+    expect(outbound()[2].value.continuationKind).toBeUndefined();
+  });
+});
+
+
+describe("useShinyRuntime — proactive authoritative replacements", () => {
+  const textMessage = (
+    id: string,
+    text: string,
+    role: "user" | "assistant" = "user",
+  ) => ({
+    id,
+    role,
+    ...(role === "assistant"
+      ? { status: { type: "complete", reason: "stop" } }
+      : {}),
+    content: [{ type: "text", text }],
+  });
+
+  const proactive = (
+    threadId: string,
+    revision: number,
+    nextMessages: ReturnType<typeof textMessage>[],
+    afterRunId?: string,
+  ) => ({
+    version: 1,
+    operation: "replace",
+    threadId,
+    revision,
+    ...(afterRunId === undefined ? {} : { afterRunId }),
+    messages: nextMessages,
+  });
+
+  const ids = (result: ReturnType<typeof setup>["result"]) =>
+    messages(result).map((message) => message.id);
+
+  it("atomically replaces a known inactive thread without switching or sending a user turn", async () => {
+    localStorage.setItem("shinyAssistantUI:test:threads", JSON.stringify([
+      { id: "selected", status: "regular", title: "Selected" },
+      { id: "inactive", status: "regular", title: "Inactive" },
+    ]));
+    localStorage.setItem("shinyAssistantUI:test:msgs:inactive", JSON.stringify([
+      textMessage("old-a", "old A"),
+      textMessage("old-b", "old B", "assistant"),
+    ]));
+    const { result } = setup({ persistence: "client" });
+    await act(async () => {});
+    inputs.length = 0;
+
+    await fireR("proactive-messages", proactive("inactive", 1, [
+      textMessage("replacement-a", "replacement A"),
+      textMessage("replacement-b", "replacement B", "assistant"),
+    ]));
+
+    expect(currentThreadId(result)).toBe("selected");
+    expect(inputs.filter((item) => item.id === "test")).toHaveLength(0);
+    expect(JSON.parse(localStorage.getItem("shinyAssistantUI:test:msgs:inactive") ?? "[]")
+      .map((message: { id: string }) => message.id))
+      .toEqual(["replacement-a", "replacement-b"]);
+  });
+
+  it("holds a pre-sessions payload and applies it once the target becomes known", async () => {
+    const { result } = setup({ persistence: "server" });
+    const selected = currentThreadId(result);
+
+    await fireR("proactive-messages", proactive("early-session", 1, [
+      textMessage("early-report", "scheduled report", "assistant"),
+    ]));
+    expect(result.current.runtime.threads.getState().threadIds)
+      .not.toContain("early-session");
+
+    await fireR("sessions", {
+      sessions: [{ id: "early-session", title: "Early", createdAt: "2026-08-19T00:00:00Z" }],
+    });
+
+    expect(currentThreadId(result)).toBe(selected);
+    await act(async () => result.current.runtime.threads.switchToThread("early-session"));
+    expect(ids(result)).toEqual(["early-report"]);
+    expect(inputs.filter((item) =>
+      item.id === "test" && item.value?.type === "load_session"))
+      .toHaveLength(0);
+  });
+
+  it("updates an archived thread without selecting it", async () => {
+    const { result } = setup({ persistence: "client" });
+    const selected = currentThreadId(result);
+    await fireR("sessions", {
+      sessions: [{ id: "archived-session", title: "Archived", archived: true }],
+    });
+
+    await fireR("proactive-messages", proactive("archived-session", 1, [
+      textMessage("archived-report", "archived report", "assistant"),
+    ]));
+
+    expect(currentThreadId(result)).toBe(selected);
+    expect(result.current.runtime.threads.getState().archivedThreadIds)
+      .toContain("archived-session");
+    expect(JSON.parse(localStorage.getItem("shinyAssistantUI:test:msgs:archived-session") ?? "[]")
+      .map((message: { id: string }) => message.id))
+      .toEqual(["archived-report"]);
+  });
+
+  it("does not create a true unknown or revive a deleted target from proactive or late sessions", async () => {
+    const { result } = setup({ persistence: "server" });
+    await fireR("sessions", {
+      sessions: [{ id: "deleted-session", title: "Delete me" }],
+    });
+
+    await fireR("proactive-messages", proactive("never-known", 1, [
+      textMessage("ghost-report", "ghost", "assistant"),
+    ]));
+    expect(result.current.runtime.threads.getState().threadIds).not.toContain("never-known");
+    expect(result.current.runtime.threads.getState().archivedThreadIds).not.toContain("never-known");
+
+    await act(async () => result.current.runtime.threads.getItemById("deleted-session").delete());
+    await fireR("proactive-messages", proactive("deleted-session", 1, [
+      textMessage("late-deleted-report", "must stay deleted", "assistant"),
+    ]));
+    await fireR("sessions", {
+      sessions: [{ id: "deleted-session", title: "Late stale session" }],
+    });
+
+    expect(result.current.runtime.threads.getState().threadIds).not.toContain("deleted-session");
+    expect(result.current.runtime.threads.getState().archivedThreadIds).not.toContain("deleted-session");
+  });
+
+  it("accepts only a strictly newer revision and ignores stale or replayed replacements", async () => {
+    localStorage.setItem("shinyAssistantUI:test:threads", JSON.stringify([
+      { id: "revision-thread", status: "regular", title: "Revision" },
+    ]));
+    const { result } = setup({ persistence: "client" });
+    await act(async () => {});
+
+    await fireR("proactive-messages", proactive("revision-thread", 2, [
+      textMessage("revision-2", "newest", "assistant"),
+    ]));
+    await fireR("proactive-messages", proactive("revision-thread", 1, [
+      textMessage("revision-1", "stale", "assistant"),
+    ]));
+    await fireR("proactive-messages", proactive("revision-thread", 2, [
+      textMessage("revision-2-replay", "replay", "assistant"),
+    ]));
+
+    expect(ids(result)).toEqual(["revision-2"]);
+  });
+
+  it("never terminal-flushes a snapshot causally older than the active foreground run", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = currentThreadId(result);
+    await fireR("proactive-messages", proactive(threadId, 1, [
+      textMessage("baseline-report", "baseline scheduled result", "assistant"),
+    ]));
+    expect(ids(result)).toEqual(["baseline-report"]);
+
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("foreground question");
+      await result.current.runtime.thread.composer.send();
+    });
+    const runId = inputs.find((item) =>
+      item.id === "test" && item.value?.text === "foreground question")!.value.runId;
+
+    await fireR("proactive-messages", proactive(threadId, 2, [
+      textMessage("stale-snapshot", "older scheduled result", "assistant"),
+    ], "previous-run"));
+    await fireR("chunk", { threadId, runId, text: "foreground answer" });
+    await fireR("done", { threadId, runId });
+
+    const rendered = JSON.stringify(messages(result));
+    expect(rendered).toContain("baseline scheduled result");
+    expect(rendered).toContain("foreground question");
+    expect(rendered).toContain("foreground answer");
+    expect(rendered).not.toContain("older scheduled result");
+  });
+
+  it("flushes the newest current-run snapshot after done and preserves the completed turn", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("fresh foreground question");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) =>
+      item.id === "test" && item.value?.text === "fresh foreground question")!.value.runId;
+    const reconciled = proactive(threadId, 3, [
+      textMessage("server-user", "fresh foreground question"),
+      textMessage("server-assistant", "fresh foreground answer", "assistant"),
+      textMessage("scheduled-report", "new scheduled result", "assistant"),
+    ], runId);
+
+    await fireR("proactive-messages", reconciled);
+    expect(ids(result)).not.toContain("scheduled-report");
+    await fireR("chunk", { threadId, runId, text: "fresh foreground answer" });
+    await fireR("done", { threadId, runId });
+
+    expect(ids(result)).toEqual(["server-user", "server-assistant", "scheduled-report"]);
+    await fireR("proactive-messages", proactive(threadId, 3, [
+      textMessage("same-revision-replay", "must not replay", "assistant"),
+    ], runId));
+    expect(ids(result)).toEqual(["server-user", "server-assistant", "scheduled-report"]);
+  });
+
+  it("invalidates a pending initial-history replacement and permits a later explicit refresh", async () => {
+    const { result } = setup({ persistence: "server" });
+    const selected = currentThreadId(result);
+    const threadId = "history-proactive-initial";
+    await fireR("sessions", {
+      sessions: [{ id: threadId, title: "Initial race" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const pendingRequests = inputs.filter((item) =>
+      item.id === "test" && item.value?.type === "load_session");
+    const pending = pendingRequests[pendingRequests.length - 1]!.value;
+
+    await fireR("proactive-messages", proactive(threadId, 1, [
+      textMessage("proactive-initial", "authoritative proactive", "assistant"),
+    ]));
+    expect(result.current.readingHistory).toBe(false);
+    expect(result.current.historyHasMore).toBe(false);
+    expect(result.current.historyCursor).toBeNull();
+
+    await fireR("load-thread", {
+      threadId,
+      requestId: pending.requestId,
+      messages: [textMessage("late-initial", "late history")],
+      cursor: 10,
+      hasMore: true,
+    });
+    expect(ids(result)).toEqual(["proactive-initial"]);
+
+    await act(async () => result.current.runtime.threads.switchToThread(selected));
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const refreshes = inputs.filter((item) =>
+      item.id === "test" && item.value?.type === "load_session");
+    expect(refreshes[refreshes.length - 1]?.value.requestId).not.toBe(pending.requestId);
+  });
+
+  it("invalidates a pending older-page response and resets its pagination state", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "history-proactive-page";
+    await fireR("sessions", {
+      sessions: [{ id: threadId, title: "Page race" }],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const initialRequests = inputs.filter((item) =>
+      item.id === "test" && item.value?.type === "load_session");
+    const initialRequest = initialRequests[initialRequests.length - 1]!.value;
+    await fireR("load-thread", {
+      threadId,
+      requestId: initialRequest.requestId,
+      messages: [textMessage("recent-history", "recent")],
+      cursor: 50,
+      hasMore: true,
+    });
+    await act(async () => result.current.loadOlderHistory());
+    const pageRequests = inputs.filter((item) =>
+      item.id === "test" && item.value?.type === "load_session_page");
+    const pageRequest = pageRequests[pageRequests.length - 1]!.value;
+    expect(result.current.loadingOlder).toBe(true);
+
+    await fireR("proactive-messages", proactive(threadId, 1, [
+      textMessage("proactive-page", "new full snapshot", "assistant"),
+    ]));
+    expect(result.current.loadingOlder).toBe(false);
+    expect(result.current.historyHasMore).toBe(false);
+    expect(result.current.historyCursor).toBeNull();
+
+    await fireR("load-thread", {
+      threadId,
+      requestId: pageRequest.requestId,
+      prepend: true,
+      messages: [textMessage("late-older-page", "obsolete older")],
+      cursor: null,
+      hasMore: false,
+    });
+    expect(ids(result)).toEqual(["proactive-page"]);
+  });
+
+  it.each([
+    ["client", true],
+    ["server", false],
+    ["none", false],
+  ] as const)("%s persistence writes proactive replacements only when client-owned", async (
+    persistence,
+    shouldWrite,
+  ) => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const { result } = setup({ persistence });
+    const threadId = `persist-${persistence}`;
+    await fireR("sessions", {
+      sessions: [{ id: threadId, title: "Persistence target" }],
+    });
+    setItem.mockClear();
+
+    await fireR("proactive-messages", proactive(threadId, 1, [
+      textMessage("persisted-report", "persist me", "assistant"),
+    ]));
+
+    const writes = setItem.mock.calls.filter(([key]) =>
+      key === `shinyAssistantUI:test:msgs:${threadId}`);
+    expect(writes.length > 0).toBe(shouldWrite);
+    expect(currentThreadId(result)).not.toBe(threadId);
   });
 });

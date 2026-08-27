@@ -126,6 +126,43 @@
   invisible(TRUE)
 }
 
+# Return one stable package-owned run_r endpoint for every background Chat and
+# Workspace launched by this main R session. Repeated Addin invocations must not
+# close/rebind the REP socket while an existing Job still depends on it.
+.addin_ensure_r_console_server <- function(
+    envir = globalenv(), echo = TRUE,
+    url_factory = function() {
+      paste0("ipc://", tempfile("claude-addin-console-", fileext = ".sock"))
+    }) {
+  valid_url <- function(value) {
+    is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
+  }
+  current_url <- .claude_console_state$url
+  if (isTRUE(.claude_console_state$active) &&
+      !is.null(.claude_console_state$socket) && valid_url(current_url)) {
+    return(current_url)
+  }
+  if (!requireNamespace("nanonext", quietly = TRUE) ||
+      !requireNamespace("later", quietly = TRUE)) return(NULL)
+
+  # Preserve the endpoint embedded in already-running Chat/Workspace specs.
+  # Only allocate a replacement if rebinding our previous URL genuinely fails.
+  if (valid_url(current_url)) {
+    started <- isTRUE(tryCatch(
+      .addin_start_r_console_server(current_url, envir = envir, echo = echo),
+      error = function(e) FALSE
+    ))
+    if (started) return(current_url)
+  }
+  replacement <- tryCatch(as.character(url_factory())[[1L]], error = function(e) "")
+  if (!valid_url(replacement) || identical(replacement, current_url)) return(NULL)
+  started <- isTRUE(tryCatch(
+    .addin_start_r_console_server(replacement, envir = envir, echo = echo),
+    error = function(e) FALSE
+  ))
+  if (started) replacement else NULL
+}
+
 # ── 客户端（background job 侧）：发代码,同步取回捕获结果 ─────────────────────
 .addin_run_r_remote <- function(url, code, timeout = 15000) {
   if (!requireNamespace("nanonext", quietly = TRUE))
@@ -144,12 +181,11 @@
 }
 
 
-# ── Angle B (Plan 22): Claude-agentic run_r as an in-process SDK MCP tool ──────
-# Claude calls run_r → (approval) → this handler runs in the background job →
-# routes over nanonext to the main-session env-server (above) → the code runs
-# VISIBLY in the user's live .GlobalEnv (echo) and the capture is returned to
-# Claude. Reuses the Angle A env-server; needs ClaudeAgentSDK's in-process MCP
-# support (create_sdk_mcp_server / sdk_mcp_tool). No new dependencies.
+# ── Angle B (Plan 22): Claude-agentic run_r through an external stdio MCP ────
+# Claude calls run_r → (approval) → inst/mcp/run_r_server.R routes over
+# nanonext to the main-session env-server (above) → the code runs VISIBLY in
+# the user's live .GlobalEnv (echo) and the capture is returned to Claude.
+# Reuses the Angle A env-server and ClaudeAgentSDK's stdio-MCP support.
 
 # autorun toggle → which allowed_tools to connect with. When on, run_r is
 # auto-allowed (no approval card); when off, run_r hits the approval card.
@@ -167,16 +203,11 @@
   mcp_servers
 }
 
-# Build the in-process "r_session" MCP server exposing run_r. Returns NULL when
-# the installed ClaudeAgentSDK lacks in-process MCP support (older versions) —
-# callers then simply don't register it.
-# Build the run_r MCP server config. Returns an EXTERNAL stdio server config
-# (type="stdio") that launches inst/mcp/run_r_server.R — NOT an in-process
-# (type="sdk") server, because the CLI stalls ~50s on the first message when an
-# in-process server is registered and the connection idles first (Plan 22).
-# The stdio subprocess is curl-free (ClaudeAgentSDK + nanonext only). console_url
-# and the library paths are passed via the server's env. Returns NULL when the
-# installed ClaudeAgentSDK lacks stdio-MCP support or the script is missing.
+# Build the external stdio "r_session" MCP server config. It launches
+# inst/mcp/run_r_server.R and routes requests to the live console server. The
+# subprocess is curl-free (ClaudeAgentSDK + nanonext only); console_url and the
+# library paths are passed via its environment. Returns NULL when the installed
+# ClaudeAgentSDK lacks stdio-MCP support or the script is missing.
 .addin_run_r_server <- function(console_url, timeout = 60000) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE) ||
       !("mcp_serve_stdio" %in% getNamespaceExports("ClaudeAgentSDK")))

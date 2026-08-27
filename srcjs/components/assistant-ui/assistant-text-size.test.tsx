@@ -49,9 +49,15 @@ const messages: ThreadMessageLike[] = [
   },
 ];
 
-function Harness({ size }: { size?: "small" | "compact" | "medium" }) {
+function Harness({
+  size,
+  threadMessages = messages,
+}: {
+  size?: "small" | "compact" | "medium";
+  threadMessages?: ThreadMessageLike[];
+}) {
   const runtime = useExternalStoreRuntime({
-    messages,
+    messages: threadMessages,
     isRunning: false,
     convertMessage: (message) => message,
     onNew: async () => {},
@@ -92,6 +98,7 @@ describe("assistant response text size", () => {
     expect(text.textContent).not.toContain("SOURCE CHIP");
     expect(tool).not.toBeNull();
     expect(content.contains(tool)).toBe(true);
+    expect(container.querySelector('[data-slot="aui_assistant-message-footer"]')).not.toBeNull();
     expect(container.querySelector(".aui-user-message-content")?.textContent)
       .toContain("USER TEXT");
   });
@@ -105,5 +112,47 @@ describe("assistant response text size", () => {
     expect(content.dataset.assistantTextSize).toBe("medium");
     expect(text.dataset.textSize).toBe("medium");
     expect(text.className).not.toMatch(/\btext-(sm|base|lg)\b/);
+  });
+});
+
+
+describe("assistant message actions", () => {
+  it("omits the text action footer and its spacing for tool-only messages", async () => {
+    const threadMessages: ThreadMessageLike[] = [
+      { id: "u-tool", role: "user", content: [{ type: "text", text: "Run it" } as any] },
+      {
+        id: "a-tool", role: "assistant",
+        status: { type: "complete", reason: "stop" } as any,
+        content: [{
+          type: "tool-call", toolCallId: "tool-only", toolName: "Bash",
+          args: { command: "printf tool" }, argsText: '{"command":"printf tool"}',
+          result: "TOOL ONLY RESULT", isError: false,
+        } as any],
+      },
+      {
+        id: "a-text", role: "assistant",
+        status: { type: "complete", reason: "stop" } as any,
+        content: [{ type: "text", text: "FINAL ANSWER" } as any],
+      },
+    ];
+
+    const { container } = render(<Harness threadMessages={threadMessages} />);
+    await waitFor(() => expect(container.textContent).toContain("FINAL ANSWER"));
+
+    const roots = Array.from(container.querySelectorAll<HTMLElement>(
+      '[data-slot="aui_assistant-message-root"]',
+    ));
+    expect(roots).toHaveLength(2);
+    const [toolRoot, textRoot] = roots;
+
+    expect(toolRoot.querySelector(".aui-tool-group-trigger, .aui-shiny-tool")).not.toBeNull();
+    expect(toolRoot.querySelector('[data-slot="aui_assistant-message-footer"]')).toBeNull();
+    expect(toolRoot.className).not.toContain("pb-7.5");
+    expect(toolRoot.className).not.toContain("-mb-7.5");
+
+    expect(textRoot.textContent).toContain("FINAL ANSWER");
+    expect(textRoot.querySelector('[data-slot="aui_assistant-message-footer"]')).not.toBeNull();
+    expect(textRoot.className).toContain("pb-7.5");
+    expect(textRoot.className).toContain("-mb-7.5");
   });
 });

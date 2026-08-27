@@ -253,12 +253,13 @@ test_that("background job preserves workspace spec and display name", {
   result <- .run_claude_bg_job(
     spec,
     port = 4322L,
+    registry = new.env(parent = emptyenv()),
     job_run = function(path, name, workingDir) {
       seen$name <- name
       seen$working_dir <- workingDir
     },
     show_viewer = function(...) NULL,
-    wait_ready = function(...) FALSE
+    wait_ready = function(...) TRUE
   )
 
   roundtrip <- readRDS(result$spec_path)
@@ -273,10 +274,14 @@ test_that("Claude handler resolves cwd from the submitted thread project", {
   skip_if_not_installed("ClaudeAgentSDK")
   received <- NULL
   provider_call <- NULL
+  sent <- FALSE
   client <- new.env(parent = emptyenv())
   client$connect <- function() invisible(NULL)
   client$disconnect <- function() invisible(NULL)
-  client$send <- function(...) invisible(NULL)
+  client$send <- function(...) {
+    sent <<- TRUE
+    invisible(NULL)
+  }
   client$interrupt <- function(...) invisible(NULL)
   client$poll_messages <- function() list()
   client$get_server_info <- function() list()
@@ -313,7 +318,7 @@ test_that("Claude handler resolves cwd from the submitted thread project", {
     on_tool_call = function(...) NULL,
     on_tool_result = function(...) NULL,
     on_thinking = function(...) NULL,
-    is_cancelled = function() TRUE,
+    is_cancelled = function() isTRUE(sent),
     wait_for_approval = function(...) {
       promises::promise_resolve(list(approved = FALSE))
     }

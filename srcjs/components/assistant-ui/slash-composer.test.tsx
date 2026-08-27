@@ -442,13 +442,13 @@ describe("copilot-api service state", () => {
 });
 
 describe("Claude checklist lifecycle controls", () => {
-  it("offers an exact-revision close action only after every task completes", () => {
+  it("normalizes completed status and closes the exact revision at any time", () => {
     const dismissChecklist = vi.fn();
     const completed = {
       threadId: "thread-a",
       revision: "rev-complete",
       allCompleted: true,
-      visibleItems: [{ id: "1", content: "Done", status: "completed" }],
+      visibleItems: [{ id: "1", content: "Done", status: " Completed " }],
       overflowCount: 0,
     };
     const { getByTestId, rerender } = render(
@@ -458,7 +458,10 @@ describe("Claude checklist lifecycle controls", () => {
       />,
     );
     const widget = getByTestId("widget-checklist-close");
-    fireEvent.click(within(widget).getByRole("button", { name: /dismiss completed checklist/i }));
+    const completedLabel = within(widget).getByText("Done");
+    expect(within(widget).getByText("✓")).toBeTruthy();
+    expect(completedLabel.className).toContain("line-through");
+    fireEvent.click(within(widget).getByRole("button", { name: /close checklist/i }));
     expect(dismissChecklist).toHaveBeenCalledWith("thread-a", "rev-complete");
 
     rerender(
@@ -475,7 +478,8 @@ describe("Claude checklist lifecycle controls", () => {
         } as unknown as Partial<ShinyConfigCtx>}
       />,
     );
-    expect(within(widget).queryByRole("button", { name: /dismiss completed checklist/i })).toBeNull();
+    fireEvent.click(within(widget).getByRole("button", { name: /close checklist/i }));
+    expect(dismissChecklist).toHaveBeenLastCalledWith("thread-a", "rev-active");
   });
 });
 
@@ -542,6 +546,63 @@ describe("historical thread paging controls", () => {
     );
     expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
       .toContain("Waiting for an available run slot…");
+  });
+
+  it("renders precise request stages and queue position", () => {
+    const { getByTestId, rerender } = render(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "connecting", runStage: "submitting", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-request-stage");
+    const stageCases = [
+      ["submitting", "Preparing request…"],
+      ["model-switch", "Applying model…"],
+      ["consumer-acquire", "Waiting for conversation stream…"],
+      ["sending", "Sending request…"],
+      ["awaiting-model", "Waiting for Claude…"],
+      ["streaming", "Generating…"],
+      ["finalizing", "Finalizing…"],
+    ] as const;
+    for (const [runStage, expected] of stageCases) {
+      rerender(
+        <Widget
+          id="request-stage"
+          context={{ runPhase: runStage === "streaming" || runStage === "finalizing" ? "running" : "connecting", runStage, warming: false } as Partial<ShinyConfigCtx>}
+        />,
+      );
+      const indicator = widget.querySelector("[data-slot='aui_warming']");
+      expect(indicator?.getAttribute("data-run-stage")).toBe(runStage);
+      expect(indicator?.textContent).toContain(expected);
+    }
+
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "queued", runQueuePosition: 3, warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("3rd in queue");
+
+    const cancelRun = vi.fn();
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "connecting", runStage: "awaiting-model", warming: false, cancelRun } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    fireEvent.click(widget.querySelector<HTMLButtonElement>("[data-slot='aui_run_cancel']")!);
+    expect(cancelRun).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "running", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")).toBeNull();
   });
 
   it("offers a top load-older control and guards repeated loads", () => {

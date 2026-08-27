@@ -1,3 +1,48 @@
+# shinyAssistantUI 0.5.6
+
+- **并行 Agent 输出隔离与及时顶层交付**：parented 子 Agent 的 text/thinking 不再混入
+  顶层回复，两个并行 Agent 的卡片、nested tool、完成状态与最终顶层总结保持清晰顺序；
+  无 partial `text_delta` 的完整顶层 `AssistantMessage` 在真实到达时立即过滤、去重并交付，
+  不再额外等待后续 `ResultMessage`。Agent 自身结果仍遵循 SDK 的完成粒度，不伪造逐字流式。
+- **Checklist 与流式自动跟随修复**：任务状态统一归一化，完成项显示 `✓` 与删除线，活动/
+  完成 checklist 均可用 `×` 精确关闭；新 turn 从旧历史发送时立即跳到最新内容，持续流式增长
+  保持跟随，用户主动上滚后不再被拉回，点击既有唯一向下箭头可恢复跟随。
+- **终态状态与 tool-only 消息收口**：`thinking_tokens`/`requesting` 只在真实 active run 中
+  显示，done/error/cancel 后的晚到事件不会复活状态行，其他后台 status 保持可用。纯工具
+  assistant message 不再显示无正文可操作的 Copy/Refresh/Export footer，也不保留其大块补偿
+  间距；含正文及 mixed text+tool 消息继续保留完整操作条。
+- **长时间工具与 Agent 活动心跳**：Bash、grep、find 及 Agent 工具在等待结果期间现在持续
+  显示明确的 running/working 文案、spinner/shimmer 和逐秒 elapsed；多个并发工具中较早的
+  pending 卡片也不再因消息位置被误显示为已完成。真实 Task 事件卡即使没有后续
+  `TaskProgressMessage` 也会继续更新 elapsed，完成后立即停止前端时钟。实现仅复用/补充
+  mounted-running 组件的低频视觉心跳，不新增 R timer、后端 polling、网络请求、stdout
+  reader 或伪造进度。
+
+- **Claude addin 冷启动体验**：Chat 与 Workspace 现在都在界面挂载后默认预热初始
+  Claude CLI，并持续显示明确的 warming indicator 直到 initialize 完成；首条消息直接
+  复用已连接 client。通用 `assistantUIServer()` 仍保持 `prewarm = FALSE`，且用户可在
+  addin 中显式设为 `FALSE` 以恢复按需连接。同步删除旧 in-process `run_r` MCP 的预热
+  stall 警告；当前 external stdio MCP 无需该限制。
+- **Manual approval 断线恢复**：若 Claude CLI 在等待 Approve/Deny 时断开，permission
+  response 不再抛出原始 `Not connected` 或错误持久化为 Approved。未执行的工具会收到明确
+  结果，失效 client 被安全退役，已有 session 映射保留，下一轮以原 SID 重新连接。
+- **Claude 请求阶段与取消语义**：新增 submitting、model switch、cold connect、consumer
+  acquire、sending、awaiting model、streaming 和 finalizing 等真实阶段及队列位置；queued /
+  connecting 可取消，model pending/rejection 可见，并通过服务端与前端单调守卫、cancel
+  tombstone 和 send 前 cancellation gates 保证取消后不再发送。空闲轮询按
+  100 → 200 → 400 → 500ms 退避，已打开的主动回合仍持续快速协调到 Result。
+
+- **通用 Tool Result Auto Renderer**：result 区直接复用项目自研的 `JsonHighlighter` /
+  `SyntaxHighlighter`。对象、数组和完整 JSON container 字符串使用主题感知的 Prism
+  彩色格式；普通文本、JSON scalar、损坏 JSON、error 及显式 result type 保持原语义。
+  WebSearch 形状结果已通过 installed-package 浏览器验证，未新增专属 UI 或伪造 result
+  streaming。
+
+- **低风险性能基线仪表**：Claude coordinator 提供只读 poll/message 指标，handler
+  提供不发送到浏览器的 performance snapshot；显式授权的测量脚本覆盖 1/5/10/25
+  threads。25-thread 实测保持低 R CPU/RSS 与约 1ms heartbeat，并确认子进程清理；仪表
+  不新增 timer、poll、network、stdout reader 或 client retention。
+
 # shinyAssistantUI 0.5.5
 
 - **修复工具后 thinking-only 导致续接中断**：工具完成但缺少最终回复时，原有

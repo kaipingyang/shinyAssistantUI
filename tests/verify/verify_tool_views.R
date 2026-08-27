@@ -156,6 +156,14 @@ chk("Grep query has pattern field", isTRUE(value("(document.querySelector('[data
 # Phase 2: WebFetch -> query with url link
 chk("WebFetch url renders as a link", isTRUE(value("(function(){var e=document.querySelector('[data-query-field=\"url\"] a');return !!e && (e.getAttribute('href')||'').includes('example.com') && e.getAttribute('target')==='_blank';})()")))
 
+# Generic auto result: structured WebSearch-shaped data reuses shared JSON highlighting.
+chk("WebSearch-shaped result auto-renders colored JSON", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('WebSearch'));const result=card?.querySelector('[data-result-view=json]');return !!result && !!result.querySelector('[data-syntax-highlighter=prism-json]') && !!result.querySelector('.token') && (result.textContent||'').includes('synthetic weather marker') && (result.textContent||'').includes('Synthetic result')})()"
+)))
+chk("WebSearch-shaped result does not fall back to console", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('WebSearch'));return !!card && !card.querySelector('[data-result-view=console]')})()"
+)))
+
 # Phase 3: run_r text result -> console (monospace, plain text, not JSON)
 chk("run_r result renders as console text (not JSON)",
     isTRUE(value("(function(){var els=document.querySelectorAll('[data-result-view=\"console\"]');for(var i=0;i<els.length;i++){var t=els[i].textContent||'';if(t.includes('[1] 2') && !t.includes('{'))return true;}return false;})()")))

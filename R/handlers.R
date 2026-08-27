@@ -1277,11 +1277,419 @@ make_ellmer_session_loader <- function(store) {
   if (length(value) != 1L || !is.finite(value) || value < 0) 180 else value
 }
 
+.claude_idle_start_delay_seconds <- function() {
+  value <- suppressWarnings(as.numeric(
+    getOption("shinyAssistantUI.claude_idle_start_delay", 1)
+  ))
+  if (length(value) != 1L || !is.finite(value) || value < 0) 1 else value
+}
+
+.claude_idle_opener <- function(message) {
+  inherits(message, "StreamEvent") ||
+    (inherits(message, "UserMessage") && !isTRUE(message$is_replay)) ||
+    inherits(message, "AssistantMessage") ||
+    inherits(message, "PermissionRequestMessage")
+}
+
+# Coordinate every consumer of one Claude SDK message queue. Only the named
+# owner may poll; idle work yields to queued foreground/compact owners only after
+# its terminal Result has been reconciled.
+.new_claude_consumer_coordinator <- function(
+    poll_messages,
+    schedule,
+    now,
+    on_idle_event,
+    on_idle_result,
+    on_idle_failure,
+    deny_idle_permission,
+    interrupt,
+    poll_interval = 0.1,
+    max_idle_poll_interval = 0.5,
+    idle_timeout = 120) {
+  owner <- NULL
+  waiters <- list()
+  buffered <- list()
+  generation <- 0L
+  idle_enabled <- FALSE
+  idle_opened_at <- NULL
+  idle_poll_scheduled <- FALSE
+  idle_poll_cancel <- NULL
+  idle_schedule_serial <- 0L
+  idle_poll_delay <- poll_interval
+  idle_polls <- 0L
+  empty_idle_polls <- 0L
+  foreground_polls <- 0L
+  messages_seen <- 0L
+  denied_idle_permissions <- new.env(parent = emptyenv())
+
+  elapsed <- function(started) {
+    value <- now() - started
+    if (inherits(value, "difftime")) as.numeric(value, units = "secs") else as.numeric(value)
+  }
+  reset_idle_backoff <- function() {
+    idle_poll_delay <<- poll_interval
+    invisible(NULL)
+  }
+  advance_idle_backoff <- function() {
+    idle_poll_delay <<- min(max_idle_poll_interval, idle_poll_delay * 2)
+    invisible(NULL)
+  }
+  grant_next <- function() {
+    if (!is.null(owner) || !length(waiters)) return(invisible(FALSE))
+    waiter <- waiters[[1L]]
+    waiters <<- waiters[-1L]
+    owner <<- waiter$name
+    waiter$on_acquired()
+    invisible(TRUE)
+  }
+  release_owner <- function(expected) {
+    if (!identical(owner, expected)) return(invisible(FALSE))
+    owner <<- NULL
+    idle_opened_at <<- NULL
+    grant_next()
+    invisible(TRUE)
+  }
+  fail_idle <- function(reason) {
+    tryCatch(interrupt(), error = function(error) invisible(NULL))
+    tryCatch(on_idle_failure(reason), error = function(error) invisible(NULL))
+    release_owner("idle")
+    invisible(NULL)
+  }
+
+  schedule_idle <- NULL
+  poll_idle <- NULL
+  cancel_scheduled_idle <- function() {
+    idle_schedule_serial <<- idle_schedule_serial + 1L
+    if (is.function(idle_poll_cancel)) {
+      tryCatch(idle_poll_cancel(), error = function(error) invisible(NULL))
+    }
+    idle_poll_cancel <<- NULL
+    idle_poll_scheduled <<- FALSE
+    invisible(NULL)
+  }
+  schedule_idle <- function(delay = idle_poll_delay) {
+    if (!idle_enabled || idle_poll_scheduled) return(invisible(FALSE))
+    token <- generation
+    idle_schedule_serial <<- idle_schedule_serial + 1L
+    schedule_serial <- idle_schedule_serial
+    idle_poll_scheduled <<- TRUE
+    idle_poll_cancel <<- schedule(function() {
+      if (!identical(schedule_serial, idle_schedule_serial)) return(invisible(NULL))
+      idle_poll_cancel <<- NULL
+      idle_poll_scheduled <<- FALSE
+      if (!identical(token, generation) || !idle_enabled) return(invisible(NULL))
+      poll_idle(token)
+    }, delay)
+    invisible(TRUE)
+  }
+  poll_idle <- function(token) {
+    if (!identical(token, generation) || !idle_enabled) return(invisible(NULL))
+    if (!is.null(owner) && !identical(owner, "idle")) {
+      return(invisible(NULL))
+    }
+    if (is.null(owner)) owner <<- "idle"
+
+    if (!is.null(idle_opened_at) && elapsed(idle_opened_at) >= idle_timeout) {
+      fail_idle(simpleError("Idle Claude turn timed out"))
+      return(invisible(NULL))
+    }
+
+    idle_polls <<- idle_polls + 1L
+    batch <- tryCatch(poll_messages() %||% list(), error = function(error) error)
+    if (inherits(batch, "error")) {
+      fail_idle(batch)
+      return(invisible(NULL))
+    }
+    messages_seen <<- messages_seen + length(batch)
+    batch <- c(buffered, batch)
+    buffered <<- list()
+    if (!length(batch)) {
+      empty_idle_polls <<- empty_idle_polls + 1L
+      if (is.null(idle_opened_at)) {
+        release_owner("idle")
+        advance_idle_backoff()
+      }
+      schedule_idle()
+      return(invisible(NULL))
+    }
+    reset_idle_backoff()
+
+    for (index in seq_along(batch)) {
+      message <- batch[[index]]
+      opener <- .claude_idle_opener(message)
+      if (opener && is.null(idle_opened_at)) idle_opened_at <<- now()
+      if (inherits(message, "PermissionRequestMessage")) {
+        request_id <- tryCatch(
+          as.character(message$request_id %||% "")[[1L]],
+          error = function(error) ""
+        )
+        permission_key <- paste0(generation, "\034", request_id)
+        already_denied <- exists(
+          permission_key, envir = denied_idle_permissions, inherits = FALSE
+        )
+        reason <- simpleError("Idle permission request was denied")
+        if (!already_denied) {
+          assign(permission_key, TRUE, envir = denied_idle_permissions)
+          reason <- tryCatch({
+            deny_idle_permission(message)
+            reason
+          }, error = function(error) error)
+        }
+        fail_idle(reason)
+        return(invisible(NULL))
+      }
+
+      if (inherits(message, "ResultMessage")) {
+        if (index < length(batch)) buffered <<- batch[(index + 1L):length(batch)]
+        result_token <- generation
+        completion <- function() {
+          if (!identical(result_token, generation) || !identical(owner, "idle")) {
+            return(invisible(FALSE))
+          }
+          release_owner("idle")
+          schedule_idle()
+          invisible(TRUE)
+        }
+        tryCatch(
+          on_idle_result(message, completion),
+          error = function(error) fail_idle(error)
+        )
+        return(invisible(NULL))
+      }
+
+      tryCatch(on_idle_event(message), error = function(error) {
+        fail_idle(error)
+      })
+      if (!identical(owner, "idle")) return(invisible(NULL))
+    }
+
+    if (is.null(idle_opened_at)) release_owner("idle")
+    schedule_idle()
+    invisible(NULL)
+  }
+
+  list(
+    start_idle = function(delay = 0) {
+      idle_enabled <<- TRUE
+      cancel_scheduled_idle()
+      reset_idle_backoff()
+      schedule_idle(delay)
+      invisible(NULL)
+    },
+    acquire = function(name, on_acquired) {
+      if (is.null(owner)) {
+        cancel_scheduled_idle()
+        reset_idle_backoff()
+        owner <<- name
+        on_acquired()
+      } else {
+        waiters[[length(waiters) + 1L]] <<- list(
+          name = name, on_acquired = on_acquired
+        )
+      }
+      invisible(NULL)
+    },
+    poll_one = function(name) {
+      if (!identical(owner, name)) stop("Only the current consumer owner may poll", call. = FALSE)
+      if (length(buffered)) {
+        message <- buffered[[1L]]
+        buffered <<- buffered[-1L]
+        return(message)
+      }
+      foreground_polls <<- foreground_polls + 1L
+      batch <- poll_messages() %||% list()
+      messages_seen <<- messages_seen + length(batch)
+      if (!length(batch)) return(NULL)
+      if (length(batch) > 1L) buffered <<- batch[-1L]
+      batch[[1L]]
+    },
+    release = function(name) {
+      if (!identical(owner, name)) return(invisible(FALSE))
+      released <- release_owner(name)
+      cancel_scheduled_idle()
+      reset_idle_backoff()
+      schedule_idle()
+      invisible(released)
+    },
+    invalidate = function() {
+      generation <<- generation + 1L
+      idle_enabled <<- FALSE
+      cancel_scheduled_idle()
+      idle_opened_at <<- NULL
+      reset_idle_backoff()
+      owner <<- NULL
+      waiters <<- list()
+      buffered <<- list()
+      invisible(NULL)
+    },
+    is_busy = function() !is.null(owner),
+    metrics = function() {
+      owner_kind <- if (is.null(owner)) {
+        "none"
+      } else if (identical(owner, "idle")) {
+        "idle"
+      } else {
+        sub(":.*$", "", as.character(owner))
+      }
+      list(
+        idle_polls = idle_polls,
+        empty_idle_polls = empty_idle_polls,
+        foreground_polls = foreground_polls,
+        messages_seen = messages_seen,
+        idle_poll_ms = as.numeric(idle_poll_delay * 1000),
+        owner = owner_kind,
+        waiters = length(waiters),
+        buffered_messages = length(buffered),
+        idle_enabled = isTRUE(idle_enabled),
+        idle_open = !is.null(idle_opened_at)
+      )
+    }
+  )
+}
+
+# Re-read the complete authoritative transcript until one full snapshot is
+# quiet. Snapshot identity includes content, not merely message ids, and the
+# project is part of the key because Claude session ids are not project-global.
+.new_claude_transcript_reconciler <- function(
+    read_snapshot,
+    publish,
+    schedule,
+    now,
+    quiet_delay = 0.1,
+    deadline = 2) {
+  states <- new.env(parent = emptyenv())
+  generation <- 0L
+  published_any <- FALSE
+
+  key_for <- function(thread_id, session_id, project) {
+    paste(
+      enc2utf8(as.character(project %||% "")),
+      enc2utf8(as.character(session_id %||% "")),
+      enc2utf8(as.character(thread_id %||% "")),
+      sep = "\034"
+    )
+  }
+  fingerprint <- function(value) serialize(value, NULL, ascii = FALSE, version = 2)
+  elapsed <- function(started) {
+    value <- now() - started
+    if (inherits(value, "difftime")) as.numeric(value, units = "secs") else as.numeric(value)
+  }
+  state_for <- function(key) {
+    get0(key, envir = states, inherits = FALSE)
+  }
+
+  baseline <- function(thread_id, session_id, project) {
+    snapshot <- read_snapshot(thread_id, session_id, project) %||% list()
+    key <- key_for(thread_id, session_id, project)
+    previous <- state_for(key)
+    assign(key, list(
+      snapshot = snapshot,
+      fingerprint = fingerprint(snapshot),
+      revision = previous$revision %||% 0L
+    ), envir = states)
+    invisible(snapshot)
+  }
+
+  reconcile <- function(thread_id, session_id, project, after_run_id,
+                        must_advance = FALSE, is_current = function() TRUE,
+                        on_complete = function(ok, reason = NULL) invisible(NULL)) {
+    key <- key_for(thread_id, session_id, project)
+    if (is.null(state_for(key))) baseline(thread_id, session_id, project)
+    token <- generation
+    started <- now()
+    candidate_fingerprint <- NULL
+    candidate_snapshot <- NULL
+    settled <- FALSE
+
+    finish <- function(ok, reason = NULL) {
+      if (settled) return(invisible(FALSE))
+      settled <<- TRUE
+      on_complete(ok, reason)
+      invisible(TRUE)
+    }
+    tick <- NULL
+    tick <- function() {
+      if (settled) return(invisible(NULL))
+      if (!identical(token, generation) || !isTRUE(is_current())) {
+        finish(FALSE, simpleError("Transcript reconciliation is stale"))
+        return(invisible(NULL))
+      }
+      if (elapsed(started) >= deadline) {
+        finish(FALSE, simpleError("Transcript reconciliation timed out"))
+        return(invisible(NULL))
+      }
+
+      snapshot <- tryCatch(
+        read_snapshot(thread_id, session_id, project) %||% list(),
+        error = function(error) error
+      )
+      if (inherits(snapshot, "error")) {
+        finish(FALSE, snapshot)
+        return(invisible(NULL))
+      }
+      current_fingerprint <- fingerprint(snapshot)
+      stable <- !is.null(candidate_fingerprint) &&
+        identical(current_fingerprint, candidate_fingerprint)
+      candidate_fingerprint <<- current_fingerprint
+      candidate_snapshot <<- snapshot
+
+      if (stable) {
+        state <- state_for(key)
+        advanced <- !identical(current_fingerprint, state$fingerprint)
+        if (advanced) {
+          if (!identical(token, generation) || !isTRUE(is_current())) {
+            finish(FALSE, simpleError("Transcript reconciliation is stale"))
+            return(invisible(NULL))
+          }
+          revision <- as.integer(state$revision %||% 0L) + 1L
+          publish_error <- tryCatch({
+            publish(thread_id, candidate_snapshot, revision, after_run_id)
+            NULL
+          }, error = function(error) error)
+          if (inherits(publish_error, "error")) {
+            finish(FALSE, publish_error)
+            return(invisible(NULL))
+          }
+          assign(key, list(
+            snapshot = candidate_snapshot,
+            fingerprint = current_fingerprint,
+            revision = revision
+          ), envir = states)
+          published_any <<- TRUE
+          finish(TRUE)
+          return(invisible(NULL))
+        }
+        if (!isTRUE(must_advance)) {
+          finish(TRUE)
+          return(invisible(NULL))
+        }
+      }
+      schedule(tick, quiet_delay)
+      invisible(NULL)
+    }
+
+    schedule(tick, quiet_delay)
+    invisible(NULL)
+  }
+
+  list(
+    baseline = baseline,
+    reconcile = reconcile,
+    invalidate = function() {
+      generation <<- generation + 1L
+      invisible(NULL)
+    },
+    has_published = function() published_any
+  )
+}
+
 # Start a non-blocking compact drain. The total wall clock is measured from this
 # call and is never reset by empty polls or unrelated provider messages.
 .claude_start_compact_poll <- function(
     client,
     on_terminal,
+    poll_one = NULL,
+    poll_messages = NULL,
     on_progress = function(phase) invisible(NULL),
     persist_result = function(message) invisible(NULL),
     timeout_seconds = .claude_compact_timeout_seconds(),
@@ -1290,6 +1698,9 @@ make_ellmer_session_loader <- function(store) {
     schedule = function(callback, delay) later::later(callback, delay = delay)) {
   started <- now()
   settled <- FALSE
+  if (is.null(poll_one) && is.null(poll_messages)) {
+    poll_messages <- function() client$poll_messages()
+  }
 
   elapsed_seconds <- function() {
     elapsed <- now() - started
@@ -1315,7 +1726,12 @@ make_ellmer_session_loader <- function(store) {
     }
 
     messages <- tryCatch(
-      client$poll_messages(),
+      if (is.function(poll_one)) {
+        message <- poll_one()
+        if (is.null(message)) list() else list(message)
+      } else {
+        poll_messages()
+      },
       error = function(error) error
     )
     if (inherits(messages, "error")) {
@@ -1494,6 +1910,203 @@ make_ellmer_session_loader <- function(store) {
   "Please provide the final user-visible response now. ",
   "Do not continue with reasoning only."
 )
+.CLAUDE_MINIMAL_CONTINUE_NOTICE <- paste0(
+  "Claude still did not produce a user-visible response. ",
+  "Retrying once with a minimal continuation\u2026"
+)
+.CLAUDE_MINIMAL_CONTINUE_PROMPT <- "\u7ee7\u7eed"
+.CLAUDE_CONTINUATION_KINDS <- c("tool-postlude", "generic", "minimal")
+
+.normalize_claude_continuation_kind <- function(kind) {
+  if (is.null(kind) || length(kind) != 1L || is.na(kind[[1L]])) return(NULL)
+  kind <- as.character(kind[[1L]])
+  if (!kind %in% .CLAUDE_CONTINUATION_KINDS) return(NULL)
+  kind
+}
+
+.claude_terminal_kind <- function(thinking_seen, visible_text_seen,
+                                  structured_tool_seen, stop_reason,
+                                  result_text = "") {
+  has_result_text <- is.character(result_text) && length(result_text) > 0L &&
+    any(!is.na(result_text) & nzchar(trimws(result_text)))
+  if (isTRUE(thinking_seen) && !isTRUE(visible_text_seen) &&
+      !isTRUE(structured_tool_seen) && identical(stop_reason, "end_turn") &&
+      !has_result_text) {
+    return("thinking_only_end_turn")
+  }
+  NULL
+}
+
+.new_claude_usage_probe_manager <- function(is_current) {
+  states <- new.env(parent = emptyenv())
+  probe_loop <- later::create_loop(parent = later::global_loop())
+  closed <- FALSE
+
+  state_for <- function(thread_id) {
+    key <- as.character(thread_id)[[1L]]
+    state <- get0(key, envir = states, inherits = FALSE)
+    if (!is.null(state)) return(state)
+    state <- new.env(parent = emptyenv())
+    state$in_flight <- FALSE
+    state$dirty <- FALSE
+    state$sequence <- 0L
+    state$latest <- NULL
+    assign(key, state, envir = states)
+    state
+  }
+
+  same_owner <- function(left, right) {
+    !is.null(left) && !is.null(right) &&
+      identical(left$client, right$client) &&
+      identical(left$consumer_record, right$consumer_record) &&
+      identical(left$generation, right$generation)
+  }
+
+  context_number <- function(value, positive = FALSE) {
+    value <- suppressWarnings(as.numeric(value))
+    if (length(value) != 1L || is.na(value) || !is.finite(value) ||
+        value < 0 || (positive && value <= 0)) return(NULL)
+    value
+  }
+
+  start_probe <- NULL
+  start_probe <- function(state) {
+    if (closed) return(invisible(FALSE))
+    spec <- state$latest
+    method <- tryCatch(
+      spec$client$get_context_usage_async,
+      error = function(error) NULL
+    )
+    if (!is.function(method)) return(invisible(FALSE))
+
+    state$in_flight <- TRUE
+    state$dirty <- FALSE
+    state$sequence <- state$sequence + 1L
+    sequence <- state$sequence
+
+    settle <- function(value = NULL, succeeded = FALSE) {
+      if (!identical(state$sequence, sequence) || !isTRUE(state$in_flight)) {
+        return(invisible(FALSE))
+      }
+      state$in_flight <- FALSE
+
+      current <- isTRUE(tryCatch(
+        is_current(
+          spec$thread_id,
+          spec$client,
+          spec$consumer_record,
+          spec$generation
+        ),
+        error = function(error) FALSE
+      ))
+      if (isTRUE(succeeded) && current) {
+        context_tokens <- context_number(
+          .context_usage_field(value, "totalTokens", "total_tokens")
+        )
+        context_window <- context_number(
+          .context_usage_field(value, "rawMaxTokens", "raw_max_tokens") %||%
+            .context_usage_field(value, "maxTokens", "max_tokens"),
+          positive = TRUE
+        )
+        if (!is.null(context_window)) context_window <- as.integer(context_window)
+        tryCatch(
+          spec$publish(context_tokens, context_window),
+          error = function(error) NULL
+        )
+      }
+
+      restart <- isTRUE(state$dirty)
+      state$dirty <- FALSE
+      if (restart) start_probe(state)
+      invisible(TRUE)
+    }
+
+    method_args <- tryCatch(names(formals(method)), error = function(error) NULL)
+    callback_mode <- all(c("on_fulfilled", "on_rejected") %in% method_args)
+    if (callback_mode) {
+      started <- later::with_loop(
+        probe_loop,
+        promises::with_promise_domain(
+          NULL,
+          shiny::withReactiveDomain(NULL, tryCatch({
+            method(
+              timeout_ms = Inf,
+              on_fulfilled = function(value) settle(value, succeeded = TRUE),
+              on_rejected = function(reason) settle(succeeded = FALSE)
+            )
+            TRUE
+          }, error = function(error) FALSE)),
+          replace = TRUE
+        )
+      )
+      if (!started) state$in_flight <- FALSE
+      return(invisible(started))
+    }
+
+    request <- later::with_loop(
+      probe_loop,
+      tryCatch(method(timeout_ms = 5000L), error = function(error) error)
+    )
+    if (inherits(request, "error")) {
+      state$in_flight <- FALSE
+      return(invisible(FALSE))
+    }
+    attached <- later::with_loop(probe_loop, tryCatch({
+      promises::then(
+        request,
+        onFulfilled = function(value) {
+          settle(value, succeeded = TRUE)
+          NULL
+        },
+        onRejected = function(reason) {
+          settle(succeeded = FALSE)
+          NULL
+        }
+      )
+      TRUE
+    }, error = function(error) FALSE))
+    if (!attached) state$in_flight <- FALSE
+    invisible(attached)
+  }
+
+  list(
+    request = function(thread_id, client, consumer_record, generation, publish) {
+      state <- state_for(thread_id)
+      spec <- list(
+        thread_id = thread_id,
+        client = client,
+        consumer_record = consumer_record,
+        generation = generation,
+        publish = publish
+      )
+      changed <- !same_owner(state$latest, spec)
+      state$latest <- spec
+      if (isTRUE(state$in_flight)) {
+        if (changed) state$dirty <- TRUE
+        return(invisible(FALSE))
+      }
+      start_probe(state)
+    },
+    schedule = function(callback, delay = 0.05) {
+      if (closed) return(invisible(FALSE))
+      later::later(callback, delay = delay, loop = probe_loop)
+      invisible(TRUE)
+    },
+    close = function() {
+      if (closed) return(invisible(NULL))
+      closed <<- TRUE
+      try(later::destroy_loop(probe_loop), silent = TRUE)
+      invisible(NULL)
+    },
+    pending_count = function() {
+      keys <- ls(states, all.names = TRUE)
+      if (!length(keys)) return(0L)
+      sum(vapply(keys, function(key) {
+        isTRUE(get(key, envir = states, inherits = FALSE)$in_flight)
+      }, logical(1)))
+    }
+  )
+}
 
 #' Create a ClaudeAgentSDK handler for assistantUIServer
 #'
@@ -1621,10 +2234,17 @@ make_claude_handler <- function(options       = NULL,
   model_values <- vapply(model_options, `[[`, character(1), "value")
   initial_model <- options$model %||% "default"
   if (!initial_model %in% model_values) initial_model <- "default"
-  model_state <- new.env(parent = emptyenv())
-  model_state$value <- initial_model
-  internal_model <- function() {
-    v <- model_state$value
+  model_states <- new.env(parent = emptyenv())
+  model_for <- function(thread_id) {
+    get0(thread_id, envir = model_states, ifnotfound = initial_model, inherits = FALSE)
+  }
+  model_switches <- list()
+  pending_model_switch <- function(thread_id) {
+    state <- model_switches[[thread_id]]
+    if (is.null(state) || isTRUE(state$settled)) NULL else state
+  }
+  internal_model <- function(thread_id) {
+    v <- model_for(thread_id)
     if (is.null(v) || identical(v, "default")) NULL else v
   }
 
@@ -1663,6 +2283,131 @@ make_claude_handler <- function(options       = NULL,
   active_turns <- list()
   compact_in_progress <- list()
   reset_clients_pending <- FALSE
+  consumer_records <- list()
+  usage_generations <- list()
+  usage_probe_manager <- .new_claude_usage_probe_manager(
+    is_current = function(thread_id, client, consumer_record, generation) {
+      identical(clients[[thread_id]], client) &&
+        identical(consumer_records[[thread_id]], consumer_record) &&
+        identical(usage_generations[[thread_id]], generation)
+    }
+  )
+  transcript_reconcilers <- list()
+  persistent_routes <- list()
+  owner_serial <- 0L
+  retire_serial <- 0L
+
+  canonical_project <- function(project) {
+    if (is.null(project) || !length(project) || is.na(project[[1L]]) ||
+        !nzchar(as.character(project[[1L]]))) return(NULL)
+    value <- path.expand(as.character(project[[1L]]))
+    tryCatch(
+      normalizePath(value, winslash = "/", mustWork = FALSE),
+      error = function(error) value
+    )
+  }
+
+  route_for <- function(thread_id) {
+    route <- persistent_routes[[thread_id]]
+    if (!is.null(route)) return(route)
+    route <- new.env(parent = emptyenv())
+    route$project <- NULL
+    route$last_run_id <- NULL
+    route$proactive_published <- FALSE
+    route$pending_messages <- NULL
+    route$on_messages <- NULL
+    route$on_task <- NULL
+    route$on_rate_limit <- NULL
+    route$on_status <- NULL
+    persistent_routes[[thread_id]] <<- route
+    route
+  }
+
+  publish_persistent_messages <- function(thread_id, messages, revision, after_run_id) {
+    route <- route_for(thread_id)
+    payload <- list(
+      messages = messages,
+      revision = revision,
+      after_run_id = after_run_id
+    )
+    route$proactive_published <- TRUE
+    if (is.function(route$on_messages)) {
+      route$on_messages(
+        messages = messages,
+        revision = revision,
+        after_run_id = after_run_id
+      )
+    } else {
+      route$pending_messages <- payload
+    }
+    invisible(NULL)
+  }
+
+  transcript_reconciler_for <- function(thread_id) {
+    existing <- transcript_reconcilers[[thread_id]]
+    if (!is.null(existing)) return(existing)
+    reconciler <- .new_claude_transcript_reconciler(
+      read_snapshot = function(thread_id, session_id, project) {
+        directory <- project
+        if (is.null(directory) || !length(directory) || is.na(directory[[1L]]) ||
+            !nzchar(as.character(directory[[1L]]))) {
+          directory <- NULL
+        } else {
+          directory <- as.character(directory[[1L]])
+        }
+        messages <- .get_claude_session_messages(session_id, directory = directory)
+        .claude_msgs_to_thread(
+          messages,
+          decisions = .read_tool_decisions(decisions_path),
+          metadata = .read_tool_metadata(.claude_tool_metadata_path(session_map_path))
+        )
+      },
+      publish = publish_persistent_messages,
+      schedule = function(callback, delay) later::later(callback, delay = delay),
+      now = Sys.time
+    )
+    transcript_reconcilers[[thread_id]] <<- reconciler
+    reconciler
+  }
+
+  dispatch_idle_event <- function(thread_id, message) {
+    route <- route_for(thread_id)
+    safely <- function(callback, ...) {
+      if (is.function(callback)) tryCatch(callback(...), error = function(error) NULL)
+      invisible(NULL)
+    }
+    if (inherits(message, "TaskStartedMessage")) {
+      safely(route$on_task, message$task_id, "started",
+             description = message$description, tool_name = message$task_type)
+    } else if (inherits(message, "TaskProgressMessage")) {
+      safely(route$on_task, message$task_id, "progress",
+             description = message$description, tool_name = message$last_tool_name)
+    } else if (inherits(message, "TaskNotificationMessage")) {
+      safely(route$on_task, message$task_id, "notification",
+             status = message$status, summary = message$summary)
+    } else if (inherits(message, "TaskUpdatedMessage")) {
+      patch <- message$patch %||% list()
+      safely(route$on_task, message$task_id, "updated",
+             status = message$status %||% patch$status,
+             description = patch$description %||% patch$prompt)
+    } else if (inherits(message, "RateLimitEvent")) {
+      info <- message$rate_limit_info %||% list()
+      safely(route$on_rate_limit, status = info$status, resets_at = info$resets_at,
+             utilization = info$utilization, type = info$rate_limit_type)
+    } else if (inherits(message, "HookEventMessage")) {
+      safely(route$on_status, paste0("hook:", message$subtype),
+             text = paste0("Hook: ", message$hook_event_name %||% message$subtype))
+    } else if (inherits(message, "SystemMessage")) {
+      data <- message$data %||% list()
+      text <- tryCatch(
+        data[["status"]] %||% data[["message"]] %||% data[["text"]] %||% NULL,
+        error = function(error) NULL
+      )
+      safely(route$on_status, message$subtype,
+             text = if (is.character(text)) text else NULL)
+    }
+    invisible(NULL)
+  }
 
   make_opts <- function(thread_id, resume_sid = NULL, project = NULL) {
     # 伪模式:"Strict"(askAll)= default + 注入 ask:["*"];
@@ -1679,7 +2424,7 @@ make_claude_handler <- function(options       = NULL,
       } else NULL) %||% options$cwd,
       system_prompt               = options$system_prompt,
       thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
-      model                       = internal_model() %||% options$model,
+      model                       = internal_model(thread_id) %||% options$model,
       settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
       mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
       allowed_tools               = .addin_run_r_allowed_tools(
@@ -1701,8 +2446,115 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
+  coordinator_for <- function(thread_id, client, project = NULL) {
+    current <- consumer_records[[thread_id]]
+    if (!is.null(current) && identical(current$client, client)) {
+      if (is.null(current$project)) current$project <- canonical_project(project)
+      route <- route_for(thread_id)
+      if (is.null(route$project)) route$project <- current$project
+      current$coordinator$start_idle(.claude_idle_start_delay_seconds())
+      return(current)
+    }
+
+    route <- route_for(thread_id)
+    owning_project <- canonical_project(project %||% route$project)
+    if (is.null(route$project)) route$project <- owning_project
+    reconciler <- transcript_reconciler_for(thread_id)
+    record <- new.env(parent = emptyenv())
+    record$client <- client
+    record$project <- owning_project
+    record$idle_must_advance <- FALSE
+    record$reconciler <- reconciler
+    record$coordinator <- NULL
+
+    raw_poll <- function() {
+      poller <- tryCatch(client$poll_messages, error = function(error) NULL)
+      if (!is.function(poller)) return(list())
+      poller() %||% list()
+    }
+    record$coordinator <- .new_claude_consumer_coordinator(
+      poll_messages = raw_poll,
+      schedule = function(callback, delay) later::later(callback, delay = delay),
+      now = Sys.time,
+      on_idle_event = function(message) {
+        if (.claude_idle_opener(message)) {
+          record$idle_must_advance <- TRUE
+        }
+        dispatch_idle_event(thread_id, message)
+      },
+      on_idle_result = function(message, on_complete) {
+        sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
+        if (is.null(sid) || !length(sid) || is.na(sid[[1L]]) ||
+            !nzchar(as.character(sid[[1L]]))) {
+          dispatch_idle_event(thread_id, structure(list(
+            subtype = "proactive-error",
+            data = list(message = "Idle Claude Result had no session id")
+          ), class = "SystemMessage"))
+          record$idle_must_advance <- FALSE
+          on_complete()
+          return(invisible(NULL))
+        }
+        sid <- as.character(sid[[1L]])
+        persist_session(thread_id, sid)
+        route <- route_for(thread_id)
+        must_advance <- isTRUE(record$idle_must_advance)
+        record$reconciler$reconcile(
+          thread_id = thread_id,
+          session_id = sid,
+          project = record$project %||% route$project,
+          after_run_id = route$last_run_id,
+          must_advance = must_advance,
+          is_current = function() identical(consumer_records[[thread_id]], record),
+          on_complete = function(ok, reason = NULL) {
+            record$idle_must_advance <- FALSE
+            if (!isTRUE(ok) && is.function(route$on_status)) {
+              tryCatch(route$on_status(
+                "proactive-error",
+                text = conditionMessage(reason %||% simpleError("Transcript reconciliation failed"))
+              ), error = function(error) NULL)
+            }
+            on_complete()
+            later::later(function() flush_pending_client_reset(), delay = 0)
+          }
+        )
+        invisible(NULL)
+      },
+      on_idle_failure = function(reason) {
+        route <- route_for(thread_id)
+        if (is.function(route$on_status)) {
+          tryCatch(route$on_status(
+            "proactive-error", text = conditionMessage(reason)
+          ), error = function(error) NULL)
+        }
+        later::later(function() flush_pending_client_reset(), delay = 0)
+      },
+      deny_idle_permission = function(message) {
+        client$deny_tool(
+          message$request_id,
+          "Denied because no interactive foreground run owns this request",
+          interrupt = TRUE
+        )
+      },
+      interrupt = function() client$interrupt()
+    )
+    consumer_records[[thread_id]] <<- record
+
+    stored_sid <- read_session_id(thread_id)
+    if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
+      tryCatch(
+        reconciler$baseline(thread_id, stored_sid, record$project %||% route$project),
+        error = function(error) NULL
+      )
+    }
+    record$coordinator$start_idle(.claude_idle_start_delay_seconds())
+    record
+  }
+
   get_client <- function(thread_id, project = NULL) {
-    if (!is.null(clients[[thread_id]])) return(clients[[thread_id]])
+    if (!is.null(clients[[thread_id]])) {
+      coordinator_for(thread_id, clients[[thread_id]], project)
+      return(clients[[thread_id]])
+    }
 
     strict_sid <- strict_resume_sids[[thread_id]]
     stored_sid <- read_session_id(thread_id)
@@ -1729,11 +2581,42 @@ make_claude_handler <- function(options       = NULL,
       }
     )
 
+    coordinator_for(thread_id, client, project)
     client
   }
 
-  # 按 session_id 反查线程并断开其仍连着的 client（删除会话前调用，避免 CLI 把
-  # transcript 写回磁盘导致"删了又出现"）。老 session（无活动 client）= no-op。
+  retire_threads <- function(thread_ids, async = FALSE) {
+    thread_ids <- unique(as.character(thread_ids %||% character(0)))
+    invisible(lapply(thread_ids, function(thread_id) {
+      client <- clients[[thread_id]]
+      if (is.null(client)) return(invisible(NULL))
+      record <- consumer_records[[thread_id]]
+      retire_serial <<- retire_serial + 1L
+      owner <- paste0("retire:", retire_serial)
+      retire <- function() {
+        if (!is.null(record)) {
+          record$coordinator$invalidate()
+          record$reconciler$invalidate()
+        }
+        if (identical(clients[[thread_id]], client)) clients[[thread_id]] <<- NULL
+        if (identical(consumer_records[[thread_id]], record)) {
+          consumer_records[[thread_id]] <<- NULL
+        }
+        disconnect <- function() .disconnect_claude_client_safely(client)
+        if (isTRUE(async) && requireNamespace("later", quietly = TRUE)) {
+          later::later(disconnect, delay = 0)
+        } else {
+          disconnect()
+        }
+        invisible(NULL)
+      }
+      if (is.null(record)) retire() else record$coordinator$acquire(owner, retire)
+      invisible(NULL)
+    }))
+  }
+
+  # Session deletion and option resets retire a client only after its current
+  # queue owner (including transcript reconciliation) has released ownership.
   release_session <- function(session_id) {
     if (is.null(session_id) || !nzchar(session_id %||% "")) return(invisible(character(0)))
     matches <- function(m) {
@@ -1742,29 +2625,16 @@ make_claude_handler <- function(options       = NULL,
     }
     disk <- tryCatch(.read_claude_session_map(session_map_path), error = function(e) list())
     tids <- unique(c(matches(disk), matches(session_map)))
-    for (tid in tids) {
-      cl <- clients[[tid]]
-      if (!is.null(cl)) {
-        .disconnect_claude_client_safely(cl)
-        clients[[tid]] <<- NULL
-      }
-    }
+    retire_threads(tids, async = FALSE)
     invisible(tids)
   }
 
-  # Settings/cwd changes must not disconnect a client while any thread is
-  # consuming it. Defer the registry reset until every normal turn and compact
-  # action has settled; the next turn reconnects with the new options.
   has_active_consumers <- function() {
     any(vapply(active_turns, isTRUE, logical(1))) ||
       any(vapply(compact_in_progress, isTRUE, logical(1)))
   }
   perform_reset_clients <- function(async = TRUE) {
-    .cleanup_claude_client_registry(
-      get_clients   = function() clients,
-      clear_clients = function() clients <<- list(),
-      async         = async
-    )
+    retire_threads(names(clients), async = async)
     invisible(NULL)
   }
   flush_pending_client_reset <- function() {
@@ -1812,10 +2682,60 @@ make_claude_handler <- function(options       = NULL,
         if (!model %in% model_values) {
           err(paste0("Unknown model: ", model)); return(invisible(NULL))
         }
+        if (!is.null(pending_model_switch(thread_id))) {
+          err("Model switch already in progress")
+          return(invisible(NULL))
+        }
         if (is.null(cl)) cl <- get_client(thread_id)
-        cl$set_model(model)               # 热切换，无需重连
-        model_state$value <- model        # 记住，重连时经 make_opts 保持
-        ok(paste0("Switched model to ", model), value = model)
+        set_model_async <- tryCatch(cl$set_model_async, error = function(error) NULL)
+        async_formals <- if (is.function(set_model_async)) names(formals(set_model_async)) else character(0)
+        if (!all(c("on_fulfilled", "on_rejected") %in% async_formals)) {
+          err("Connected ClaudeAgentSDK does not support acknowledged model switching")
+          return(invisible(NULL))
+        }
+
+        state <- new.env(parent = emptyenv())
+        state$client <- cl
+        state$model <- model
+        state$settled <- FALSE
+        state$promise <- promises::promise(function(resolve, reject) {
+          state$resolve <- resolve
+        })
+        model_switches[[thread_id]] <<- state
+        settle <- function(error = NULL) {
+          if (isTRUE(state$settled)) return(invisible(NULL))
+          state$settled <- TRUE
+          current <- identical(model_switches[[thread_id]], state)
+          if (current) model_switches[[thread_id]] <<- NULL
+          succeeded <- is.null(error) && current && identical(clients[[thread_id]], cl)
+          if (succeeded) assign(thread_id, model, envir = model_states)
+          reason <- error %||% simpleError("Model switch acknowledgement became stale")
+          error_message <- if (succeeded) NULL else tryCatch(
+            conditionMessage(reason),
+            error = function(message_error) as.character(reason)[[1L]]
+          )
+          # Release foreground waiters even if the Shiny session disappeared and
+          # sending the action result consequently throws.
+          state$resolve(succeeded)
+          tryCatch({
+            if (succeeded) {
+              ok(paste0("Switched model to ", model), value = model)
+            } else {
+              err(error_message)
+            }
+          }, error = function(action_error) NULL)
+          invisible(NULL)
+        }
+        tryCatch(
+          set_model_async(
+            model,
+            timeout_ms = 5000L,
+            on_fulfilled = function(response) settle(),
+            on_rejected = function(error) settle(error)
+          ),
+          error = function(error) settle(error)
+        )
+        invisible(NULL)
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)
         # askAll/yolo 是伪模式(经 settings / 丢 prompt-tool 注入),单独放行。
@@ -1846,8 +2766,30 @@ make_claude_handler <- function(options       = NULL,
         ok(paste0("Thinking level submitted: ", tv), value = tv)
       } else if (identical(id, "context")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
-        usage <- cl$get_context_usage()
-        ok(.format_context_usage(usage))
+        get_context_usage_async <- tryCatch(
+          cl$get_context_usage_async,
+          error = function(error) NULL
+        )
+        async_formals <- if (is.function(get_context_usage_async)) {
+          names(formals(get_context_usage_async))
+        } else character(0)
+        if (!all(c("on_fulfilled", "on_rejected") %in% async_formals)) {
+          err("Connected ClaudeAgentSDK does not support asynchronous context usage")
+          return(invisible(NULL))
+        }
+        tryCatch(
+          get_context_usage_async(
+            timeout_ms = 5000L,
+            on_fulfilled = function(usage) {
+              tryCatch(ok(.format_context_usage(usage)), error = function(error) NULL)
+            },
+            on_rejected = function(error) {
+              tryCatch(err(conditionMessage(error)), error = function(callback_error) NULL)
+            }
+          ),
+          error = function(error) err(conditionMessage(error))
+        )
+        invisible(NULL)
       } else if (identical(id, "interrupt")) {
         if (!is.null(cl)) cl$interrupt()
         ok("Interrupted")
@@ -1882,34 +2824,75 @@ make_claude_handler <- function(options       = NULL,
           if (!is.null(message)) value$message <- message
           value
         }
-        tryCatch({
-          send_action_result(
-            "Preparing conversation\u2026", "progress",
-            value = compact_value("starting", "Preparing conversation\u2026")
-          )
-          cl$send("/compact")
-          .claude_start_compact_poll(
-            client = cl,
-            on_progress = function(phase) {
-              if (identical(phase, "compacting")) {
-                send_action_result(
-                  "Compacting conversation\u2026", "progress",
-                  value = compact_value("compacting", "Compacting conversation\u2026")
-                )
-              }
-            },
-            on_terminal = function(status, message) {
-              release_compact()
-              phase <- if (identical(status, "ok")) "complete" else "error"
-              send_action_result(message, status, value = compact_value(phase, message))
-            },
-            persist_result = function(message) {
-              persist_session(thread_id, message$session_id)
-            }
-          )
-        }, error = function(error) {
+        send_action_result(
+          "Preparing conversation\u2026", "progress",
+          value = compact_value("starting", "Preparing conversation\u2026")
+        )
+        record <- coordinator_for(thread_id, cl, route_for(thread_id)$project)
+        owner_serial <<- owner_serial + 1L
+        compact_owner <- paste0("compact:", owner_serial)
+        compact_acquired <- FALSE
+        compact_result <- NULL
+        release_compact_owner <- function() {
+          if (isTRUE(compact_acquired)) {
+            record$coordinator$release(compact_owner)
+            compact_acquired <<- FALSE
+          }
           release_compact()
-          stop(error)
+        }
+        finish_compact <- function(status, message) {
+          release_compact_owner()
+          phase <- if (identical(status, "ok")) "complete" else "error"
+          send_action_result(message, status, value = compact_value(phase, message))
+        }
+        record$coordinator$acquire(compact_owner, function() {
+          compact_acquired <<- TRUE
+          tryCatch({
+            cl$send("/compact")
+            .claude_start_compact_poll(
+              client = cl,
+              poll_one = function() {
+                record$coordinator$poll_one(compact_owner)
+              },
+              on_progress = function(phase) {
+                if (identical(phase, "compacting")) {
+                  send_action_result(
+                    "Compacting conversation\u2026", "progress",
+                    value = compact_value("compacting", "Compacting conversation\u2026")
+                  )
+                }
+              },
+              on_terminal = function(status, message) {
+                if (!identical(status, "ok") || is.null(compact_result)) {
+                  finish_compact(status, message)
+                  return(invisible(NULL))
+                }
+                route <- route_for(thread_id)
+                record$reconciler$reconcile(
+                  thread_id, compact_result$session_id,
+                  record$project %||% route$project,
+                  route$last_run_id, FALSE,
+                  is_current = function() identical(consumer_records[[thread_id]], record),
+                  on_complete = function(ok, reason = NULL) {
+                    if (isTRUE(ok)) {
+                      finish_compact(status, message)
+                    } else {
+                      finish_compact("error", paste0(
+                        "Compact completed but transcript reconciliation failed: ",
+                        conditionMessage(reason)
+                      ))
+                    }
+                  }
+                )
+              },
+              persist_result = function(message) {
+                compact_result <<- message
+                persist_session(thread_id, message$session_id)
+              }
+            )
+          }, error = function(error) {
+            finish_compact("error", paste0("Compact failed: ", conditionMessage(error)))
+          })
         })
       } else if (identical(id, "mcp")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
@@ -1972,10 +2955,9 @@ make_claude_handler <- function(options       = NULL,
   # 通过 attr 暴露给 assistantUIServer，在 session 结束时调用，防止长生命周期
   # Shiny session 不断新建线程导致子进程累积泄漏。
   cleanup <- function() {
-    .cleanup_claude_client_registry(
-      get_clients = function() clients,
-      clear_clients = function() clients <<- list()
-    )
+    usage_probe_manager$close()
+    retire_threads(names(clients), async = FALSE)
+    invisible(NULL)
   }
 
   handler_fn <- coro::async(function(
@@ -1986,9 +2968,44 @@ make_claude_handler <- function(options       = NULL,
     on_tool_call_start = NULL, on_tool_call_delta = NULL,
     on_auto_continue = NULL,
     on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
-    on_commands = NULL, on_warming = NULL,
-    ide_context = NULL, project = NULL
+    on_proactive_messages = NULL, on_proactive_task = NULL,
+    on_proactive_rate_limit = NULL, on_proactive_status = NULL,
+    on_commands = NULL, on_warming = NULL, on_run_phase = NULL,
+    ide_context = NULL, project = NULL, run_id = NULL,
+    continuation_kind = NULL
   ) {
+    continuation_kind <- .normalize_claude_continuation_kind(continuation_kind)
+    emit_run_phase <- function(stage) {
+      if (is.function(on_run_phase)) on_run_phase(stage)
+      invisible(NULL)
+    }
+    finish_cancelled_before_send <- function() {
+      if (!isTRUE(is_cancelled())) return(FALSE)
+      on_done()
+      TRUE
+    }
+    route <- route_for(thread_id)
+    existing_record <- consumer_records[[thread_id]]
+    if (!is.null(existing_record)) {
+      route$project <- existing_record$project
+    } else if (!is.null(project)) {
+      route$project <- canonical_project(project)
+    }
+    if (is.function(on_proactive_messages)) route$on_messages <- on_proactive_messages
+    if (is.function(on_proactive_task)) route$on_task <- on_proactive_task
+    if (is.function(on_proactive_rate_limit)) route$on_rate_limit <- on_proactive_rate_limit
+    if (is.function(on_proactive_status)) route$on_status <- on_proactive_status
+    if (!is.null(route$pending_messages) && is.function(route$on_messages)) {
+      pending <- route$pending_messages
+      route$pending_messages <- NULL
+      tryCatch(route$on_messages(
+        messages = pending$messages,
+        revision = pending$revision,
+        after_run_id = pending$after_run_id
+      ), error = function(error) {
+        route$pending_messages <- pending
+      })
+    }
     if (isTRUE(compact_in_progress[[thread_id]])) {
       on_error("Conversation compaction is still running; retry after it finishes")
       return(invisible(NULL))
@@ -1998,27 +3015,93 @@ make_claude_handler <- function(options       = NULL,
       return(invisible(NULL))
     }
     active_turns[[thread_id]] <<- TRUE
+    usage_generation <- as.integer(usage_generations[[thread_id]] %||% 0L) + 1L
+    usage_generations[[thread_id]] <<- usage_generation
     on.exit({
       active_turns[[thread_id]] <<- NULL
       flush_pending_client_reset()
     }, add = TRUE)
+    if (finish_cancelled_before_send()) return(invisible(NULL))
+
+    # A global model choice must settle before a cold client snapshots make_opts().
+    # Recheck because another switch can start while this coroutine is suspended.
+    repeat {
+      switch_state <- pending_model_switch(thread_id)
+      if (is.null(switch_state)) break
+      emit_run_phase("model-switch")
+      coro::await(switch_state$promise)
+    }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
 
     # 每线程冷启动:该线程尚无 client → connect() 要 spawn CLI 子进程 + initialize,
     # 首条消息慢。先发"冷启动中"信号,并【让出事件循环】使指示器在阻塞 connect 之前
     # 就渲染出来(否则 sendCustomMessage 会排到 connect 之后才 flush,指示器出现太晚)。
     cold <- is.null(clients[[thread_id]])
+    if (cold) emit_run_phase("cold-connect")
     if (cold && !is.null(on_warming)) {
       # resuming=TRUE 表示恢复已有 session（磁盘有映射）；否则是全新对话的冷启动。
       resuming <- !is.null(read_session_id(thread_id))
       on_warming(TRUE, resuming)
       coro::await(later_promise(0.05))
     }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
+    # The warming yield lets actions run, so check again immediately before
+    # make_opts() snapshots the global model for a cold client.
+    repeat {
+      switch_state <- pending_model_switch(thread_id)
+      if (is.null(switch_state)) break
+      emit_run_phase("model-switch")
+      coro::await(switch_state$promise)
+    }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
     client <- tryCatch(
       get_client(thread_id, project),
       error = function(e) { on_error(conditionMessage(e)); NULL }
     )
     if (cold && !is.null(on_warming)) on_warming(FALSE)  # 连上(或失败)即清除指示器
     if (is.null(client)) return(invisible(NULL))
+    if (finish_cancelled_before_send()) return(invisible(NULL))
+
+    # A model control request is settled by the transport's existing stdout
+    # dispatcher. Wait before taking the foreground consumer owner so this gate
+    # neither competes for stdout nor blocks a genuine proactive reconciliation.
+    repeat {
+      switch_state <- pending_model_switch(thread_id)
+      if (is.null(switch_state)) break
+      emit_run_phase("model-switch")
+      coro::await(switch_state$promise)
+    }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
+
+    record <- coordinator_for(thread_id, client, project)
+    owner_serial <<- owner_serial + 1L
+    foreground_owner <- paste0("foreground:", run_id %||% owner_serial, ":", owner_serial)
+    foreground_acquired <- FALSE
+    on.exit({
+      if (isTRUE(foreground_acquired)) {
+        record$coordinator$release(foreground_owner)
+        foreground_acquired <- FALSE
+      }
+    }, add = TRUE)
+    repeat {
+      emit_run_phase("consumer-acquire")
+      acquire_promise <- promises::promise(function(resolve, reject) {
+        record$coordinator$acquire(foreground_owner, function() {
+          foreground_acquired <<- TRUE
+          resolve(TRUE)
+        })
+      })
+      coro::await(acquire_promise)
+      if (finish_cancelled_before_send()) return(invisible(NULL))
+      switch_state <- pending_model_switch(thread_id)
+      if (is.null(switch_state)) break
+      record$coordinator$release(foreground_owner)
+      foreground_acquired <- FALSE
+      emit_run_phase("model-switch")
+      coro::await(switch_state$promise)
+    }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
+    emit_run_phase("sending")
 
     # #5 命令自动发现:每个 client 首次连接后拉一次 get_server_info(),把 CLI 真实
     # slash 命令 + output styles 推给 UI 填充 slash 面板(每线程只发一次)。
@@ -2031,6 +3114,7 @@ make_claude_handler <- function(options       = NULL,
         on_commands(cmds, styles)
       }, error = function(e) NULL)
     }
+    if (finish_cancelled_before_send()) return(invisible(NULL))
 
     atts <- attachments %||% list()
     img_parts <- lapply(
@@ -2046,7 +3130,9 @@ make_claude_handler <- function(options       = NULL,
 
     # Images ride as Anthropic content blocks; image-only sends omit the empty text
     # block (see .claude_message_content). send() accepts a string OR a block list.
+    if (finish_cancelled_before_send()) return(invisible(NULL))
     client$send(.claude_message_content(full_message, img_parts, doc_parts))
+    emit_run_phase("awaiting-model")
 
     interrupted              <- FALSE
     chunk_count              <- 0L
@@ -2055,15 +3141,19 @@ make_claude_handler <- function(options       = NULL,
     assistant_terminal_resolves_post_tool <- FALSE
     assistant_terminal_force_text <- ""
     assistant_stop_reason    <- NULL
+    thinking_content_seen    <- FALSE
     structured_tool_seen     <- FALSE
     tool_result_boundary_seen <- FALSE
     visible_text_seen        <- FALSE
     awaiting_post_tool_text  <- FALSE
     malformed_text_seen      <- FALSE
     terminal_error           <- NULL
+    terminal_result          <- NULL
+    usage_probe_start        <- NULL
     auto_continue_requested  <- FALSE
     auto_continue_notice     <- NULL
     auto_continue_prompt     <- NULL
+    auto_continue_kind       <- NULL
     intentional_deny         <- FALSE
     pending_tool_ids         <- character(0)
     tb                       <- new.env(parent = emptyenv())
@@ -2093,6 +3183,45 @@ make_claude_handler <- function(options       = NULL,
         rm(list = id, envir = pending_edit_calls)
       }
       invisible(NULL)
+    }
+    apply_permission_response <- function(callback, tool_call_id) {
+      response_error <- NULL
+      tryCatch(
+        callback(),
+        error = function(error) {
+          is_stale <- inherits(error, "claude_error_cli_connection") ||
+            grepl("^No pending permission request", conditionMessage(error))
+          if (!is_stale) stop(error)
+          response_error <<- error
+          invisible(NULL)
+        }
+      )
+      if (is.null(response_error)) return(TRUE)
+
+      # A permission request belongs to one live CLI transport. Reconnecting
+      # cannot safely replay it: the tool may already have been cancelled or
+      # partially handled. Retire only a connection-failed client so the next
+      # user turn can resume the stored SID with a fresh transport.
+      connection_closed <- inherits(response_error, "claude_error_cli_connection")
+      if (connection_closed && identical(clients[[thread_id]], client)) {
+        retire_threads(thread_id, async = FALSE)
+      }
+      remove_pending_edit_call(tool_call_id)
+      tool_result <- if (connection_closed) {
+        "Approval was not applied because the Claude connection closed; the tool was not run."
+      } else {
+        "Approval expired before it could be applied; the tool was not run."
+      }
+      on_tool_result(tool_call_id, tool_result, is_error = TRUE)
+      terminal_error <<- if (connection_closed) {
+        paste0(
+          "Claude connection closed while waiting for approval. ",
+          "The tool was not run; retry it after reconnecting."
+        )
+      } else {
+        "The approval request expired before it could be applied. The tool was not run; retry it."
+      }
+      FALSE
     }
 
     emit_guarded_text <- function(text, resolves_post_tool = TRUE) {
@@ -2176,7 +3305,9 @@ make_claude_handler <- function(options       = NULL,
         break
       }
 
-      msgs <- client$poll_messages()
+      next_message <- record$coordinator$poll_one(foreground_owner)
+      msgs <- list()
+      if (!is.null(next_message)) msgs <- list(next_message)
       if (length(msgs) == 0) {
         coro::await(later_promise(0.05)); next
       }
@@ -2186,6 +3317,7 @@ make_claude_handler <- function(options       = NULL,
       for (msg in msgs) {
         if (interrupted) {
           if (inherits(msg, "ResultMessage")) {
+            terminal_result <- msg
             persist_session(thread_id, msg$session_id)
             drain_done <- TRUE; break
           }
@@ -2198,8 +3330,10 @@ make_claude_handler <- function(options       = NULL,
           delta <- evt[["delta"]]
           bidx  <- as.character(evt[["index"]] %||% "")
           parent <- msg[["parent_tool_use_id"]]  # 子agent工具的父 Task 调用 id(用于嵌套缩进)
+          parented <- !is.null(parent) && length(parent) > 0L &&
+            !is.na(parent[[1L]]) && nzchar(as.character(parent[[1L]]))
 
-          if (identical(etype, "message_delta")) {
+          if (!parented && identical(etype, "message_delta")) {
             assistant_stop_reason <- delta[["stop_reason"]] %||%
               evt[["message"]][["stop_reason"]] %||% assistant_stop_reason
           } else if (identical(etype, "content_block_start")) {
@@ -2233,12 +3367,14 @@ make_claude_handler <- function(options       = NULL,
                 on_tool_call_delta(tool_call_id=tb[[bidx]]$id, delta=delta[["partial_json"]])
             }
 
-            if (identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
+            if (!parented && identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
               text_guard$push(delta[["text"]])
               malformed_text_seen <- isTRUE(text_guard$malformed_seen())
             }
-            if (identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% ""))
+            if (!parented && identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% "")) {
+              thinking_content_seen <- TRUE
               on_thinking(delta[["thinking"]])
+            }
 
           } else if (identical(etype, "content_block_stop") && nzchar(bidx) && !is.null(tb[[bidx]])) {
             blk <- tb[[bidx]]
@@ -2299,12 +3435,21 @@ make_claude_handler <- function(options       = NULL,
           }
 
         } else if (inherits(msg, "AssistantMessage")) {
+          assistant_parent <- msg[["parent_tool_use_id"]]
+          assistant_parented <- !is.null(assistant_parent) &&
+            length(assistant_parent) > 0L && !is.na(assistant_parent[[1L]]) &&
+            nzchar(as.character(assistant_parent[[1L]]))
+          if (assistant_parented) next
           assistant_stop_reason <- msg$stop_reason %||% assistant_stop_reason
           assistant_text_so_far <- ""
           message_resolves_post_tool <- FALSE
           message_force_text <- FALSE
           for (block in msg$content %||% list()) {
-            if (inherits(block, "ToolUseBlock") ||
+            if (inherits(block, "ThinkingBlock")) {
+              thinking_content_seen <- TRUE
+              thinking_text <- block$thinking %||% ""
+              if (nzchar(thinking_text)) on_thinking(thinking_text)
+            } else if (inherits(block, "ToolUseBlock") ||
                 inherits(block, "ServerToolUseBlock")) {
               mark_structured_tool()
               message_resolves_post_tool <- FALSE
@@ -2328,9 +3473,10 @@ make_claude_handler <- function(options       = NULL,
               }
             }
           }
-          # Some backend/image turns deliver final AssistantMessage content without
-          # partial StreamEvent text deltas. Buffer it and emit only at ResultMessage
-          # when chunk_count is still zero, so normal streaming never duplicates text.
+          # Some backend/image and post-Agent rounds deliver a complete top-level
+          # AssistantMessage without partial StreamEvent text deltas. Keep the
+          # snapshot for terminal reconciliation, but deliver its safe missing
+          # suffix now instead of waiting for a later ResultMessage.
           final_text <- .claude_assistant_text(msg)
           if (nzchar(final_text) &&
               (length(assistant_terminal_parts) == 0L ||
@@ -2341,6 +3487,40 @@ make_claude_handler <- function(options       = NULL,
             assistant_terminal_resolves_post_tool <- TRUE
             if (isTRUE(message_force_text)) {
               assistant_terminal_force_text <- final_text
+            }
+          }
+          if (nzchar(final_text)) {
+            # A complete AssistantMessage closes any partial text-guard buffer.
+            # This preserves stream order before suffix comparison.
+            text_guard$finish()
+            malformed_text_seen <- malformed_text_seen ||
+              isTRUE(text_guard$malformed_seen())
+            filtered_final <- .claude_filter_complete_text(final_text)
+            malformed_text_seen <- malformed_text_seen ||
+              isTRUE(filtered_final$malformed)
+            immediate_protocol_violation <- !structured_tool_seen &&
+              (isTRUE(filtered_final$malformed) ||
+               identical(assistant_stop_reason, "tool_use"))
+            if (!immediate_protocol_violation && nzchar(filtered_final$text)) {
+              missing_text <- .claude_terminal_suffix(
+                streamed_text,
+                filtered_final$text
+              )
+              if (nzchar(missing_text)) {
+                emit_guarded_text(
+                  missing_text,
+                  resolves_post_tool = message_resolves_post_tool
+                )
+              }
+              if (awaiting_post_tool_text &&
+                  isTRUE(message_resolves_post_tool) &&
+                  !nzchar(missing_text) &&
+                  isTRUE(message_force_text)) {
+                emit_guarded_text(
+                  filtered_final$text,
+                  resolves_post_tool = TRUE
+                )
+              }
             }
           }
 
@@ -2422,37 +3602,50 @@ make_claude_handler <- function(options       = NULL,
             if (!is.null(decision$answers) && length(decision$answers)) {
               decision_record <- list(status = "approved", answers = decision$answers)
             }
-            .record_tool_decision(decisions_path, tuid, decision_record)
+            approval_applied <- FALSE
             # Plan 47 B:交互表单收集的值合并进 effective tool input 经 updated_input 回传。
             if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
               ui <- utils::modifyList(effective_tool_input %||% list(), decision$updatedInput)
               update_edit_effective_args(tuid, ui)
-              client$approve_tool(msg$request_id, updated_input = ui)
-              pending_tool_ids <- c(pending_tool_ids, tuid)
-            } else
-            # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
-            if (!is.null(decision$answers) && length(decision$answers)) {
+              approval_applied <- apply_permission_response(
+                function() client$approve_tool(msg$request_id, updated_input = ui),
+                tuid
+              )
+            } else if (!is.null(decision$answers) && length(decision$answers)) {
+              # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
               ui <- effective_tool_input %||% list()
               ui$answers <- decision$answers
               update_edit_effective_args(tuid, ui)
-              client$approve_tool(msg$request_id, updated_input = ui)
-              pending_tool_ids <- c(pending_tool_ids, tuid)
+              approval_applied <- apply_permission_response(
+                function() client$approve_tool(msg$request_id, updated_input = ui),
+                tuid
+              )
             } else {
-            # "Always allow" 多选:suggestionIdxs 数组(新);兼容单个 suggestionIdx。
-            idxs <- decision$suggestionIdxs
-            if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
-            idxs <- suppressWarnings(as.integer(unlist(idxs)))
-            n_sug <- length(msg$suggestions)
-            idxs <- unique(idxs[!is.na(idxs) & idxs >= 0 & idxs < n_sug])
-            perms <- Filter(Negate(is.null), lapply(idxs, function(i)
-              .claude_suggestion_to_perm(msg$suggestions[[i + 1L]])))
-            if (length(perms)) {
-              client$approve_tool(msg$request_id, updated_permissions = perms)
-            } else {
-              client$approve_tool(msg$request_id)
+              # "Always allow" 多选:suggestionIdxs 数组(新);兼容单个 suggestionIdx。
+              idxs <- decision$suggestionIdxs
+              if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
+              idxs <- suppressWarnings(as.integer(unlist(idxs)))
+              n_sug <- length(msg$suggestions)
+              idxs <- unique(idxs[!is.na(idxs) & idxs >= 0 & idxs < n_sug])
+              perms <- Filter(Negate(is.null), lapply(idxs, function(i)
+                .claude_suggestion_to_perm(msg$suggestions[[i + 1L]])))
+              approval_applied <- apply_permission_response(
+                function() {
+                  if (length(perms)) {
+                    client$approve_tool(msg$request_id, updated_permissions = perms)
+                  } else {
+                    client$approve_tool(msg$request_id)
+                  }
+                },
+                tuid
+              )
             }
+            if (!isTRUE(approval_applied)) {
+              done <- TRUE
+              break
+            }
+            .record_tool_decision(decisions_path, tuid, decision_record)
             pending_tool_ids <- c(pending_tool_ids, tuid)
-            }
           } else {
             # 纯 Deny(无留言)= 拒绝并【中断】agent —— 用户说"不",就停下,避免 Claude
             # 自行继续 / 反复用别的工具重问审批(interrupt=TRUE)。
@@ -2462,8 +3655,18 @@ make_claude_handler <- function(options       = NULL,
             deny_msg <- "Denied by user"
             if (has_msg) deny_msg <- decision$customMessage
             if (!has_msg) intentional_deny <- TRUE
+            denial_applied <- apply_permission_response(
+              function() client$deny_tool(
+                msg$request_id, deny_msg, interrupt = !has_msg
+              ),
+              tuid
+            )
+            if (!isTRUE(denial_applied)) {
+              intentional_deny <- FALSE
+              done <- TRUE
+              break
+            }
             .record_tool_decision(decisions_path, tuid, "denied")
-            client$deny_tool(msg$request_id, deny_msg, interrupt = !has_msg)
             on_tool_result(tuid, deny_msg, is_error = TRUE)
             if (!has_msg) {
               interrupted <- TRUE
@@ -2475,6 +3678,7 @@ make_claude_handler <- function(options       = NULL,
           }
 
         } else if (inherits(msg, "ResultMessage")) {
+          terminal_result <- msg
           result_is_error <- isTRUE(msg$is_error)
           text_guard$finish()
           malformed_text_seen <- malformed_text_seen ||
@@ -2563,17 +3767,27 @@ make_claude_handler <- function(options       = NULL,
                   )
                 }
               }
+              terminal_kind <- .claude_terminal_kind(
+                thinking_content_seen,
+                visible_text_seen,
+                structured_tool_seen,
+                stop_reason,
+                result_text
+              )
               if (!identical(message, "/reload-skills")) {
-                is_tool_recovery <- identical(message, .CLAUDE_AUTO_CONTINUE_PROMPT)
-                is_generic_recovery <- identical(message, .CLAUDE_EMPTY_RESPONSE_PROMPT)
+                is_tool_recovery <- identical(continuation_kind, "tool-postlude")
+                is_generic_recovery <- identical(continuation_kind, "generic")
+                is_minimal_recovery <- identical(continuation_kind, "minimal")
+                is_recovery <- is_tool_recovery || is_generic_recovery ||
+                  is_minimal_recovery
                 if (awaiting_post_tool_text) {
-                  # A recovery turn that starts another tool must not recursively
-                  # create a fresh tool-postlude recovery chain.
-                  if (is.function(on_auto_continue) &&
-                      !is_tool_recovery && !is_generic_recovery) {
+                  # Any recovery that starts another tool must fail closed rather
+                  # than recursively creating a fresh tool-postlude chain.
+                  if (is.function(on_auto_continue) && !is_recovery) {
                     auto_continue_requested <- TRUE
                     auto_continue_notice <- .CLAUDE_AUTO_CONTINUE_NOTICE
                     auto_continue_prompt <- .CLAUDE_AUTO_CONTINUE_PROMPT
+                    auto_continue_kind <- "tool-postlude"
                   } else {
                     terminal_error <- paste0(
                       "Upstream ended after a tool call without a final ",
@@ -2581,18 +3795,34 @@ make_claude_handler <- function(options       = NULL,
                     )
                   }
                 } else if (!visible_text_seen) {
-                  # Ordinary thinking-only turns and a thinking-only tool recovery
-                  # each get one generic recovery. The generic prompt cannot retry
-                  # itself, bounding a tool path to at most two continuations.
-                  if (is.function(on_auto_continue) && !is_generic_recovery) {
+                  # Ordinary and tool-postlude no-visible successes advance to
+                  # generic. Generic advances once to the exact user-proven
+                  # minimal prompt; minimal is the hard bound.
+                  if (is.function(on_auto_continue) &&
+                      (!is_recovery || is_tool_recovery)) {
                     auto_continue_requested <- TRUE
                     auto_continue_notice <- .CLAUDE_EMPTY_RESPONSE_NOTICE
                     auto_continue_prompt <- .CLAUDE_EMPTY_RESPONSE_PROMPT
-                  } else if (is_generic_recovery) {
-                    terminal_error <- paste0(
-                      "Automatic continuation also ended without a user-visible ",
-                      "response. Please retry the request."
-                    )
+                    auto_continue_kind <- "generic"
+                  } else if (is.function(on_auto_continue) && is_generic_recovery) {
+                    auto_continue_requested <- TRUE
+                    auto_continue_notice <- .CLAUDE_MINIMAL_CONTINUE_NOTICE
+                    auto_continue_prompt <- .CLAUDE_MINIMAL_CONTINUE_PROMPT
+                    auto_continue_kind <- "minimal"
+                  } else if (is_minimal_recovery) {
+                    if (identical(terminal_kind, "thinking_only_end_turn")) {
+                      terminal_error <- paste0(
+                        "Claude ended with a thinking-only response at end_turn ",
+                        "after bounded automatic continuation recovery. No tool call was ",
+                        "inferred or executed from thinking text. Please retry ",
+                        "the request, run /compact, or switch model."
+                      )
+                    } else {
+                      terminal_error <- paste0(
+                        "Automatic continuation also ended without a user-visible ",
+                        "response. Please retry the request."
+                      )
+                    }
                   } else {
                     terminal_error <- paste0(
                       "Upstream ended without a user-visible response. ",
@@ -2608,6 +3838,12 @@ make_claude_handler <- function(options       = NULL,
           pending_tool_ids <- character(0)
           flush_tool_blocks(mark_completed = TRUE)
           if (identical(message, "/reload-skills") && !result_is_error && is.null(terminal_error)) {
+            reload_project <- record$project
+            record$coordinator$invalidate()
+            record$reconciler$invalidate()
+            if (identical(consumer_records[[thread_id]], record)) {
+              consumer_records[[thread_id]] <<- NULL
+            }
             client <- .claude_reload_skills_thread(
               thread_id = thread_id,
               result = msg,
@@ -2620,7 +3856,9 @@ make_claude_handler <- function(options       = NULL,
               disconnect_client = .disconnect_claude_client_safely,
               resume_client = function(id, sid) {
                 strict_resume_sids[[id]] <<- sid
-                resumed <- connect_new_client(id, make_opts(id, sid))
+                resumed <- connect_new_client(
+                  id, make_opts(id, sid, project = reload_project)
+                )
                 strict_resume_sids[[id]] <<- NULL
                 resumed
               },
@@ -2628,6 +3866,7 @@ make_claude_handler <- function(options       = NULL,
                 if (!is.null(on_commands)) on_commands(commands, output_styles)
               }
             )
+            record <- coordinator_for(thread_id, client, reload_project)
             commands_discovered[[thread_id]] <<- TRUE
           } else {
             persist_session(thread_id, msg$session_id)
@@ -2644,31 +3883,52 @@ make_claude_handler <- function(options       = NULL,
             model_name <- tryCatch({
               if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
             }, error = function(e) NULL)
-            cw0 <- NULL
-            u_cost <- msg$total_cost_usd; u_turns <- msg$num_turns; u_dur <- msg$duration_ms
-            # 环要显示"当前上下文占用"(≠累计吞吐 tokens),用 get_context_usage()(与 /context 同源)。
-            # 它是同步控制请求,【不能内联】——会把本轮"完成/停转圈"推迟一个往返、短暂卡主循环。
-            # 故用 later 延后一拍在后台拉取并悄悄刷新环:本轮立即 on_done、用户可继续敲字/发送,
-            # 环随后默默更新。get_context_usage 失败(早期/不支持)→ context_tokens 留空,前端回落
-            # 到 tokens。coro async 体内用普通语句(不写 `x <- if`)。
-            refresh_usage <- function() {
-              ctx <- tryCatch(client$get_context_usage(), error = function(e) NULL)
-              context_tokens <- tryCatch(as.numeric(.context_usage_field(ctx, "totalTokens", "total_tokens")),
-                                         error = function(e) NULL)
-              if (length(context_tokens) != 1L || is.na(context_tokens)) context_tokens <- NULL
-              ctx_max <- tryCatch(as.numeric(.context_usage_field(ctx, "rawMaxTokens", "raw_max_tokens") %||%
-                                               .context_usage_field(ctx, "maxTokens", "max_tokens")),
-                                  error = function(e) NULL)
-              # B:窗口只用 get_context_usage 的真实值(rawMaxTokens 优先);拿不到 → NULL,
-              # 前端不显示环(绝不猜 200k/1M)。context_tokens 同理缺失即不显示。
-              cw <- cw0
-              if (length(ctx_max) == 1L && !is.na(ctx_max) && ctx_max > 0) cw <- as.integer(ctx_max)
-              tryCatch(on_usage(cost_usd = u_cost, tokens = tokens, context_tokens = context_tokens,
-                                turns = u_turns, duration_ms = u_dur,
-                                model = model_name, context_window = cw), error = function(e) NULL)
+            u_cost <- msg$total_cost_usd
+            u_turns <- msg$num_turns
+            u_dur <- msg$duration_ms
+            # ResultMessage usage is available now and must be published before
+            # completion. Context occupancy is a distinct value; leave it
+            # unknown unless the non-blocking async probe supplies it later.
+            publish_usage <- function(context_tokens, context_window) {
+              tryCatch(
+                on_usage(
+                  cost_usd = u_cost,
+                  tokens = tokens,
+                  context_tokens = context_tokens,
+                  turns = u_turns,
+                  duration_ms = u_dur,
+                  model = model_name,
+                  context_window = context_window
+                ),
+                error = function(e) NULL
+              )
             }
-            if (requireNamespace("later", quietly = TRUE)) later::later(refresh_usage, 0.05) else refresh_usage()
+            publish_usage(NULL, NULL)
+            async_usage <- tryCatch(
+              client$get_context_usage_async,
+              error = function(error) NULL
+            )
+            async_args <- NULL
+            if (is.function(async_usage)) {
+              async_args <- tryCatch(
+                names(formals(async_usage)),
+                error = function(error) NULL
+              )
+            }
+            if (is.function(async_usage) &&
+                all(c("on_fulfilled", "on_rejected") %in% async_args)) {
+              usage_probe_start <- function() {
+                usage_probe_manager$request(
+                  thread_id,
+                  client,
+                  record,
+                  usage_generation,
+                  publish_usage
+                )
+              }
+            }
           }
+          emit_run_phase("finalizing")
           done <- TRUE; break
 
         # #2 子agent/Task 进度(system 子类型消息)。
@@ -2720,19 +3980,110 @@ make_claude_handler <- function(options       = NULL,
       coro::await(later_promise(0.01))
     }
 
+    terminal_sid <- tryCatch(
+      terminal_result$session_id %||% terminal_result$sessionId %||% read_session_id(thread_id),
+      error = function(error) read_session_id(thread_id)
+    )
+    if (!is.null(terminal_sid) && length(terminal_sid) &&
+        !is.na(terminal_sid[[1L]]) && nzchar(as.character(terminal_sid[[1L]]))) {
+      terminal_sid <- as.character(terminal_sid[[1L]])
+      if (isTRUE(route$proactive_published)) {
+        reconciliation <- promises::promise(function(resolve, reject) {
+          tryCatch(
+            record$reconciler$reconcile(
+              thread_id = thread_id,
+              session_id = terminal_sid,
+              project = record$project,
+              after_run_id = run_id,
+              must_advance = TRUE,
+              is_current = function() identical(consumer_records[[thread_id]], record),
+              on_complete = function(ok, reason = NULL) {
+                resolve(list(ok = ok, reason = reason))
+              }
+            ),
+            error = function(error) resolve(list(ok = FALSE, reason = error))
+          )
+        })
+        reconciliation <- coro::await(reconciliation)
+        if (!isTRUE(reconciliation$ok) && is.null(terminal_error)) {
+          terminal_error <- paste0(
+            "Transcript reconciliation failed: ",
+            conditionMessage(reconciliation$reason %||% simpleError("unknown error"))
+          )
+        }
+      } else {
+        tryCatch(
+          record$reconciler$baseline(
+            thread_id, terminal_sid, record$project
+          ),
+          error = function(error) NULL
+        )
+      }
+    }
+    if (!is.null(run_id) && length(run_id) && !is.na(run_id[[1L]]) &&
+        nzchar(as.character(run_id[[1L]]))) {
+      route$last_run_id <- as.character(run_id[[1L]])
+    }
+
     if (!is.null(terminal_error)) {
       on_error(terminal_error)
     } else {
       if (isTRUE(auto_continue_requested)) {
-        on_auto_continue(
+        .call_compatible_callback(on_auto_continue, list(
           notice = auto_continue_notice,
-          prompt = auto_continue_prompt
-        )
+          prompt = auto_continue_prompt,
+          kind = auto_continue_kind
+        ))
       }
       on_done()
     }
+    if (is.function(usage_probe_start)) {
+      usage_probe_start()
+    }
+    invisible(NULL)
   })
 
+  attr(handler_fn, "performance_snapshot") <- function() {
+    non_null_count <- function(values) {
+      as.integer(sum(vapply(values, function(value) !is.null(value), logical(1))))
+    }
+    true_count <- function(values) {
+      as.integer(sum(vapply(values, isTRUE, logical(1))))
+    }
+    thread_ids <- sort(unique(c(names(clients), names(consumer_records))))
+    threads <- lapply(thread_ids, function(thread_id) {
+      record <- consumer_records[[thread_id]]
+      coordinator_metrics <- if (!is.null(record) &&
+          is.function(record$coordinator$metrics)) {
+        record$coordinator$metrics()
+      } else {
+        NULL
+      }
+      list(
+        connected = !is.null(clients[[thread_id]]),
+        coordinator = coordinator_metrics
+      )
+    })
+    names(threads) <- thread_ids
+    pending_switches <- as.integer(sum(vapply(
+      model_switches,
+      function(state) !is.null(state) && !isTRUE(state$settled),
+      logical(1)
+    )))
+    list(
+      captured_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3%z"),
+      connected_clients = non_null_count(clients),
+      coordinators = non_null_count(consumer_records),
+      active_turns = true_count(active_turns),
+      compacting_threads = true_count(compact_in_progress),
+      pending_model_switches = pending_switches,
+      usage_probes_pending = as.integer(usage_probe_manager$pending_count()),
+      transcript_reconcilers = non_null_count(transcript_reconcilers),
+      persistent_routes = non_null_count(persistent_routes),
+      reset_pending = isTRUE(reset_clients_pending),
+      threads = threads
+    )
+  }
   attr(handler_fn, "cleanup") <- cleanup
   attr(handler_fn, "supports_concurrent_threads") <- TRUE
   attr(handler_fn, "action_handler") <- claude_action
@@ -2746,13 +4097,16 @@ make_claude_handler <- function(options       = NULL,
       options = thinking_options
     ),
     model = list(
-      value = model_state$value,
+      value = initial_model,
       options = model_options
     )
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
   attr(handler_fn, "warmup") <- function(thread_id, project = NULL) {
-    get_client(thread_id, project)
+    client <- get_client(thread_id, project)
+    coordinator_for(thread_id, client, project)$coordinator$start_idle(
+      .claude_idle_start_delay_seconds()
+    )
     invisible(NULL)
   }
   attr(handler_fn, "record_tool_metadata") <- function(

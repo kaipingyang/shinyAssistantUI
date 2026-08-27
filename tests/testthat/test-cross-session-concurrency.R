@@ -383,3 +383,50 @@ test_that("active cancel emits a settled done and the same thread can run again"
     expect_identical(entered, c("first", "second"))
   })
 })
+
+
+test_that("run stages are additive and metadata cannot start streaming", {
+  sent <- list()
+  handler <- function(message, on_chunk, on_done, on_warming, on_commands,
+                      on_usage, on_status, on_run_phase) {
+    on_run_phase("sending")
+    on_warming(FALSE)
+    on_commands(list(), list())
+    on_usage(tokens = 1L)
+    on_status("init", "Initializing")
+    on_chunk("one")
+    on_chunk("two")
+    on_run_phase("finalizing")
+    on_done()
+  }
+  attr(handler, "supports_concurrent_threads") <- TRUE
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler)
+  }, {
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
+    submit_plan67(session, "A", "stages", "run-stages")
+    drain_plan67_loop()
+    expect_true(any(vapply(
+      sent, function(item) identical(item$type, "chat_input:done"), logical(1)
+    )))
+
+    states <- lapply(Filter(
+      function(item) identical(item$type, "chat_input:run-state"), sent
+    ), `[[`, "message")
+    running_stream <- Filter(function(state) {
+      identical(state$phase, "running") && identical(state$stage, "streaming")
+    }, states)
+    expect_length(running_stream, 1L)
+    expect_true(any(vapply(states, function(state) {
+      identical(state$phase, "connecting") && identical(state$stage, "sending")
+    }, logical(1))))
+    expect_true(any(vapply(states, function(state) {
+      identical(state$phase, "running") && identical(state$stage, "finalizing")
+    }, logical(1))))
+    expect_identical(states[[length(states)]]$phase, "complete")
+    expect_null(states[[length(states)]]$stage)
+  })
+})

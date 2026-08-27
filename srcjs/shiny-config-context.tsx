@@ -38,6 +38,9 @@ export interface ThinkingState {
 export interface ModelState {
   value: string;
   options: PermissionModeOption[];
+  pending: boolean;
+  requested: string | null;
+  error: string | null;
   setValue: (value: string) => void;
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
@@ -64,6 +67,8 @@ export interface ShinyConfigCtx {
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void;
+  /** Increments whenever runtime accepts a new ordinary user submission. */
+  submissionRevision?: number;
   onRunInConsole?: (code: string) => void;
   blockingAction?: {
     kind: "compact";
@@ -107,6 +112,9 @@ export interface ShinyConfigCtx {
   warming?: boolean;
   warmingResuming?: boolean;
   runPhase?: "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
+  runStage?: "submitting" | "model-switch" | "cold-connect" | "consumer-acquire" | "sending" | "awaiting-model" | "streaming" | "finalizing";
+  runQueuePosition?: number;
+  cancelRun?: () => void;
   /** Cold-start indicator text (English default "Starting…"); backend-specific override. */
   warmingLabel?: string;
   /** Empty-state welcome greeting (default "How can I help you today?"). */
