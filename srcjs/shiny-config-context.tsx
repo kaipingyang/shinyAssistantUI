@@ -126,6 +126,8 @@ export interface ShinyConfigCtx {
   sidebarCollapsed?: boolean;
   // ── 工作目录选择器（addin）──
   workingDir?: string;
+  /** Current project's Git branch; absent for non-Git directories. */
+  gitBranch?: string;
   recentDirs?: string[];
   nativePicker?: boolean;
   pickWorkingDir?: () => void;

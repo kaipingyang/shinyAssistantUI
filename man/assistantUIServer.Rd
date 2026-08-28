@@ -26,6 +26,8 @@ assistantUIServer(
   on_delete_session = NULL,
   workspace_mode = FALSE,
   working_dir = NULL,
+  git_branch = NULL,
+  git_branch_provider = NULL,
   native_picker = FALSE,
   on_pick_working_dir = NULL,
   on_set_working_dir = NULL,
@@ -247,6 +249,13 @@ callback signatures. Defaults to \code{FALSE}.}
 \item{working_dir}{Optional initial working directory shown in the
 working-directory picker (addin).}
 
+\item{git_branch}{Optional initial Git branch label shown below the composer.
+Use \code{NULL} for non-Git directories so no branch element is rendered.}
+
+\item{git_branch_provider}{Optional function accepting \code{project} and returning
+its current branch label, or \code{NULL} outside Git. It is sampled after run
+completion, error, and cancellation so the composer metadata stays current.}
+
 \item{native_picker}{Logical; whether a native directory chooser is available
 (RStudio addin).}
 
@@ -389,11 +398,11 @@ instead of an inline panel.}
 \code{warmup} attribute (e.g. \code{\link[=make_claude_handler]{make_claude_handler()}}), pre-connect the initial
 thread's client on mount so the \strong{first} message on that thread isn't slowed
 by the cold start (ClaudeSDKClient spawning the \code{claude} CLI subprocess).
-Historical sessions are warmed independently after \code{send_thread()} succeeds,
-regardless of this option; their warmups are deduplicated per thread and a
-failed warmup may be retried on a later load. A brief cold-start indicator is
-shown while connecting. Newly created blank threads remain lazy unless they
-are the initial thread covered by this one-shot option.
+Historical session browsing is transcript-only and never enters the warmup
+queue; the first explicit send on a historical thread lazily connects and
+resumes its saved backend session. A brief cold-start indicator is shown
+while connecting. Newly created blank threads remain lazy unless they are
+the initial thread covered by this one-shot option.
 \strong{Left \code{FALSE} by default on purpose}: enabling it makes app startup attempt
 a backend connection at mount, so a slow/unreachable backend would stall the
 open (the default lazy connect only happens on the first message). Turn on

@@ -44,6 +44,9 @@ test_that("model action commits only after async acknowledgement", {
 
   expect_length(sync_calls, 0L)
   expect_identical(pending$model, "sonnet")
+  # A healthy first CLI acknowledgement can arrive just beyond the SDK's
+  # legacy five-second default on a cold or loaded backend.
+  expect_identical(pending$timeout_ms, 30000L)
   expect_false(any(vapply(results, function(item) identical(item$status, "ok"), logical(1))))
 
   pending$resolve(list())

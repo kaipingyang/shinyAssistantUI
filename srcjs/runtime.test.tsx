@@ -155,6 +155,24 @@ describe("useShinyRuntime — per-thread composer drafts", () => {
     expect(result.current.runtime.thread.composer.getState().text).toBe("");
   });
 
+  it("accepts Git branch updates only for the selected project", async () => {
+    const { result } = setup({ working_dir: "/project/a", git_branch: "main" });
+    expect(result.current.gitBranch).toBe("main");
+
+    await fireR("git-branch", { project: "/project/old", branch: "stale" });
+    expect(result.current.gitBranch).toBe("main");
+
+    await fireR("working-dir", { dir: "/project/b", recent: [] });
+    expect(result.current.gitBranch).toBeUndefined();
+    await fireR("git-branch", { project: "/project/a", branch: "late-main" });
+    expect(result.current.gitBranch).toBeUndefined();
+
+    await fireR("git-branch", { project: "/project/b", branch: "feature/b" });
+    expect(result.current.gitBranch).toBe("feature/b");
+    await fireR("git-branch", { project: "/project/b", branch: null });
+    expect(result.current.gitBranch).toBeUndefined();
+  });
+
   it("does not resurrect a submitted local slash action", async () => {
     const { result } = setup({
       action_items: [{ id: "context", command: "context", label: "Context" }],
@@ -761,6 +779,34 @@ describe("useShinyRuntime — tool 流式三段", () => {
       .find((p) => p.type === "tool-call" && p.toolCallId === "tc-no-start");
     expect(noStart.timing?.startedAt).toEqual(expect.any(Number));
     expect(noStart.timing?.completedAt).toBeUndefined();
+  });
+
+  it("keeps the thread callback route after done for associated background approval", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("start background task");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    await fireR("chunk", { text: "foreground complete", threadId: tid });
+    await fireR("done", { threadId: tid });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    await fireR("chunk", { text: "late chunk must be ignored", threadId: tid });
+    expect(JSON.stringify(messages(result))).not.toContain("late chunk must be ignored");
+
+    await fireR("tool-call", {
+      toolCallId: "associated-after-done",
+      toolName: "Bash",
+      args: { command: "echo safe" },
+      argsText: "{\"command\":\"echo safe\"}",
+      annotations: { requiresApproval: true },
+      threadId: tid,
+    });
+
+    const approval = messages(result)
+      .flatMap((message) => (message.content as any[]) ?? [])
+      .find((part) => part.type === "tool-call" && part.toolCallId === "associated-after-done");
+    expect(approval?.artifact?.requiresApproval).toBe(true);
   });
 
   it("projects growing Write Markdown args before the final canonical tool-call", async () => {

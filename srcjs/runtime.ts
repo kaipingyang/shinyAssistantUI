@@ -380,6 +380,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [workingDir, setWorkingDirState] = useState<string>(
     () => initialSelectedProject,
   );
+  const [gitBranch, setGitBranch] = useState<string | undefined>(
+    () => typeof config?.git_branch === "string" && config.git_branch.length > 0
+      ? config.git_branch
+      : undefined,
+  );
   workingDirRef.current = workingDir;
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const nativePicker = config?.native_picker === true;
@@ -1290,6 +1295,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (typeof d?.dir === "string") {
         workingDirRef.current = d.dir;
         setWorkingDirState(d.dir);
+        setGitBranch(undefined);
         if (workspaceMode) {
           setWorkspaceProjectOrder((previous) =>
             previous.includes(d.dir!) ? previous : [d.dir!, ...previous]
@@ -1305,6 +1311,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         runtimeRef.current?.thread.composer.setText("");
         thisSessionThreadIds.current.clear();
       }
+    });
+    bridge.current.onGitBranch((data) => {
+      if (typeof data?.project !== "string" ||
+          data.project !== workingDirRef.current) return;
+      setGitBranch(
+        typeof data.branch === "string" && data.branch.length > 0
+          ? data.branch
+          : undefined,
+      );
     });
     bridge.current.onProjects((d) => {
       if (Array.isArray(d?.projects)) setProjects(d.projects as string[]);
@@ -1928,7 +1943,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             delete activeTaskRunIdsRef.current[threadId];
             clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
-            bridge.current.setRunCallbacks(threadId, null);
+            bridge.current.retireRunCallbacks(threadId);
           }
           advancePendingSubmissionsRef.current(threadId, runId, true);
           setMessagesMap((prev) => {
@@ -1961,7 +1976,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             delete activeTaskRunIdsRef.current[threadId];
             clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
-            bridge.current.setRunCallbacks(threadId, null);
+            bridge.current.retireRunCallbacks(threadId);
           }
           advancePendingSubmissionsRef.current(threadId, runId, false);
           if (proactiveAfterRunRef.current.get(threadId)?.afterRunId === runId) {
@@ -2671,6 +2686,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (workspaceMode && project && project !== workingDirRef.current) {
           workingDirRef.current = project;
           setWorkingDirState(project);
+          setGitBranch(undefined);
           bridge.current.sendSetWorkingDir(project);
         }
         // 注意：不在切换线程时清空 callbacks——正在运行的流应继续完成
@@ -2942,6 +2958,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     searchWorkspace,
     // 工作目录选择器（addin）
     workingDir,
+    gitBranch,
     recentDirs,
     nativePicker,
     pickWorkingDir: () => bridge.current.sendPickWorkingDir(),
@@ -2949,6 +2966,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (workspaceMode) {
         workingDirRef.current = path;
         setWorkingDirState(path);
+        setGitBranch(undefined);
         setWorkspaceProjectOrder((previous) =>
           previous.includes(path) ? previous : [path, ...previous]
         );

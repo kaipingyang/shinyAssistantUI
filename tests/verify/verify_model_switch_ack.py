@@ -123,12 +123,31 @@ async def main(url: str) -> None:
                 timeout=15000,
             )
             ack_elapsed = time.monotonic() - started
+            sonnet_committed = "sonnet" in (await model_trigger.inner_text()).lower()
             await page.wait_for_function(
                 "[...document.querySelectorAll('[data-role=assistant]')]"
                 ".some(e=>e.innerText.includes('MODEL_SWITCH_ACK_OK'))",
                 timeout=75000,
             )
             elapsed = time.monotonic() - started
+
+            # Verify the canonical default value through the same acknowledged path.
+            await model_trigger.click()
+            await content.wait_for(state="visible", timeout=10000)
+            default_item = content.locator(
+                '[data-slot="model-selector-item"]', has_text="Default"
+            ).first
+            await default_item.wait_for(state="visible", timeout=10000)
+            default_started = time.monotonic()
+            await default_item.click()
+            await page.wait_for_function(
+                "(document.querySelector('[data-slot=model-selector-trigger]')?.innerText||'')"
+                ".toLowerCase().includes('default')",
+                timeout=30000,
+            )
+            default_ack_elapsed = time.monotonic() - default_started
+            default_committed = "default" in (await model_trigger.inner_text()).lower()
+
             body_text = await page.locator("body").inner_text()
             websocket_open = await page.evaluate(
                 "Boolean(window.Shiny?.shinyapp?.$socket) && "
@@ -154,7 +173,12 @@ async def main(url: str) -> None:
             finalizing_ms = finalizing_events[0]["at"] if finalizing_events else None
 
             check("prompt accepted immediately", True)
-            check("model acknowledgement committed", "sonnet" in (await model_trigger.inner_text()).lower(), f"ack={ack_elapsed:.3f}s")
+            check("model acknowledgement committed", sonnet_committed, f"ack={ack_elapsed:.3f}s")
+            check(
+                "default model acknowledgement committed",
+                default_committed,
+                f"ack={default_ack_elapsed:.3f}s",
+            )
             check("model acknowledgement pending was visible", pending_visible)
             check("request stages appeared in order", all(position >= 0 for position in positions) and positions == sorted(positions), " -> ".join(stages))
             check("streaming stage appeared", bool(streaming_events))

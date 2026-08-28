@@ -183,11 +183,11 @@
 #'   `warmup` attribute (e.g. [make_claude_handler()]), pre-connect the initial
 #'   thread's client on mount so the **first** message on that thread isn't slowed
 #'   by the cold start (ClaudeSDKClient spawning the `claude` CLI subprocess).
-#'   Historical sessions are warmed independently after `send_thread()` succeeds,
-#'   regardless of this option; their warmups are deduplicated per thread and a
-#'   failed warmup may be retried on a later load. A brief cold-start indicator is
-#'   shown while connecting. Newly created blank threads remain lazy unless they
-#'   are the initial thread covered by this one-shot option.
+#'   Historical session browsing is transcript-only and never enters the warmup
+#'   queue; the first explicit send on a historical thread lazily connects and
+#'   resumes its saved backend session. A brief cold-start indicator is shown
+#'   while connecting. Newly created blank threads remain lazy unless they are
+#'   the initial thread covered by this one-shot option.
 #'   **Left `FALSE` by default on purpose**: enabling it makes app startup attempt
 #'   a backend connection at mount, so a slow/unreachable backend would stall the
 #'   open (the default lazy connect only happens on the first message). Turn on
@@ -242,6 +242,11 @@
 #'   callback signatures. Defaults to `FALSE`.
 #' @param working_dir Optional initial working directory shown in the
 #'   working-directory picker (addin).
+#' @param git_branch Optional initial Git branch label shown below the composer.
+#'   Use `NULL` for non-Git directories so no branch element is rendered.
+#' @param git_branch_provider Optional function accepting `project` and returning
+#'   its current branch label, or `NULL` outside Git. It is sampled after run
+#'   completion, error, and cancellation so the composer metadata stays current.
 #' @param native_picker Logical; whether a native directory chooser is available
 #'   (RStudio addin).
 #' @param on_pick_working_dir Optional `function()` invoked to open the native
@@ -323,6 +328,8 @@ assistantUIServer <- function(id, handler,
                               on_delete_session = NULL,
                               workspace_mode    = FALSE,
                               working_dir       = NULL,
+                              git_branch        = NULL,
+                              git_branch_provider = NULL,
                               native_picker     = FALSE,
                               on_pick_working_dir = NULL,
                               on_set_working_dir  = NULL,
@@ -497,6 +504,10 @@ assistantUIServer <- function(id, handler,
   if (!is.null(working_dir)) {
     config$working_dir   <- as.character(working_dir)[[1L]]
     config$native_picker <- isTRUE(native_picker)
+    if (!is.null(git_branch) && length(git_branch) &&
+        !is.na(git_branch[[1L]]) && nzchar(as.character(git_branch[[1L]]))) {
+      config$git_branch <- as.character(git_branch[[1L]])
+    }
   }
   # 工作目录收藏夹初始列表（addin）。
   if (!is.null(projects)) config$projects <- as.list(as.character(projects))
@@ -557,6 +568,15 @@ assistantUIServer <- function(id, handler,
   cancel_flags <- new.env(parent = emptyenv())
   # 每线程注册的 cancel 函数（仅当前 active run 可调用）。
   cancel_fns <- new.env(parent = emptyenv())
+  # Run-scoped project snapshots keep cancellation refreshes correlated even if
+  # the visible workspace changes while a run is settling.
+  run_projects <- new.env(parent = emptyenv())
+  forget_run_project <- function(run_id) {
+    if (!is.null(run_id) && exists(run_id, envir = run_projects, inherits = FALSE)) {
+      rm(list = run_id, envir = run_projects)
+    }
+    invisible(NULL)
+  }
   run_scheduler <- NULL
   cancel_warmup <- function(thread_id) invisible(FALSE)
   run_states <- new.env(parent = emptyenv())
@@ -593,6 +613,26 @@ assistantUIServer <- function(id, handler,
     invisible(TRUE)
   }
 
+  refresh_git_branch <- function(project = NULL) {
+    if (!is.function(git_branch_provider)) return(invisible(FALSE))
+    target <- project %||% working_dir
+    if (is.null(target) || !length(target) || is.na(target[[1L]]) ||
+        !nzchar(as.character(target[[1L]]))) return(invisible(FALSE))
+    target <- as.character(target[[1L]])
+    branch <- tryCatch(
+      .call_compatible_callback(git_branch_provider, list(project = target)),
+      error = function(e) NULL
+    )
+    if (!is.null(branch) && length(branch) && !is.na(branch[[1L]]) &&
+        nzchar(as.character(branch[[1L]]))) branch <- as.character(branch[[1L]])
+    else branch <- NULL
+    session$sendCustomMessage(
+      paste0(input_id, ":git-branch"),
+      list(project = target, branch = branch)
+    )
+    invisible(TRUE)
+  }
+
   # ── 消息回调工厂（按 thread_id 构建，消息携带 threadId 供 JS 路由）──────────
   # 旧版：静态回调，所有 thread 共用一个 callbacks slot，切 thread 时旧 handler
   # 的 onDone 会错误清掉新 thread 的 running 状态，旧消息也可能串入新 thread。
@@ -624,6 +664,8 @@ assistantUIServer <- function(id, handler,
       },
       on_done = function(suggestions = list()) {
         if (!settle_run("complete")) return(invisible(NULL))
+        refresh_git_branch(project)
+        forget_run_project(run_id)
         if (!is.null(on_open_file)) {
           reveal_path <- edit_reveal$flush()
           if (!is.null(reveal_path)) {
@@ -655,6 +697,8 @@ assistantUIServer <- function(id, handler,
       },
       on_error_fn = function(msg) {
         if (!settle_run("error")) return(invisible(NULL))
+        refresh_git_branch(project)
+        forget_run_project(run_id)
         session$sendCustomMessage(paste0(input_id, ":error"),
                                   list(message = msg, threadId = thread_id,
                                        runId = run_id))
@@ -1195,8 +1239,27 @@ assistantUIServer <- function(id, handler,
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
+  cancel_pending_approvals <- function(tid = NULL, run_id = NULL) {
+    for (key in ls(approval_resolvers)) {
+      entry <- get0(key, envir = approval_resolvers)
+      if (is.null(entry) ||
+          (!is.null(tid) && !identical(entry$thread, tid)) ||
+          (!is.null(run_id) && !identical(entry$run, run_id))) next
+      rm(list = key, envir = approval_resolvers)
+      tryCatch(
+        entry$fn(list(approved = FALSE, toolCallId = key)),
+        error = function(e) NULL
+      )
+    }
+    invisible(NULL)
+  }
+
   cancel_thread_work <- function(tid, run_id = NULL) {
     if (!is.null(run_scheduler)) run_scheduler$cancel(tid, run_id)
+    # Approval for a foreground-created background task can arrive after the
+    # foreground run has settled. Archive/delete must still release that idle
+    # owner even though there is no active run to cancel anymore.
+    cancel_pending_approvals(tid, run_id)
 
     active_run_id <- get0(tid, envir = active_run_ids)
     cancels_active <- !is.null(active_run_id) &&
@@ -1209,16 +1272,9 @@ assistantUIServer <- function(id, handler,
       rm(list = tid, envir = cancel_fns)
       tryCatch(cancel_fn(), error = function(e) NULL)
     }
-    for (key in ls(approval_resolvers)) {
-      entry <- get0(key, envir = approval_resolvers)
-      if (!is.null(entry) && identical(entry$thread, tid) &&
-          identical(entry$run, active_run_id)) {
-        rm(list = key, envir = approval_resolvers)
-        tryCatch(entry$fn(list(approved = FALSE, toolCallId = key)), error = function(e) NULL)
-      }
-    }
     invisible(NULL)
   }
+  session$onSessionEnded(function() cancel_pending_approvals())
 
   # 方案B：Archive 软隐藏（可恢复，持久化在服务端）。
   if (!is.null(on_archive_session)) {
@@ -1265,6 +1321,11 @@ assistantUIServer <- function(id, handler,
   # limit (forced to 1 for handlers without the explicit concurrency capability).
   execute_run <- function(thread_id, run_id, msg_text, is_reload, attachments,
                           ide_context, project = NULL, continuation_kind = NULL) {
+    run_project <- project %||% working_dir
+    if (!is.null(run_id) && !is.null(run_project) && length(run_project) &&
+        !is.na(run_project[[1L]]) && nzchar(as.character(run_project[[1L]]))) {
+      assign(run_id, as.character(run_project[[1L]]), envir = run_projects)
+    }
     # This invocation owns the thread-level cancellation resources until its
     # returned promise settles. Queued/stale run IDs must not touch that owner.
     assign(thread_id, run_id, envir = active_run_ids)
@@ -1376,6 +1437,8 @@ assistantUIServer <- function(id, handler,
       send_run_state(thread_id, run_id, phase, queue_position)
     },
     on_cancelled_settled = function(thread_id, run_id) {
+      refresh_git_branch(get0(run_id, envir = run_projects, inherits = FALSE))
+      forget_run_project(run_id)
       if (exists(run_id, envir = run_states, inherits = FALSE)) {
         rm(list = run_id, envir = run_states)
       }
@@ -1393,10 +1456,8 @@ assistantUIServer <- function(id, handler,
   # handler 尚未注册，消息被静默丢弃。JS ready 信号到达后，用缓存的 sessions 补发。
   pending_sessions <- NULL
 
-  # Historical sessions always warm after their messages are delivered, even
-  # when initial prewarm is disabled. State is per thread: concurrent/repeated
-  # loads deduplicate, success stays warm, and failure removes the marker so a
-  # later load can retry.
+  # Optional warm-ahead is reserved for the explicitly selected blank thread.
+  # History traversal never enters this queue; sending lazily resumes instead.
   .warmup_fn <- attr(handler, "warmup")
   # Handlers that own external resources (e.g. make_codeagent_remote_handler's
   # worker processes) may expose a `teardown` attribute; stop them on session end.
@@ -1582,9 +1643,8 @@ assistantUIServer <- function(id, handler,
             prepend = is_older_history
           )
         )
-        # Restoring the SDK conversation is a distinct second phase. Loading an
-        # older UI page must not reconnect or warm the same thread again.
-        if (is_initial_history) schedule_warmup(msg$threadId, msg$project)
+        # History browsing is transcript-only. The saved session mapping remains
+        # available, and the first explicit send lazily resumes through get_client().
       }
       .call_history_callback(on_session_load, list(
         session_id = msg$sessionId,
@@ -1630,9 +1690,19 @@ assistantUIServer <- function(id, handler,
     if (!is_reload && is.list(quote) && nzchar(trimws(quote$text %||% "")))
       user_text <- .prepend_quote(user_text, quote$text)
 
+    incoming_run_id <- msg$runId %||% NULL
+    incoming_project <- msg$project %||% working_dir
+    if (!is.null(incoming_run_id) && !is.null(incoming_project) &&
+        length(incoming_project) && !is.na(incoming_project[[1L]]) &&
+        nzchar(as.character(incoming_project[[1L]]))) {
+      assign(
+        incoming_run_id, as.character(incoming_project[[1L]]),
+        envir = run_projects
+      )
+    }
     run_scheduler$invoke(
       thread_id,
-      msg$runId %||% NULL,
+      incoming_run_id,
       user_text,
       is_reload,
       msg$attachments %||% list(),
@@ -1642,8 +1712,8 @@ assistantUIServer <- function(id, handler,
     )
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # Initial blank-thread warmup remains opt-in and one-shot. Historical loads
-  # call schedule_warmup independently above and are not gated by this observer.
+  # Initial blank-thread warmup remains opt-in and one-shot. History loads are
+  # deliberately transcript-only and rely on lazy resume when the user sends.
   if (isTRUE(prewarm) && is.function(.warmup_fn)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_warmup")]], {
       msg <- session$input[[paste0(input_id, "_warmup")]]
@@ -1729,6 +1799,12 @@ assistantUIServer <- function(id, handler,
     send_working_dir = function(dir, recent = list()) {
       session$sendCustomMessage(paste0(input_id, ":working-dir"),
                                 list(dir = dir, recent = recent))
+    },
+    send_git_branch = function(project, branch = NULL) {
+      session$sendCustomMessage(
+        paste0(input_id, ":git-branch"),
+        list(project = project, branch = branch)
+      )
     },
     # 推送工作目录收藏夹列表给 UI。
     send_projects = function(projects) {

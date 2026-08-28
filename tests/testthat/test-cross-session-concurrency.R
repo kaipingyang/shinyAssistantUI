@@ -30,10 +30,13 @@ new_plan67_gate <- function(concurrent = TRUE) {
   )
 }
 
-submit_plan67 <- function(session, thread_id, text, run_id = paste0("run-", thread_id, "-", text)) {
+submit_plan67 <- function(session, thread_id, text,
+                          run_id = paste0("run-", thread_id, "-", text),
+                          project = NULL) {
   session$flushReact()
   session$setInputs(chat_input = list(
-    text = text, threadId = thread_id, runId = run_id, ts = as.numeric(Sys.time())
+    text = text, threadId = thread_id, runId = run_id, project = project,
+    ts = as.numeric(Sys.time())
   ))
   session$flushReact()
   drain_plan67_loop()
@@ -198,17 +201,26 @@ test_that("a stale same-thread cancel does not cancel the newer active run", {
 test_that("queued cancellation removes only that run and publishes authoritative phases", {
   gate <- new_plan67_gate()
   sent <- list()
+  provider_projects <- character()
   shiny::testServer(function(input, output, session) {
-    assistantUIServer("chat", handler = gate$handler, max_concurrent_runs = 1L)
+    assistantUIServer(
+      "chat", handler = gate$handler, max_concurrent_runs = 1L,
+      working_dir = "/project-default",
+      git_branch_provider = function(project) {
+        provider_projects <<- c(provider_projects, project)
+        "feature/queued"
+      }
+    )
   }, {
     session$sendCustomMessage <- function(type, message) {
       sent[[length(sent) + 1L]] <<- list(type = type, message = message)
     }
-    submit_plan67(session, "A", "first", "run-A")
-    submit_plan67(session, "B", "first", "run-B")
+    submit_plan67(session, "A", "first", "run-A", project = "/project-A")
+    submit_plan67(session, "B", "first", "run-B", project = "/project-B")
     session$setInputs(chat_input_cancel = list(threadId = "B", runId = "run-B", ts = 1))
     session$flushReact()
     drain_plan67_loop()
+    expect_identical(provider_projects, "/project-B")
     gate$release("A:first")
     drain_plan67_loop()
 
@@ -428,5 +440,79 @@ test_that("run stages are additive and metadata cannot start streaming", {
     }, logical(1))))
     expect_identical(states[[length(states)]]$phase, "complete")
     expect_null(states[[length(states)]]$stage)
+  })
+})
+
+
+test_that("archiving settles an approval registered after foreground completion", {
+  skip_if_not_installed("promises")
+  skip_if_not_installed("later")
+
+  decision <- NULL
+  handler <- function(on_done, on_tool_call, wait_for_approval, ...) {
+    on_done()
+    later::later(function() {
+      on_tool_call(
+        "approval-after-done", "Bash", list(command = "echo pending"),
+        list(requiresApproval = TRUE)
+      )
+      promises::then(
+        wait_for_approval("approval-after-done"),
+        function(value) decision <<- value
+      )
+    }, delay = 0.02)
+    invisible(NULL)
+  }
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat", handler = handler,
+      on_archive_session = function(...) invisible(NULL)
+    )
+  }, {
+    submit_plan67(session, "A", "start", "run-A-late-approval")
+    drain_plan67_loop()
+    expect_null(decision)
+
+    session$setInputs(chat_input_archive_session = list(
+      sessionId = "A", archived = TRUE, ts = 1
+    ))
+    session$flushReact()
+    drain_plan67_loop()
+
+    expect_false(isTRUE(decision$approved))
+    expect_identical(decision$toolCallId, "approval-after-done")
+  })
+})
+
+
+test_that("session end settles an approval registered after foreground completion", {
+  skip_if_not_installed("promises")
+  skip_if_not_installed("later")
+
+  decision <- NULL
+  handler <- function(on_done, wait_for_approval, ...) {
+    on_done()
+    later::later(function() {
+      promises::then(
+        wait_for_approval("approval-after-session"),
+        function(value) decision <<- value
+      )
+    }, delay = 0.02)
+    invisible(NULL)
+  }
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler)
+  }, {
+    submit_plan67(session, "A", "start", "run-A-session-approval")
+    drain_plan67_loop()
+    expect_null(decision)
+
+    session$close()
+    drain_plan67_loop()
+
+    expect_false(isTRUE(decision$approved))
+    expect_identical(decision$toolCallId, "approval-after-session")
   })
 })

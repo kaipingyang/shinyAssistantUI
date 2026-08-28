@@ -1250,3 +1250,289 @@ test_that("idle Assistant content publishes before Result and transient status s
     logical(1)
   )))
 })
+
+
+test_that("foreground-created task ownership excludes detached idle tasks", {
+  tracker <- shinyAssistantUI:::.new_claude_background_task_ownership()
+  associated <- plan91_sdk_message(
+    "TaskStartedMessage", task_id = "agent-owned", tool_use_id = "tool-agent"
+  )
+  detached <- plan91_sdk_message(
+    "TaskStartedMessage", task_id = "agent-idle", tool_use_id = "tool-idle"
+  )
+  tracker$observe(associated, foreground = TRUE)
+  tracker$observe(detached, foreground = FALSE)
+
+  expect_true(tracker$owns(plan91_sdk_message(
+    "PermissionRequestMessage", request_id = "p-owned",
+    agent_id = "agent-owned", tool_use_id = "tool-agent"
+  )))
+  expect_false(tracker$owns(plan91_sdk_message(
+    "PermissionRequestMessage", request_id = "p-idle",
+    agent_id = "agent-idle", tool_use_id = "tool-idle"
+  )))
+
+  tracker$observe(plan91_sdk_message(
+    "TaskNotificationMessage", task_id = "agent-owned", status = "completed"
+  ), foreground = FALSE)
+  expect_false(tracker$owns(plan91_sdk_message(
+    "PermissionRequestMessage", request_id = "p-after-terminal",
+    agent_id = "agent-owned", tool_use_id = "tool-agent"
+  )))
+})
+
+
+test_that("associated idle permission waits for approval and terminal reconciliation", {
+  scheduler <- plan91_scheduler()
+  permission_done <- NULL
+  foreground <- character()
+  denied <- 0L
+  results <- 0L
+  queue <- list(
+    list(plan91_sdk_message(
+      "PermissionRequestMessage", request_id = "associated", agent_id = "agent-owned"
+    )),
+    list(plan91_sdk_message("ResultMessage", session_id = "session-owned"))
+  )
+  coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
+    poll_messages = function() {
+      value <- queue[[1L]] %||% list()
+      queue <<- queue[-1L]
+      value
+    },
+    schedule = scheduler$schedule,
+    now = function() 0,
+    on_idle_event = function(message) invisible(NULL),
+    on_idle_result = function(message, on_complete) {
+      results <<- results + 1L
+      on_complete()
+    },
+    on_idle_failure = function(reason, on_complete) on_complete(),
+    handle_idle_permission = function(message, on_complete, on_failure) {
+      permission_done <<- on_complete
+      TRUE
+    },
+    deny_idle_permission = function(message) denied <<- denied + 1L,
+    interrupt = function() invisible(NULL)
+  )
+
+  coordinator$start_idle()
+  scheduler$run_next()
+  coordinator$acquire("foreground:next", function() foreground <<- "acquired")
+  expect_true(is.function(permission_done))
+  expect_length(foreground, 0L)
+  expect_identical(denied, 0L)
+
+  permission_done()
+  scheduler$run_next()
+  expect_identical(results, 1L)
+  expect_identical(foreground, "acquired")
+  coordinator$release("foreground:next")
+})
+
+
+test_that("detached idle denial holds owner until failure reconciliation completes", {
+  scheduler <- plan91_scheduler()
+  failure_done <- NULL
+  foreground <- character()
+  failures <- character()
+  denied <- 0L
+  interrupted <- 0L
+  coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
+    poll_messages = function() list(plan91_sdk_message(
+      "PermissionRequestMessage", request_id = "detached"
+    )),
+    schedule = scheduler$schedule,
+    now = function() 0,
+    on_idle_event = function(message) invisible(NULL),
+    on_idle_result = function(message, on_complete) on_complete(),
+    on_idle_failure = function(reason, on_complete) {
+      failures <<- c(failures, plan91_reason_text(reason))
+      failure_done <<- on_complete
+    },
+    deny_idle_permission = function(message) denied <<- denied + 1L,
+    interrupt = function() interrupted <<- interrupted + 1L
+  )
+
+  coordinator$start_idle()
+  scheduler$run_next()
+  coordinator$acquire("foreground:queued", function() foreground <<- "acquired")
+
+  expect_identical(denied, 1L)
+  expect_identical(interrupted, 1L)
+  expect_length(failures, 1L)
+  expect_identical(
+    failures[[1L]],
+    "A background task requested approval and was stopped because no interactive run was available."
+  )
+  expect_true(is.function(failure_done))
+  expect_length(foreground, 0L)
+  expect_true(coordinator$is_busy())
+
+  failure_done()
+  expect_identical(foreground, "acquired")
+  coordinator$release("foreground:queued")
+})
+
+
+test_that("make_claude_handler routes owned background approval and reconciles detached denial", {
+  skip_if_not_installed("coro")
+  skip_if_not_installed("promises")
+  skip_if_not_installed("later")
+
+  old_delay <- getOption("shinyAssistantUI.claude_idle_start_delay")
+  options(shinyAssistantUI.claude_idle_start_delay = 0)
+  on.exit(options(shinyAssistantUI.claude_idle_start_delay = old_delay), add = TRUE)
+
+  queue <- list()
+  transcript <- list(list(id = "baseline", role = "assistant", content = "before"))
+  approvals <- character()
+  denials <- character()
+  interrupts <- 0L
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() invisible(NULL)
+  client$send <- function(...) invisible(NULL)
+  client$get_server_info <- function() list(commands = list(), output_styles = list())
+  client$approve_tool <- function(request_id, ...) approvals <<- c(approvals, request_id)
+  client$deny_tool <- function(request_id, ...) denials <<- c(denials, request_id)
+  client$interrupt <- function(...) interrupts <<- interrupts + 1L
+  client$poll_messages <- function() {
+    if (!length(queue)) return(list())
+    value <- queue[[1L]]
+    queue <<- queue[-1L]
+    value
+  }
+
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) client,
+    .get_claude_session_messages = function(session_id, directory = NULL, ...) transcript,
+    .claude_msgs_to_thread = function(messages, ...) messages,
+    .claude_drain_timeout_seconds = function() 0.01
+  )
+  map_path <- tempfile(fileext = ".rds")
+  saveRDS(list(`thread-owned` = "session-owned"), map_path)
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", include_partial_messages = TRUE),
+    session_map_path = map_path
+  )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+
+  cards <- list()
+  proactive <- list()
+  statuses <- character()
+  events <- character()
+  approval_resolve <- NULL
+  done <- FALSE
+  error <- NULL
+  queue <- list(list(
+    plan91_sdk_message(
+      "TaskStartedMessage", task_id = "agent-owned", tool_use_id = "task-tool",
+      description = "Owned child task", task_type = "Agent"
+    ),
+    plan91_sdk_message(
+      "ResultMessage", session_id = "session-owned", is_error = FALSE,
+      result = "foreground complete", usage = list()
+    )
+  ))
+  handler(
+    message = "start owned task", thread_id = "thread-owned", run_id = "run-owned",
+    attachments = list(),
+    on_chunk = function(...) invisible(NULL),
+    on_done = function(...) done <<- TRUE,
+    on_error = function(message) error <<- message,
+    on_tool_call = function(...) cards[[length(cards) + 1L]] <<- list(...),
+    on_tool_result = function(...) invisible(NULL),
+    on_thinking = function(...) invisible(NULL),
+    on_task = function(...) invisible(NULL),
+    on_proactive_messages = function(messages, revision, after_run_id = NULL) {
+      events <<- c(events, "transcript")
+      proactive[[length(proactive) + 1L]] <<- messages
+    },
+    on_proactive_task = function(...) invisible(NULL),
+    on_proactive_rate_limit = function(...) invisible(NULL),
+    on_proactive_status = function(status, text = NULL, ...) {
+      events <<- c(events, "status")
+      statuses <<- c(statuses, text %||% status)
+    },
+    is_cancelled = function() FALSE,
+    wait_for_approval = function(tool_call_id) promises::promise(function(resolve, reject) {
+      approval_resolve <<- resolve
+    })
+  )
+  for (i in seq_len(300L)) {
+    later::run_now(0.01)
+    if (done || !is.null(error)) break
+  }
+  expect_null(error)
+  expect_true(done)
+
+  queue <- list(
+    list(plan91_sdk_message(
+      "PermissionRequestMessage", request_id = "approve-owned",
+      tool_use_id = "task-tool", agent_id = "agent-owned",
+      tool_name = "Bash", tool_input = list(command = "echo safe")
+    )),
+    list(plan91_sdk_message(
+      "ResultMessage", session_id = "session-owned", is_error = FALSE
+    ))
+  )
+  for (i in seq_len(300L)) {
+    later::run_now(0.01)
+    if (length(cards) && is.function(approval_resolve)) break
+  }
+  expect_length(cards, 1L)
+  expect_identical(cards[[1L]]$tool_call_id, "task-tool")
+  expect_true(is.function(approval_resolve))
+  expect_length(denials, 0L)
+
+  proactive_before_approval <- length(proactive)
+  approval_resolve(list(approved = TRUE))
+  for (i in seq_len(300L)) {
+    later::run_now(0.01)
+    if (identical(approvals, "approve-owned") && !length(queue)) break
+  }
+  expect_identical(approvals, "approve-owned")
+  expect_length(queue, 0L)
+  expect_length(proactive, proactive_before_approval)
+
+  transcript <- list(list(
+    id = "associated-delayed", role = "assistant",
+    content = "Reply persisted after associated approval Result"
+  ))
+  for (i in seq_len(500L)) {
+    later::run_now(0.01)
+    if (length(proactive) > proactive_before_approval) break
+  }
+  expect_gt(length(proactive), proactive_before_approval)
+  expect_true(any(grepl("Reply persisted after associated approval", vapply(
+    proactive, function(messages) as.character(messages[[1L]]$content), character(1)
+  ), fixed = TRUE)))
+
+  transcript <- list(list(
+    id = "detached-reply", role = "assistant",
+    content = "Reply written before detached approval interruption"
+  ))
+  events <- character()
+  queue <- list(list(plan91_sdk_message(
+    "PermissionRequestMessage", request_id = "deny-detached",
+    tool_name = "Bash", tool_input = list(command = "detached")
+  )))
+  for (i in seq_len(500L)) {
+    later::run_now(0.01)
+    if (length(statuses) && length(proactive) >= 1L &&
+        identical(tail(denials, 1L), "deny-detached")) break
+  }
+
+  expect_identical(tail(denials, 1L), "deny-detached")
+  expect_gte(interrupts, 1L)
+  expect_true(any(grepl("Reply written before detached approval", vapply(
+    proactive, function(messages) as.character(messages[[1L]]$content), character(1)
+  ), fixed = TRUE)))
+  expect_true(any(statuses == paste0(
+    "A background task requested approval and was stopped because ",
+    "no interactive run was available."
+  )))
+  expect_identical(events[seq_len(min(2L, length(events)))], c("transcript", "status"))
+})

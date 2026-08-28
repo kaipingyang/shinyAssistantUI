@@ -439,6 +439,22 @@ describe("copilot-api service state", () => {
       }
     },
   );
+
+  it("shows the current Git branch below the Composer and hides it when absent", () => {
+    const view = render(
+      <Widget id="git-branch" context={{ gitBranch: "feature/footer" }} />,
+    );
+    const widget = view.getByTestId("widget-git-branch");
+    const branch = widget.querySelector<HTMLElement>('[data-slot="aui_git_branch"]');
+    const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+
+    expect(branch).not.toBeNull();
+    expect(branch?.textContent).toContain("feature/footer");
+    expect(composer!.compareDocumentPosition(branch!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    view.rerender(<Widget id="git-branch" context={{ gitBranch: undefined }} />);
+    expect(view.getByTestId("widget-git-branch").querySelector('[data-slot="aui_git_branch"]')).toBeNull();
+  });
 });
 
 describe("Claude checklist lifecycle controls", () => {

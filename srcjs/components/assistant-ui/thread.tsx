@@ -61,6 +61,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   FileTextIcon,
+  GitBranchIcon,
   MicIcon,
   ClockIcon,
   MoreHorizontalIcon,
@@ -985,17 +986,33 @@ const ShinyUsageFooter: FC = () => {
   );
 };
 
+const ShinyGitBranchFooter: FC = () => {
+  const { gitBranch } = useShinyConfig();
+  if (!gitBranch) return null;
+  return (
+    <div
+      className="aui-git-branch flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+      data-slot="aui_git_branch"
+      title={`Git branch: ${gitBranch}`}
+    >
+      <GitBranchIcon className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">{gitBranch}</span>
+    </div>
+  );
+};
+
 const ShinyComposerMetaFooter: FC = () => {
-  const { serviceState, usage } = useShinyConfig();
+  const { serviceState, usage, gitBranch } = useShinyConfig();
   const showsReady = serviceState?.status === "ready";
   const showsUsage = Boolean(usage && (usage.costUsd != null || usage.tokens != null));
-  if (!showsReady && !showsUsage) return null;
+  if (!showsReady && !showsUsage && !gitBranch) return null;
   return (
     <div
       data-slot="aui_composer_meta_footer"
       data-layout="inline"
       className="flex min-h-5 items-center justify-between gap-3 px-1"
     >
+      <ShinyGitBranchFooter />
       <ShinyServiceReadyLine />
       <ShinyUsageFooter />
     </div>

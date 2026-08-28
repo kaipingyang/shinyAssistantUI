@@ -9,7 +9,7 @@ run_later_queue <- function(seconds = 0.3) {
   invisible(NULL)
 }
 
-test_that("historical loads warm asynchronously per thread without prewarm", {
+test_that("historical loads remain transcript-only without creating clients", {
   calls <- character()
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
@@ -29,37 +29,25 @@ test_that("historical loads warm asynchronously per thread without prewarm", {
     )
   }, {
     session$flushReact()
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "history-1"
-    ))
-    session$flushReact()
+    for (index in seq_len(5L)) {
+      session$setInputs(chat_input = list(
+        type = "load_session",
+        sessionId = paste0("s", index),
+        threadId = paste0("history-", index)
+      ))
+      session$flushReact()
+      run_later_queue()
+    }
     expect_length(calls, 0L)
-    run_later_queue()
-    expect_identical(calls, "history-1")
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-again", threadId = "history-1"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(calls, "history-1")
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s2", threadId = "history-2"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(calls, c("history-1", "history-2"))
   })
 })
 
-test_that("failed historical warmup clears state and can retry", {
+test_that("history loading never invokes a failing warmup hook", {
   attempts <- 0L
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
     attempts <<- attempts + 1L
-    if (attempts == 1L) stop("mock warmup failure")
-    invisible(NULL)
+    stop("history must not invoke warmup")
   }
   loader <- function(session_id, thread_id, send_thread) send_thread(list())
 
@@ -70,25 +58,11 @@ test_that("failed historical warmup clears state and can retry", {
   }, {
     session$flushReact()
     session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "retry-thread"
+      type = "load_session", sessionId = "s1", threadId = "history-thread"
     ))
     session$flushReact()
     run_later_queue()
-    expect_identical(attempts, 1L)
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-retry", threadId = "retry-thread"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(attempts, 2L)
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-dedup", threadId = "retry-thread"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(attempts, 2L)
+    expect_identical(attempts, 0L)
   })
 })
 
@@ -236,7 +210,7 @@ test_that("older history pages forward cursor and request ids without another wa
     ))
     session$flushReact()
     run_later_queue()
-    expect_identical(warmups, "history-1")
+    expect_length(warmups, 0L)
 
     session$setInputs(chat_input = list(
       type = "load_session_page", sessionId = "s1", threadId = "history-1",
@@ -248,7 +222,7 @@ test_that("older history pages forward cursor and request ids without another wa
     expect_length(calls, 2L)
     expect_null(calls[[1L]]$cursor)
     expect_identical(calls[[2L]], list(cursor = 50L, limit = 50L))
-    expect_identical(warmups, "history-1")
+    expect_length(warmups, 0L)
     history_responses <- Filter(
       function(item) identical(item$type, "chat_input:load-thread"), sent
     )
@@ -374,7 +348,7 @@ test_that("Claude session refresh keeps the last successful snapshot on read fai
 })
 
 
-test_that("historical warmup waits until foreground runs settle", {
+test_that("historical browsing stays transcript-only while foreground runs settle", {
   entered <- character()
   finish_run <- NULL
   warmups <- character()
@@ -414,7 +388,7 @@ test_that("historical warmup waits until foreground runs settle", {
     finish_run()
     session$flushReact()
     run_later_queue(0.3)
-    expect_identical(warmups, "background")
+    expect_length(warmups, 0L)
   })
 })
 
@@ -479,6 +453,49 @@ test_that("deleting a thread removes its queued warmup before foreground release
 })
 
 
+
+
+test_that("Claude history loader stays cold and the first client creation resumes its session", {
+  skip_if_not_installed("ClaudeAgentSDK")
+
+  path <- tempfile(fileext = ".rds")
+  connections <- 0L
+  created_options <- list()
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() {
+    connections <<- connections + 1L
+    invisible(NULL)
+  }
+  client$disconnect <- function() invisible(NULL)
+
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) {
+      created_options[[length(created_options) + 1L]] <<- options
+      client
+    },
+    .get_claude_session_messages = function(...) list(),
+    .claude_msgs_to_thread = function(messages, ...) messages
+  )
+
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", include_partial_messages = TRUE),
+    session_map_path = path
+  )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  loader <- make_claude_session_loader(path)
+
+  loader(
+    "saved-session", "history-thread",
+    send_thread = function(...) invisible(NULL)
+  )
+  expect_identical(connections, 0L)
+  expect_length(created_options, 0L)
+
+  attr(handler, "warmup")("history-thread")
+  expect_identical(connections, 1L)
+  expect_identical(created_options[[1L]]$resume, "saved-session")
+})
 test_that("Claude session loader routes Workspace history by project directory", {
   path <- tempfile(fileext = ".rds")
   reads <- list()

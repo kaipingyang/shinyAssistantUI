@@ -19,6 +19,7 @@ export type AttachmentData = {
 export type IdeContextPolicy = { selectionVisible: boolean };
 export type QuoteInfo = { text: string; messageId: string };  // 划词引用 metadata.custom.quote
 export type WorkingDirPayload = { dir?: string; recent?: string[] };
+export type GitBranchPayload = { project?: string; branch?: string | null };
 export type ProjectsPayload = { projects?: string[] };
 export type IdeContextMeta = {
   requestId?: string;
@@ -181,11 +182,14 @@ export interface ShinyBridge {
   requestToolResultChunk: (request: LazyToolResultRequest) => void;
   onToolResultChunk: (handler: (chunk: LazyToolResultChunk) => void) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
+  /** Retain only tool approval callbacks after a foreground run settles. */
+  retireRunCallbacks: (threadId: string) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
   onSessions: (handler: (data: SessionsPayload) => void) => void;
   onProactiveMessages: (handler: (data: ProactiveMessagesPayload) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
+  onGitBranch: (handler: (data: GitBranchPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
   onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
@@ -217,6 +221,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   // 工作目录（addin 工作目录选择器）：同 :sessions，可能早到 → 缓冲回放。
   let workingDirHandler: ((data: WorkingDirPayload) => void) | null = null;
   let bufferedWorkingDir: WorkingDirPayload | null = null;
+  let gitBranchHandler: ((data: GitBranchPayload) => void) | null = null;
+  let bufferedGitBranch: GitBranchPayload | null = null;
   let projectsHandler: ((data: ProjectsPayload) => void) | null = null;
   let bufferedProjects: ProjectsPayload | null = null;
   type ConsoleResultData = { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string };
@@ -335,6 +341,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     const d = data as WorkingDirPayload;
     if (workingDirHandler) workingDirHandler(d);
     else bufferedWorkingDir = d;
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:git-branch`, (data) => {
+    const d = data as GitBranchPayload;
+    if (gitBranchHandler) gitBranchHandler(d);
+    else bufferedGitBranch = d;
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:projects`, (data) => {
@@ -527,6 +539,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       }
     },
 
+    retireRunCallbacks(threadId) {
+      const callbacks = callbacksMap.get(threadId);
+      if (!callbacks) return;
+      // A foreground-created background task may request approval after the
+      // foreground Result. Keep only the tool channel; all late run-scoped
+      // chunks, terminals, and rich parts become no-ops until the next run
+      // replaces this entry with a full callback set.
+      callbacksMap.set(threadId, {
+        onChunk: () => {},
+        onToolCall: callbacks.onToolCall,
+        onToolResult: callbacks.onToolResult,
+        onDone: () => {},
+        onError: () => {},
+      });
+    },
+
     onClear(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:clear`, (_data) => handler());
     },
@@ -592,6 +620,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     onWorkingDir(handler) {
       workingDirHandler = handler;
       if (bufferedWorkingDir) { handler(bufferedWorkingDir); bufferedWorkingDir = null; }
+    },
+    onGitBranch(handler) {
+      gitBranchHandler = handler;
+      if (bufferedGitBranch) { handler(bufferedGitBranch); bufferedGitBranch = null; }
     },
     sendPickWorkingDir() {
       Shiny.setInputValue(`${inputId}_pick_working_dir`, { ts: Date.now() }, { priority: "event" });

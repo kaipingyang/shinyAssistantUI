@@ -1345,6 +1345,60 @@ make_ellmer_session_loader <- function(store) {
 }
 
 # Coordinate every consumer of one Claude SDK message queue. Only the named
+
+.new_claude_background_task_ownership <- function() {
+  tasks <- new.env(parent = emptyenv())
+  scalar <- function(value) {
+    if (is.null(value) || !length(value) || is.na(value[[1L]]) ||
+        !nzchar(as.character(value[[1L]]))) NULL else as.character(value[[1L]])
+  }
+  terminal <- function(message) {
+    if (inherits(message, "TaskNotificationMessage")) return(TRUE)
+    if (!inherits(message, "TaskUpdatedMessage")) return(FALSE)
+    status <- scalar(message$status %||% (message$patch %||% list())$status)
+    !is.null(status) && status %in% c("completed", "failed", "killed", "stopped")
+  }
+  observe <- function(message, foreground = FALSE) {
+    task_id <- scalar(message$task_id)
+    if (is.null(task_id)) return(invisible(FALSE))
+    if (terminal(message)) {
+      if (exists(task_id, envir = tasks, inherits = FALSE)) rm(list = task_id, envir = tasks)
+      return(invisible(TRUE))
+    }
+    if (isTRUE(foreground) && inherits(message, "TaskStartedMessage")) {
+      assign(task_id, list(
+        task_id = task_id,
+        tool_use_id = scalar(message$tool_use_id)
+      ), envir = tasks)
+      return(invisible(TRUE))
+    }
+    invisible(FALSE)
+  }
+  owns <- function(message) {
+    if (!inherits(message, "PermissionRequestMessage")) return(FALSE)
+    ids <- ls(tasks, all.names = TRUE)
+    if (!length(ids)) return(FALSE)
+    agent_id <- scalar(message$agent_id)
+    tool_use_id <- scalar(message$tool_use_id)
+    records <- lapply(ids, function(id) get(id, envir = tasks, inherits = FALSE))
+    direct <- any(vapply(records, function(record) {
+      (!is.null(agent_id) && identical(agent_id, record$task_id)) ||
+        (!is.null(tool_use_id) && !is.null(record$tool_use_id) &&
+           identical(tool_use_id, record$tool_use_id))
+    }, logical(1)))
+    direct
+  }
+  list(
+    observe = observe,
+    owns = owns,
+    active_ids = function() ls(tasks, all.names = TRUE),
+    clear = function() {
+      ids <- ls(tasks, all.names = TRUE)
+      if (length(ids)) rm(list = ids, envir = tasks)
+      invisible(NULL)
+    }
+  )
+}
 # owner may poll; idle work yields to queued foreground/compact owners only after
 # its terminal Result has been reconciled.
 .new_claude_consumer_coordinator <- function(
@@ -1354,6 +1408,7 @@ make_ellmer_session_loader <- function(store) {
     on_idle_event,
     on_idle_result,
     on_idle_failure,
+    handle_idle_permission = NULL,
     deny_idle_permission,
     interrupt,
     poll_interval = 0.1,
@@ -1374,6 +1429,7 @@ make_ellmer_session_loader <- function(store) {
   foreground_polls <- 0L
   messages_seen <- 0L
   denied_idle_permissions <- new.env(parent = emptyenv())
+  idle_failure_pending <- FALSE
 
   elapsed <- function(started) {
     value <- now() - started
@@ -1403,9 +1459,31 @@ make_ellmer_session_loader <- function(store) {
     invisible(TRUE)
   }
   fail_idle <- function(reason) {
+    if (isTRUE(idle_failure_pending)) return(invisible(NULL))
+    idle_failure_pending <<- TRUE
     tryCatch(interrupt(), error = function(error) invisible(NULL))
-    tryCatch(on_idle_failure(reason), error = function(error) invisible(NULL))
-    release_owner("idle")
+    completed <- FALSE
+    complete <- function() {
+      if (completed) return(invisible(FALSE))
+      completed <<- TRUE
+      idle_failure_pending <<- FALSE
+      release_owner("idle")
+      invisible(TRUE)
+    }
+    supports_completion <- FALSE
+    if (is.function(on_idle_failure)) {
+      callback_formals <- tryCatch(names(formals(on_idle_failure)), error = function(error) character())
+      supports_completion <- "on_complete" %in% callback_formals || "..." %in% callback_formals
+      tryCatch(
+        .call_compatible_callback(on_idle_failure, list(
+          reason = reason, on_complete = complete
+        )),
+        error = function(error) complete()
+      )
+    } else {
+      complete()
+    }
+    if (!supports_completion) complete()
     invisible(NULL)
   }
 
@@ -1472,6 +1550,28 @@ make_ellmer_session_loader <- function(store) {
       opener <- .claude_idle_opener(message)
       if (opener && is.null(idle_opened_at)) idle_opened_at <<- now()
       if (inherits(message, "PermissionRequestMessage")) {
+        if (is.function(handle_idle_permission)) {
+          if (index < length(batch)) buffered <<- batch[(index + 1L):length(batch)]
+          permission_token <- generation
+          resume_idle <- function() {
+            if (!identical(permission_token, generation) || !identical(owner, "idle")) {
+              return(invisible(FALSE))
+            }
+            schedule_idle(0)
+            invisible(TRUE)
+          }
+          handled <- tryCatch(
+            isTRUE(handle_idle_permission(
+              message, on_complete = resume_idle, on_failure = fail_idle
+            )),
+            error = function(error) {
+              fail_idle(error)
+              TRUE
+            }
+          )
+          if (handled) return(invisible(NULL))
+          if (index < length(batch)) buffered <<- list()
+        }
         request_id <- tryCatch(
           as.character(message$request_id %||% "")[[1L]],
           error = function(error) ""
@@ -1480,7 +1580,9 @@ make_ellmer_session_loader <- function(store) {
         already_denied <- exists(
           permission_key, envir = denied_idle_permissions, inherits = FALSE
         )
-        reason <- simpleError("Idle permission request was denied")
+        reason <- simpleError(
+          "A background task requested approval and was stopped because no interactive run was available."
+        )
         if (!already_denied) {
           assign(permission_key, TRUE, envir = denied_idle_permissions)
           reason <- tryCatch({
@@ -2467,6 +2569,10 @@ make_claude_handler <- function(options       = NULL,
     route$on_task <- NULL
     route$on_rate_limit <- NULL
     route$on_status <- NULL
+    route$on_tool_call <- NULL
+    route$on_tool_result <- NULL
+    route$wait_for_approval <- NULL
+    route$background_tasks <- .new_claude_background_task_ownership()
     persistent_routes[[thread_id]] <<- route
     route
   }
@@ -2520,6 +2626,7 @@ make_claude_handler <- function(options       = NULL,
 
   dispatch_idle_event <- function(thread_id, message) {
     route <- route_for(thread_id)
+    route$background_tasks$observe(message, foreground = FALSE)
     safely <- function(callback, ...) {
       if (is.function(callback)) tryCatch(callback(...), error = function(error) NULL)
       invisible(NULL)
@@ -2690,6 +2797,97 @@ make_claude_handler <- function(options       = NULL,
       invisible(NULL)
     }
 
+    handle_associated_permission <- function(message, on_complete, on_failure) {
+      permission_route <- route_for(thread_id)
+      if (!isTRUE(permission_route$background_tasks$owns(message)) ||
+          !is.function(permission_route$on_tool_call) ||
+          !is.function(permission_route$wait_for_approval)) return(FALSE)
+      tool_id <- message$tool_use_id %||% message$request_id
+      tool_input <- message$tool_input %||% list()
+      card_published <- tryCatch({
+        permission_route$on_tool_call(
+          tool_call_id = tool_id,
+          tool_name = message$tool_name,
+          args = tool_input,
+          annotations = list(
+            requiresApproval = TRUE,
+            suggestions = message$suggestions %||% list(),
+            title = message$title,
+            displayName = message$display_name,
+            description = message$description
+          )
+        )
+        TRUE
+      }, error = function(error) {
+        on_failure(error)
+        FALSE
+      })
+      if (!card_published) return(TRUE)
+      decision_promise <- tryCatch(
+        permission_route$wait_for_approval(tool_id),
+        error = function(error) error
+      )
+      if (inherits(decision_promise, "error")) {
+        on_failure(decision_promise)
+        return(TRUE)
+      }
+      promises::then(
+        decision_promise,
+        onFulfilled = function(decision) {
+          tryCatch({
+            if (isTRUE(decision$approved)) {
+              decision_record <- "approved"
+              updated_input <- NULL
+              if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
+                updated_input <- utils::modifyList(tool_input, decision$updatedInput)
+              } else if (!is.null(decision$answers) && length(decision$answers)) {
+                updated_input <- tool_input
+                updated_input$answers <- decision$answers
+                decision_record <- list(status = "approved", answers = decision$answers)
+              }
+              if (!is.null(updated_input)) {
+                client$approve_tool(message$request_id, updated_input = updated_input)
+              } else {
+                idxs <- decision$suggestionIdxs
+                if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
+                idxs <- suppressWarnings(as.integer(unlist(idxs)))
+                suggestion_count <- length(message$suggestions %||% list())
+                idxs <- unique(idxs[!is.na(idxs) & idxs >= 0L & idxs < suggestion_count])
+                permissions <- Filter(Negate(is.null), lapply(idxs, function(index) {
+                  .claude_suggestion_to_perm(message$suggestions[[index + 1L]])
+                }))
+                if (length(permissions)) {
+                  client$approve_tool(message$request_id, updated_permissions = permissions)
+                } else client$approve_tool(message$request_id)
+              }
+              .record_tool_decision(decisions_path, tool_id, decision_record)
+            } else {
+              custom <- decision$customMessage
+              has_custom <- !is.null(custom) && nzchar(trimws(custom))
+              client$deny_tool(
+                message$request_id,
+                if (has_custom) custom else "Denied by user",
+                interrupt = !has_custom
+              )
+              .record_tool_decision(decisions_path, tool_id, "denied")
+            }
+            # The provider may emit terminal Result before its transcript write
+            # becomes visible. Hold the idle owner until reconciliation observes
+            # the approved/denied tool continuation rather than accepting the
+            # unchanged baseline snapshot.
+            record$idle_must_advance <- TRUE
+            on_complete()
+          }, error = on_failure)
+          invisible(NULL)
+        },
+        onRejected = function(error) {
+          on_failure(error)
+          invisible(NULL)
+        }
+      )
+      TRUE
+    }
+
     record$coordinator <- .new_claude_consumer_coordinator(
       poll_messages = raw_poll,
       schedule = function(callback, delay) later::later(callback, delay = delay),
@@ -2769,16 +2967,49 @@ make_claude_handler <- function(options       = NULL,
         }
         invisible(NULL)
       },
-      on_idle_failure = function(reason) {
-        route <- route_for(thread_id)
-        if (is.function(route$on_status)) {
-          tryCatch(route$on_status(
-            "proactive-error", text = conditionMessage(reason)
-          ), error = function(error) NULL)
+      on_idle_failure = function(reason, on_complete) {
+        failure_route <- route_for(thread_id)
+        finish_failure <- function() {
+          record$idle_must_advance <- FALSE
+          record$idle_preview_requested <- FALSE
+          record$idle_preview_published <- FALSE
+          if (is.function(failure_route$on_status)) {
+            tryCatch(failure_route$on_status(
+              "proactive-error", text = conditionMessage(reason)
+            ), error = function(error) NULL)
+          }
+          on_complete()
+          later::later(function() flush_pending_client_reset(), delay = 0)
+          invisible(NULL)
         }
-        later::later(function() flush_pending_client_reset(), delay = 0)
+        reconcile_failure <- function(...) {
+          sid <- read_session_id(thread_id)
+          if (!valid_idle_sid(sid)) {
+            finish_failure()
+            return(invisible(NULL))
+          }
+          record$reconciler$reconcile(
+            thread_id = thread_id,
+            session_id = as.character(sid[[1L]]),
+            project = record$project %||% failure_route$project,
+            after_run_id = failure_route$last_run_id,
+            must_advance = isTRUE(record$idle_must_advance) &&
+              !isTRUE(record$idle_preview_published),
+            is_current = function() identical(consumer_records[[thread_id]], record),
+            on_complete = function(ok, reconcile_reason = NULL) finish_failure()
+          )
+          invisible(NULL)
+        }
+        if (isTRUE(record$idle_preview_running)) {
+          record$idle_finalizer <- reconcile_failure
+        } else {
+          reconcile_failure()
+        }
+        invisible(NULL)
       },
+      handle_idle_permission = handle_associated_permission,
       deny_idle_permission = function(message) {
+        record$idle_must_advance <- TRUE
         client$deny_tool(
           message$request_id,
           "Denied because no interactive foreground run owns this request",
@@ -2847,6 +3078,7 @@ make_claude_handler <- function(options       = NULL,
         if (!is.null(record)) {
           record$coordinator$invalidate()
           record$reconciler$invalidate()
+          route_for(thread_id)$background_tasks$clear()
         }
         if (identical(clients[[thread_id]], client)) clients[[thread_id]] <<- NULL
         if (identical(consumer_records[[thread_id]], record)) {
@@ -2979,7 +3211,7 @@ make_claude_handler <- function(options       = NULL,
         tryCatch(
           set_model_async(
             model,
-            timeout_ms = 5000L,
+            timeout_ms = 30000L,
             on_fulfilled = function(response) settle(),
             on_rejected = function(error) settle(error)
           ),
@@ -3245,6 +3477,9 @@ make_claude_handler <- function(options       = NULL,
     if (is.function(on_proactive_task)) route$on_task <- on_proactive_task
     if (is.function(on_proactive_rate_limit)) route$on_rate_limit <- on_proactive_rate_limit
     if (is.function(on_proactive_status)) route$on_status <- on_proactive_status
+    if (is.function(on_tool_call)) route$on_tool_call <- on_tool_call
+    if (is.function(on_tool_result)) route$on_tool_result <- on_tool_result
+    if (is.function(wait_for_approval)) route$wait_for_approval <- wait_for_approval
     if (!is.null(route$pending_messages) && is.function(route$on_messages)) {
       pending <- route$pending_messages
       route$pending_messages <- NULL
@@ -4199,16 +4434,19 @@ make_claude_handler <- function(options       = NULL,
 
         # #2 子agent/Task 进度(system 子类型消息)。
         } else if (inherits(msg, "TaskStartedMessage")) {
+          route$background_tasks$observe(msg, foreground = TRUE)
           if (!is.null(on_task)) on_task(msg$task_id, "started",
                                          description = msg$description, tool_name = msg$task_type)
         } else if (inherits(msg, "TaskProgressMessage")) {
           if (!is.null(on_task)) on_task(msg$task_id, "progress",
                                          description = msg$description, tool_name = msg$last_tool_name)
         } else if (inherits(msg, "TaskNotificationMessage")) {
+          route$background_tasks$observe(msg, foreground = TRUE)
           if (!is.null(on_task)) on_task(msg$task_id, "notification",
                                          status = msg$status, summary = msg$summary)
         } else if (inherits(msg, "TaskUpdatedMessage")) {
-          # 部分子agent的终态只经 task_updated 的 patch 到达(无单独 notification)。
+          route$background_tasks$observe(msg, foreground = TRUE)
+          # 部分子agent的终态只经 task_updated 的 patch到达(无单独 notification)。
           # patch 里可能带 status/description,尽力提取,收尾进度卡。
           if (!is.null(on_task)) {
             patch <- msg$patch %||% list()
@@ -4512,8 +4750,9 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
 
   function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L,
            project = NULL) {
-    # Pre-fill the mapping before the initial page is delivered so asynchronous
-    # warmup resumes this historical SDK session instead of starting fresh.
+    # Pre-fill the mapping before the initial page is delivered so the first
+    # explicit foreground send resumes this historical SDK session instead of
+    # starting fresh. Browsing itself remains transcript-only.
     if (is.null(cursor) && !is.null(session_id) && nzchar(session_id %||% "")) {
       tryCatch(
         .update_claude_session_map(session_map_path, thread_id, session_id),

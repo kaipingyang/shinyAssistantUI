@@ -158,6 +158,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     sidebarCollapsed: showThreadList && sidebar.collapsed,
     // 工作目录选择器（addin）
     workingDir: rt.workingDir,
+    gitBranch: rt.gitBranch,
     recentDirs: rt.recentDirs,
     nativePicker: rt.nativePicker,
     pickWorkingDir: rt.pickWorkingDir,

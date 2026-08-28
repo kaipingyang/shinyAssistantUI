@@ -325,6 +325,8 @@
       usage_style      = "ring",
       workspace_mode    = isTRUE(workspace),
       working_dir      = cur_dir(),
+      git_branch       = .addin_git_branch(cur_dir()),
+      git_branch_provider = function(project) .addin_git_branch(project),
       native_picker    = native_picker,
       on_pick_working_dir = on_pick_wd,
       on_set_working_dir  = on_set_wd,
@@ -508,6 +510,7 @@
         )
         recent <- add_recent(nd)
         ctrl$send_working_dir(nd, as.list(recent))
+        ctrl$send_git_branch(nd, .addin_git_branch(nd))
         ctrl$send_projects(.read_saved_projects(projects_path))
         push_sessions()
         return(invisible(nd))
@@ -523,6 +526,7 @@
       )
       recent <- add_recent(nd)
       ctrl$send_working_dir(nd, as.list(recent))
+      ctrl$send_git_branch(nd, .addin_git_branch(nd))
       push_sessions()
       invisible(nd)
     }
