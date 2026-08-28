@@ -3240,3 +3240,28 @@ describe("useShinyRuntime — proactive authoritative replacements", () => {
     expect(currentThreadId(result)).not.toBe(threadId);
   });
 });
+
+
+  it("does not revive wrapped requesting status after the run has completed", async () => {
+    const { result } = setup();
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("wrapped status");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outboundMessages = inputs.filter((item) => item.id === "test");
+    const outbound = outboundMessages[outboundMessages.length - 1]!.value;
+    const threadId = outbound.threadId as string;
+    const runId = outbound.runId as string;
+
+    await fireR("status", { threadId, status: "status", text: "requesting" });
+    expect(result.current.statusText).toBe("requesting");
+
+    await fireR("done", { threadId, runId });
+    expect(result.current.statusText).toBeNull();
+
+    await fireR("status", { threadId, status: "status", text: "requesting" });
+    expect(result.current.statusText).toBeNull();
+
+    await fireR("status", { threadId, status: "status", text: "Background task ready" });
+    expect(result.current.statusText).toBe("Background task ready");
+  });

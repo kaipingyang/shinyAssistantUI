@@ -1132,3 +1132,121 @@ test_that("assistantUIServer forwards the browser run id to compatible handlers"
     expect_identical(received_run_id, "run-contract-91")
   })
 })
+
+
+test_that("idle Assistant content publishes before Result and transient status stays hidden", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  skip_if_not_installed("coro")
+  skip_if_not_installed("promises")
+  skip_if_not_installed("later")
+
+  old_delay <- getOption("shinyAssistantUI.claude_idle_start_delay")
+  options(shinyAssistantUI.claude_idle_start_delay = 0)
+  on.exit(options(shinyAssistantUI.claude_idle_start_delay = old_delay), add = TRUE)
+
+  queue <- list(ClaudeAgentSDK::ResultMessage(
+    subtype = "success", duration_ms = 1, duration_api_ms = 1,
+    is_error = FALSE, num_turns = 1, session_id = "idle-preview-session",
+    result = "foreground complete", stop_reason = "end_turn"
+  ))
+  transcript <- list(list(
+    id = "foreground", role = "assistant",
+    content = list(list(type = "text", text = "foreground complete"))
+  ))
+  client <- new.env(parent = emptyenv())
+  client$connect <- client$disconnect <- client$send <- function(...) invisible(NULL)
+  client$deny_tool <- client$approve_tool <- client$interrupt <- function(...) invisible(NULL)
+  client$poll_messages <- function() {
+    current <- queue
+    queue <<- list()
+    current
+  }
+
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) client,
+    .get_claude_session_messages = function(session_id, directory = NULL, ...) transcript,
+    .claude_msgs_to_thread = function(messages, ...) messages,
+    .package = "shinyAssistantUI"
+  )
+
+  handler <- make_claude_handler(
+    options = list(
+      permission_mode = "default",
+      permission_prompt_tool_name = "stdio",
+      include_partial_messages = TRUE
+    ),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  cleanup <- attr(handler, "cleanup")
+  if (is.function(cleanup)) on.exit(cleanup(), add = TRUE)
+
+  foreground_done <- FALSE
+  proactive <- list()
+  statuses <- list()
+  handler(
+    message = "start background deploy", thread_id = "idle-preview-thread",
+    attachments = list(),
+    on_chunk = function(...) NULL,
+    on_done = function(...) foreground_done <<- TRUE,
+    on_error = function(message) stop(message),
+    on_tool_call = function(...) NULL,
+    on_tool_result = function(...) NULL,
+    on_thinking = function(...) NULL,
+    is_cancelled = function() FALSE,
+    wait_for_approval = function(...) promises::promise_resolve(list(approved = FALSE)),
+    on_proactive_messages = function(messages, revision, after_run_id) {
+      proactive[[length(proactive) + 1L]] <<- list(
+        messages = messages, revision = revision, after_run_id = after_run_id
+      )
+    },
+    on_proactive_status = function(status, text = NULL) {
+      statuses[[length(statuses) + 1L]] <<- list(status = status, text = text)
+    },
+    run_id = "foreground-run"
+  )
+  expect_true(plan91_drain_shiny(
+    session = list(flushReact = function() invisible(NULL)),
+    done = function() foreground_done,
+    limit = 400L
+  ))
+
+  transcript <- c(transcript, list(list(
+    id = "proactive-mid", role = "assistant",
+    content = list(list(type = "text", text = "background finished; checking log"))
+  )))
+  queue <- list(
+    plan91_sdk_message(
+      "SystemMessage", subtype = "status", data = list(status = "requesting")
+    ),
+    plan91_sdk_message(
+      "SystemMessage", subtype = "status", data = list(status = "background-ready")
+    ),
+    plan91_sdk_message(
+      "AssistantMessage", session_id = "idle-preview-session",
+      content = list()
+    )
+  )
+
+  for (i in seq_len(400L)) {
+    later::run_now(0.01)
+    if (length(proactive)) break
+  }
+
+  expect_length(proactive, 1L)
+  expect_identical(
+    proactive[[1L]]$messages[[2L]]$content[[1L]]$text,
+    "background finished; checking log"
+  )
+  expect_false(any(vapply(
+    statuses,
+    function(value) identical(value$text, "requesting") ||
+      identical(value$status, "requesting"),
+    logical(1)
+  )))
+  expect_true(any(vapply(
+    statuses,
+    function(value) identical(value$text, "background-ready"),
+    logical(1)
+  )))
+})

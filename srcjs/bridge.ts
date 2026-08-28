@@ -1,6 +1,8 @@
 // Shiny ↔ React 通信桥
 // 封装 Shiny.setInputValue 和 addCustomMessageHandler
 
+import type { LazyToolResultChunk, LazyToolResultRequest } from "./lazy-tool-result";
+
 declare const Shiny: {
   setInputValue: (id: string, value: unknown, opts?: { priority?: string }) => void;
   addCustomMessageHandler: (type: string, handler: (data: unknown) => void) => void;
@@ -176,6 +178,8 @@ export interface ShinyBridge {
   sendWarmup: (threadId: string, project?: string) => void;
   requestIdeContext: (requestId: string, threadId: string, project?: string) => void;
   searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number, project?: string) => void;
+  requestToolResultChunk: (request: LazyToolResultRequest) => void;
+  onToolResultChunk: (handler: (chunk: LazyToolResultChunk) => void) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
@@ -206,6 +210,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   let proactiveMessagesHandler: ((data: ProactiveMessagesPayload) => void) | null = null;
   const bufferedProactiveMessages: ProactiveMessagesPayload[] = [];
   let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
+  let toolResultChunkHandler: ((data: LazyToolResultChunk) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
   let bufferedSessions: SessionsPayload | null = null;
@@ -301,6 +306,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:tool-result`, (data) => {
     const d = data as { toolCallId: string; result: unknown; isError?: boolean; threadId?: string };
     routeCallback(d.threadId)?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:tool-result-chunk`, (data) => {
+    toolResultChunkHandler?.(data as LazyToolResultChunk);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:sessions`, (data) => {
@@ -496,6 +505,18 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         { requestId, threadId, query, kinds, limit, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
+    },
+
+    requestToolResultChunk(request) {
+      Shiny.setInputValue(
+        `${inputId}_tool_result_chunk`,
+        { ...request, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
+    onToolResultChunk(handler) {
+      toolResultChunkHandler = handler;
     },
 
     setRunCallbacks(threadId, callbacks) {

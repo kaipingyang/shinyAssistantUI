@@ -31,7 +31,8 @@ Manual mode displays approval only when Claude Code requests it; it is not an as
 
 ## Assistant status and message actions
 
-1. `Thinking…`/`thinking_tokens` and `requesting` are transient foreground-run statuses. Done, error, and cancellation clear them, and a late event cannot restore them after the run ends.
+1. `Thinking…`/`thinking_tokens` and `requesting` are transient foreground-run statuses. Done, error, and cancellation clear them, and a late event cannot restore them after the run ends. This includes wrapped CLI status messages shaped as `status="status", text="requesting"` (or `thinking_tokens`).
 2. Other explicit backend statuses may remain visible outside a foreground run; do not globally suppress idle/proactive status reporting.
-3. A tool-only assistant message renders its tool cards without the text-message footer, Copy/Reload/Export controls, or reserved footer spacing.
-4. Assistant messages with non-whitespace text—including mixed text plus tools—retain the existing BranchPicker, Copy, Reload, Export, and timestamp footer behavior.
+3. During an idle/proactive turn triggered by background-task completion, each authoritative transcript snapshot is published once stable; already-written assistant/tool content must not be held until the terminal `ResultMessage`. Final reconciliation remains authoritative and revision ordered.
+4. A tool-only assistant message renders its tool cards without the text-message footer, Copy/Reload/Export controls, or reserved footer spacing.
+5. Assistant messages with non-whitespace text—including mixed text plus tools—retain the existing BranchPicker, Copy, Reload, Export, and timestamp footer behavior.

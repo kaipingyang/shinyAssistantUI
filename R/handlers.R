@@ -247,8 +247,61 @@
 # 重命名会话的 seam（同步侧栏标题到 SDK session 存储，可单测 mock）。
 .rename_claude_session <- function(session_id, title, directory = NULL)
   ClaudeAgentSDK::rename_session(session_id, title, directory = directory)
+.find_claude_session_file <- function(session_id, directory = NULL) {
+  finder <- tryCatch(
+    getFromNamespace(".find_session_file", "ClaudeAgentSDK"),
+    error = function(error) NULL
+  )
+  if (!is.function(finder)) return(NULL)
+  tryCatch(finder(session_id, directory), error = function(error) NULL)
+}
+
+.claude_compact_summary_uuids <- function(path) {
+  if (is.null(path) || !length(path) || is.na(path[[1L]]) ||
+      !file.exists(path[[1L]])) return(character())
+  connection <- file(path[[1L]], open = "r", encoding = "UTF-8")
+  on.exit(close(connection), add = TRUE)
+  uuids <- character()
+  repeat {
+    line <- readLines(connection, n = 1L, warn = FALSE)
+    if (!length(line)) break
+    if (!grepl('"isCompactSummary"\\s*:\\s*true', line, perl = TRUE)) next
+    entry <- tryCatch(
+      jsonlite::fromJSON(line, simplifyVector = FALSE),
+      error = function(error) NULL
+    )
+    uuid <- entry[["uuid"]]
+    if (isTRUE(entry[["isCompactSummary"]]) && is.character(uuid) &&
+        length(uuid) == 1L && !is.na(uuid) && nzchar(uuid)) {
+      uuids <- c(uuids, uuid)
+    }
+  }
+  unique(uuids)
+}
+
+.annotate_claude_compact_summaries <- function(messages, path) {
+  compact_uuids <- tryCatch(
+    .claude_compact_summary_uuids(path),
+    error = function(error) character()
+  )
+  if (!length(compact_uuids)) return(messages)
+  for (index in seq_along(messages)) {
+    uuid <- messages[[index]]$uuid
+    if (is.character(uuid) && length(uuid) == 1L &&
+        !is.na(uuid) && uuid %in% compact_uuids) {
+      messages[[index]]$is_compact_summary <- TRUE
+      messages[[index]]$is_visible_in_transcript_only <- TRUE
+    }
+  }
+  messages
+}
+
 .get_claude_session_messages <- function(session_id, directory = NULL) {
-  ClaudeAgentSDK::get_session_messages(session_id, directory = directory)
+  messages <- ClaudeAgentSDK::get_session_messages(session_id, directory = directory)
+  # SDK <= 0.2.3 dropped compact metadata. Recover only authoritative UUIDs
+  # from the local transcript; failures leave the original history untouched.
+  path <- .find_claude_session_file(session_id, directory)
+  .annotate_claude_compact_summaries(messages, path)
 }
 
 .read_claude_session_map <- function(path) {
@@ -1819,6 +1872,101 @@ make_ellmer_session_loader <- function(store) {
   list(args = cached_args, diffStartLine = start_line)
 }
 
+.claude_ui_tool_result_max_bytes <- function() {
+  value <- suppressWarnings(as.numeric(getOption(
+    "shinyAssistantUI.claude_tool_result_max_bytes",
+    1024 * 1024
+  )))
+  if (length(value) != 1L || is.na(value) || !is.finite(value) || value < 1) {
+    value <- 1024 * 1024
+  }
+  min(value, 1024 * 1024, .Machine$integer.max)
+}
+
+.claude_tool_result_size_bytes <- function(result) {
+  if (is.character(result)) {
+    element_bytes <- ifelse(
+      is.na(result),
+      2,
+      nchar(result, type = "bytes")
+    )
+    return(sum(element_bytes) + max(0, length(result) - 1L))
+  }
+  # JSON can expand compact R atomic storage substantially (for example,
+  # 32-bit integers become decimal text). Avoid serializing an already-large
+  # object merely to measure it; a 4x conservative estimate bounds common
+  # jsonlite-compatible lists/vectors and errs toward omitting the UI preview.
+  4 * as.numeric(utils::object.size(result))
+}
+
+.claude_tool_result_is_oversized <- function(result) {
+  .claude_tool_result_size_bytes(result) > .claude_ui_tool_result_max_bytes()
+}
+
+.claude_utf8_prefix_bytes <- function(text, max_bytes) {
+  if (!nzchar(text) || nchar(text, type = "bytes") <= max_bytes) return(text)
+  low <- 0L
+  high <- nchar(text, type = "chars")
+  while (low < high) {
+    middle <- as.integer(ceiling((low + high) / 2))
+    candidate <- substr(text, 1L, middle)
+    if (nchar(candidate, type = "bytes") <= max_bytes) {
+      low <- middle
+    } else {
+      high <- middle - 1L
+    }
+  }
+  if (low > 0L) substr(text, 1L, low) else ""
+}
+
+.claude_tool_result_source_bytes <- function(result) {
+  source_bytes <- suppressWarnings(as.numeric(
+    attr(result, "shinyAssistantUI.source_bytes", exact = TRUE)
+  ))
+  measured <- .claude_tool_result_size_bytes(result)
+  if (length(source_bytes) == 1L && is.finite(source_bytes) && source_bytes >= measured) {
+    source_bytes
+  } else {
+    measured
+  }
+}
+
+.claude_ui_tool_result <- function(result) {
+  max_bytes <- .claude_ui_tool_result_max_bytes()
+  size_bytes <- .claude_tool_result_source_bytes(result)
+  if (.claude_tool_result_size_bytes(result) <= max_bytes) return(result)
+
+  if (is.character(result)) {
+    text <- paste(result, collapse = "\n")
+    notice <- paste0(
+      "[UI preview truncated at ", format(max_bytes, scientific = FALSE),
+      " bytes; Claude/CLI received the complete result (", format(size_bytes, scientific = FALSE),
+      " bytes in R).]"
+    )
+    separator <- "\n\n"
+    notice_bytes <- nchar(paste0(separator, notice), type = "bytes")
+    prefix_budget <- max(0, max_bytes - notice_bytes)
+    prefix <- .claude_utf8_prefix_bytes(text, prefix_budget)
+    preview <- .claude_utf8_prefix_bytes(paste0(prefix, separator, notice), max_bytes)
+    attr(preview, "shinyAssistantUI.source_bytes") <- size_bytes
+    return(preview)
+  }
+
+  preview <- paste0(
+    "[UI preview omitted because this structured tool result is ",
+    format(size_bytes, scientific = FALSE), " bytes in R (limit ",
+    format(max_bytes, scientific = FALSE),
+    " bytes). Claude/CLI received the complete result.]"
+  )
+  attr(preview, "shinyAssistantUI.source_bytes") <- size_bytes
+  preview
+}
+
+.claude_full_gc <- function() {
+  gc(full = TRUE)
+  invisible(NULL)
+}
+
 .claude_user_tool_results <- function(message) {
   if (!inherits(message, "UserMessage") || !is.list(message$content)) return(list())
   blocks <- Filter(function(block) inherits(block, "ToolResultBlock"), message$content)
@@ -2403,8 +2551,18 @@ make_claude_handler <- function(options       = NULL,
         data[["status"]] %||% data[["message"]] %||% data[["text"]] %||% NULL,
         error = function(error) NULL
       )
-      safely(route$on_status, message$subtype,
-             text = if (is.character(text)) text else NULL)
+      text <- if (is.character(text)) text else NULL
+      effective_status <- message$subtype
+      if (identical(effective_status, "status") && length(text) == 1L &&
+          !is.na(text[[1L]]) && nzchar(text[[1L]])) {
+        effective_status <- text[[1L]]
+      }
+      # `requesting` / `thinking_tokens` belong to an interactive foreground
+      # run. An idle/proactive turn has no such owner, so publishing these as
+      # persistent status would leave a stale line after background completion.
+      if (!effective_status %in% c("requesting", "thinking_tokens")) {
+        safely(route$on_status, message$subtype, text = text)
+      }
     }
     invisible(NULL)
   }
@@ -2464,6 +2622,11 @@ make_claude_handler <- function(options       = NULL,
     record$client <- client
     record$project <- owning_project
     record$idle_must_advance <- FALSE
+    record$idle_preview_requested <- FALSE
+    record$idle_preview_running <- FALSE
+    record$idle_preview_published <- FALSE
+    record$idle_preview_sid <- NULL
+    record$idle_finalizer <- NULL
     record$reconciler <- reconciler
     record$coordinator <- NULL
 
@@ -2472,51 +2635,138 @@ make_claude_handler <- function(options       = NULL,
       if (!is.function(poller)) return(list())
       poller() %||% list()
     }
+
+    valid_idle_sid <- function(value) {
+      !is.null(value) && length(value) && !is.na(value[[1L]]) &&
+        nzchar(as.character(value[[1L]]))
+    }
+    run_idle_preview <- NULL
+    run_idle_preview <- function() {
+      if (isTRUE(record$idle_preview_running) ||
+          !isTRUE(record$idle_preview_requested)) return(invisible(NULL))
+      sid <- record$idle_preview_sid %||% read_session_id(thread_id)
+      if (!valid_idle_sid(sid)) {
+        record$idle_preview_requested <- FALSE
+        return(invisible(NULL))
+      }
+      sid <- as.character(sid[[1L]])
+      record$idle_preview_requested <- FALSE
+      record$idle_preview_running <- TRUE
+      require_advance <- !isTRUE(record$idle_preview_published)
+      preview_route <- route_for(thread_id)
+      record$reconciler$reconcile(
+        thread_id = thread_id,
+        session_id = sid,
+        project = record$project %||% preview_route$project,
+        after_run_id = preview_route$last_run_id,
+        must_advance = require_advance,
+        is_current = function() identical(consumer_records[[thread_id]], record),
+        on_complete = function(ok, reason = NULL) {
+          record$idle_preview_running <- FALSE
+          if (isTRUE(ok) && isTRUE(require_advance)) {
+            record$idle_preview_published <- TRUE
+          }
+          if (!identical(consumer_records[[thread_id]], record)) {
+            return(invisible(NULL))
+          }
+          finalizer <- record$idle_finalizer
+          if (is.function(finalizer)) {
+            record$idle_finalizer <- NULL
+            finalizer(isTRUE(ok))
+          } else if (isTRUE(record$idle_preview_requested)) {
+            run_idle_preview()
+          }
+          invisible(NULL)
+        }
+      )
+      invisible(NULL)
+    }
+    request_idle_preview <- function(message) {
+      sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
+      if (valid_idle_sid(sid)) record$idle_preview_sid <- as.character(sid[[1L]])
+      if (!valid_idle_sid(record$idle_preview_sid)) return(invisible(NULL))
+      record$idle_preview_requested <- TRUE
+      run_idle_preview()
+      invisible(NULL)
+    }
+
     record$coordinator <- .new_claude_consumer_coordinator(
       poll_messages = raw_poll,
       schedule = function(callback, delay) later::later(callback, delay = delay),
       now = Sys.time,
       on_idle_event = function(message) {
         if (.claude_idle_opener(message)) {
+          if (!isTRUE(record$idle_must_advance)) {
+            record$idle_preview_published <- FALSE
+          }
           record$idle_must_advance <- TRUE
         }
+        # Complete top-level Assistant snapshots are already authoritative in
+        # Claude's transcript. Reconcile them while the idle turn is still open
+        # so background-task follow-up does not appear only at terminal Result.
+        if (inherits(message, "AssistantMessage")) request_idle_preview(message)
         dispatch_idle_event(thread_id, message)
       },
       on_idle_result = function(message, on_complete) {
-        sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
-        if (is.null(sid) || !length(sid) || is.na(sid[[1L]]) ||
-            !nzchar(as.character(sid[[1L]]))) {
-          dispatch_idle_event(thread_id, structure(list(
-            subtype = "proactive-error",
-            data = list(message = "Idle Claude Result had no session id")
-          ), class = "SystemMessage"))
-          record$idle_must_advance <- FALSE
-          on_complete()
-          return(invisible(NULL))
-        }
-        sid <- as.character(sid[[1L]])
-        persist_session(thread_id, sid)
-        route <- route_for(thread_id)
-        must_advance <- isTRUE(record$idle_must_advance)
-        record$reconciler$reconcile(
-          thread_id = thread_id,
-          session_id = sid,
-          project = record$project %||% route$project,
-          after_run_id = route$last_run_id,
-          must_advance = must_advance,
-          is_current = function() identical(consumer_records[[thread_id]], record),
-          on_complete = function(ok, reason = NULL) {
+        finalize_idle_result <- function(preview_satisfied = FALSE) {
+          sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
+          if (!valid_idle_sid(sid)) {
+            dispatch_idle_event(thread_id, structure(list(
+              subtype = "proactive-error",
+              data = list(message = "Idle Claude Result had no session id")
+            ), class = "SystemMessage"))
             record$idle_must_advance <- FALSE
-            if (!isTRUE(ok) && is.function(route$on_status)) {
-              tryCatch(route$on_status(
-                "proactive-error",
-                text = conditionMessage(reason %||% simpleError("Transcript reconciliation failed"))
-              ), error = function(error) NULL)
-            }
+            record$idle_preview_requested <- FALSE
+            record$idle_preview_published <- FALSE
+            on_complete()
+            return(invisible(NULL))
+          }
+          sid <- as.character(sid[[1L]])
+          persist_session(thread_id, sid)
+          route <- route_for(thread_id)
+          # If Result arrived while a preview was reading, that successful
+          # stable read happened after the terminal was already observable and
+          # is therefore the authoritative final snapshot. Reuse it and release
+          # the idle owner synchronously instead of waiting through two more
+          # identical reads (which would also delay a queued foreground turn).
+          if (isTRUE(preview_satisfied) && isTRUE(record$idle_preview_published)) {
+            record$idle_must_advance <- FALSE
+            record$idle_preview_requested <- FALSE
+            record$idle_preview_published <- FALSE
             on_complete()
             later::later(function() flush_pending_client_reset(), delay = 0)
+            return(invisible(NULL))
           }
-        )
+          must_advance <- isTRUE(record$idle_must_advance) &&
+            !isTRUE(record$idle_preview_published)
+          record$reconciler$reconcile(
+            thread_id = thread_id,
+            session_id = sid,
+            project = record$project %||% route$project,
+            after_run_id = route$last_run_id,
+            must_advance = must_advance,
+            is_current = function() identical(consumer_records[[thread_id]], record),
+            on_complete = function(ok, reason = NULL) {
+              record$idle_must_advance <- FALSE
+              record$idle_preview_requested <- FALSE
+              record$idle_preview_published <- FALSE
+              if (!isTRUE(ok) && is.function(route$on_status)) {
+                tryCatch(route$on_status(
+                  "proactive-error",
+                  text = conditionMessage(reason %||% simpleError("Transcript reconciliation failed"))
+                ), error = function(error) NULL)
+              }
+              on_complete()
+              later::later(function() flush_pending_client_reset(), delay = 0)
+            }
+          )
+          invisible(NULL)
+        }
+        if (isTRUE(record$idle_preview_running)) {
+          record$idle_finalizer <- finalize_idle_result
+        } else {
+          finalize_idle_result(FALSE)
+        }
         invisible(NULL)
       },
       on_idle_failure = function(reason) {
@@ -3286,6 +3536,7 @@ make_claude_handler <- function(options       = NULL,
     # 在持续吐垃圾时会被不断重置而失效）。
     DRAIN_TIMEOUT_SECS <- .claude_drain_timeout_seconds()
     drain_start        <- NULL  # interrupted 时记录起点
+    reclaim_large_result <- FALSE
 
     repeat {
       if (!interrupted && is_cancelled()) {
@@ -3357,7 +3608,15 @@ make_claude_handler <- function(options       = NULL,
             } else if (identical(blk[["type"]], "advisor_tool_result")) {
               # 服务端工具结果块(wire 名 advisor_tool_result,非 server_tool_result):
               # 直接作为对应工具的结果发出(无 is_error 字段)。
-              on_tool_result(blk[["tool_use_id"]], blk[["content"]], is_error = FALSE)
+              advisor_result <- blk[["content"]]
+              if (.claude_tool_result_is_oversized(advisor_result)) {
+                reclaim_large_result <- TRUE
+              }
+              on_tool_result(
+                blk[["tool_use_id"]],
+                .claude_ui_tool_result(advisor_result),
+                is_error = FALSE
+              )
             }
 
           } else if (identical(etype, "content_block_delta") && is.list(delta)) {
@@ -3426,7 +3685,14 @@ make_claude_handler <- function(options       = NULL,
                 )
               }
             }
-            on_tool_result(tuid, tool_result$result, is_error = tool_result$is_error)
+            if (.claude_tool_result_is_oversized(tool_result$result)) {
+              reclaim_large_result <- TRUE
+            }
+            on_tool_result(
+              tuid,
+              .claude_ui_tool_result(tool_result$result),
+              is_error = tool_result$is_error
+            )
             remove_pending_edit_call(tuid)
             pending_tool_ids <- setdiff(pending_tool_ids, tuid)
             for (key in ls(tb)) {
@@ -3976,6 +4242,21 @@ make_claude_handler <- function(options       = NULL,
         }
       }
 
+      if (isTRUE(reclaim_large_result)) {
+        # Release this poll batch's direct references before asking R to return
+        # pages from a one-off oversized result. No timer or extra poll is added.
+        next_message <- NULL
+        msgs <- NULL
+        msg <- NULL
+        user_tool_results <- NULL
+        tool_result <- NULL
+        advisor_result <- NULL
+        evt <- NULL
+        blk <- NULL
+        delta <- NULL
+        .claude_full_gc()
+        reclaim_large_result <- FALSE
+      }
       if (drain_done || done) break
       coro::await(later_promise(0.01))
     }
@@ -4433,14 +4714,17 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
                      if (is.list(x)) (x[["text"]] %||% "") else as.character(x %||% ""),
                      character(1)), collapse = "\n")
                  else ""
-          assign(tuid, list(text = txt, is_error = isTRUE(b[["is_error"]])),
-                 envir = tool_results)
+          assign(tuid, list(
+            text = .claude_ui_tool_result(txt),
+            is_error = isTRUE(b[["is_error"]])
+          ), envir = tool_results)
         }
       }
     }
   }
   for (m in msgs) {
     if (identical(m$type, "user")) {
+      compact_summary <- isTRUE(m$is_compact_summary) || isTRUE(m$isCompactSummary)
       raw  <- m$message$content
       text <- if (is.character(raw)) raw
               else {
@@ -4452,12 +4736,16 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
       if (!nzchar(trimws(text))) next
       # resume/hook 时 CLI 以 user 轮次写入的合成系统通知（如孤儿任务 <task-notification>）
       # 不是用户真实输入，跳过而非渲染为 user 气泡。
-      if (.is_synthetic_system_user_text(text)) next
-      result[[length(result) + 1L]] <- list(
+      if (!compact_summary && .is_synthetic_system_user_text(text)) next
+      entry <- list(
         id      = paste0("h-", m$uuid),
-        role    = "user",
+        role    = if (compact_summary) "assistant" else "user",
         content = list(list(type = "text", text = text))
       )
+      if (compact_summary) {
+        entry$status <- list(type = "complete", reason = "stop")
+      }
+      result[[length(result) + 1L]] <- entry
     } else if (identical(m$type, "assistant")) {
       raw   <- m$message$content
       parts <- list()

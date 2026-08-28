@@ -123,6 +123,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     refreshIdeContext: rt.refreshIdeContext,
     workspaceMentions: rt.workspaceMentions,
     searchWorkspace: rt.searchWorkspace,
+    lazyToolResults: rt.lazyToolResults,
     readingHistory: rt.readingHistory,
     historyHasMore: rt.historyHasMore,
     loadingOlder: rt.loadingOlder,

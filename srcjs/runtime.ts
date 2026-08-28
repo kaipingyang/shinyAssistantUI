@@ -50,6 +50,7 @@ import {
 } from "./helpers";
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
 import { projectLabel, sessionsToWorkspaceThreads } from "./workspace-threads";
+import { createLazyToolResultClient, type LazyToolResultClient } from "./lazy-tool-result";
 
 const RUN_SCOPED_TRANSIENT_STATUSES = new Set([
   "thinking_tokens",
@@ -236,6 +237,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const bridge = useRef<ShinyBridge>(null!);
   if (!bridge.current) {
     bridge.current = createShinyBridge(inputId);
+  }
+  const lazyToolResults = useRef<LazyToolResultClient>(null!);
+  if (!lazyToolResults.current) {
+    lazyToolResults.current = createLazyToolResultClient(
+      (request) => bridge.current.requestToolResultChunk(request),
+    );
+    bridge.current.onToolResultChunk((chunk) => lazyToolResults.current.accept(chunk));
   }
   const copilotServiceConfig = useMemo(() => parseCopilotServiceAddon(config), [config]);
   const copilotBridge = useRef<CopilotServiceBridge | null>(null);
@@ -1171,13 +1179,16 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // Run-scoped statuses can arrive late from the CLI after done. Never let
       // them resurrect a terminal thread's status line; persistent statuses
       // (hooks, background work, compaction) remain independently visible.
-      if (RUN_SCOPED_TRANSIENT_STATUSES.has(d.status) &&
+      const statusKind = d.status === "status" && typeof d.text === "string"
+        ? d.text
+        : d.status;
+      if (RUN_SCOPED_TRANSIENT_STATUSES.has(statusKind) &&
           !activeRunsRef.current.has(tid)) {
         setStatusTextMap((previous) => ({ ...previous, [tid]: null }));
         return;
       }
-      const label = d.text || (d.status === "thinking_tokens" ? "Thinking\u2026"
-        : d.status === "init" ? "Initializing\u2026" : d.status);
+      const label = d.text || (statusKind === "thinking_tokens" ? "Thinking\u2026"
+        : statusKind === "init" ? "Initializing\u2026" : statusKind);
       setStatusTextMap((previous) => ({ ...previous, [tid]: label ?? null }));
     });
     // ── 每线程冷启动指示 ──────────────────────────────────────────────────────
@@ -2917,7 +2928,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [currentThreadId]);
 
   return {
-    runtime, submissionRevision, sendToolApproval, switchToNewThread, newThreadInProject,
+    runtime, lazyToolResults: lazyToolResults.current,
+    submissionRevision, sendToolApproval, switchToNewThread, newThreadInProject,
     renameThread, openFile, enqueueMessage,
     runInConsole, consoleRunEnabled,
     invokeAction, permissionMode, thinking, model,

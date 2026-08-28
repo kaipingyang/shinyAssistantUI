@@ -412,6 +412,52 @@ assistantUIServer <- function(id, handler,
   effective_concurrency <- .effective_max_concurrent_runs(handler, requested_concurrency)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
+  lazy_tool_results <- .new_lazy_tool_result_store()
+  tool_result_annotations <- new.env(parent = emptyenv())
+  tool_result_key <- function(thread_id, tool_call_id) {
+    paste0(thread_id, "\u001f", tool_call_id)
+  }
+  prepare_lazy_history_results <- function(messages, thread_id) {
+    if (!is.list(messages) || !is.character(thread_id) || length(thread_id) != 1L ||
+        is.na(thread_id) || !nzchar(thread_id)) return(messages)
+    for (message_index in seq_along(messages)) {
+      message <- messages[[message_index]]
+      if (!is.list(message) || !is.list(message$content)) next
+      for (part_index in seq_along(message$content)) {
+        part <- message$content[[part_index]]
+        if (!is.list(part) || !identical(part$type, "tool-call") ||
+            !is.character(part$toolCallId) || length(part$toolCallId) != 1L) next
+        artifact <- if (is.list(part$artifact)) part$artifact else list()
+        result_type <- as.character(artifact$resultType %||% "auto")[[1L]]
+        progressive_type <- !(result_type %in% c("html", "image", "file", "table"))
+        source_bytes <- tryCatch(
+          .claude_tool_result_source_bytes(part$result),
+          error = function(e) NA_real_
+        )
+        ui_result <- tryCatch(
+          .claude_ui_tool_result(part$result),
+          error = function(e) "[UI preview unavailable because the tool result could not be bounded safely.]"
+        )
+        descriptor <- if (progressive_type) tryCatch(
+          lazy_tool_results$put(
+            ui_result, thread_id, part$toolCallId, source_bytes = source_bytes
+          ),
+          error = function(e) NULL
+        ) else NULL
+        if (!is.null(descriptor)) {
+          artifact$inputId <- input_id
+          artifact$threadId <- thread_id
+          part$artifact <- artifact
+          part$result <- descriptor
+        } else {
+          part$result <- ui_result
+        }
+        message$content[[part_index]] <- part
+      }
+      messages[[message_index]] <- message
+    }
+    messages
+  }
   normalize_continuation_kind <- function(value) {
     valid <- c("tool-postlude", "generic", "minimal")
     if (is.null(value) || length(value) != 1L || is.na(value[[1L]])) return(NULL)
@@ -630,6 +676,12 @@ assistantUIServer <- function(id, handler,
         # 注入 inputId，使前端审批 UI 能定位到本 widget 实例的 approval handler
         # （多 widget 同页时模块级单例会串台，靠 inputId 路由隔离）。
         annotations$inputId <- input_id
+        annotations$threadId <- thread_id
+        assign(
+          tool_result_key(thread_id, tool_call_id),
+          annotations,
+          envir = tool_result_annotations
+        )
         # Edit 工具：算 old_string 在文件里的真实起始行 → 前端 diff 显示真实行号(非从 1)。
         # 仅单个 Edit;MultiEdit 多段不同起始行,暂不注入(前端退回 1-based)。
         if (identical(tool_name, "Edit") && is.null(annotations$diffStartLine)) {
@@ -669,6 +721,13 @@ assistantUIServer <- function(id, handler,
       },
       on_tool_call_start = function(tool_call_id, tool_name, annotations = list()) {
         mark_running()
+        annotations$inputId <- input_id
+        annotations$threadId <- thread_id
+        assign(
+          tool_result_key(thread_id, tool_call_id),
+          annotations,
+          envir = tool_result_annotations
+        )
         session$sendCustomMessage(
           paste0(input_id, ":tool-call-start"),
           list(
@@ -689,9 +748,37 @@ assistantUIServer <- function(id, handler,
       on_tool_result = function(tool_call_id, result, is_error = FALSE) {
         mark_running()
         edit_reveal$note_result(tool_call_id, is_error)
+        annotation_key <- tool_result_key(thread_id, tool_call_id)
+        annotations <- get0(annotation_key, envir = tool_result_annotations, inherits = FALSE)
+        if (exists(annotation_key, envir = tool_result_annotations, inherits = FALSE)) {
+          rm(list = annotation_key, envir = tool_result_annotations)
+        }
+        result_type <- as.character(annotations$resultType %||% "auto")[[1L]]
+        progressive_type <- !(result_type %in% c("html", "image", "file", "table"))
+        source_bytes <- tryCatch(
+          .claude_tool_result_source_bytes(result),
+          error = function(e) NA_real_
+        )
+        ui_result <- tryCatch(
+          .claude_ui_tool_result(result),
+          error = function(e) "[UI preview unavailable because the tool result could not be bounded safely.]"
+        )
+        descriptor <- if (progressive_type) {
+          tryCatch(
+            lazy_tool_results$put(
+              ui_result, thread_id, tool_call_id, source_bytes = source_bytes
+            ),
+            error = function(e) NULL
+          )
+        } else NULL
         session$sendCustomMessage(
           paste0(input_id, ":tool-result"),
-          list(toolCallId = tool_call_id, result = result, isError = is_error, threadId = thread_id)
+          list(
+            toolCallId = tool_call_id,
+            result = descriptor %||% ui_result,
+            isError = is_error,
+            threadId = thread_id
+          )
         )
       },
       on_thinking = function(text) {
@@ -735,6 +822,7 @@ assistantUIServer <- function(id, handler,
       # Keep these closures alive after the handler returns, but never mutate run
       # state: the browser reconciles the full transcript independently.
       on_proactive_messages = function(messages, revision, after_run_id = NULL) {
+        messages <- prepare_lazy_history_results(messages, thread_id)
         session$sendCustomMessage(
           paste0(input_id, ":proactive-messages"),
           list(
@@ -1482,6 +1570,7 @@ assistantUIServer <- function(id, handler,
 
     if (is_history_request && !is.null(on_session_load)) {
       send_thread <- function(messages, cursor = NULL, has_more = FALSE) {
+        messages <- prepare_lazy_history_results(messages, msg$threadId)
         session$sendCustomMessage(
           paste0(input_id, ":load-thread"),
           list(
@@ -1563,14 +1652,55 @@ assistantUIServer <- function(id, handler,
     }, once = TRUE, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
 
-  # session 结束时回收 handler 持有的资源（如 ClaudeSDKClient 子进程）。
-  # handler 可选通过 attr(handler, "cleanup") 暴露清理函数；ellmer handler 无此 attr 则跳过。
+  shiny::observeEvent(session$input[[paste0(input_id, "_tool_result_chunk")]], {
+    msg <- session$input[[paste0(input_id, "_tool_result_chunk")]]
+    scalar_chr <- function(value) {
+      if (!is.character(value) || length(value) != 1L || is.na(value) || !nzchar(value)) NULL
+      else value
+    }
+    request_id <- scalar_chr(msg$requestId)
+    handle <- scalar_chr(msg$handle)
+    thread_id <- scalar_chr(msg$threadId)
+    tool_call_id <- scalar_chr(msg$toolCallId)
+    if (is.null(request_id) || is.null(handle) || is.null(thread_id) || is.null(tool_call_id)) {
+      return()
+    }
+    chunk <- tryCatch(
+      lazy_tool_results$read_chunk(
+        handle = handle,
+        generation = msg$generation,
+        thread_id = thread_id,
+        tool_call_id = tool_call_id,
+        offset = msg$offset,
+        max_bytes = msg$maxBytes
+      ),
+      error = function(e) NULL
+    )
+    response <- list(
+      handle = handle,
+      generation = msg$generation,
+      threadId = thread_id,
+      toolCallId = tool_call_id,
+      requestId = request_id,
+      offset = msg$offset
+    )
+    if (is.null(chunk)) {
+      response$error <- "Tool result chunk is unavailable or stale."
+    } else {
+      response$text <- chunk$text
+      response$nextOffset <- chunk$nextOffset
+      response$done <- chunk$done
+    }
+    session$sendCustomMessage(paste0(input_id, ":tool-result-chunk"), response)
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  # Session-owned lazy artifacts and optional backend resources share one cleanup
+  # callback so both paths run even if backend cleanup is absent or interrupted.
   handler_cleanup <- attr(handler, "cleanup")
-  if (is.function(handler_cleanup)) {
-    session$onSessionEnded(function() {
-      .run_handler_cleanup(handler_cleanup)
-    })
-  }
+  session$onSessionEnded(function() {
+    lazy_tool_results$cleanup()
+    if (is.function(handler_cleanup)) .run_handler_cleanup(handler_cleanup)
+  })
 
   invisible(list(
     clear = function() {

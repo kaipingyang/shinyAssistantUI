@@ -18,7 +18,10 @@ ui <- assistantUIPage(
     actionButton("fake_active_requesting", "Send active synthetic requesting"),
     actionButton("fake_late_thinking", "Send late synthetic thinking"),
     actionButton("fake_late_requesting", "Send late synthetic requesting"),
+    actionButton("fake_late_wrapped_requesting", "Send late wrapped requesting"),
     actionButton("fake_regular_status", "Send synthetic regular status"),
+    actionButton("fake_proactive_mid", "Publish proactive intermediate snapshot"),
+    actionButton("fake_proactive_final", "Publish proactive final snapshot"),
     textOutput("fixture_state", inline = TRUE)
   ),
   assistantUIOutput("chat", height = "100%")
@@ -29,9 +32,12 @@ server <- function(input, output, session) {
   fixture_state <- reactiveVal("ready")
 
   handler <- function(message, on_chunk, on_done, on_error,
-                      on_tool_call, on_tool_result, on_status, ...) {
+                      on_tool_call, on_tool_result, on_status,
+                      on_proactive_messages, run_id = NULL, ...) {
     active$on_done <- on_done
+    active$run_id <- run_id
     active$on_status <- on_status
+    active$on_proactive_messages <- on_proactive_messages
     on_status("thinking_tokens")
     on_tool_call(
       tool_call_id = "synthetic-tool-only",
@@ -86,10 +92,48 @@ server <- function(input, output, session) {
     fixture_state("late-requesting-sent")
   }, ignoreInit = TRUE)
 
+  observeEvent(input$fake_late_wrapped_requesting, {
+    req(is.function(active$on_status))
+    active$on_status("status", "requesting")
+    fixture_state("late-wrapped-requesting-sent")
+  }, ignoreInit = TRUE)
+
   observeEvent(input$fake_regular_status, {
     req(is.function(active$on_status))
     active$on_status("working", "SYNTHETIC BACKGROUND READY")
     fixture_state("regular-status-sent")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$fake_proactive_mid, {
+    req(is.function(active$on_proactive_messages))
+    active$on_proactive_messages(
+      messages = list(list(
+        id = "proactive-mid", role = "assistant",
+        content = list(list(type = "text", text = "SYNTHETIC PROACTIVE INTERMEDIATE"))
+      )),
+      revision = 101L,
+      after_run_id = active$run_id
+    )
+    fixture_state("proactive-mid-sent")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$fake_proactive_final, {
+    req(is.function(active$on_proactive_messages))
+    active$on_proactive_messages(
+      messages = list(
+        list(
+          id = "proactive-mid", role = "assistant",
+          content = list(list(type = "text", text = "SYNTHETIC PROACTIVE INTERMEDIATE"))
+        ),
+        list(
+          id = "proactive-final", role = "assistant",
+          content = list(list(type = "text", text = "SYNTHETIC PROACTIVE FINAL"))
+        )
+      ),
+      revision = 102L,
+      after_run_id = active$run_id
+    )
+    fixture_state("proactive-final-sent")
   }, ignoreInit = TRUE)
 }
 

@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useOpeningFile } from "@/hooks/use-opening-file";
+import { isLazyToolResultDescriptor, useLazyToolResult } from "@/lazy-tool-result";
 
 // annotations.icon(lucide 名)→ 组件,对齐 v0.1.0 的 per-tool 图标。
 const TOOL_ICONS: Record<string, LucideIcon> = {
@@ -62,17 +63,28 @@ export type ToolDecideOpts = {
   answers?: Record<string, string | string[]>;
 };
 
+type ToolCardOptions = {
+  collapseOnSettle?: boolean;
+  completedDefaultOpen?: boolean;
+  pendingDefaultOpen?: boolean;
+};
+
 // 共享工具卡状态 + 审批决策派发(供外壳与各交互体消费)。
-export function useToolCard(props: ToolCallMessagePartProps) {
+export function useToolCard(props: ToolCallMessagePartProps, options: ToolCardOptions = {}) {
   const { toolName, args, argsText, result, status, timing, artifact, toolCallId } = props;
   const ann = artifact as Record<string, unknown> | undefined;
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
   const editLikeTool = toolName === "Edit" || toolName === "MultiEdit" || toolName === "Write";
-  const defaultOpen = toolHistoryDefaultOpen(
-    ann as { defaultOpen?: boolean } | undefined,
-    status?.type === "requires-action" || (pending && needsApproval) || editLikeTool,
-  );
+  const pendingForcedClosed = options.pendingDefaultOpen === false && pending;
+  const defaultOpen = pendingForcedClosed
+    ? false
+    : options.completedDefaultOpen === false && !pending
+      ? false
+      : toolHistoryDefaultOpen(
+        ann as { defaultOpen?: boolean } | undefined,
+        status?.type === "requires-action" || (pending && needsApproval) || editLikeTool,
+      );
   const resultType = (ann?.resultType as string | undefined) ?? "auto";
   const resultLang = (ann?.resultLang as string | undefined) ?? "text";
   const isServerTool = ann?.serverTool === true;
@@ -93,9 +105,19 @@ export function useToolCard(props: ToolCallMessagePartProps) {
     _openRegistry.set(registryKey, next);
     setOpenState(next);
   };
+  const awaitingDecision = pending && needsApproval && decision === null;
+  const wasAwaitingDecision = useRef(awaitingDecision);
+  const settlementClosed = useRef(false);
   useEffect(() => {
-    if (pending && needsApproval && decision === null) setOpen(true);
-  }, [pending, needsApproval, decision]);
+    if (awaitingDecision) {
+      settlementClosed.current = false;
+      if (options.pendingDefaultOpen !== false) setOpen(true);
+    } else if (options.collapseOnSettle && wasAwaitingDecision.current && !settlementClosed.current) {
+      settlementClosed.current = true;
+      setOpen(false);
+    }
+    wasAwaitingDecision.current = awaitingDecision;
+  }, [awaitingDecision, options.collapseOnSettle, options.pendingDefaultOpen]);
 
   const displayTitle = (() => {
     const s = toolCallSummary(toolName, args);
@@ -142,7 +164,7 @@ export function useToolCard(props: ToolCallMessagePartProps) {
   })();
 
   return {
-    toolName, args, displayArgs, argsText, result, status, timing, ann, registryKey,
+    toolName, toolCallId, args, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, decide, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   };
@@ -153,13 +175,23 @@ export type ToolCard = ReturnType<typeof useToolCard>;
 // 工具卡外壳:头部(图标/server badge/文件路径)+ 折叠 chrome(参数 + 结果)+ 审批区
 // (pending && needsApproval && 未决策 时显示 meta + 传入的 approvalBody)+ 决策指示。
 export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approvalBody?: ReactNode }) {
-  const { onOpenFile } = useShinyConfig();
+  const { onOpenFile, lazyToolResults } = useShinyConfig();
   const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
     toolName, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
+  const lazyDescriptor = isLazyToolResultDescriptor(result) && result.toolCallId === card.toolCallId
+    ? result
+    : undefined;
+  const lazyResult = useLazyToolResult(
+    lazyToolResults,
+    lazyDescriptor,
+    open,
+    lazyDescriptor?.threadId ?? "",
+    card.toolCallId,
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const captureScroll = (event: UIEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
@@ -173,6 +205,9 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
       atBottom: maxTop > 0 && maxTop - target.scrollTop <= 2,
       atRight: maxLeft > 0 && maxLeft - target.scrollLeft <= 2,
     });
+    if (region === "result" && lazyDescriptor && maxTop - target.scrollTop <= 128) {
+      lazyResult.requestNext();
+    }
   };
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -275,7 +310,43 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
                 data-tool-scroll-region="result"
                 className="mt-1 max-h-96 overflow-auto overscroll-contain"
               >
-                <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />
+                {lazyDescriptor ? (
+                  <div
+                    data-lazy-tool-result={lazyDescriptor.handle}
+                    className="flex flex-col gap-1 [&_pre]:whitespace-pre [&_pre]:leading-4"
+                  >
+                    <p className="text-muted-foreground text-xs">{lazyDescriptor.summary}</p>
+                    {lazyResult.snapshot.droppedLineBreaks > 0 && (
+                      <div
+                        aria-hidden="true"
+                        data-lazy-result-spacer
+                        style={{ height: `${lazyResult.snapshot.droppedLineBreaks}rem`, flexShrink: 0 }}
+                      />
+                    )}
+                    {lazyResult.snapshot.droppedBytes > 0 && (
+                      <p data-lazy-result-dropped className="text-muted-foreground text-[11px]">
+                        Earlier output released to keep this view memory-bounded.
+                      </p>
+                    )}
+                    {lazyResult.snapshot.error && (
+                      <p role="alert" className="text-destructive text-xs">{lazyResult.snapshot.error}</p>
+                    )}
+                    {lazyResult.snapshot.text && (
+                      <ShinyToolResult
+                        result={lazyResult.snapshot.text}
+                        resultType={resultType}
+                        resultLang={resultLang}
+                        isError={isError}
+                        annotations={ann}
+                      />
+                    )}
+                    {lazyResult.snapshot.loading && (
+                      <p data-lazy-result-loading className="text-muted-foreground text-xs">Loading…</p>
+                    )}
+                  </div>
+                ) : (
+                  <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />
+                )}
               </div>
             </div>
           )}

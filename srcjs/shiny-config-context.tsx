@@ -3,6 +3,7 @@ import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 import type { CopilotServiceState } from "./copilot-service-addon";
 import type { ChecklistSnapshot } from "./checklist-reducer";
 import type { MonitoredTask } from "./task-monitor";
+import type { LazyToolResultClient } from "./lazy-tool-result";
 
 export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; argumentHint?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
@@ -153,6 +154,8 @@ export interface ShinyConfigCtx {
   setRunREnabled?: (value: boolean) => void;
   autoStartCopilotApi?: boolean;
   setAutoStartCopilotApi?: (value: boolean) => void;
+  /** Session-scoped progressive loader for metadata-only large tool results. */
+  lazyToolResults?: LazyToolResultClient;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

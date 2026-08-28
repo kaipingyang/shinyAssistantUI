@@ -151,6 +151,14 @@ async def main(url: str) -> None:
             await page.wait_for_timeout(250)
             check("late requesting cannot revive terminal status", await status_line.count() == 0)
 
+            await page.locator("#fake_late_wrapped_requesting").dispatch_event("click")
+            await page.wait_for_function(
+                "document.querySelector('#fixture_state')?.textContent?.trim() === 'late-wrapped-requesting-sent'",
+                timeout=10000,
+            )
+            await page.wait_for_timeout(250)
+            check("late wrapped requesting cannot revive terminal status", await status_line.count() == 0)
+
             await text_root.hover()
             text_facts = await text_root.evaluate(
                 """el => ({
@@ -193,6 +201,38 @@ async def main(url: str) -> None:
             check(
                 "ordinary non-transient status remains supported after done",
                 "SYNTHETIC BACKGROUND READY" in await status_line.inner_text(),
+            )
+
+            await page.locator("#fake_proactive_mid").dispatch_event("click")
+            await page.wait_for_function(
+                "document.querySelector('#fixture_state')?.textContent?.trim() === 'proactive-mid-sent'",
+                timeout=10000,
+            )
+            await page.wait_for_function(
+                "document.body.innerText.includes('SYNTHETIC PROACTIVE INTERMEDIATE')",
+                timeout=10000,
+            )
+            body_after_mid = await page.locator("body").inner_text()
+            check(
+                "proactive intermediate snapshot is visible before final snapshot",
+                "SYNTHETIC PROACTIVE INTERMEDIATE" in body_after_mid
+                and "SYNTHETIC PROACTIVE FINAL" not in body_after_mid,
+            )
+
+            await page.locator("#fake_proactive_final").dispatch_event("click")
+            await page.wait_for_function(
+                "document.querySelector('#fixture_state')?.textContent?.trim() === 'proactive-final-sent'",
+                timeout=10000,
+            )
+            await page.wait_for_function(
+                "document.body.innerText.includes('SYNTHETIC PROACTIVE FINAL')",
+                timeout=10000,
+            )
+            body_after_final = await page.locator("body").inner_text()
+            check(
+                "newer proactive revision keeps intermediate and adds final content",
+                "SYNTHETIC PROACTIVE INTERMEDIATE" in body_after_final
+                and "SYNTHETIC PROACTIVE FINAL" in body_after_final,
             )
 
             websocket_open = await page.evaluate(
