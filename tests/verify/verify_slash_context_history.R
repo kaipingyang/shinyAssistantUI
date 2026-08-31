@@ -229,8 +229,9 @@ type_text(" argument-one")
 key("Enter", "Enter", 13L)
 check("skill arguments remain literal", wait_for("document.body.innerText.includes('ECHO[/yourskill argument-one]')", 8))
 
-# History is lazy and paged: reading -> newest page -> restoring; older pages prepend on demand.
-current_stage <- "history-load-warmup"
+# History is transcript-only and paged: reading -> newest page -> restoring;
+# older pages prepend on demand without starting the backend.
+current_stage <- "history-load-transcript-only"
 value("window.__historyTimeline=[];window.__historyFound=false;window.__historyWarm=false;window.__historyReading=false;window.__historyTimer=setInterval(()=>{const body=document.body.innerText;if(!window.__historyFound&&body.includes('HISTORICAL_FIXTURE_MESSAGE')){window.__historyFound=true;window.__historyTimeline.push('messages')}const r=!!document.querySelector('[data-slot=aui_history_reading]');if(r!==window.__historyReading){window.__historyReading=r;window.__historyTimeline.push(r?'reading:true':'reading:false')}const w=!!document.querySelector('[data-slot=aui_warming]');if(w!==window.__historyWarm){window.__historyWarm=w;window.__historyTimeline.push(w?'warming:true':'warming:false')}},10);true")
 item_json <- value("(function(){const e=Array.from(document.querySelectorAll('[data-slot=aui_thread-list-item]')).find(x=>x.innerText.includes('Fixture History'));if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2,visible:r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight})})()")
 check("history item is visible", !is.null(item_json) && isTRUE(fromJSON(item_json)$visible))
@@ -246,9 +247,10 @@ value("document.querySelector('[data-slot=aui_load_older]').click(); true")
 check("older history prepends on demand", wait_for("document.body.innerText.includes('OLDER_FIXTURE_001')", 6))
 value("document.querySelector('[data-slot=tool-fallback-trigger]').click(); true")
 check("tool result renders only after expand", wait_for("document.body.innerText.includes('fixture tool result')", 4))
-check("history warming completes", wait_for("window.__historyTimeline.includes('warming:true') && window.__historyTimeline.includes('warming:false')", 8))
 timeline <- fromJSON(value("JSON.stringify(window.__historyTimeline)"))
-check("history reading and restore phases are both observed", all(c("reading:true", "reading:false", "messages", "warming:true", "warming:false") %in% timeline),
+check("history browsing does not start backend warming", !"warming:true" %in% timeline,
+      paste(timeline, collapse = " -> "))
+check("history reading and restore phases are both observed", all(c("reading:true", "reading:false", "messages") %in% timeline),
       paste(timeline, collapse = " -> "))
 # resume 时 CLI 以 user 轮次写入的 <task-notification> 合成通知必须被显示层过滤，
 # 真实的 user/assistant 消息仍保留。
@@ -263,7 +265,7 @@ clear_editor(); type_text("continue history")
 key("Enter", "Enter", 13L)
 check("history continuation completes", wait_for("document.body.innerText.includes('ECHO[continue history]')", 8))
 Sys.sleep(0.2)
-check("history continuation has no cold start", !isTRUE(value("window.__continueWarmSeen")))
+check("history continuation lazily cold-starts once", isTRUE(value("window.__continueWarmSeen")))
 
 Sys.sleep(0.3)
 check("no browser console errors or exceptions", length(console_errors) == 0L,

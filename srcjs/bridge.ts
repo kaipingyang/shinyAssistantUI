@@ -1,6 +1,8 @@
 // Shiny ↔ React 通信桥
 // 封装 Shiny.setInputValue 和 addCustomMessageHandler
 
+import type { LazyToolResultChunk, LazyToolResultRequest } from "./lazy-tool-result";
+
 declare const Shiny: {
   setInputValue: (id: string, value: unknown, opts?: { priority?: string }) => void;
   addCustomMessageHandler: (type: string, handler: (data: unknown) => void) => void;
@@ -17,6 +19,7 @@ export type AttachmentData = {
 export type IdeContextPolicy = { selectionVisible: boolean };
 export type QuoteInfo = { text: string; messageId: string };  // 划词引用 metadata.custom.quote
 export type WorkingDirPayload = { dir?: string; recent?: string[] };
+export type GitBranchPayload = { project?: string; branch?: string | null };
 export type ProjectsPayload = { projects?: string[] };
 export type IdeContextMeta = {
   requestId?: string;
@@ -42,6 +45,37 @@ export type WorkspaceResults = {
   items: WorkspaceMentionItem[];
 };
 
+export type RunPhase = "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
+export type RunStage =
+  | "submitting"
+  | "model-switch"
+  | "cold-connect"
+  | "consumer-acquire"
+  | "sending"
+  | "awaiting-model"
+  | "streaming"
+  | "finalizing";
+export type RunStatePayload = {
+  threadId: string;
+  runId: string;
+  phase: RunPhase;
+  stage?: RunStage;
+  queuePosition?: number;
+};
+
+export type AutoContinueKind = "tool-postlude" | "generic" | "minimal";
+
+export type AutoContinuePayload = {
+  threadId: string;
+  runId?: string;
+  notice: string;
+  prompt: string;
+  kind?: AutoContinueKind;
+};
+
+const isAutoContinueKind = (value: unknown): value is AutoContinueKind =>
+  value === "tool-postlude" || value === "generic" || value === "minimal";
+
 export type ToolCallPayload = {
   toolCallId: string;
   toolName: string;
@@ -56,6 +90,8 @@ export type SessionItem = {
   preview: string;
   createdAt: string; // ISO 8601 datetime string
   archived?: boolean; // server-authoritative soft-hide (方案B)
+  project?: string;
+  projectLabel?: string;
 };
 
 export type RunCallbacks = {
@@ -70,8 +106,9 @@ export type RunCallbacks = {
   onData?: (d: { name: string; data: unknown }) => void;
   onGenerativeUi?: (d: { spec: unknown }) => void;
   onArtifact?: (artifact: { id: string; title: string; type: string; content: string; lang?: string }) => void;
-  onDone: (suggestions?: Array<{prompt: string}>) => void;
-  onError: (message: string) => void;
+  onAutoContinue?: (data: AutoContinuePayload) => void;
+  onDone: (suggestions?: Array<{prompt: string}>, runId?: string, cancelled?: boolean) => void;
+  onError: (message: string, runId?: string) => void;
 };
 
 export type ActionRequestOptions = {
@@ -91,22 +128,39 @@ export type ActionResult = {
 export type HistoryLoadPayload = {
   threadId: string;
   messages: unknown[];
+  requestId?: string;
   cursor?: string | number | null;
   hasMore?: boolean;
   prepend?: boolean;
 };
 
+export type SessionsPayload = {
+  sessions: SessionItem[];
+  projectOrder?: string[];
+};
+
+export type ProactiveMessagesPayload = {
+  version: 1;
+  operation: "replace";
+  threadId: string;
+  revision: number;
+  messages: unknown[];
+  afterRunId?: string;
+};
+
 export interface ShinyBridge {
-  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo) => void;
-  sendReload: (text: string, threadId: string) => void;
-  sendCancel: (threadId: string) => void;
+  sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string, continuationKind?: AutoContinueKind) => void;
+  reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean, project?: string) => void;
+  cancelReservedSubmissions: (submissionIds: string[]) => void;
+  sendReload: (text: string, threadId: string, runId?: string, project?: string) => void;
+  sendCancel: (threadId: string, runId?: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
-  sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions) => void;
-  sendRename: (threadId: string, title: string) => void;
-  sendOpenFile: (path: string, line?: number) => void;
-  sendRunInConsole: (code: string) => void;
-  sendArchiveSession: (sessionId: string, archived: boolean) => void;
-  sendDeleteSession: (sessionId: string) => void;
+  sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions, project?: string) => void;
+  sendRename: (threadId: string, title: string, project?: string) => void;
+  sendOpenFile: (path: string, line?: number, threadId?: string, project?: string) => void;
+  sendRunInConsole: (code: string, threadId?: string, project?: string) => void;
+  sendArchiveSession: (sessionId: string, archived: boolean, project?: string) => void;
+  sendDeleteSession: (sessionId: string, project?: string) => void;
   sendPickWorkingDir: () => void;
   sendSetWorkingDir: (path: string) => void;
   sendFilesPaneFollow: (value: boolean) => void;
@@ -114,30 +168,38 @@ export interface ShinyBridge {
   sendDefaultPermissionMode: (value: string) => void;
   sendModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => void;
   sendComposerDensity: (value: string) => void;
+  sendAssistantTextSize: (value: string) => void;
   sendRunREnabled: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
-  sendLoadSession: (sessionId: string, threadId: string) => void;
-  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number) => void;
+  sendLoadSession: (sessionId: string, threadId: string, requestId?: string, project?: string) => void;
+  sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string, project?: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendReady: () => void;
-  sendWarmup: (threadId: string) => void;
-  requestIdeContext: (requestId: string, threadId: string) => void;
-  searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number) => void;
+  sendWarmup: (threadId: string, project?: string) => void;
+  requestIdeContext: (requestId: string, threadId: string, project?: string) => void;
+  searchWorkspace: (requestId: string, threadId: string, query: string, kinds?: Array<"file" | "folder">, limit?: number, project?: string) => void;
+  requestToolResultChunk: (request: LazyToolResultRequest) => void;
+  onToolResultChunk: (handler: (chunk: LazyToolResultChunk) => void) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
+  /** Retain only tool approval callbacks after a foreground run settles. */
+  retireRunCallbacks: (threadId: string) => void;
   onClear: (handler: () => void) => void;
   onActionResult: (handler: (data: ActionResult) => void) => void;
-  onSessions: (handler: (data: { sessions: SessionItem[] }) => void) => void;
+  onSessions: (handler: (data: SessionsPayload) => void) => void;
+  onProactiveMessages: (handler: (data: ProactiveMessagesPayload) => void) => void;
   onWorkingDir: (handler: (data: WorkingDirPayload) => void) => void;
+  onGitBranch: (handler: (data: GitBranchPayload) => void) => void;
   onProjects: (handler: (data: ProjectsPayload) => void) => void;
-  onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string }) => void) => void;
+  onConsoleResult: (handler: (data: { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string }) => void) => void;
   onLoadThread: (handler: (data: HistoryLoadPayload) => void) => void;
   onUsage: (handler: (data: { threadId?: string; costUsd?: number; tokens?: number; contextTokens?: number; turns?: number; durationMs?: number; model?: string; contextWindow?: number }) => void) => void;
   onStateSnapshot: (handler: (data: { threadId?: string; state?: unknown }) => void) => void;
-  onTask: (handler: (data: { threadId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
+  onTask: (handler: (data: { threadId?: string; runId?: string; taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }) => void) => void;
   onRateLimit: (handler: (data: { threadId?: string; status?: string; resetsAt?: string; utilization?: number; type?: string }) => void) => void;
   onStatus: (handler: (data: { threadId?: string; status: string; text?: string }) => void) => void;
   onWarming: (handler: (data: { threadId?: string; active?: boolean; resuming?: boolean }) => void) => void;
+  onRunState: (handler: (data: RunStatePayload) => void) => void;
   onServerCommands: (handler: (data: { threadId?: string; commands?: unknown[]; outputStyles?: unknown[] }) => void) => void;
   onSuggestions: (handler: (data: { threadId?: string; suggestions?: unknown[] }) => void) => void;
   onCommands: (handler: (data: { commands?: unknown[] }) => void) => void;
@@ -148,17 +210,22 @@ export interface ShinyBridge {
 export function createShinyBridge(inputId: string): ShinyBridge {
   // 按 threadId 存储 callbacks，支持多 thread 并发（切 thread 不丢失旧 handler 回调）
   const callbacksMap = new Map<string, RunCallbacks>();
-  let sessionsHandler: ((data: { sessions: SessionItem[] }) => void) | null = null;
+  let sessionsHandler: ((data: SessionsPayload) => void) | null = null;
+  let proactiveMessagesHandler: ((data: ProactiveMessagesPayload) => void) | null = null;
+  const bufferedProactiveMessages: ProactiveMessagesPayload[] = [];
   let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
+  let toolResultChunkHandler: ((data: LazyToolResultChunk) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
-  let bufferedSessions: { sessions: SessionItem[] } | null = null;
+  let bufferedSessions: SessionsPayload | null = null;
   // 工作目录（addin 工作目录选择器）：同 :sessions，可能早到 → 缓冲回放。
   let workingDirHandler: ((data: WorkingDirPayload) => void) | null = null;
   let bufferedWorkingDir: WorkingDirPayload | null = null;
+  let gitBranchHandler: ((data: GitBranchPayload) => void) | null = null;
+  let bufferedGitBranch: GitBranchPayload | null = null;
   let projectsHandler: ((data: ProjectsPayload) => void) | null = null;
   let bufferedProjects: ProjectsPayload | null = null;
-  type ConsoleResultData = { code: string; ok: boolean; output: string; error: string };
+  type ConsoleResultData = { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string };
   let consoleResultHandler: ((data: ConsoleResultData) => void) | null = null;
   let bufferedConsoleResult: ConsoleResultData | null = null;
 
@@ -180,13 +247,21 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:done`, (data) => {
-    const d = data as { suggestions?: Array<{prompt: string}>; threadId?: string };
-    routeCallback(d.threadId)?.onDone(d.suggestions);
+    const d = data as { suggestions?: Array<{prompt: string}>; threadId?: string; runId?: string; cancelled?: boolean };
+    routeCallback(d.threadId)?.onDone(d.suggestions, d.runId, d.cancelled);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:error`, (data) => {
-    const d = data as { message: string; threadId?: string };
-    routeCallback(d.threadId)?.onError(d.message);
+    const d = data as { message: string; threadId?: string; runId?: string };
+    routeCallback(d.threadId)?.onError(d.message, d.runId);
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:auto-continue`, (data) => {
+    const d = data as Partial<AutoContinuePayload>;
+    if (typeof d.threadId !== "string" || typeof d.notice !== "string" ||
+        typeof d.prompt !== "string" ||
+        (d.kind !== undefined && !isAutoContinueKind(d.kind))) return;
+    routeCallback(d.threadId)?.onAutoContinue?.(d as AutoContinuePayload);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:thinking`, (data) => {
@@ -239,13 +314,23 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     routeCallback(d.threadId)?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
   });
 
+  Shiny.addCustomMessageHandler(`${inputId}:tool-result-chunk`, (data) => {
+    toolResultChunkHandler?.(data as LazyToolResultChunk);
+  });
+
   Shiny.addCustomMessageHandler(`${inputId}:sessions`, (data) => {
-    const d = data as { sessions: SessionItem[] };
+    const d = data as SessionsPayload;
     if (sessionsHandler) {
       sessionsHandler(d);
     } else {
       bufferedSessions = d; // 缓冲，等 onSessions() 注册后回放
     }
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:proactive-messages`, (data) => {
+    const d = data as ProactiveMessagesPayload;
+    if (proactiveMessagesHandler) proactiveMessagesHandler(d);
+    else bufferedProactiveMessages.push(d);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:load-thread`, (data) => {
@@ -258,6 +343,12 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     else bufferedWorkingDir = d;
   });
 
+  Shiny.addCustomMessageHandler(`${inputId}:git-branch`, (data) => {
+    const d = data as GitBranchPayload;
+    if (gitBranchHandler) gitBranchHandler(d);
+    else bufferedGitBranch = d;
+  });
+
   Shiny.addCustomMessageHandler(`${inputId}:projects`, (data) => {
     const d = data as ProjectsPayload;
     if (projectsHandler) projectsHandler(d);
@@ -268,28 +359,44 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     if (consoleResultHandler) consoleResultHandler(d);
     else bufferedConsoleResult = d;
   });
-
   return {
-    sendUserMessage(text, threadId, attachments, ideContext, quote) {
+    sendUserMessage(text, threadId, attachments, ideContext, quote, runId, submissionId, project, continuationKind) {
       Shiny.setInputValue(
         inputId,
-        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ts: Date.now() },
+        { text, threadId, attachments: attachments ?? [], ...(ideContext && { ideContext }), ...(quote && { quote }), ...(runId && { runId }), ...(submissionId && { submissionId }), ...(project && { project }), ...(continuationKind && { continuationKind }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendReload(text, threadId) {
+    reserveIdeContext(submissionId, threadId, selectionVisible, project) {
+      Shiny.setInputValue(
+        `${inputId}_reserve_submission`,
+        { submissionId, threadId, selectionVisible, ...(project && { project }), ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
+    cancelReservedSubmissions(submissionIds) {
+      if (submissionIds.length === 0) return;
+      Shiny.setInputValue(
+        `${inputId}_cancel_reserved_submissions`,
+        { submissionIds, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
+    sendReload(text, threadId, runId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "reload", text, threadId, ts: Date.now() },
+        { type: "reload", text, threadId, ...(runId && { runId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendCancel(threadId) {
+    sendCancel(threadId, runId) {
       Shiny.setInputValue(
         `${inputId}_cancel`,
-        { threadId, ts: Date.now() },
+        { threadId, ...(runId && { runId }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -302,7 +409,7 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendAction(actionId, threadId, options = {}) {
+    sendAction(actionId, threadId, options = {}, project) {
       Shiny.setInputValue(
         `${inputId}_action`,
         {
@@ -310,64 +417,65 @@ export function createShinyBridge(inputId: string): ShinyBridge {
           threadId,
           requestId: options.requestId,
           silent: options.silent ?? false,
+          ...(project && { project }),
           ts: Date.now(),
         },
         { priority: "event" }
       );
     },
 
-    sendRename(threadId, title) {
+    sendRename(threadId, title, project) {
       Shiny.setInputValue(
         `${inputId}_rename`,
-        { threadId, title, ts: Date.now() },
+        { threadId, title, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendOpenFile(path, line) {
+    sendOpenFile(path, line, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_open_file`,
-        { path, line: line ?? null, ts: Date.now() },
+        { path, line: line ?? null, ...(threadId && { threadId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendRunInConsole(code) {
+    sendRunInConsole(code, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_run_in_console`,
-        { code, ts: Date.now() },
+        { code, ...(threadId && { threadId }), ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendArchiveSession(sessionId, archived) {
+    sendArchiveSession(sessionId, archived, project) {
       Shiny.setInputValue(
         `${inputId}_archive_session`,
-        { sessionId, archived, ts: Date.now() },
+        { sessionId, archived, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendDeleteSession(sessionId) {
+    sendDeleteSession(sessionId, project) {
       Shiny.setInputValue(
         `${inputId}_delete_session`,
-        { sessionId, ts: Date.now() },
+        { sessionId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendLoadSession(sessionId, threadId) {
+    sendLoadSession(sessionId, threadId, requestId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session", sessionId, threadId, ts: Date.now() },
+        { type: "load_session", sessionId, threadId, requestId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50) {
+    sendLoadSessionPage(sessionId, threadId, cursor, limit = 50, requestId, project) {
       Shiny.setInputValue(
         inputId,
-        { type: "load_session_page", sessionId, threadId, cursor, limit, ts: Date.now() },
+        { type: "load_session_page", sessionId, threadId, cursor, limit, requestId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
@@ -387,28 +495,40 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         { priority: "event" }
       );
     },
-    sendWarmup(threadId) {
+    sendWarmup(threadId, project) {
       Shiny.setInputValue(
         `${inputId}_warmup`,
-        { threadId, ts: Date.now() },
+        { threadId, ...(project && { project }), ts: Date.now() },
         { priority: "event" }
       );
     },
 
-    requestIdeContext(requestId, threadId) {
+    requestIdeContext(requestId, threadId, project) {
       Shiny.setInputValue(
         `${inputId}_ide_context_refresh`,
-        { requestId, threadId, ts: Date.now() },
+        { requestId, threadId, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
     },
 
-    searchWorkspace(requestId, threadId, query, kinds = ["file", "folder"], limit = 50) {
+    searchWorkspace(requestId, threadId, query, kinds = ["file", "folder"], limit = 50, project) {
       Shiny.setInputValue(
         `${inputId}_workspace_search`,
-        { requestId, threadId, query, kinds, limit, ts: Date.now() },
+        { requestId, threadId, query, kinds, limit, ...(project && { project }), ts: Date.now() },
         { priority: "event" },
       );
+    },
+
+    requestToolResultChunk(request) {
+      Shiny.setInputValue(
+        `${inputId}_tool_result_chunk`,
+        { ...request, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+
+    onToolResultChunk(handler) {
+      toolResultChunkHandler = handler;
     },
 
     setRunCallbacks(threadId, callbacks) {
@@ -417,6 +537,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       } else {
         callbacksMap.set(threadId, callbacks);
       }
+    },
+
+    retireRunCallbacks(threadId) {
+      const callbacks = callbacksMap.get(threadId);
+      if (!callbacks) return;
+      // A foreground-created background task may request approval after the
+      // foreground Result. Keep only the tool channel; all late run-scoped
+      // chunks, terminals, and rich parts become no-ops until the next run
+      // replaces this entry with a full callback set.
+      callbacksMap.set(threadId, {
+        onChunk: () => {},
+        onToolCall: callbacks.onToolCall,
+        onToolResult: callbacks.onToolResult,
+        onDone: () => {},
+        onError: () => {},
+      });
     },
 
     onClear(handler) {
@@ -447,6 +583,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     onWarming(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:warming`, (data) => handler(data as never));
     },
+    onRunState(handler) {
+      Shiny.addCustomMessageHandler(`${inputId}:run-state`, (data) => handler(data as RunStatePayload));
+    },
     onServerCommands(handler) {
       Shiny.addCustomMessageHandler(`${inputId}:server-commands`, (data) => handler(data as never));
     },
@@ -471,9 +610,20 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       }
     },
 
+    onProactiveMessages(handler) {
+      proactiveMessagesHandler = handler;
+      while (bufferedProactiveMessages.length > 0) {
+        handler(bufferedProactiveMessages.shift()!);
+      }
+    },
+
     onWorkingDir(handler) {
       workingDirHandler = handler;
       if (bufferedWorkingDir) { handler(bufferedWorkingDir); bufferedWorkingDir = null; }
+    },
+    onGitBranch(handler) {
+      gitBranchHandler = handler;
+      if (bufferedGitBranch) { handler(bufferedGitBranch); bufferedGitBranch = null; }
     },
     sendPickWorkingDir() {
       Shiny.setInputValue(`${inputId}_pick_working_dir`, { ts: Date.now() }, { priority: "event" });
@@ -495,6 +645,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendComposerDensity(value) {
       Shiny.setInputValue(`${inputId}_composer_density`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendAssistantTextSize(value) {
+      Shiny.setInputValue(`${inputId}_assistant_text_size`, { value, ts: Date.now() }, { priority: "event" });
     },
     sendRunREnabled(value) {
       Shiny.setInputValue(`${inputId}_run_r_enabled`, { value, ts: Date.now() }, { priority: "event" });

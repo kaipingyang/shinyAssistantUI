@@ -8,14 +8,16 @@
 ^package-lock\.json$
 ^vite\.config\.mts$
 ^vitest\.config\.ts$
+^tools$
+^dependency-snapshots$
 ^tsconfig\.json$
 ^examples$
 ^tests/verify$
 ^assistant-ui-src$
-.*\.png$
+.*\.(png|jpe?g)$
 ^\.ellmer_sessions$
 ^\.claude$
-^\.codegraph$
+^\.codegraph($|/)
 ^\.kiro$
 ^inst/www/bundle-stats\.html$
 ^\.claude_session_map.*\.rds$
@@ -25,3 +27,4 @@
 ^positron_shiny_bug_feedback\.md$
 ^CLAUDE\.md$
 ^AGENTS\.md$
+^CODE_REVIEW_dev_617934e\.md$

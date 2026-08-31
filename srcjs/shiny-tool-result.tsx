@@ -1,20 +1,9 @@
 import type { ReactNode } from "react";
-import { PrismLight } from "react-syntax-highlighter";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import rLang from "react-syntax-highlighter/dist/esm/languages/prism/r";
-import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
-import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
-import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
-import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
-import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
 import { safeUrl } from "./helpers";
-
-PrismLight.registerLanguage("r", rLang);
-PrismLight.registerLanguage("python", python);
-PrismLight.registerLanguage("javascript", javascript);
-PrismLight.registerLanguage("sql", sql);
-PrismLight.registerLanguage("bash", bash);
-PrismLight.registerLanguage("json", json);
+import {
+  JsonHighlighter,
+  SyntaxHighlighter,
+} from "./components/assistant-ui/syntax-highlighter";
 
 // inline markdown: **bold** *italic* `code` [link](url)（safeUrl 过滤 scheme）
 function parseInline(text: string): ReactNode[] {
@@ -50,7 +39,11 @@ function SimpleMarkdown({ text }: { text: string }) {
       const code: string[] = []; i++;
       while (i < lines.length && !lines[i].startsWith("```")) { code.push(lines[i]); i++; }
       i++;
-      nodes.push(<PrismLight key={key++} language={lang} style={oneLight} customStyle={{ margin: "6px 0", fontSize: "12px", borderRadius: "6px" }}>{code.join("\n")}</PrismLight>);
+      nodes.push(
+        <div key={key++} className="bg-muted/50 my-1.5 overflow-x-auto rounded-md p-2.5 text-xs">
+          <SyntaxHighlighter language={lang} code={code.join("\n")} />
+        </div>,
+      );
       continue;
     }
     const hm = line.match(/^(#{1,3})\s+(.+)/);
@@ -87,6 +80,37 @@ function TableResult({ data }: { data: unknown }) {
   );
 }
 
+function autoJsonText(result: unknown): string | undefined {
+  let value = result;
+  if (typeof result === "string") {
+    const trimmed = result.trim();
+    if (!((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && trimmed.endsWith("]")))) return undefined;
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (value === null || typeof value !== "object") return undefined;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+function JsonResult({ code }: { code: string }) {
+  return (
+    <div
+      data-result-view="json"
+      className="aui-tool-result-json bg-muted/50 overflow-x-auto rounded-md p-2.5 text-xs"
+    >
+      <JsonHighlighter code={code} />
+    </div>
+  );
+}
+
 export function ShinyToolResult({
   result, resultType, resultLang, isError, annotations,
 }: {
@@ -96,9 +120,24 @@ export function ShinyToolResult({
   const display = typeof result === "string" ? result : JSON.stringify(result, null, 2);
   if (isError) return <pre data-result-view="console" className="text-destructive bg-destructive/5 rounded-md p-2 font-mono text-xs whitespace-pre-wrap">{display}</pre>;
   switch (resultType) {
+    case "auto": {
+      const jsonText = autoJsonText(result);
+      if (jsonText !== undefined) return <JsonResult code={jsonText} />;
+      return <pre data-result-view="console" className="bg-muted/50 rounded-md p-2 font-mono text-xs whitespace-pre-wrap">{display}</pre>;
+    }
+    case "json": {
+      const jsonText = autoJsonText(result);
+      return jsonText !== undefined
+        ? <JsonResult code={jsonText} />
+        : <pre data-result-view="console" className="bg-muted/50 rounded-md p-2 font-mono text-xs whitespace-pre-wrap">{display}</pre>;
+    }
     case "markdown": return <SimpleMarkdown text={display} />;
     case "table": return <TableResult data={result} />;
-    case "code": return <PrismLight language={resultLang} style={oneLight} customStyle={{ margin: 0, fontSize: "12px", borderRadius: "6px" }}>{display}</PrismLight>;
+    case "code": return (
+      <div data-result-view="code" className="bg-muted/50 overflow-x-auto rounded-md p-2.5 text-xs">
+        <SyntaxHighlighter language={resultLang} code={display} />
+      </div>
+    );
     case "image": return <img src={typeof result === "string" ? result : ""} alt="tool result" className="max-w-full rounded-md border" />;
     case "file": {
       const filename = (annotations?.resultFilename as string | undefined) ?? "download";

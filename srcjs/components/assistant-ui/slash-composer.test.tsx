@@ -356,6 +356,149 @@ describe("Lexical slash composer", () => {
   });
 });
 
+describe("copilot-api service state", () => {
+  it("renders ready as a compact green line below the Composer", () => {
+    const { getByTestId } = render(
+      <Widget
+        id="service-ready"
+        context={{ serviceState: { status: "ready" } } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-service-ready");
+    const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+    const ready = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_service_status"][data-status="ready"]',
+    );
+    const icon = ready?.querySelector<HTMLElement>("[data-slot='aui_service_ready_icon']");
+
+    expect(composer).not.toBeNull();
+    expect(ready).not.toBeNull();
+    expect(ready?.dataset.compact).toBe("true");
+    expect(composer!.compareDocumentPosition(ready!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(ready?.className).not.toContain("rounded-lg");
+    expect(ready?.className).not.toContain("border-border");
+    expect(icon?.className).toMatch(/text-green-/);
+    expect(editorIn(widget).getAttribute("contenteditable")).toBe("true");
+  });
+
+  it("places ready status and usage metrics in one compact footer row", () => {
+    const { getByTestId } = render(
+      <Widget
+        id="service-ready-usage"
+        context={{
+          serviceState: { status: "ready" },
+          usage: { costUsd: 1.4781, tokens: 78022, turns: 1, durationMs: 7500 },
+        } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-service-ready-usage");
+    const row = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_composer_meta_footer"][data-layout="inline"]',
+    );
+    const ready = widget.querySelector<HTMLElement>(
+      '[data-slot="aui_service_status"][data-status="ready"]',
+    );
+    const usage = widget.querySelector<HTMLElement>('[data-slot="aui_usage_footer"]');
+
+    expect(row).not.toBeNull();
+    expect(ready?.parentElement).toBe(row);
+    expect(usage?.parentElement).toBe(row);
+    expect(row?.textContent).toContain("copilot-api is ready");
+    expect(row?.textContent).toContain("$1.4781 · 78,022 tokens · 1 turn · 7.5s");
+  });
+
+  it.each(["checking", "starting", "failed"] as const)(
+    "renders actionable %s state above the Composer",
+    (status) => {
+      const retryService = vi.fn();
+      const context = {
+        serviceState: {
+          status,
+          message: status === "failed" ? "copilot-api did not become ready" : undefined,
+        },
+        retryService,
+      } as unknown as Partial<ShinyConfigCtx>;
+      const { getByTestId } = render(
+        <Widget id={`service-${status}`} context={context} />,
+      );
+      const widget = getByTestId(`widget-service-${status}`);
+      const service = widget.querySelector<HTMLElement>(
+        `[data-slot="aui_service_status"][data-status="${status}"]`,
+      );
+      const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+
+      expect(service).not.toBeNull();
+      expect(composer).not.toBeNull();
+      expect(service!.compareDocumentPosition(composer!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      expect(editorIn(widget).getAttribute("contenteditable")).toBe("true");
+
+      if (status === "failed") {
+        const retry = within(widget).getByRole("button", { name: /retry/i });
+        fireEvent.click(retry);
+        expect(retryService).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it("shows the current Git branch below the Composer and hides it when absent", () => {
+    const view = render(
+      <Widget id="git-branch" context={{ gitBranch: "feature/footer" }} />,
+    );
+    const widget = view.getByTestId("widget-git-branch");
+    const branch = widget.querySelector<HTMLElement>('[data-slot="aui_git_branch"]');
+    const composer = widget.querySelector<HTMLElement>(".aui-composer-root");
+
+    expect(branch).not.toBeNull();
+    expect(branch?.textContent).toContain("feature/footer");
+    expect(composer!.compareDocumentPosition(branch!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    view.rerender(<Widget id="git-branch" context={{ gitBranch: undefined }} />);
+    expect(view.getByTestId("widget-git-branch").querySelector('[data-slot="aui_git_branch"]')).toBeNull();
+  });
+});
+
+describe("Claude checklist lifecycle controls", () => {
+  it("normalizes completed status and closes the exact revision at any time", () => {
+    const dismissChecklist = vi.fn();
+    const completed = {
+      threadId: "thread-a",
+      revision: "rev-complete",
+      allCompleted: true,
+      visibleItems: [{ id: "1", content: "Done", status: " Completed " }],
+      overflowCount: 0,
+    };
+    const { getByTestId, rerender } = render(
+      <Widget
+        id="checklist-close"
+        context={{ checklist: completed, dismissChecklist } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-checklist-close");
+    const completedLabel = within(widget).getByText("Done");
+    expect(within(widget).getByText("✓")).toBeTruthy();
+    expect(completedLabel.className).toContain("line-through");
+    fireEvent.click(within(widget).getByRole("button", { name: /close checklist/i }));
+    expect(dismissChecklist).toHaveBeenCalledWith("thread-a", "rev-complete");
+
+    rerender(
+      <Widget
+        id="checklist-close"
+        context={{
+          checklist: {
+            ...completed,
+            revision: "rev-active",
+            allCompleted: false,
+            visibleItems: [{ id: "1", content: "Working", status: "in_progress" }],
+          },
+          dismissChecklist,
+        } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    fireEvent.click(within(widget).getByRole("button", { name: /close checklist/i }));
+    expect(dismissChecklist).toHaveBeenLastCalledWith("thread-a", "rev-active");
+  });
+});
+
 
 describe("historical thread paging controls", () => {
   it("renders reading and restoring as separate phases", () => {
@@ -382,6 +525,100 @@ describe("historical thread paging controls", () => {
     expect(widget.querySelector("[data-slot='aui_warming']")?.getAttribute("data-resuming")).toBe("true");
     expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
       .toContain("Resuming session…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{
+          runPhase: "connecting",
+          warming: false,
+          warmingLabel: "Starting Claude Code…",
+        } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Sending request…");
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .not.toContain("Starting Claude Code…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{
+          runPhase: "connecting",
+          warming: true,
+          warmingLabel: "Starting Claude Code…",
+        } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Starting Claude Code…");
+
+    rerender(
+      <Widget
+        id="history-status"
+        context={{ runPhase: "queued", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("Waiting for an available run slot…");
+  });
+
+  it("renders precise request stages and queue position", () => {
+    const { getByTestId, rerender } = render(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "connecting", runStage: "submitting", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-request-stage");
+    const stageCases = [
+      ["submitting", "Preparing request…"],
+      ["model-switch", "Applying model…"],
+      ["consumer-acquire", "Waiting for conversation stream…"],
+      ["sending", "Sending request…"],
+      ["awaiting-model", "Waiting for Claude…"],
+      ["streaming", "Generating…"],
+      ["finalizing", "Finalizing…"],
+    ] as const;
+    for (const [runStage, expected] of stageCases) {
+      rerender(
+        <Widget
+          id="request-stage"
+          context={{ runPhase: runStage === "streaming" || runStage === "finalizing" ? "running" : "connecting", runStage, warming: false } as Partial<ShinyConfigCtx>}
+        />,
+      );
+      const indicator = widget.querySelector("[data-slot='aui_warming']");
+      expect(indicator?.getAttribute("data-run-stage")).toBe(runStage);
+      expect(indicator?.textContent).toContain(expected);
+    }
+
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "queued", runQueuePosition: 3, warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")?.textContent)
+      .toContain("3rd in queue");
+
+    const cancelRun = vi.fn();
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "connecting", runStage: "awaiting-model", warming: false, cancelRun } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    fireEvent.click(widget.querySelector<HTMLButtonElement>("[data-slot='aui_run_cancel']")!);
+    expect(cancelRun).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <Widget
+        id="request-stage"
+        context={{ runPhase: "running", warming: false } as Partial<ShinyConfigCtx>}
+      />,
+    );
+    expect(widget.querySelector("[data-slot='aui_warming']")).toBeNull();
   });
 
   it("offers a top load-older control and guards repeated loads", () => {
@@ -401,5 +638,49 @@ describe("historical thread paging controls", () => {
     expect(button).not.toBeNull();
     fireEvent.click(button!);
     expect(loadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("Claude checklist bounded expansion and collapse", () => {
+  it("expands +N more inline, keeps the body bounded, and collapses to its header", () => {
+    const items = Array.from({ length: 7 }, (_, index) => ({
+      id: String(index + 1),
+      content: `Current task ${index + 1}`,
+      status: index === 0 ? "in_progress" : "pending",
+    }));
+    const checklist = {
+      threadId: "thread-current",
+      revision: "current-group",
+      allCompleted: false,
+      staleAfterUserTurn: false,
+      items,
+      visibleItems: items.slice(0, 5),
+      overflowCount: 2,
+    };
+    const { getByTestId } = render(
+      <Widget
+        id="checklist-expand-collapse"
+        context={{ checklist } as unknown as Partial<ShinyConfigCtx>}
+      />,
+    );
+    const widget = getByTestId("widget-checklist-expand-collapse");
+    const panel = widget.querySelector<HTMLElement>('[data-slot="aui_claude_checklist"]')!;
+
+    expect(panel.dataset.collapsed).toBe("false");
+    expect(within(widget).queryByText("Current task 7")).toBeNull();
+    fireEvent.click(within(widget).getByRole("button", { name: /show 2 more checklist items/i }));
+    expect(within(widget).getByText("Current task 7")).toBeTruthy();
+    const body = widget.querySelector<HTMLElement>('[data-slot="aui_checklist_body"]');
+    expect(body?.className).toContain("max-h-");
+    expect(body?.className).toContain("overflow-y-auto");
+    expect(within(widget).getByRole("button", { name: /show fewer checklist items/i })).toBeTruthy();
+
+    fireEvent.click(within(widget).getByRole("button", { name: /collapse checklist/i }));
+    expect(panel.dataset.collapsed).toBe("true");
+    expect(widget.querySelector('[data-slot="aui_checklist_body"]')).toBeNull();
+    fireEvent.click(within(widget).getByRole("button", { name: /expand checklist/i }));
+    expect(panel.dataset.collapsed).toBe("false");
+    expect(widget.querySelector('[data-slot="aui_checklist_body"]')).not.toBeNull();
   });
 });

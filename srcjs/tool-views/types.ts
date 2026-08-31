@@ -15,6 +15,24 @@ export type QuestionSummary = {
 export type ToolView =
   | { kind: "diff"; oldContent: string; newContent: string; fileName?: string; startLine?: number }
   | { kind: "code"; code: string; lang: string; fileName?: string }
+  | {
+      kind: "table";
+      text: string;
+      rows: string[][];
+      delimiter: "comma" | "tab";
+      truncatedRows: boolean;
+      truncatedColumns: boolean;
+      truncatedCells: boolean;
+      fileName?: string;
+    }
+  | {
+      kind: "markdown";
+      text: string;
+      defaultMode: "preview" | "source";
+      sourceControl: "prominent" | "subtle";
+      sourceLanguage?: string;
+      fileName?: string;
+    }
   | { kind: "todos"; items: TodoItem[] }
   | { kind: "query"; fields: QueryField[] }
   | { kind: "questions"; items: QuestionSummary[] }
@@ -25,4 +43,10 @@ export type ToolView =
 // 例:annotations$argsView = list(kind = "code", field = "code", lang = "r")
 export type ArgsViewHint =
   | { kind: "code"; field?: string; lang?: string }
-  | { kind: "diff"; oldField?: string; newField?: string; fileField?: string };
+  | { kind: "diff"; oldField?: string; newField?: string; fileField?: string }
+  | {
+      kind: "markdown";
+      field?: string;
+      defaultMode?: "preview" | "source";
+      sourceControl?: "prominent" | "subtle";
+    };

@@ -59,3 +59,44 @@ test_that(".claude_msgs_to_thread 把历史决策回填到 tool-call part 的 ar
   expect_identical(part1$artifact$approvalResult, "denied")
   expect_identical(part1$toolCallId, "tu_1")
 })
+
+
+test_that("AskUserQuestion decision objects preserve answers while old strings stay compatible", {
+  path <- tempfile(fileext = ".rds")
+  on.exit(unlink(path), add = TRUE)
+  answer_decision <- list(
+    status = "approved",
+    answers = list("Fav color?" = "Blue", "Which langs?" = c("R", "SQL"))
+  )
+  shinyAssistantUI:::.record_tool_decision(path, "tu_ask", answer_decision)
+  shinyAssistantUI:::.record_tool_decision(path, "tu_old", "denied")
+  stored <- shinyAssistantUI:::.read_tool_decisions(path)
+  expect_identical(stored[["tu_ask"]], answer_decision)
+  expect_identical(stored[["tu_old"]], "denied")
+})
+
+test_that(".claude_msgs_to_thread restores AskUserQuestion answers into structured args", {
+  questions <- list(list(
+    question = "Fav color?",
+    multiSelect = FALSE,
+    options = list(list(label = "Blue"), list(label = "Red"))
+  ))
+  msgs <- list(
+    list(type = "assistant", uuid = "a-ask", message = list(content = list(
+      list(type = "tool_use", id = "tu_ask", name = "AskUserQuestion", input = list(questions = questions))
+    ))),
+    list(type = "user", uuid = "u-ask", message = list(content = list(
+      list(type = "tool_result", tool_use_id = "tu_ask", content = "Answers submitted", is_error = FALSE)
+    )))
+  )
+  decisions <- list(tu_ask = list(
+    status = "approved",
+    answers = list("Fav color?" = "Blue")
+  ))
+
+  thread <- shinyAssistantUI:::.claude_msgs_to_thread(msgs, decisions)
+  part <- Filter(function(p) identical(p$type, "tool-call"), thread[[1]]$content)[[1]]
+  expect_identical(part$artifact$approvalResult, "approved")
+  expect_identical(part$args$answers, list("Fav color?" = "Blue"))
+  expect_match(part$argsText, '"answers"', fixed = TRUE)
+})

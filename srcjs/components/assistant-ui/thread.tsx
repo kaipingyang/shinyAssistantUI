@@ -61,6 +61,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   FileTextIcon,
+  GitBranchIcon,
   MicIcon,
   ClockIcon,
   MoreHorizontalIcon,
@@ -107,6 +108,66 @@ export type ThreadProps = {
   components?: ThreadComponents | undefined;
 };
 
+
+type StreamingViewportMetrics = {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+};
+
+type FollowMessage = {
+  id: string;
+  role: string;
+};
+
+const STREAMING_BOTTOM_TOLERANCE = 8;
+
+export function resolveStreamingFollow(
+  previous: StreamingViewportMetrics,
+  current: StreamingViewportMetrics,
+  wasFollowing: boolean,
+  explicitUpwardIntent = false,
+): boolean {
+  const bottomDistance = current.scrollHeight - current.clientHeight - current.scrollTop;
+  if (bottomDistance <= STREAMING_BOTTOM_TOLERANCE) return true;
+  if (explicitUpwardIntent) return false;
+  const stableHeight = Math.abs(current.scrollHeight - previous.scrollHeight) <= 1;
+  const movedUp = current.scrollTop < previous.scrollTop - 1;
+  if (stableHeight && movedUp) return false;
+  return wasFollowing;
+}
+
+export function hasAppendedUserMessage(
+  previousTailId: string | null,
+  messages: readonly FollowMessage[],
+): boolean {
+  if (!previousTailId) return false;
+  const priorTailIndex = messages.findIndex((message) => message.id === previousTailId);
+  if (priorTailIndex < 0 || priorTailIndex === messages.length - 1) return false;
+  return messages.slice(priorTailIndex + 1).some((message) => message.role === "user");
+}
+
+export function hasNewUserMessage(
+  previousUserIds: ReadonlySet<string>,
+  messages: readonly FollowMessage[],
+): boolean {
+  return messages.some(
+    (message) => message.role === "user" && !previousUserIds.has(message.id),
+  );
+}
+
+const readViewportMetrics = (viewport: HTMLDivElement): StreamingViewportMetrics => ({
+  scrollTop: viewport.scrollTop,
+  scrollHeight: viewport.scrollHeight,
+  clientHeight: viewport.clientHeight,
+});
+
+const scrollViewportToBottomInstant = (viewport: HTMLDivElement): void => {
+  const previousBehavior = viewport.style.scrollBehavior;
+  viewport.style.scrollBehavior = "auto";
+  viewport.scrollTop = viewport.scrollHeight;
+  viewport.style.scrollBehavior = previousBehavior;
+};
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
 const ThreadComponentsContext =
@@ -130,11 +191,42 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
-  const { historyHasMore, loadingOlder, loadOlderHistory, threadMaxWidth, composerDensity } = useShinyConfig();
+  const {
+    historyHasMore,
+    loadingOlder,
+    loadOlderHistory,
+    submissionRevision = 0,
+    threadMaxWidth,
+    composerDensity,
+  } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const previousLoadingOlderRef = useRef(Boolean(loadingOlder));
+  const followMessages = useAuiState((state) => state.thread.messages);
+  const followMessageRevision = useAuiState((state) => {
+    const messages = state.thread.messages;
+    const userCount = messages.reduce(
+      (count, message) => count + (message.role === "user" ? 1 : 0),
+      0,
+    );
+    const last = messages[messages.length - 1];
+    const textLength = last?.content.reduce(
+      (length, part) => length + (part.type === "text" ? part.text.length : 0),
+      0,
+    ) ?? 0;
+    return `${messages.length}:${userCount}:${last?.id ?? ""}:${last?.content.length ?? 0}:${textLength}`;
+  });
+  const followRunning = useAuiState((state) => state.thread.isRunning);
+  const followingRef = useRef(true);
+  const previousMetricsRef = useRef<StreamingViewportMetrics | null>(null);
+  const previousTailIdRef = useRef<string | null>(null);
+  const previousUserIdsRef = useRef<Set<string>>(new Set());
+  const previousUserCountRef = useRef(0);
+  const previousRunningRef = useRef(followRunning);
+  const previousSubmissionRevisionRef = useRef(submissionRevision);
+  const pointerActiveRef = useRef(false);
+  const upwardWheelRef = useRef(false);
   // 内容溢出（需翻页）时才显示顶部"当前提问"小框，短对话不占布局。
   const [overflowing, setOverflowing] = useState(false);
 
@@ -202,6 +294,26 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     loadOlderHistory();
   };
 
+  const followSubmittedTurn = useCallback(() => {
+    followingRef.current = true;
+    upwardWheelRef.current = false;
+    const scrollLatest = () => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      scrollViewportToBottomInstant(viewport);
+      followingRef.current = true;
+      previousMetricsRef.current = readViewportMetrics(viewport);
+    };
+    scrollLatest();
+    window.requestAnimationFrame(scrollLatest);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (submissionRevision === previousSubmissionRevisionRef.current) return;
+    previousSubmissionRevisionRef.current = submissionRevision;
+    followSubmittedTurn();
+  }, [submissionRevision, followSubmittedTurn]);
+
   useLayoutEffect(() => {
     const wasLoading = previousLoadingOlderRef.current;
     previousLoadingOlderRef.current = Boolean(loadingOlder);
@@ -213,6 +325,52 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     }
     olderAnchorRef.current = null;
   }, [loadingOlder]);
+
+  useLayoutEffect(() => {
+    const currentTailId = followMessages[followMessages.length - 1]?.id ?? null;
+    const submitted = hasAppendedUserMessage(
+      previousTailIdRef.current,
+      followMessages,
+    );
+    const newUserMessage = hasNewUserMessage(
+      previousUserIdsRef.current,
+      followMessages,
+    );
+    const currentUserIds = new Set(
+      followMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.id),
+    );
+    const currentUserCount = followMessages.filter(
+      (message) => message.role === "user",
+    ).length;
+    const userCountIncreased = currentUserCount > previousUserCountRef.current;
+    const runStarted = followRunning && !previousRunningRef.current;
+    previousTailIdRef.current = currentTailId;
+    previousUserIdsRef.current = currentUserIds;
+    previousUserCountRef.current = currentUserCount;
+    previousRunningRef.current = followRunning;
+    const explicitNewTurn = !loadingOlder && (newUserMessage || userCountIncreased);
+    const forceLatest = submitted || explicitNewTurn || runStarted;
+    if (forceLatest) followingRef.current = true;
+    if (loadingOlder && !submitted && !runStarted) return undefined;
+    if (!followingRef.current || (followMessages.length === 0 && !followRunning)) {
+      return undefined;
+    }
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    if (!previousMetricsRef.current) {
+      previousMetricsRef.current = readViewportMetrics(viewport);
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const current = viewportRef.current;
+      if (!current || (!followingRef.current && !forceLatest)) return;
+      scrollViewportToBottomInstant(current);
+      if (forceLatest) followingRef.current = true;
+      previousMetricsRef.current = readViewportMetrics(current);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [followMessageRevision, followMessages, followRunning, loadingOlder]);
 
   return (
     <ThreadPrimitive.Root
@@ -231,8 +389,32 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         data-slot="aui_thread-viewport"
+        onWheelCapture={(event) => {
+          if (event.deltaY < 0) upwardWheelRef.current = true;
+        }}
+        onPointerDownCapture={() => {
+          pointerActiveRef.current = true;
+        }}
+        onPointerUpCapture={() => {
+          pointerActiveRef.current = false;
+        }}
+        onPointerCancelCapture={() => {
+          pointerActiveRef.current = false;
+        }}
         onScroll={(event) => {
-          if (event.currentTarget.scrollTop <= 120) requestOlder();
+          const current = readViewportMetrics(event.currentTarget);
+          const previous = previousMetricsRef.current ?? current;
+          const pointerMovedUp = pointerActiveRef.current &&
+            current.scrollTop < previous.scrollTop - 1;
+          followingRef.current = resolveStreamingFollow(
+            previous,
+            current,
+            followingRef.current,
+            upwardWheelRef.current || pointerMovedUp,
+          );
+          upwardWheelRef.current = false;
+          previousMetricsRef.current = current;
+          if (current.scrollTop <= 120) requestOlder();
         }}
         className="relative flex min-h-0 flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
       >
@@ -260,6 +442,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           </div>
 
           <ThreadPrimitive.ViewportFooter
+            data-slot="aui_thread-viewport-footer"
             className={cn(
               "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
@@ -268,10 +451,14 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           >
             <ThreadScrollToBottom />
             <ShinyStatusPanels />
+            <ShinyServiceStatus />
+            <ShinyChecklistPanel />
             {/* Plan 48B: 动态 follow-up 建议 chip(自带 !isEmpty && !isRunning && 有建议 门禁)*/}
             <ThreadFollowupSuggestions />
-            <Composer />
-            <ShinyUsageFooter />
+            <div data-slot="aui_composer-stack" className="flex flex-col gap-1">
+              <Composer />
+              <ShinyComposerMetaFooter />
+            </div>
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
@@ -437,8 +624,7 @@ const IdeContextIndicator: FC = () => {
 };
 
 const Composer: FC = () => {
-  const { refreshIdeContext, composerDensity } = useShinyConfig();
-  const compact = composerDensity === "compact";
+  const { refreshIdeContext, composerDensity, blockingAction } = useShinyConfig();
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ShinyAgentProgress />
@@ -446,60 +632,274 @@ const Composer: FC = () => {
         <div
           data-slot="aui_composer-shell"
           data-density={composerDensity ?? "comfortable"}
-          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
+          data-blocked={blockingAction ? "true" : "false"}
+          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[density=compact]:gap-1 data-[density=compact]:[&_.aui-composer-input]:py-0 data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
         >
           <ComposerQuotePreview />
           <ComposerAttachments />
           <IdeContextIndicator />
-          {compact ? (
-            // 扁平单行(≈shinychat):输入框在最左(flex-1,光标贴最左),控件(附件/权限/模型/用量环)
-            // + 发送全在右侧;附件预览 / IDE 上下文条在上方按需出现。comfortable 保留完整两行布局。
-            <div className="aui-composer-compact-row flex items-end gap-1.5">
-              <div className="min-w-0 flex-1">
-                <ShinyComposerInput onFocus={refreshIdeContext} />
-              </div>
-              <ComposerAddAttachment />
-              <PermissionModeControl compact />
-              <ModelPickerDialog />
-              <ShinyContextDisplay />
-              <ComposerSendGroup />
-            </div>
-          ) : (
-            <>
-              <ShinyComposerInput onFocus={refreshIdeContext} />
-              <ComposerAction />
-            </>
-          )}
+          <ShinyComposerInput onFocus={refreshIdeContext} />
+          <ComposerAction />
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
 };
 
-// Per-thread Claude CLI connection indicator.
+// Per-thread connection / scheduler indicator.
 const ShinyWarmingIndicator: FC = () => {
-  const { warming, warmingResuming, warmingLabel } = useShinyConfig();
-  if (!warming) return null;
-  // Backend-agnostic English default; consumers (addin / codeagent example) override via warmingLabel.
-  const label = warmingLabel || (warmingResuming ? "Resuming session…" : "Starting…");
+  const { warming, warmingResuming, warmingLabel, runPhase, runStage, runQueuePosition, cancelRun } = useShinyConfig();
+  const waiting = runPhase === "queued";
+  const active = waiting || runPhase === "connecting" || (runPhase === "running" && Boolean(runStage));
+  if (!warming && !active) return null;
+  const ordinal = (value: number) => {
+    const mod100 = value % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
+    return `${value}${value % 10 === 1 ? "st" : value % 10 === 2 ? "nd" : value % 10 === 3 ? "rd" : "th"}`;
+  };
+  const stageLabels: Record<string, string> = {
+    submitting: "Preparing request…",
+    "model-switch": "Applying model…",
+    "cold-connect": warmingResuming ? "Resuming session…" : "Starting Claude…",
+    "consumer-acquire": "Waiting for conversation stream…",
+    sending: "Sending request…",
+    "awaiting-model": "Waiting for Claude…",
+    streaming: "Generating…",
+    finalizing: "Finalizing…",
+  };
+  const label = warming
+    ? (warmingLabel || (runStage ? stageLabels[runStage] : undefined) || (warmingResuming ? "Resuming session…" : "Starting…"))
+    : waiting
+      ? (runQueuePosition ? `${ordinal(runQueuePosition)} in queue…` : "Waiting for an available run slot…")
+      : stageLabels[runStage ?? ""] || "Sending request…";
   return (
     <div
       data-slot="aui_warming"
+      data-run-phase={runPhase}
+      data-run-stage={runStage}
+      data-queue-position={runQueuePosition}
       data-resuming={warmingResuming ? "true" : "false"}
       className="aui-warming-indicator flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
     >
-      <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <span className={cn(
+        "inline-block size-3 shrink-0 rounded-full border-2 border-primary",
+        waiting ? "border-dotted" : "animate-spin border-t-transparent",
+      )} />
       <span>{label}</span>
+      {(waiting || runPhase === "connecting") && cancelRun && (
+        <button
+          type="button"
+          data-slot="aui_run_cancel"
+          className="ms-auto rounded px-1.5 py-0.5 text-xs text-foreground hover:bg-muted"
+          onClick={cancelRun}
+        >
+          Cancel
+        </button>
+      )}
     </div>
   );
 };
 
-const ShinyStatusPanels: FC = () => {
-  const { rateLimit, tasks, statusText, stopTask } = useShinyConfig();
-  const activeTasks = (tasks ?? []).filter(
-    (task) => !/^(completed|done|stopped|failed|cancelled|canceled|errored)$/i.test(task.status ?? ""),
+const ShinyServiceStatus: FC = () => {
+  const {
+    serviceState, pendingServiceSubmissions, retryService,
+    cancelPendingServiceSubmissions,
+  } = useShinyConfig();
+  if (!serviceState || serviceState.status === "ready") return null;
+  const labels = {
+    disabled: "copilot-api auto-start is disabled",
+    checking: "Checking copilot-api…",
+    starting: "Starting copilot-api…",
+    ready: "copilot-api is ready",
+    failed: "copilot-api is not ready",
+  } as const;
+  const busy = serviceState.status === "checking" || serviceState.status === "starting";
+  return (
+    <div
+      data-slot="aui_service_status"
+      data-status={serviceState.status}
+      role="status"
+      aria-live="polite"
+      className="aui-service-status flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
+    >
+      {busy ? (
+        <span className="inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      ) : (
+        <span aria-hidden="true">{serviceState.status === "failed" ? "⚠" : "○"}</span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">{labels[serviceState.status]}</span>
+        {serviceState.message && serviceState.message !== labels[serviceState.status] ? (
+          <span className="text-muted-foreground ms-2">{serviceState.message}</span>
+        ) : null}
+        {(pendingServiceSubmissions ?? 0) > 0 ? (
+          <span data-slot="aui_service_pending" className="text-muted-foreground ms-2">
+            · {pendingServiceSubmissions} submission{pendingServiceSubmissions === 1 ? "" : "s"} waiting
+          </span>
+        ) : null}
+      </span>
+      {serviceState.status === "failed" && retryService ? (
+        <button
+          type="button"
+          onClick={retryService}
+          className="rounded border px-2 py-0.5 text-xs hover:bg-accent"
+        >
+          Retry
+        </button>
+      ) : null}
+      {(pendingServiceSubmissions ?? 0) > 0 && cancelPendingServiceSubmissions ? (
+        <button
+          type="button"
+          onClick={cancelPendingServiceSubmissions}
+          className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+        >
+          Cancel waiting
+        </button>
+      ) : null}
+    </div>
   );
-  const hasAny = rateLimit || activeTasks.length > 0 || statusText;
+};
+
+const ShinyServiceReadyLine: FC = () => {
+  const {
+    serviceState, pendingServiceSubmissions, cancelPendingServiceSubmissions,
+  } = useShinyConfig();
+  if (serviceState?.status !== "ready") return null;
+  return (
+    <div
+      data-slot="aui_service_status"
+      data-status="ready"
+      data-compact="true"
+      role="status"
+      aria-live="polite"
+      className="aui-service-ready flex shrink-0 items-center gap-1.5 whitespace-nowrap py-0.5 text-[11px] text-green-700 dark:text-green-400"
+    >
+      <span data-slot="aui_service_ready_icon" className="shrink-0 font-bold text-green-600 dark:text-green-400" aria-hidden="true">✓</span>
+      <span className="font-medium">copilot-api is ready</span>
+      {(pendingServiceSubmissions ?? 0) > 0 ? (
+        <span data-slot="aui_service_pending" className="text-muted-foreground">
+          · {pendingServiceSubmissions} submission{pendingServiceSubmissions === 1 ? "" : "s"} waiting
+        </span>
+      ) : null}
+      {(pendingServiceSubmissions ?? 0) > 0 && cancelPendingServiceSubmissions ? (
+        <button
+          type="button"
+          onClick={cancelPendingServiceSubmissions}
+          className="ms-auto rounded px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+        >
+          Cancel waiting
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
+const ShinyChecklistPanel: FC = () => {
+  const { checklist, dismissChecklist } = useShinyConfig();
+  const [collapsed, setCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const allItems = checklist?.items ?? checklist?.visibleItems ?? [];
+  const taskIdentity = allItems.map((item) => item.id).join("\u001f");
+
+  // New task identities should be visible, while status-only revisions must not
+  // repeatedly override a user's explicit collapse/show-all choice.
+  useEffect(() => {
+    setCollapsed(false);
+    setShowAll(false);
+  }, [checklist?.threadId, taskIdentity]);
+
+  if (!checklist || allItems.length === 0) return null;
+  const shownItems = showAll ? allItems : checklist.visibleItems;
+  return (
+    <div
+      data-slot="aui_claude_checklist"
+      data-checklist-revision={checklist.revision}
+      data-all-completed={checklist.allCompleted ? "true" : "false"}
+      data-collapsed={collapsed ? "true" : "false"}
+      className="aui-claude-checklist overflow-hidden rounded-lg border border-border bg-background/95 text-sm shadow-sm"
+    >
+      <div className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold ${collapsed ? "" : "border-b"}`}>
+        <button
+          type="button"
+          aria-label={collapsed ? "Expand checklist" : "Collapse checklist"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expand checklist" : "Collapse checklist"}
+          onClick={() => setCollapsed((value) => !value)}
+          className="hover:bg-accent inline-flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-start"
+        >
+          <span aria-hidden="true" className="text-muted-foreground w-3">
+            {collapsed ? "\u25B8" : "\u25BE"}
+          </span>
+          <span>Claude checklist</span>
+          <span className="text-muted-foreground font-normal">({allItems.length})</span>
+        </button>
+        {dismissChecklist ? (
+          <button
+            type="button"
+            aria-label="Close checklist"
+            title="Close checklist"
+            onClick={() => dismissChecklist(checklist.threadId, checklist.revision)}
+            className="text-muted-foreground hover:bg-accent hover:text-foreground ms-auto inline-flex size-5 items-center justify-center rounded"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        ) : null}
+      </div>
+      {!collapsed && (
+        <div
+          data-slot="aui_checklist_body"
+          className="max-h-[min(9rem,28vh)] overflow-y-auto px-3 py-2"
+        >
+          <ul className="flex flex-col gap-1">
+            {shownItems.map((item) => {
+              const status = String(item.status).trim().toLowerCase();
+              const complete = ["completed", "complete", "done"].includes(status);
+              const running = ["in_progress", "in-progress", "in progress", "running"].includes(status);
+              return (
+                <li key={item.id} data-checklist-status={item.status} className="flex items-start gap-2 text-xs">
+                  <span className={complete ? "text-green-600" : running ? "text-blue-600" : "text-muted-foreground"}>
+                    {complete ? "✓" : running ? "◐" : "○"}
+                  </span>
+                  <span className={complete ? "text-muted-foreground line-through" : ""}>
+                    {running && item.activeForm ? item.activeForm : item.content}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          {checklist.overflowCount > 0 ? (
+            <button
+              type="button"
+              data-slot="aui_checklist_overflow"
+              aria-label={showAll
+                ? "Show fewer checklist items"
+                : `Show ${checklist.overflowCount} more checklist items`}
+              aria-expanded={showAll}
+              onClick={() => setShowAll((value) => !value)}
+              className="text-muted-foreground hover:text-foreground hover:bg-accent mt-1 rounded px-1 py-0.5 text-[11px]"
+            >
+              {showAll ? "Show less" : `+${checklist.overflowCount} more`}
+            </button>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const ShinyStatusPanels: FC = () => {
+  const { rateLimit, tasks, recentTasks, statusText, stopTask } = useShinyConfig();
+  const activeTasks = tasks ?? [];
+  const hasActiveTasks = activeTasks.length > 0;
+  const [taskNow, setTaskNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasActiveTasks) return undefined;
+    setTaskNow(Date.now());
+    const interval = window.setInterval(() => setTaskNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [hasActiveTasks]);
+  const latestActivity = recentTasks?.[0];
+  const hasAny = rateLimit || activeTasks.length > 0 || latestActivity || statusText;
   if (!hasAny) return null;
   return (
     <div className="aui-sdk-panels flex flex-col gap-2">
@@ -518,27 +918,42 @@ const ShinyStatusPanels: FC = () => {
           key={task.taskId}
           data-slot="aui_task_card"
           data-task-id={task.taskId}
+          data-task-active="true"
           className="aui-task-card flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
         >
           <span className="animate-pulse">⚙️</span>
           <span className="flex-1 truncate">
             {task.description || task.summary || `Subagent ${task.taskId.slice(0, 6)}`}
             {task.toolName ? <span className="text-muted-foreground"> · {task.toolName}</span> : null}
-            {task.status ? <span className="text-muted-foreground"> · {task.status}</span> : null}
+            {task.status ? <span className="text-muted-foreground"> · {task.stopping ? "stopping" : task.status}</span> : null}
+            <span className="text-muted-foreground"> · {Math.max(0, Math.floor((taskNow - task.startedAt) / 1000))}s</span>
           </span>
           {stopTask && (
             <button
               type="button"
               data-slot="aui_task_stop"
               data-stop-task={task.taskId}
+              disabled={task.stopping}
               onClick={() => stopTask(task.taskId)}
-              className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+              className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10 disabled:cursor-wait disabled:opacity-60"
             >
-              Stop
+              {task.stopping ? "Stopping…" : "Stop"}
             </button>
           )}
         </div>
       ))}
+      {latestActivity && (
+        <div data-slot="aui_task_recent" className="flex px-1 text-[11px] text-muted-foreground">
+          <span
+            key={latestActivity.taskId}
+            data-task-id={latestActivity.taskId}
+            data-task-status={latestActivity.status}
+            className="min-w-0 truncate rounded border px-1.5 py-0.5"
+          >
+            {latestActivity.description || latestActivity.summary || latestActivity.taskId.slice(0, 6)} · {latestActivity.status}
+          </span>
+        </div>
+      )}
       {statusText && (
         <div
           className="aui-status-line flex items-center gap-2 px-1 text-xs text-muted-foreground"
@@ -562,11 +977,44 @@ const ShinyUsageFooter: FC = () => {
   if (usage.durationMs != null) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
   return (
     <div
-      className="aui-usage-footer flex items-center justify-end gap-2 px-1 text-xs text-muted-foreground"
+      className="aui-usage-footer ms-auto flex shrink-0 items-center justify-end gap-2 whitespace-nowrap text-xs text-muted-foreground"
       data-slot="aui_usage_footer"
       data-cost-usd={usage.costUsd ?? ""}
     >
       <span>{parts.join(" · ")}</span>
+    </div>
+  );
+};
+
+const ShinyGitBranchFooter: FC = () => {
+  const { gitBranch } = useShinyConfig();
+  if (!gitBranch) return null;
+  return (
+    <div
+      className="aui-git-branch flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+      data-slot="aui_git_branch"
+      title={`Git branch: ${gitBranch}`}
+    >
+      <GitBranchIcon className="size-3.5 shrink-0" aria-hidden="true" />
+      <span className="truncate">{gitBranch}</span>
+    </div>
+  );
+};
+
+const ShinyComposerMetaFooter: FC = () => {
+  const { serviceState, usage, gitBranch } = useShinyConfig();
+  const showsReady = serviceState?.status === "ready";
+  const showsUsage = Boolean(usage && (usage.costUsd != null || usage.tokens != null));
+  if (!showsReady && !showsUsage && !gitBranch) return null;
+  return (
+    <div
+      data-slot="aui_composer_meta_footer"
+      data-layout="inline"
+      className="flex min-h-5 items-center justify-between gap-3 px-1"
+    >
+      <ShinyGitBranchFooter />
+      <ShinyServiceReadyLine />
+      <ShinyUsageFooter />
     </div>
   );
 };
@@ -613,6 +1061,24 @@ const ShinyTimestamp: FC = () => {
 };
 
 const ComposerSendGroup: FC = () => {
+  const { blockingAction } = useShinyConfig();
+  if (blockingAction?.kind === "compact") {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Button
+          type="button"
+          variant="default"
+          size="icon"
+          disabled
+          className="aui-composer-compact-blocked size-7 rounded-full"
+          aria-label="Compacting conversation"
+          title="Compacting conversation"
+        >
+          <RefreshCwIcon className="size-3.5 animate-spin" />
+        </Button>
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-1.5">
       <AuiIf condition={(s) => s.thread.capabilities.dictation}>
@@ -710,6 +1176,12 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
+  const { assistantTextSize = "medium" } = useShinyConfig();
+  const hasActionableText = useAuiState((s) =>
+    s.message.content.some(
+      (part) => part.type === "text" && part.text.trim().length > 0,
+    ),
+  );
 
   // reserves space for action bar and compensates with `-mb` for consistent msg spacing
   // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
@@ -722,10 +1194,14 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in relative duration-150",
+        hasActionableText && "-mb-7.5 pb-7.5",
+      )}
     >
       <div
         data-slot="aui_assistant-message-content"
+        data-assistant-text-size={assistantTextSize}
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
@@ -769,7 +1245,15 @@ const AssistantMessage: FC = () => {
                 );
               }
               case "text":
-                return <MarkdownText />;
+                return (
+                  <div
+                    data-slot="aui_assistant-text"
+                    data-text-size={assistantTextSize}
+                    className="[&_.aui-md-h1]:text-[1.25em] [&_.aui-md-h2]:text-[1.125em] [&_.aui-md-h3]:text-[1em] [&_.aui-md-h4]:text-[1em] [&_.aui-md-h5]:text-[0.875em] [&_.aui-md-h6]:text-[0.875em]"
+                  >
+                    <MarkdownText />
+                  </div>
+                );
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
@@ -819,14 +1303,16 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      <div
-        data-slot="aui_assistant-message-footer"
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
-      >
-        <BranchPicker />
-        <AssistantActionBar />
-        <ShinyTimestamp />
-      </div>
+      {hasActionableText && (
+        <div
+          data-slot="aui_assistant-message-footer"
+          className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        >
+          <BranchPicker />
+          <AssistantActionBar />
+          <ShinyTimestamp />
+        </div>
+      )}
     </MessagePrimitive.Root>
   );
 };

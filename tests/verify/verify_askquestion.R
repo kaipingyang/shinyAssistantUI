@@ -1,6 +1,7 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
+home_library <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
 port <- 9633L
 unlink(c("/tmp/aui-ask.out", "/tmp/aui-ask.err"))
 failures <- character()
@@ -8,10 +9,12 @@ chk <- function(name, cond, detail = "") {
   ok <- isTRUE(cond); cat(sprintf("[%s] %-52s %s\n", if (ok) "PASS" else "FAIL", name, detail))
   if (!ok) failures <<- c(failures, name); invisible(ok)
 }
-app <- callr::r_bg(function(project, port) {
+app <- callr::r_bg(function(project, port, home_library) {
+  .libPaths(c(home_library, .libPaths()))
   setwd(project); suppressPackageStartupMessages(library(shiny))
+  cat("installed=", find.package("shinyAssistantUI"), "\n", sep = "")
   shiny::runApp("tests/verify/askquestion_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
-}, args = list(project = project, port = port), stdout = "/tmp/aui-ask.out", stderr = "/tmp/aui-ask.err")
+}, args = list(project = project, port = port, home_library = home_library), stdout = "/tmp/aui-ask.out", stderr = "/tmp/aui-ask.err")
 on.exit(try(app$kill(), silent = TRUE), add = TRUE)
 for (i in seq_len(100)) { if (!app$is_alive()) break; if (file.exists("/tmp/aui-ask.err") && any(grepl("Listening on", readLines("/tmp/aui-ask.err", warn = FALSE)))) break; Sys.sleep(0.25) }
 if (!app$is_alive()) { cat(tail(readLines("/tmp/aui-ask.err", warn = FALSE), 20), sep = "\n"); stop("boot failed") }
@@ -38,11 +41,18 @@ press_key <- function(key, code, vk) {
 
 browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port)); browser$Page$loadEventFired()
 chk("widget mounted", wait_for("!!document.querySelector('.aui-root')", 15))
+value("window.__askInvalidSeen=!!document.querySelector('[data-ask-questions-invalid]');window.__askInvalidObserver=new MutationObserver(()=>{if(document.querySelector('[data-ask-questions-invalid]'))window.__askInvalidSeen=true});window.__askInvalidObserver.observe(document.documentElement,{childList:true,subtree:true});true")
 click_sel(".aui-lexical-input[contenteditable='true']"); Sys.sleep(0.35)
 browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
 
-chk("AskUserQuestion card rendered", wait_for("!!document.querySelector('[data-slot=\"ask-user-question\"]')", 15))
+chk("streamed AskUserQuestion card rendered", wait_for("!!document.querySelector('[data-slot=\"ask-user-question\"]')", 15))
+chk("no invalid AskUserQuestion warning was ever inserted",
+    isTRUE(value("window.__askInvalidSeen===false && !document.querySelector('[data-ask-questions-invalid]')")))
+app_stdout <- if (file.exists("/tmp/aui-ask.out")) readLines("/tmp/aui-ask.out", warn = FALSE) else character()
+chk("fixture uses Home installed package",
+    any(grepl(paste0("installed=", home_library, "/shinyAssistantUI"), app_stdout, fixed = TRUE)),
+    paste(grep("^installed=", app_stdout, value = TRUE), collapse = " | "))
 chk("two questions rendered", isTRUE(value("document.querySelectorAll('[data-ask-question]').length===2")),
     value("document.querySelectorAll('[data-ask-question]').length+''"))
 click_thread <- function(label) {
@@ -79,17 +89,29 @@ chk("answers round-trip: custom overrides single; multi includes custom",
     wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\\\"Fav color?\\\":\\\"Teal\\\"') && t.includes('\\\"Which langs?\\\":[\\\"R\\\",\\\"SQL\\\"]');})()", 12),
     value("document.getElementById('decision')?.textContent"))
 
+chk("live tool record keeps submitted option selected", wait_for(
+    "!!document.querySelector('[data-question-option=R][data-question-selected=true]') && !document.querySelector('[data-slot=ask-user-question]')", 8))
+chk("live tool record keeps custom and multiple answers", isTRUE(value(
+    "(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v&&v.innerText.includes('Teal')&&v.innerText.includes('R, SQL')&&v.querySelector('[data-question-option=R]')?.innerText.includes('☑')})()"
+)))
+chk("long Ask result scrolls inside shared result viewport", wait_for(
+    "(function(){const v=document.querySelector('[data-slot=tool-result-scroll]');if(!v)return false;const r=v.getBoundingClientRect(),c=getComputedStyle(v);return c.overflowY==='auto'&&r.height<=385&&v.scrollHeight>v.clientHeight&&(v.textContent||'').includes('answer result line 160')})()", 8))
+
 # session-load / 历史完成态：answers必须保留在结构化视图，不能恢复审批表单。
 chk("clicked AskUserQuestion history thread", click_thread("Ask history"))
 chk("historical AskUserQuestion loaded", wait_for(
     "document.body.innerText.includes('Historical answers restored')", 8))
 chk("history keeps structured questions and submitted answers",
     isTRUE(value("(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v && !document.querySelector('[data-args-format=json]') && v.innerText.includes('Answer:') && v.innerText.includes('Teal') && v.innerText.includes('R, SQL');})()")))
+chk("history marks the corresponding option selected",
+    isTRUE(value("document.querySelector('[data-arg-view=questions] [data-question-option=R]')?.getAttribute('data-question-selected')==='true' && document.querySelector('[data-arg-view=questions] [data-question-option=R]')?.innerText.includes('☑')")))
 chk("history does not restore interactive question form",
     isTRUE(value("!document.querySelector('[data-slot=ask-user-question]')")))
 chk("history preserves approved completion state",
     isTRUE(value("document.querySelector('[data-approval-result=approved]')?.innerText.includes('Approved')")))
 
+chk("no invalid AskUserQuestion warning appeared through history restore",
+    isTRUE(value("window.__askInvalidSeen===false && !document.querySelector('[data-ask-questions-invalid]')")))
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
 if (length(failures)) stop("verification failed: ", paste(failures, collapse = ", "))

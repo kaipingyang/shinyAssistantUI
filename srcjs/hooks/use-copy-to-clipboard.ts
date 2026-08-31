@@ -12,7 +12,7 @@ export const useCopyToClipboard = ({
   const [isCopied, setIsCopied] = useState<boolean>(false);
 
   const copyToClipboard = (value: string) => {
-    if (!value || typeof navigator === "undefined" || !navigator.clipboard) {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
       return;
     }
 

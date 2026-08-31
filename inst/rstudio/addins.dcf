@@ -2,3 +2,8 @@ Name: Claude Code Chat
 Description: Open a project-rooted, agentic Claude Code chat (ClaudeAgentSDK) in the RStudio Viewer. The active file and selection are used as context; file edits/shell commands are approval-gated.
 Binding: claude_addin
 Interactive: true
+
+Name: Claude Workspace
+Description: Open one Claude Code workspace across multiple saved projects, with project-routed sessions and up to four concurrent threads.
+Binding: claude_workspace_addin
+Interactive: true

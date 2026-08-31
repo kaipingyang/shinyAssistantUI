@@ -1,6 +1,6 @@
 Package: shinyAssistantUI
 Title: AI Assistant Chat UI for Shiny
-Version: 0.5.2
+Version: 0.5.6
 Authors@R: person("Kaiping", "Yang", role = c("aut", "cre"),
                   email = "1260146556@qq.com")
 Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
@@ -12,6 +12,7 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 Imports:
+    coro (>= 1.1.0),
     grDevices,
     htmltools,
     shiny,
@@ -23,7 +24,6 @@ Suggests:
     RSQLite,
     base64enc,
     jsonlite,
-    coro,
     promises,
     later,
     ellmer,
@@ -39,6 +39,7 @@ Suggests:
     readxl,
     writexl,
     pkgload,
-    withr
+    withr,
+    S7
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

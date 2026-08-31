@@ -154,6 +154,30 @@ describe("SidebarSettings", () => {
     expect(values).toContain("bypassPermissions");
     expect(values).not.toContain("yolo");
   });
+
+  it("shows an enabled-by-default copilot-api auto-start toggle and delegates changes", () => {
+    const setAutoStartCopilotApi = vi.fn();
+    const context = {
+      ...ctxWith(),
+      autoStartCopilotApi: true,
+      setAutoStartCopilotApi,
+    } as ShinyConfigCtx;
+    render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const toggle = screen.getByRole("checkbox", {
+      name: "Automatically start copilot-api",
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+
+    fireEvent.click(toggle);
+    expect(setAutoStartCopilotApi).toHaveBeenCalledOnce();
+    expect(setAutoStartCopilotApi).toHaveBeenCalledWith(false);
+  });
 });
 
 describe("ThinkingControl", () => {
@@ -179,5 +203,58 @@ describe("ThinkingControl", () => {
     expect(screen.getByRole("option", { name: "Extended" })).toBeTruthy();
     fireEvent.change(select, { target: { value: "enabled" } });
     expect(setValue).toHaveBeenCalledWith("enabled");
+  });
+});
+
+
+describe("Assistant text size and constrained Settings layout", () => {
+  it("offers three assistant text sizes and delegates the selected value", () => {
+    const setAssistantTextSize = vi.fn();
+    const context = {
+      ...baseContext,
+      assistantTextSize: "small",
+      setAssistantTextSize,
+    } as ShinyConfigCtx;
+    render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const select = screen.getByLabelText("Assistant text size") as HTMLSelectElement;
+    expect(select.value).toBe("small");
+    expect(Array.from(select.options).map((option) => option.value))
+      .toEqual(["small", "compact", "medium"]);
+    expect(Array.from(select.options).map((option) => option.textContent))
+      .toEqual(["Small", "Medium", "Default"]);
+    fireEvent.change(select, { target: { value: "compact" } });
+    expect(setAssistantTextSize).toHaveBeenCalledWith("compact");
+  });
+
+  it("constrains the dialog to the sidebar and makes overflow scrollable", () => {
+    const context = {
+      ...baseContext,
+      assistantTextSize: "medium",
+      setAssistantTextSize: vi.fn(),
+    } as ShinyConfigCtx;
+    const { container } = render(
+      <div data-slot="aui_thread_sidebar" className="relative h-80">
+        <ShinyConfigContext.Provider value={context}>
+          <SidebarSettings />
+        </ShinyConfigContext.Provider>
+      </div>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const wrapper = container.querySelector(".aui-sidebar-settings") as HTMLElement;
+    const dialog = container.querySelector('[data-slot="aui_settings_dialog"]') as HTMLElement;
+    const header = container.querySelector('[data-slot="aui_settings_header"]') as HTMLElement;
+    expect(wrapper.className).not.toContain("relative");
+    expect(dialog.className).toContain("max-h-[calc(100%-4rem)]");
+    expect(dialog.className).toContain("overflow-y-auto");
+    expect(dialog.className).toContain("overscroll-contain");
+    expect(dialog.className).toContain("[scrollbar-gutter:stable]");
+    expect(header.className).toContain("sticky");
   });
 });

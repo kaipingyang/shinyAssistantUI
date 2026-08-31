@@ -130,6 +130,33 @@
 }
 
 # 带缓存的 workspace 索引：按 normalizePath(project)+git HEAD 缓存到 home 的 rds。
+
+# 当前 Git branch，供 composer footer 显示。Detached HEAD 明确显示短 SHA；
+# 非 Git、空仓、无 git 或非法目录返回 NULL。参数只经 system2 argv 传递，不拼 shell。
+.addin_git_branch <- function(project) {
+  if (Sys.which("git") == "" || is.null(project) || length(project) != 1L ||
+      is.na(project[[1L]]) || !nzchar(as.character(project[[1L]])) ||
+      !dir.exists(project)) return(NULL)
+  run_git <- function(args) {
+    value <- suppressWarnings(tryCatch(
+      system2(
+        "git",
+        c("-C", shQuote(as.character(project[[1L]])),
+          "-c", shQuote("safe.directory=*"), args),
+        stdout = TRUE, stderr = FALSE
+      ),
+      error = function(e) character(0)
+    ))
+    status <- attr(value, "status")
+    value <- value[nzchar(value)]
+    if ((!is.null(status) && !identical(as.integer(status), 0L)) || !length(value)) NULL
+    else as.character(value[[1L]])
+  }
+  branch <- run_git(c("symbolic-ref", "--quiet", "--short", "HEAD"))
+  if (!is.null(branch)) return(branch)
+  sha <- run_git(c("rev-parse", "--short=8", "HEAD"))
+  if (is.null(sha)) NULL else paste0("detached@", sha)
+}
 # 命中直接读，HEAD 变化或非 git 时重建（非 git 不写缓存）。
 .addin_workspace_index_cached <- function(project, cache_path, max_files = 10000L) {
   head <- .addin_git_head(project)

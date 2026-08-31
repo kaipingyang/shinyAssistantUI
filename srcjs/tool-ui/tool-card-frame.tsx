@@ -2,8 +2,8 @@
 // 缩进 + 决策记忆。ShinyToolFallback(默认审批体)和各 per-tool 交互组件(如 AskUserQuestion)
 // 都复用它,交互体经 `approvalBody` 插槽注入 —— 这是官方"per-message inline tool render
 // override"模式的落地(替代已 deprecated 的 makeAssistantToolUI/useAssistantToolUI 注册表)。
-import { useState, useEffect, useRef, type ReactNode } from "react";
-import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { useState, useEffect, useLayoutEffect, useRef, type ReactNode, type UIEvent } from "react";
+import { useThreadViewport, type ToolCallMessagePartProps } from "@assistant-ui/react";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ShinyToolResult } from "@/shiny-tool-result";
 import { computeToolDepth, toolHistoryDefaultOpen, toolCallSummary } from "@/helpers";
@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useOpeningFile } from "@/hooks/use-opening-file";
+import { isLazyToolResultDescriptor, useLazyToolResult } from "@/lazy-tool-result";
 
 // annotations.icon(lucide 名)→ 组件,对齐 v0.1.0 的 per-tool 图标。
 const TOOL_ICONS: Record<string, LucideIcon> = {
@@ -35,6 +36,24 @@ export const _regKey = (inputId: string | undefined, id: string) => `${inputId ?
 // 审批决策注册表：按 inputId::toolCallId 记住 approved/denied，使工具卡在结果到达后
 // 重渲染/重挂载时不丢失"✓ Approved"指示。
 const _decisionRegistry = new Map<string, "approved" | "denied">();
+const _decisionOptsRegistry = new Map<string, ToolDecideOpts>();
+
+const _openRegistry = new Map<string, boolean>();
+type ToolScrollState = {
+  scrollTop: number;
+  scrollLeft: number;
+  atBottom: boolean;
+  atRight: boolean;
+};
+const _scrollRegistry = new Map<string, ToolScrollState>();
+
+export function _clearToolCardStateForTests() {
+  _parentRegistry.clear();
+  _decisionRegistry.clear();
+  _decisionOptsRegistry.clear();
+  _openRegistry.clear();
+  _scrollRegistry.clear();
+}
 
 export type ToolDecideOpts = {
   updatedInput?: Record<string, unknown>;
@@ -44,32 +63,61 @@ export type ToolDecideOpts = {
   answers?: Record<string, string | string[]>;
 };
 
+type ToolCardOptions = {
+  collapseOnSettle?: boolean;
+  completedDefaultOpen?: boolean;
+  pendingDefaultOpen?: boolean;
+};
+
 // 共享工具卡状态 + 审批决策派发(供外壳与各交互体消费)。
-export function useToolCard(props: ToolCallMessagePartProps) {
-  const { toolName, args, argsText, result, status, artifact, toolCallId } = props;
+export function useToolCard(props: ToolCallMessagePartProps, options: ToolCardOptions = {}) {
+  const { toolName, args, argsText, result, status, timing, artifact, toolCallId } = props;
   const ann = artifact as Record<string, unknown> | undefined;
   const pending = result === undefined;
   const needsApproval = ann?.requiresApproval === true;
   const editLikeTool = toolName === "Edit" || toolName === "MultiEdit" || toolName === "Write";
-  const defaultOpen = toolHistoryDefaultOpen(
-    ann as { defaultOpen?: boolean } | undefined,
-    status?.type === "requires-action" || (pending && needsApproval) || editLikeTool,
-  );
+  const pendingForcedClosed = options.pendingDefaultOpen === false && pending;
+  const defaultOpen = pendingForcedClosed
+    ? false
+    : options.completedDefaultOpen === false && !pending
+      ? false
+      : toolHistoryDefaultOpen(
+        ann as { defaultOpen?: boolean } | undefined,
+        status?.type === "requires-action" || (pending && needsApproval) || editLikeTool,
+      );
   const resultType = (ann?.resultType as string | undefined) ?? "auto";
   const resultLang = (ann?.resultLang as string | undefined) ?? "text";
   const isServerTool = ann?.serverTool === true;
   const isError = (status?.type === "incomplete") || ann?.isError === true;
 
+  const registryKey = _regKey(ann?.inputId as string | undefined, toolCallId);
   const [decision, setDecision] = useState<null | "approved" | "denied">(
     () =>
-      _decisionRegistry.get(_regKey(ann?.inputId as string | undefined, toolCallId)) ??
+      _decisionRegistry.get(registryKey) ??
       (ann?.approvalResult as "approved" | "denied" | undefined) ??
       null,
   );
-  const [open, setOpen] = useState(defaultOpen);
+  const [decisionOpts, setDecisionOpts] = useState<ToolDecideOpts | undefined>(
+    () => _decisionOptsRegistry.get(registryKey),
+  );
+  const [open, setOpenState] = useState(() => _openRegistry.get(registryKey) ?? defaultOpen);
+  const setOpen = (next: boolean) => {
+    _openRegistry.set(registryKey, next);
+    setOpenState(next);
+  };
+  const awaitingDecision = pending && needsApproval && decision === null;
+  const wasAwaitingDecision = useRef(awaitingDecision);
+  const settlementClosed = useRef(false);
   useEffect(() => {
-    if (pending && needsApproval && decision === null) setOpen(true);
-  }, [pending, needsApproval, decision]);
+    if (awaitingDecision) {
+      settlementClosed.current = false;
+      if (options.pendingDefaultOpen !== false) setOpen(true);
+    } else if (options.collapseOnSettle && wasAwaitingDecision.current && !settlementClosed.current) {
+      settlementClosed.current = true;
+      setOpen(false);
+    }
+    wasAwaitingDecision.current = awaitingDecision;
+  }, [awaitingDecision, options.collapseOnSettle, options.pendingDefaultOpen]);
 
   const displayTitle = (() => {
     const s = toolCallSummary(toolName, args);
@@ -101,12 +149,22 @@ export function useToolCard(props: ToolCallMessagePartProps) {
 
   const decide = (approved: boolean, opts?: ToolDecideOpts) => {
     resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
-    _decisionRegistry.set(_regKey(ann?.inputId as string | undefined, toolCallId), approved ? "approved" : "denied");
+    _decisionRegistry.set(registryKey, approved ? "approved" : "denied");
+    if (opts) _decisionOptsRegistry.set(registryKey, opts);
+    else _decisionOptsRegistry.delete(registryKey);
+    setDecisionOpts(opts);
     setDecision(approved ? "approved" : "denied");
   };
 
+  const displayArgs = (() => {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+    if (decisionOpts?.answers) return { ...args, answers: decisionOpts.answers };
+    if (decisionOpts?.updatedInput) return { ...args, ...decisionOpts.updatedInput };
+    return args;
+  })();
+
   return {
-    toolName, args, argsText, result, status, ann,
+    toolName, toolCallId, args, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, decide, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   };
@@ -117,29 +175,91 @@ export type ToolCard = ReturnType<typeof useToolCard>;
 // 工具卡外壳:头部(图标/server badge/文件路径)+ 折叠 chrome(参数 + 结果)+ 审批区
 // (pending && needsApproval && 未决策 时显示 meta + 传入的 approvalBody)+ 决策指示。
 export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approvalBody?: ReactNode }) {
-  const { onOpenFile } = useShinyConfig();
+  const { onOpenFile, lazyToolResults } = useShinyConfig();
   const { opening, open: openFile } = useOpeningFile(onOpenFile);
   const {
-    toolName, args, argsText, result, status, ann,
+    toolName, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, depth, open, setOpen,
     displayTitle, resultType, resultLang, isError, isServerTool, filePath, ToolIcon, iconName,
   } = card;
-
-  // 连续审批时,新审批框出现要主动滚进视口(轮次挂起时 assistant-ui 的自动滚动不触发)。
-  const showApproval = pending && needsApproval && decision === null;
-  const approvalRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (showApproval) {
-      const id = window.setTimeout(
-        () => approvalRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }),
-        50,
-      );
-      return () => window.clearTimeout(id);
+  const lazyDescriptor = isLazyToolResultDescriptor(result) && result.toolCallId === card.toolCallId
+    ? result
+    : undefined;
+  const lazyResult = useLazyToolResult(
+    lazyToolResults,
+    lazyDescriptor,
+    open,
+    lazyDescriptor?.threadId ?? "",
+    card.toolCallId,
+  );
+  const rootRef = useRef<HTMLDivElement>(null);
+  const captureScroll = (event: UIEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const region = target.dataset.toolScrollRegion;
+    if (!region) return;
+    const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
+    const maxLeft = Math.max(0, target.scrollWidth - target.clientWidth);
+    _scrollRegistry.set(`${registryKey}::${region}`, {
+      scrollTop: target.scrollTop,
+      scrollLeft: target.scrollLeft,
+      atBottom: maxTop > 0 && maxTop - target.scrollTop <= 2,
+      atRight: maxLeft > 0 && maxLeft - target.scrollLeft <= 2,
+    });
+    if (region === "result" && lazyDescriptor && maxTop - target.scrollTop <= 128) {
+      lazyResult.requestNext();
     }
-  }, [showApproval]);
+  };
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    for (const target of root.querySelectorAll<HTMLElement>("[data-tool-scroll-region]")) {
+      const region = target.dataset.toolScrollRegion;
+      if (!region) continue;
+      const saved = _scrollRegistry.get(`${registryKey}::${region}`);
+      if (!saved) continue;
+      target.scrollTop = saved.atBottom
+        ? Math.max(0, target.scrollHeight - target.clientHeight)
+        : saved.scrollTop;
+      target.scrollLeft = saved.atRight
+        ? Math.max(0, target.scrollWidth - target.clientWidth)
+        : saved.scrollLeft;
+    }
+  });
+
+  // 审批卡只在用户原本跟随底部时主动 reveal；如果用户正在上方阅读历史，
+  // 不再用无条件 scrollIntoView 把视口劫持回来。审批完成后再次滚到底，
+  // 让后续 tool/text stream 重新进入 assistant-ui 的 auto-follow 状态。
+  const showApproval = pending && needsApproval && decision === null;
+  // ExternalStore marks earlier assistant messages complete when a newer tool
+  // message is appended. A tool without a result is still running; preserve
+  // requires-action/incomplete, but never present a pending sibling as done.
+  const triggerStatus = pending && (!status || status.type === "complete")
+    ? ({ type: "running" } as const)
+    : status;
+  const approvalRef = useRef<HTMLDivElement>(null);
+  const viewport = useThreadViewport({ optional: true });
+  const isAtBottom = viewport?.isAtBottom ?? false;
+  const scrollToBottom = viewport?.scrollToBottom;
+  const previousShowApprovalRef = useRef(false);
+  const approvalWasFollowingRef = useRef(false);
+  useLayoutEffect(() => {
+    const justOpened = showApproval && !previousShowApprovalRef.current;
+    const justSettled = !showApproval && previousShowApprovalRef.current && decision !== null;
+    previousShowApprovalRef.current = showApproval;
+    if (justOpened) approvalWasFollowingRef.current = isAtBottom;
+    if (!((justOpened && isAtBottom) || (justSettled && approvalWasFollowingRef.current))) return;
+    if (!scrollToBottom) return;
+    const scroll = scrollToBottom;
+    const id = window.setTimeout(() => {
+      scroll({ behavior: "smooth" });
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [showApproval, decision, isAtBottom, scrollToBottom]);
 
   return (
     <div
+      ref={rootRef}
+      onScrollCapture={captureScroll}
       className="aui-shiny-tool"
       data-tool-depth={depth}
       style={depth > 0 ? { marginInlineStart: `${Math.min(depth, 4) * 16}px` } : undefined}
@@ -175,15 +295,58 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
         </div>
       )}
       <ToolFallback.Root open={open} onOpenChange={setOpen}>
-        <ToolFallback.Trigger toolName={displayTitle} status={status} />
+        <ToolFallback.Trigger toolName={displayTitle} status={triggerStatus} timing={timing} />
         <ToolFallback.Content>
-          <ToolArgsView view={resolveToolView(toolName, args, argsText, ann)} />
+          <ToolArgsView
+            view={resolveToolView(toolName, displayArgs, argsText, ann)}
+            isRunning={ann?.argsStreaming === true}
+          />
 
           {!pending && (
             <div className="aui-shiny-tool-result">
               <p className="text-muted-foreground text-xs font-medium">Result:</p>
-              <div className="mt-1">
-                <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />
+              <div
+                data-slot="tool-result-scroll"
+                data-tool-scroll-region="result"
+                className="mt-1 max-h-96 overflow-auto overscroll-contain"
+              >
+                {lazyDescriptor ? (
+                  <div
+                    data-lazy-tool-result={lazyDescriptor.handle}
+                    className="flex flex-col gap-1 [&_pre]:whitespace-pre [&_pre]:leading-4"
+                  >
+                    <p className="text-muted-foreground text-xs">{lazyDescriptor.summary}</p>
+                    {lazyResult.snapshot.droppedLineBreaks > 0 && (
+                      <div
+                        aria-hidden="true"
+                        data-lazy-result-spacer
+                        style={{ height: `${lazyResult.snapshot.droppedLineBreaks}rem`, flexShrink: 0 }}
+                      />
+                    )}
+                    {lazyResult.snapshot.droppedBytes > 0 && (
+                      <p data-lazy-result-dropped className="text-muted-foreground text-[11px]">
+                        Earlier output released to keep this view memory-bounded.
+                      </p>
+                    )}
+                    {lazyResult.snapshot.error && (
+                      <p role="alert" className="text-destructive text-xs">{lazyResult.snapshot.error}</p>
+                    )}
+                    {lazyResult.snapshot.text && (
+                      <ShinyToolResult
+                        result={lazyResult.snapshot.text}
+                        resultType={resultType}
+                        resultLang={resultLang}
+                        isError={isError}
+                        annotations={ann}
+                      />
+                    )}
+                    {lazyResult.snapshot.loading && (
+                      <p data-lazy-result-loading className="text-muted-foreground text-xs">Loading…</p>
+                    )}
+                  </div>
+                ) : (
+                  <ShinyToolResult result={result} resultType={resultType} resultLang={resultLang} isError={isError} annotations={ann} />
+                )}
               </div>
             </div>
           )}

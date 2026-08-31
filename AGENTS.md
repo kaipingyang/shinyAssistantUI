@@ -48,8 +48,77 @@ R CMD INSTALL --no-multiarch --with-keep.source .   # R + inst/www/ → installe
   the *installed* `www/` via `system.file`; a dev-only build won't be seen by the browser).
 - Order matters: **build → install** (install copies `inst/www/` into the package).
 
-If you skip this, your verification runs against **stale code** and "new features don't work"
-— a real trap that has cost multiple debugging rounds.
+### 🔴 R library roots — Home installs; shared writes require permission
+
+- **Default install target for development and verification:** the current user's Home library.
+  Omit `--library`: `R CMD INSTALL --no-multiarch --with-keep.source .`.
+- **Shared addins library:**
+  `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins/R-4.4`.
+- **Shared Dev library:**
+  `/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4`.
+  Write there only when the user explicitly asks to make a build available for testing; use an
+  explicit `--library=...` and verify `find.package("shinyAssistantUI")` resolves there.
+- **Shared Stable library (protected, highest-stability):**
+  `/mnt/usrfiles/bgcrh/build/zzz_tools/rstudio-addins/shinyAssistantUI/R-4.4/`.
+  This is the library root; the installed package is its `shinyAssistantUI/` child. Before every
+  write, explain that this publishes to the majority-user highest-stability channel and obtain
+  cautious, explicit confirmation for that release. Dev permission never implies Stable permission.
+- Never clean, overwrite, or synchronize one shared library as a side effect of writing another.
+  Record the target path, package version, and install timestamp after a shared install.
+
+#### Ordinary R: select one shared library in `~/.Rprofile`
+
+For ordinary non-`renv` R sessions, preserve the existing `.libPaths()` order (including the Home
+library) and append exactly one selected shared root. Put this in `~/.Rprofile`; the same block
+may be used in a non-`renv` `<project>/.Rprofile`:
+
+```r
+local({
+  channel <- "shared" # "shared" | "dev" | "stable"
+  libs <- c(
+    shared = "/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins/R-4.4",
+    dev = "/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4",
+    stable = "/mnt/usrfiles/bgcrh/build/zzz_tools/rstudio-addins/shinyAssistantUI/R-4.4"
+  )
+  lib <- libs[[channel]]
+  if (dir.exists(lib) && !(lib %in% .libPaths())) .libPaths(c(.libPaths(), lib))
+})
+```
+
+#### `renv` project: select one external library before activation
+
+A project `.Rprofile` takes precedence over `~/.Rprofile`, and `renv` manages its own library
+paths. Do not manually append the shared root with `.libPaths()` after activation. Select one
+root and set `RENV_CONFIG_EXTERNAL_LIBRARIES` **before** sourcing `renv/activate.R`:
+
+```r
+channel <- "shared" # "shared" | "dev" | "stable"
+libs <- c(
+  shared = "/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins/R-4.4",
+  dev = "/usrfiles/shared-projects/users/kaiping_yang/Rlibs/rstudio-addins_dev/R-4.4",
+  stable = "/mnt/usrfiles/bgcrh/build/zzz_tools/rstudio-addins/shinyAssistantUI/R-4.4"
+)
+lib <- libs[[channel]]
+Sys.setenv(RENV_CONFIG_EXTERNAL_LIBRARIES = lib)
+source("renv/activate.R")
+```
+
+Only one external library is selected, so no path separator or multi-library precedence rule is
+needed. Restart R after editing either profile, then verify:
+
+```r
+.libPaths()
+find.package("shinyAssistantUI")
+packageVersion("shinyAssistantUI")
+normalizePath(find.package("shinyAssistantUI"), winslash = "/")
+# In a renv project:
+renv::config$external.libraries()
+```
+
+For a one-off check, use `library(shinyAssistantUI, lib.loc = "<library-root>")`. Adding Stable
+for read/use never grants permission to publish a Stable build.
+
+If you skip this, verification can run against stale code and make new features appear missing.
 
 ## 🔴 Rule #1b — `jsonlite::toJSON()` result must be `as.character()`'d before `sendCustomMessage`
 

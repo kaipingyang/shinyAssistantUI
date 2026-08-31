@@ -1,8 +1,8 @@
 # Fixture: the addin's real backend (make_claude_handler + claude CLI) to reproduce
-# image-send behavior. Loads home + project .Renviron for CLI creds.
+# image-send behavior. Loads home credentials; verification launchers may preload a
+# project-local .Renviron before starting this app.
 suppressMessages({ library(shiny); library(shinyAssistantUI); library(ClaudeAgentSDK) })
 try(readRenviron("~/.Renviron"), silent = TRUE)
-try(readRenviron("/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI/.Renviron"), silent = TRUE)
 handler <- make_claude_handler(options = ClaudeAgentSDK::ClaudeAgentOptions(
   cwd                      = tempdir(),
   permission_mode          = "bypassPermissions",

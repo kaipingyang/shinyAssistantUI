@@ -42,6 +42,26 @@ click_sel(".aui-lexical-input[contenteditable='true']"); Sys.sleep(0.35)
 browser$Input$insertText(text = "go"); Sys.sleep(0.25)
 press_key("Enter", "Enter", 13L); Sys.sleep(0.3)
 
+chk("streaming Markdown Preview appears before final args", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=true]')).some(e=>e.querySelector('h1')?.textContent==='Streaming preview' && (e.textContent||'').includes('first'))",
+  2
+))
+chk("streaming Markdown Preview grows on a later delta", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=true]')).some(e=>(e.textContent||'').includes('second'))",
+  2
+))
+chk("streaming Markdown final canonical args clear running state", wait_for(
+  "Array.from(document.querySelectorAll('[data-arg-view=markdown][data-args-streaming=false]')).some(e=>e.querySelector('h1')?.textContent==='Streaming preview' && (e.textContent||'').includes('final'))",
+  4
+))
+chk("streaming Markdown Source control clicked", isTRUE(value(
+  "(function(){const r=Array.from(document.querySelectorAll('[data-arg-view=markdown]')).find(e=>e.querySelector('h1')?.textContent==='Streaming preview');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("streaming Markdown final Source is exact", wait_for(
+  "(function(){const expected=['# Streaming preview','','- first','- second','- final',''].join(String.fromCharCode(10));const s=Array.from(document.querySelectorAll('[data-markdown-source=true]')).find(e=>(e.textContent||'').includes('# Streaming preview'));return !!s&&s.textContent===expected})()",
+  2
+))
+
 chk("tool cards rendered (arg views present)", wait_for("document.querySelectorAll('[data-arg-view]').length>=5", 15),
     value("document.querySelectorAll('[data-arg-view]').length+''"))
 
@@ -54,21 +74,74 @@ chk("Bash code block shows the command (not JSON)",
     isTRUE(value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').includes('ls -la /tmp')")),
     value("(document.querySelector('[data-arg-lang=\"bash\"]')?.textContent||'').slice(0,40)"))
 
-# Write -> code(python)
-chk("Write renders a python code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"python\"]')")))
-chk("Write code block shows the content",
-    isTRUE(value("(document.querySelector('[data-arg-lang=\"python\"]')?.textContent||'').includes('print(1)')")))
+# Code Write -> code + Prism, never Markdown preview.
+chk("Python Write renders a Prism code view", isTRUE(value(
+  "!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"python\"] [data-syntax-highlighter=\"prism\"]')"
+)))
+chk("Python Write shows exact code", isTRUE(value(
+  "(document.querySelector('[data-arg-lang=\"python\"]')?.textContent||'')==='print(1)'"
+)))
+chk("R Write renders a Prism code view", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')).some(e=>(e.textContent||'').includes('x <- mean(1:3)') && !!e.querySelector('[data-syntax-highlighter=prism]'))"
+)))
+chk("code Write offers no Markdown Preview", isTRUE(value(
+  "!Array.from(document.querySelectorAll('[data-arg-view=\"code\"] button')).some(b=>(b.innerText||'').includes('Preview'))"
+)))
+
+# CSV/TSV -> semantic bounded table, with exact Source available.
+csv_source <- "name,note\r\nAlice,\"hello, \"\"world\"\"\"\r\nHTML,<script>alert(1)</script>\r\n"
+chk("CSV Write starts in table Preview", isTRUE(value(
+  "!!document.querySelector('[data-arg-view=\"table\"][data-table-format=\"csv\"][data-table-mode=\"preview\"] table')"
+)))
+chk("CSV quoted comma and escaped quote parsed", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-table-format=\"csv\"] td')).some(e=>(e.textContent||'')==='hello, \"world\"')"
+)))
+chk("CSV HTML-looking cell stays inert text", isTRUE(value(
+  "!document.querySelector('[data-table-format=\"csv\"] script') && (document.querySelector('[data-table-format=\"csv\"]')?.textContent||'').includes('<script>alert(1)</script>')"
+)))
+chk("CSV Source control clicked", isTRUE(value(
+  "(function(){const r=document.querySelector('[data-table-format=\"csv\"]');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("CSV Source remains byte-identical", isTRUE(value(sprintf(
+  "document.querySelector('[data-table-format=\"csv\"] [data-table-source=\"true\"]')?.textContent===%s",
+  as.character(jsonlite::toJSON(csv_source, auto_unbox = TRUE))
+))))
+chk("TSV uses tab-delimited table", isTRUE(value(
+  "!!document.querySelector('[data-table-format=\"tsv\"] table') && Array.from(document.querySelectorAll('[data-table-format=\"tsv\"] td')).some(e=>(e.textContent||'')==='hello, world')"
+)))
+
+# TXT -> Source first, explicit sanitized Markdown preview; .md -> Preview first.
+chk("TXT Write starts in exact Source", isTRUE(value(
+  "document.querySelector('[data-source-language=\"text\"]')?.textContent==='# Rich note\\n\\n- first item\\n'"
+)))
+chk("TXT offers Preview as Markdown", isTRUE(value(
+  "(function(){const s=document.querySelector('[data-source-language=\"text\"]');const r=s?.closest('[data-arg-view=\"markdown\"]');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Preview as Markdown');if(!b)return false;b.click();return true})()"
+)))
+chk("TXT rich Preview renders heading and list", wait_for(
+  "Array.from(document.querySelectorAll('[data-markdown-preview=\"true\"]')).some(e=>e.querySelector('h1')?.textContent==='Rich note' && !!e.querySelector('li'))", 8
+))
+chk("Markdown Write starts in Preview", isTRUE(value(
+  "Array.from(document.querySelectorAll('[data-arg-view=\"markdown\"][data-markdown-mode=\"preview\"]')).some(e=>e.querySelector('h2')?.textContent==='Markdown write')"
+)))
+
+
+chk("Markdown Source control clicked", isTRUE(value(
+  "(function(){const r=Array.from(document.querySelectorAll('[data-arg-view=markdown]')).find(e=>e.querySelector('h2')?.textContent==='Markdown write');const b=Array.from(r?.querySelectorAll('button')||[]).find(x=>(x.innerText||'').trim()==='Source');if(!b)return false;b.click();return true})()"
+)))
+chk("Markdown Source keeps exact text with Prism highlighting", isTRUE(value(
+  "(function(){const s=Array.from(document.querySelectorAll('[data-markdown-source=true][data-source-language=markdown]')).find(e=>(e.textContent||'').includes('## Markdown write'));const expected=['## Markdown write','','| A | B |','|---|---|','| 1 | 2 |',''].join(String.fromCharCode(10));return !!s && !!s.querySelector('[data-syntax-highlighter=prism]') && s.textContent===expected})()"
+)))
 
 # run_r -> code(r), clean R (no JSON {\"code\":...} wrapper)
 chk("run_r renders an R code block", isTRUE(value("!!document.querySelector('[data-arg-view=\"code\"][data-arg-lang=\"r\"]')")))
 chk("run_r shows clean R code (mean(y), no JSON key)",
-    isTRUE(value("(function(){var e=document.querySelector('[data-arg-lang=\"r\"]');if(!e)return false;var t=e.textContent||'';return t.includes('mean(y)') && !t.includes('\"code\"');})()")),
-    value("(document.querySelector('[data-arg-lang=\"r\"]')?.textContent||'').slice(0,40)"))
+    isTRUE(value("(function(){var es=document.querySelectorAll('[data-arg-lang=\"r\"]');for(var i=0;i<es.length;i++){var t=es[i].textContent||'';if(t.includes('mean(y)') && !t.includes('\"code\"'))return true;}return false;})()")),
+    value("Array.from(document.querySelectorAll('[data-arg-lang=\"r\"]')).map(e=>(e.textContent||'').slice(0,40)).join('|')"))
 
 # unknown -> json fallback
 chk("unknown tool falls back to JSON view", isTRUE(value("!!document.querySelector('[data-arg-view=\"json\"]')")))
-chk("code views count == 3 (bash+python+r)",
-    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===3")),
+chk("code views count == 4 (bash + Python Write + R Write + run_r)",
+    isTRUE(value("document.querySelectorAll('[data-arg-view=\"code\"]').length===4")),
     value("document.querySelectorAll('[data-arg-view=\"code\"]').length+''"))
 
 # Phase 2: TodoWrite -> checklist
@@ -83,9 +156,25 @@ chk("Grep query has pattern field", isTRUE(value("(document.querySelector('[data
 # Phase 2: WebFetch -> query with url link
 chk("WebFetch url renders as a link", isTRUE(value("(function(){var e=document.querySelector('[data-query-field=\"url\"] a');return !!e && (e.getAttribute('href')||'').includes('example.com') && e.getAttribute('target')==='_blank';})()")))
 
+# Generic auto result: structured WebSearch-shaped data reuses shared JSON highlighting.
+chk("WebSearch-shaped result auto-renders colored JSON", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('WebSearch'));const result=card?.querySelector('[data-result-view=json]');return !!result && !!result.querySelector('[data-syntax-highlighter=prism-json]') && !!result.querySelector('.token') && (result.textContent||'').includes('synthetic weather marker') && (result.textContent||'').includes('Synthetic result')})()"
+)))
+chk("WebSearch-shaped result does not fall back to console", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('WebSearch'));return !!card && !card.querySelector('[data-result-view=console]')})()"
+)))
+
 # Phase 3: run_r text result -> console (monospace, plain text, not JSON)
 chk("run_r result renders as console text (not JSON)",
     isTRUE(value("(function(){var els=document.querySelectorAll('[data-result-view=\"console\"]');for(var i=0;i<els.length;i++){var t=els[i].textContent||'';if(t.includes('[1] 2') && !t.includes('{'))return true;}return false;})()")))
+
+
+chk("every tool result uses the shared bounded viewport", isTRUE(value(
+  "document.querySelectorAll('.aui-shiny-tool-result').length>0 && document.querySelectorAll('.aui-shiny-tool-result').length===document.querySelectorAll('[data-slot=tool-result-scroll]').length"
+)))
+chk("long Bash result scrolls inside the card", isTRUE(value(
+  "(function(){const card=Array.from(document.querySelectorAll('.aui-shiny-tool')).find(e=>(e.querySelector('[data-slot=tool-fallback-trigger]')?.textContent||'').includes('Bash'));const v=card?.querySelector('[data-slot=tool-result-scroll]');if(!v)return false;const r=v.getBoundingClientRect(),c=getComputedStyle(v);return c.overflowY==='auto'&&r.height<=385&&v.scrollHeight>v.clientHeight&&(v.textContent||'').includes('bash result line 200')})()"
+)))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
 try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)

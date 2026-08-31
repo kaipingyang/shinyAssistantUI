@@ -24,7 +24,10 @@ assistantUIServer(
   on_edits = NULL,
   on_archive_session = NULL,
   on_delete_session = NULL,
+  workspace_mode = FALSE,
   working_dir = NULL,
+  git_branch = NULL,
+  git_branch_provider = NULL,
   native_picker = FALSE,
   on_pick_working_dir = NULL,
   on_set_working_dir = NULL,
@@ -41,6 +44,8 @@ assistantUIServer(
   on_set_mode_visibility = NULL,
   composer_density = NULL,
   on_set_composer_density = NULL,
+  assistant_text_size = NULL,
+  on_set_assistant_text_size = NULL,
   run_r_enabled = NULL,
   on_toggle_run_r = NULL,
   thread_max_width = NULL,
@@ -58,7 +63,8 @@ assistantUIServer(
   show_timestamps = FALSE,
   modal = FALSE,
   prewarm = FALSE,
-  allow_warmup = TRUE
+  allow_warmup = TRUE,
+  max_concurrent_runs = 1L
 )
 }
 \arguments{
@@ -234,8 +240,21 @@ confirms deleting a session. This is destructive: the Claude addin wires it to
 \code{ClaudeAgentSDK::delete_session()}, permanently removing the transcript from
 disk. The UI requires an explicit confirmation before invoking it.}
 
+\item{workspace_mode}{Logical. When \code{TRUE}, enables project-aware thread
+metadata and navigation. Incoming requests may supply an optional \code{project}
+snapshot; handlers, history callbacks, and thread-aware providers receive it
+only when their formals declare \code{project} (or \code{...}), preserving existing
+callback signatures. Defaults to \code{FALSE}.}
+
 \item{working_dir}{Optional initial working directory shown in the
 working-directory picker (addin).}
+
+\item{git_branch}{Optional initial Git branch label shown below the composer.
+Use \code{NULL} for non-Git directories so no branch element is rendered.}
+
+\item{git_branch_provider}{Optional function accepting \code{project} and returning
+its current branch label, or \code{NULL} outside Git. It is sampled after run
+completion, error, and cancellation so the composer metadata stays current.}
 
 \item{native_picker}{Logical; whether a native directory chooser is available
 (RStudio addin).}
@@ -282,6 +301,13 @@ visibility changes.}
 
 \item{on_set_composer_density}{Optional \verb{function(value)} called when the
 composer height preset changes.}
+
+\item{assistant_text_size}{Optional character \code{"small"}, \code{"compact"}
+(Medium), or \code{"medium"} (Default) assistant response/tool text-size preset.
+The legacy value \code{"large"} is accepted and normalized to Default.}
+
+\item{on_set_assistant_text_size}{Optional \verb{function(value)} called when the
+assistant response text-size preset changes.}
 
 \item{run_r_enabled}{Optional logical initial state of the \code{run_r} MCP tool
 toggle (\code{NULL} hides it).}
@@ -372,18 +398,27 @@ instead of an inline panel.}
 \code{warmup} attribute (e.g. \code{\link[=make_claude_handler]{make_claude_handler()}}), pre-connect the initial
 thread's client on mount so the \strong{first} message on that thread isn't slowed
 by the cold start (ClaudeSDKClient spawning the \code{claude} CLI subprocess).
-Historical sessions are warmed independently after \code{send_thread()} succeeds,
-regardless of this option; their warmups are deduplicated per thread and a
-failed warmup may be retried on a later load. A brief cold-start indicator is
-shown while connecting. Newly created blank threads remain lazy unless they
-are the initial thread covered by this one-shot option.
+Historical session browsing is transcript-only and never enters the warmup
+queue; the first explicit send on a historical thread lazily connects and
+resumes its saved backend session. A brief cold-start indicator is shown
+while connecting. Newly created blank threads remain lazy unless they are
+the initial thread covered by this one-shot option.
 \strong{Left \code{FALSE} by default on purpose}: enabling it makes app startup attempt
 a backend connection at mount, so a slow/unreachable backend would stall the
 open (the default lazy connect only happens on the first message). Turn on
 only when the backend is reliably available at load.}
 
 \item{allow_warmup}{Logical (default \code{TRUE}); allow per-thread cold-start
-warmup of the handler.}
+warmup of the handler. Warmups are deduplicated, limited to one at a time,
+deferred while any foreground run is active or queued, and cancelled when
+the Shiny session ends. The backend connect itself may still be synchronous.}
+
+\item{max_concurrent_runs}{Positive integer global limit for runs in different
+threads (default \code{1}, clamped to \code{8}). The requested limit is honored only
+when \code{handler} explicitly declares
+\code{attr(handler, "supports_concurrent_threads") <- TRUE}; all other handlers
+remain globally serial for backward compatibility. Invocations within one
+thread are always strict FIFO and never overlap.}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

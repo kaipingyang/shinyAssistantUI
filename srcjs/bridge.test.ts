@@ -25,6 +25,7 @@ function mkCallbacks(): RunCallbacks & { calls: Record<string, unknown[]> } {
     onChunk: rec("chunk"), onThinking: rec("thinking"),
     onToolCall: rec("toolCall"), onToolCallStart: rec("toolCallStart"),
     onToolCallDelta: rec("toolCallDelta"), onToolResult: rec("toolResult"),
+    onAutoContinue: rec("autoContinue"),
     onDone: rec("done"), onError: rec("error"),
   };
 }
@@ -99,6 +100,7 @@ describe("bridge 多线程路由", () => {
     const b = createShinyBridge("chat");
     const cb = mkCallbacks();
     b.setRunCallbacks("t1", cb);
+
     handlers["chat:tool-result"]({ toolCallId: "tc1", result: "ok", threadId: "t1" });
     expect(cb.calls.toolResult).toEqual([["tc1", "ok", false]]);
   });
@@ -158,10 +160,14 @@ describe("bridge inputId 前缀隔离（多 widget）", () => {
 describe("bridge sessions 缓冲回放", () => {
   it("handler 注册前到达的 :sessions 被缓冲，注册时回放", () => {
     const b = createShinyBridge("chat");
-    handlers["chat:sessions"]({ sessions: [{ id: "s1", title: "t", preview: "p", createdAt: "2026" }] });
-    const received: unknown[] = [];
+    handlers["chat:sessions"]({
+      sessions: [{ id: "s1", title: "t", preview: "p", createdAt: "2026" }],
+      projectOrder: ["/work/c", "/work/a"],
+    });
+    const received: Array<{ projectOrder?: string[] }> = [];
     b.onSessions((d) => received.push(d));
     expect(received).toHaveLength(1);
+    expect(received[0]?.projectOrder).toEqual(["/work/c", "/work/a"]);
   });
 
   it("handler 已注册则直接调用不缓冲", () => {
@@ -184,10 +190,36 @@ describe("bridge 出站消息", () => {
     expect(v.attachments).toHaveLength(1);
   });
 
-  it("sendCancel 发到 _cancel 子 input", () => {
+  it("sendCancel 发到 _cancel 子 input with matching runId", () => {
     const b = createShinyBridge("chat");
-    b.sendCancel("t1");
+    b.sendCancel("t1", "run-1");
     expect(inputValues[0].id).toBe("chat_cancel");
+    expect(inputValues[0].value).toMatchObject({ threadId: "t1", runId: "run-1" });
+  });
+
+
+  it("sendUserMessage carries hidden continuation kind without changing visible text", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage(
+      "继续", "t1", undefined, undefined, undefined,
+      "run-minimal", undefined, undefined, "minimal",
+    );
+    expect(inputValues[0]).toMatchObject({ id: "chat" });
+    expect(inputValues[0].value).toMatchObject({
+      text: "继续", threadId: "t1", runId: "run-minimal", continuationKind: "minimal",
+    });
+  });
+
+  it("routes a valid hidden auto-continuation kind", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:auto-continue"]({
+      threadId: "t1", runId: "run-1", notice: "retry", prompt: "继续", kind: "minimal",
+    });
+    expect(cb.calls.autoContinue).toEqual([[
+      expect.objectContaining({ prompt: "继续", kind: "minimal" }),
+    ]]);
   });
 
   it("sendToolApproval 带 toolCallId + approved", () => {
@@ -258,5 +290,180 @@ describe("bridge IDE context and workspace search", () => {
     handlers["chat:workspace-results"]({ requestId: "ws-1", threadId: "t1", items: [] });
     expect(contexts).toHaveLength(1);
     expect(results).toHaveLength(1);
+  });
+});
+
+
+describe("bridge run correlation", () => {
+  it("forwards runId on terminal messages and reservation inputs", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:done"]({ threadId: "t1", runId: "run-1", cancelled: true });
+    handlers["chat:error"]({ threadId: "t1", runId: "run-2", message: "bad" });
+    expect(cb.calls.done).toEqual([[undefined, "run-1", true]]);
+    expect(cb.calls.error).toEqual([["bad", "run-2"]]);
+
+    b.reserveIdeContext("submission-1", "t1", true);
+    b.cancelReservedSubmissions(["submission-1"]);
+    expect(inputValues.find((value) => value.id === "chat_reserve_submission")?.value)
+      .toMatchObject({ submissionId: "submission-1", threadId: "t1", selectionVisible: true });
+    expect(inputValues.find((value) => value.id === "chat_cancel_reserved_submissions")?.value)
+      .toMatchObject({ submissionIds: ["submission-1"] });
+  });
+});
+
+
+describe("bridge authoritative run-state", () => {
+  it("routes additive queued/connecting/running/terminal payloads without run callbacks", () => {
+    const bridge = createShinyBridge("chat");
+    const received: unknown[] = [];
+    bridge.onRunState((value) => received.push(value));
+
+    handlers["chat:run-state"]({
+      threadId: "A", runId: "run-A", phase: "queued", queuePosition: 1,
+    });
+    handlers["chat:run-state"]({
+      threadId: "A", runId: "run-A", phase: "running",
+    });
+
+    expect(received).toEqual([
+      expect.objectContaining({ threadId: "A", runId: "run-A", phase: "queued", queuePosition: 1 }),
+      expect.objectContaining({ threadId: "A", runId: "run-A", phase: "running" }),
+    ]);
+  });
+});
+
+
+describe("bridge workspace project snapshots", () => {
+  it("adds an optional project to project-sensitive requests", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage("hi", "t1", undefined, undefined, undefined, undefined, undefined, "/work/a");
+    b.reserveIdeContext("sub-1", "t1", true, "/work/a");
+    b.sendRename("t1", "Renamed", "/work/a");
+    b.sendArchiveSession("t1", true, "/work/a");
+    b.sendDeleteSession("t1", "/work/a");
+    b.sendLoadSession("t1", "t1", "load-1", "/work/a");
+    b.sendLoadSessionPage("t1", "t1", 2, 50, "page-1", "/work/a");
+    b.requestIdeContext("ctx-1", "t1", "/work/a");
+    b.searchWorkspace("ws-1", "t1", "app", ["file"], 10, "/work/a");
+
+    for (const event of inputValues) {
+      expect(event.value).toMatchObject({ project: "/work/a" });
+    }
+  });
+
+  it("keeps ordinary requests backward compatible when project is absent", () => {
+    const b = createShinyBridge("chat");
+    b.sendUserMessage("hi", "t1");
+    b.sendLoadSession("t1", "t1");
+    expect(inputValues.every((event) => !("project" in (event.value as Record<string, unknown>))))
+      .toBe(true);
+  });
+});
+
+
+describe("bridge Workspace project snapshots", () => {
+  it("forwards project on warmup, action, reload, open-file, and console events", () => {
+    const b = createShinyBridge("chat");
+    b.sendWarmup("thread-a", "/work/a");
+    b.sendAction("context", "thread-a", { requestId: "request-a" }, "/work/a");
+    b.sendReload("again", "thread-a", "run-a", "/work/a");
+    b.sendOpenFile("R/app.R", 12, "thread-a", "/work/a");
+    b.sendRunInConsole("getwd()", "thread-a", "/work/a");
+
+    expect(inputValues.find((item) => item.id === "chat_warmup")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_action")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat")?.value)
+      .toMatchObject({ type: "reload", threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_open_file")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+    expect(inputValues.find((item) => item.id === "chat_run_in_console")?.value)
+      .toMatchObject({ threadId: "thread-a", project: "/work/a" });
+  });
+});
+
+
+describe("assistant text size bridge", () => {
+  it("sends the selected enum through the widget-specific input", () => {
+    const bridge = createShinyBridge("chat");
+    bridge.sendAssistantTextSize("small");
+    const event = inputValues.find((item) => item.id === "chat_assistant_text_size");
+    expect(event).toBeTruthy();
+    expect(event!.value).toMatchObject({ value: "small" });
+  });
+});
+
+
+describe("bridge transparent auto-continuation", () => {
+  it("routes the visible notice and prompt to the owning run", () => {
+    const b = createShinyBridge("chat");
+    const cb = mkCallbacks();
+    b.setRunCallbacks("t1", cb);
+    handlers["chat:auto-continue"]({
+      threadId: "t1",
+      runId: "run-1",
+      notice: "Continuing automatically…",
+      prompt: "Please continue from the completed tool results.",
+    });
+    expect(cb.calls.autoContinue).toEqual([[
+      {
+        threadId: "t1",
+        runId: "run-1",
+        notice: "Continuing automatically…",
+        prompt: "Please continue from the completed tool results.",
+      },
+    ]]);
+  });
+});
+
+
+describe("bridge proactive-messages global subscription", () => {
+  const snapshot = (threadId: string, revision: number, id: string) => ({
+    version: 1,
+    operation: "replace",
+    threadId,
+    revision,
+    messages: [
+      { id, role: "assistant", content: [{ type: "text", text: id }] },
+    ],
+  });
+
+  it("buffers every early payload FIFO until the global subscriber registers", () => {
+    const bridge = createShinyBridge("chat");
+    const first = snapshot("thread-a", 1, "first");
+    const second = snapshot("thread-a", 2, "second");
+
+    handlers["chat:proactive-messages"](first);
+    handlers["chat:proactive-messages"](second);
+
+    const received: unknown[] = [];
+    bridge.onProactiveMessages((payload) => received.push(payload));
+
+    expect(received).toEqual([first, second]);
+  });
+
+  it("keeps early queues and subscribers isolated by widget inputId", () => {
+    const bridgeA = createShinyBridge("chatA");
+    const bridgeB = createShinyBridge("chatB");
+    const payloadA = snapshot("shared-thread", 1, "widget-a");
+    const payloadB = snapshot("shared-thread", 1, "widget-b");
+
+    handlers["chatA:proactive-messages"](payloadA);
+    handlers["chatB:proactive-messages"](payloadB);
+
+    const receivedA: unknown[] = [];
+    const receivedB: unknown[] = [];
+    bridgeA.onProactiveMessages((payload) => receivedA.push(payload));
+    bridgeB.onProactiveMessages((payload) => receivedB.push(payload));
+
+    expect(receivedA).toEqual([payloadA]);
+    expect(receivedB).toEqual([payloadB]);
+
+    handlers["chatA:proactive-messages"](snapshot("shared-thread", 2, "widget-a-live"));
+    expect(receivedA).toHaveLength(2);
+    expect(receivedB).toEqual([payloadB]);
   });
 });

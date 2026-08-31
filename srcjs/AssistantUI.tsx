@@ -106,11 +106,14 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     commands: mergeSlashCommands(rt.commands ?? configuredCommands, rt.serverCommands, actionItems),
     actionItems,
     showTimestamps: config?.show_timestamps === true,
+    workspaceMode: rt.workspaceMode,
     onEnqueue: rt.enqueueMessage,
+    submissionRevision: rt.submissionRevision,
     onRename: rt.renameThread,
     onInvokeAction: rt.invokeAction,
     onOpenFile: rt.openFile,
     onRunInConsole: rt.consoleRunEnabled ? rt.runInConsole : undefined,
+    blockingAction: rt.blockingAction,
     permissionMode: rt.permissionMode,
     thinking: rt.thinking,
     model: rt.model,
@@ -120,6 +123,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     refreshIdeContext: rt.refreshIdeContext,
     workspaceMentions: rt.workspaceMentions,
     searchWorkspace: rt.searchWorkspace,
+    lazyToolResults: rt.lazyToolResults,
     readingHistory: rt.readingHistory,
     historyHasMore: rt.historyHasMore,
     loadingOlder: rt.loadingOlder,
@@ -131,10 +135,21 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     contextWindow: typeof config?.context_window === "number" ? config.context_window : undefined,
     usageStyle: (config?.usage_style as "ring" | "bar" | "text" | undefined) ?? "ring",
     tasks: rt.tasks,
+    recentTasks: rt.recentTasks,
+    checklist: rt.checklist,
+    dismissChecklist: rt.dismissChecklist,
     rateLimit: rt.rateLimit,
     statusText: rt.statusText,
+    serviceState: rt.serviceState,
+    pendingServiceSubmissions: rt.pendingServiceSubmissions,
+    retryService: rt.retryService,
+    cancelPendingServiceSubmissions: rt.cancelPendingSubmissions,
     warming: rt.warming,
     warmingResuming: rt.warmingResuming,
+    runPhase: rt.runPhase,
+    runStage: rt.runStage,
+    runQueuePosition: rt.runQueuePosition,
+    cancelRun: rt.cancelRun,
     warmingLabel: config?.warming_label as string | undefined,
     welcomeMessage: config?.welcome_message as string | undefined,
     stopTask: rt.stopTask,
@@ -143,11 +158,14 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     sidebarCollapsed: showThreadList && sidebar.collapsed,
     // 工作目录选择器（addin）
     workingDir: rt.workingDir,
+    gitBranch: rt.gitBranch,
     recentDirs: rt.recentDirs,
     nativePicker: rt.nativePicker,
     pickWorkingDir: rt.pickWorkingDir,
     setWorkingDir: rt.setWorkingDir,
     projects: rt.projects,
+    workspaceProjectOrder: rt.workspaceProjectOrder,
+    newThreadInProject: rt.newThreadInProject,
     saveProject: rt.saveProject,
     removeProject: rt.removeProject,
     filesPaneFollow: rt.filesPaneFollow,
@@ -160,8 +178,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     setModeVisibility: rt.setModeVisibility,
     composerDensity: rt.composerDensity,
     setComposerDensity: rt.setComposerDensity,
+    assistantTextSize: rt.assistantTextSize,
+    setAssistantTextSize: rt.setAssistantTextSize,
     runREnabled: rt.runREnabled,
     setRunREnabled: rt.setRunREnabled,
+    autoStartCopilotApi: rt.autoStartCopilotApi,
+    setAutoStartCopilotApi: rt.setAutoStartCopilotApi,
     threadMaxWidth: rt.threadMaxWidth,
   };
 
@@ -206,7 +228,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
           {showThreadList && (
             <ThreadSidebar collapsed={sidebar.collapsed} onToggle={sidebar.toggle}>
               <WorkingDirBar />
-              <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1">
                 <ThreadList />
               </div>
               <SidebarSettings />

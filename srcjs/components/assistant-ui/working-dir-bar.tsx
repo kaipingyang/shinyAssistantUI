@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FC } from "react";
+import { useAuiState } from "@assistant-ui/react";
 import { FolderIcon, ChevronDownIcon, StarIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "@/shiny-config-context";
 
@@ -18,11 +19,13 @@ export const WorkingDirBar: FC = () => {
   } = useShinyConfig();
   const [editing, setEditing] = useState(false);
   const [favOpen, setFavOpen] = useState(false);   // 收藏默认收起，展开滚动
+  const isRunning = useAuiState((state) => state.thread.isRunning);
   if (!workingDir) return null;
 
   const base = workingDir.replace(/\/+$/, "").split("/").pop() || workingDir;
   const dirBase = (d: string) => d.replace(/\/+$/, "").split("/").pop() || d;
   const change = () => {
+    if (isRunning) return;
     if (nativePicker && pickWorkingDir) {
       pickWorkingDir();
       return;
@@ -30,11 +33,22 @@ export const WorkingDirBar: FC = () => {
     setEditing((v) => !v);
   };
   const submit = (path: string) => {
+    if (isRunning) return;
     const p = path.trim();
     if (p && setWorkingDir) setWorkingDir(p);
     setEditing(false);
   };
-  const saved = projects ?? [];
+  const favoriteCollator = new Intl.Collator(undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  const saved = [...(projects ?? [])].sort((left, right) => {
+    const byName = favoriteCollator.compare(dirBase(left), dirBase(right));
+    if (byName !== 0) return byName;
+    const byPath = favoriteCollator.compare(left, right);
+    if (byPath !== 0) return byPath;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
   const isSaved = saved.includes(workingDir);
 
   return (
@@ -48,8 +62,13 @@ export const WorkingDirBar: FC = () => {
           type="button"
           data-slot="aui_working_dir_change"
           onClick={change}
-          title={workingDir}
-          className="hover:bg-accent text-muted-foreground flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors"
+          disabled={isRunning}
+          aria-disabled={isRunning}
+          data-running-disabled={isRunning}
+          title={isRunning
+            ? "Wait for the current run to finish before changing folders"
+            : workingDir}
+          className="hover:bg-accent text-muted-foreground disabled:pointer-events-none disabled:opacity-50 flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors"
         >
           <FolderIcon className="size-3.5 shrink-0" />
           <span className="text-foreground min-w-0 flex-1 truncate text-start font-medium">{base}</span>
@@ -74,6 +93,7 @@ export const WorkingDirBar: FC = () => {
             data-slot="aui_working_dir_input"
             defaultValue={workingDir}
             autoFocus
+            disabled={isRunning}
             placeholder="Working directory path…"
             onKeyDown={(e) => {
               if (e.key === "Enter") submit((e.target as HTMLInputElement).value);
@@ -89,8 +109,9 @@ export const WorkingDirBar: FC = () => {
                   type="button"
                   data-slot="aui_working_dir_recent"
                   onClick={() => submit(d)}
+                  disabled={isRunning}
                   title={d}
-                  className="hover:bg-accent text-muted-foreground truncate rounded px-2 py-0.5 text-start text-[11px]"
+                  className="hover:bg-accent text-muted-foreground disabled:pointer-events-none disabled:opacity-50 truncate rounded px-2 py-0.5 text-start text-[11px]"
                 >
                   {d}
                 </button>
@@ -154,8 +175,12 @@ export const WorkingDirBar: FC = () => {
                     type="button"
                     data-slot="aui_project_jump"
                     onClick={() => setWorkingDir?.(d)}
-                    title={d}
-                    className="text-muted-foreground min-w-0 flex-1 truncate px-2 py-1 text-start text-xs"
+                    disabled={isRunning}
+                    aria-disabled={isRunning}
+                    title={isRunning
+                      ? "Wait for the current run to finish before changing folders"
+                      : d}
+                    className="text-muted-foreground disabled:pointer-events-none disabled:opacity-50 min-w-0 flex-1 truncate px-2 py-1 text-start text-xs"
                   >
                     {dirBase(d)}
                   </button>

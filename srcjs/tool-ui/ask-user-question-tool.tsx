@@ -8,7 +8,11 @@ import { Button } from "@/components/ui/button";
 import { parseAskUserQuestionArgs } from "@/tool-views/ask-user-question-args";
 
 export const AskUserQuestionToolUI: ToolCallMessagePartComponent = (props) => {
-  const card = useToolCard(props);
+  const card = useToolCard(props, {
+    collapseOnSettle: true,
+    completedDefaultOpen: false,
+    pendingDefaultOpen: false,
+  });
   const questions = parseAskUserQuestionArgs(props.args);
   const approvalBody = questions ? (
     <AskQuestionCard

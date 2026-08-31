@@ -1,5 +1,9 @@
 import { createContext, useContext } from "react";
 import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
+import type { CopilotServiceState } from "./copilot-service-addon";
+import type { ChecklistSnapshot } from "./checklist-reducer";
+import type { MonitoredTask } from "./task-monitor";
+import type { LazyToolResultClient } from "./lazy-tool-result";
 
 export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; argumentHint?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
@@ -10,6 +14,16 @@ export interface PermissionModeOption {
   description?: string;
   disabled?: boolean;
 }
+
+export type AssistantTextSize = "small" | "compact" | "medium";
+
+/** Canonicalize persisted/server values while preserving the old medium=Default contract. */
+export const normalizeAssistantTextSize = (value: unknown): AssistantTextSize | undefined => {
+  if (value === "large") return "medium";
+  return value === "small" || value === "compact" || value === "medium"
+    ? value
+    : undefined;
+};
 export interface PermissionModeState {
   value: string;
   options: PermissionModeOption[];
@@ -25,6 +39,9 @@ export interface ThinkingState {
 export interface ModelState {
   value: string;
   options: PermissionModeOption[];
+  pending: boolean;
+  requested: string | null;
+  error: string | null;
   setValue: (value: string) => void;
   pickerOpen: boolean;
   setPickerOpen: (open: boolean) => void;
@@ -41,11 +58,25 @@ export interface ShinyConfigCtx {
   commands: ShinyCommand[];
   actionItems: ShinyActionItem[];
   showTimestamps: boolean;
+  /** Plan 81: opt-in multi-project Claude Workspace navigation. */
+  workspaceMode?: boolean;
+  /** Session-local project registry order; independent from Favorites. */
+  workspaceProjectOrder?: string[];
+  /** Create a blank thread atomically bound to one Workspace project. */
+  newThreadInProject?: (project: string) => void;
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void;
+  /** Increments whenever runtime accepts a new ordinary user submission. */
+  submissionRevision?: number;
   onRunInConsole?: (code: string) => void;
+  blockingAction?: {
+    kind: "compact";
+    phase: "starting" | "compacting";
+    startedAt: number;
+    message?: string;
+  };
   permissionMode?: PermissionModeState;
   thinking?: ThinkingState;
   model?: ModelState;
@@ -69,11 +100,22 @@ export interface ShinyConfigCtx {
   showUsage?: boolean;
   contextWindow?: number;
   usageStyle?: "ring" | "bar" | "text";
-  tasks?: Array<{ taskId: string; kind: string; description?: string; status?: string; toolName?: string; summary?: string }>;
+  tasks?: MonitoredTask[];
+  recentTasks?: MonitoredTask[];
+  checklist?: ChecklistSnapshot & { threadId: string };
+  dismissChecklist?: (threadId: string, revision: string) => void;
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
+  serviceState?: CopilotServiceState;
+  pendingServiceSubmissions?: number;
+  retryService?: () => void;
+  cancelPendingServiceSubmissions?: () => void;
   warming?: boolean;
   warmingResuming?: boolean;
+  runPhase?: "queued" | "connecting" | "running" | "complete" | "error" | "cancelled";
+  runStage?: "submitting" | "model-switch" | "cold-connect" | "consumer-acquire" | "sending" | "awaiting-model" | "streaming" | "finalizing";
+  runQueuePosition?: number;
+  cancelRun?: () => void;
   /** Cold-start indicator text (English default "Starting…"); backend-specific override. */
   warmingLabel?: string;
   /** Empty-state welcome greeting (default "How can I help you today?"). */
@@ -84,6 +126,8 @@ export interface ShinyConfigCtx {
   sidebarCollapsed?: boolean;
   // ── 工作目录选择器（addin）──
   workingDir?: string;
+  /** Current project's Git branch; absent for non-Git directories. */
+  gitBranch?: string;
   recentDirs?: string[];
   nativePicker?: boolean;
   pickWorkingDir?: () => void;
@@ -104,9 +148,16 @@ export interface ShinyConfigCtx {
   /** Plan 45: composer height preset — "comfortable" (default) | "compact" (flat, ~shinychat). */
   composerDensity?: "comfortable" | "compact";
   setComposerDensity?: (value: "comfortable" | "compact") => void;
+  /** Plan 87: assistant response text size; medium preserves the existing 16px default. */
+  assistantTextSize?: AssistantTextSize;
+  setAssistantTextSize?: (value: AssistantTextSize) => void;
   /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
   runREnabled?: boolean;
   setRunREnabled?: (value: boolean) => void;
+  autoStartCopilotApi?: boolean;
+  setAutoStartCopilotApi?: (value: boolean) => void;
+  /** Session-scoped progressive loader for metadata-only large tool results. */
+  lazyToolResults?: LazyToolResultClient;
   /** CSS length capping chat content width; undefined = full width (default). */
   threadMaxWidth?: string;
 }

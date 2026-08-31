@@ -73,3 +73,83 @@ test_that("nanonext round-trip: 客户端在 server 的 .GlobalEnv 执行并取�
   r3 <- shinyAssistantUI:::.addin_run_r_remote(url, 'stop("boom")', timeout = 6000)
   expect_false(r3$ok); expect_match(r3$error, "boom", fixed = TRUE)
 })
+
+
+test_that(".addin_ensure_r_console_server reuses one package-owned URL", {
+  state <- shinyAssistantUI:::.claude_console_state
+  old <- as.list(state, all.names = TRUE)
+  old_names <- ls(state, all.names = TRUE)
+  on.exit({
+    for (name in ls(state, all.names = TRUE)) rm(list = name, envir = state)
+    for (name in old_names) assign(name, old[[name]], envir = state)
+  }, add = TRUE)
+
+  for (name in ls(state, all.names = TRUE)) rm(list = name, envir = state)
+  state$active <- TRUE
+  state$url <- "ipc:///tmp/existing-shared.sock"
+  state$socket <- new.env(parent = emptyenv())
+  generated <- 0L
+  expect_identical(
+    shinyAssistantUI:::.addin_ensure_r_console_server(
+      url_factory = function() {
+        generated <<- generated + 1L
+        "ipc:///tmp/new.sock"
+      }
+    ),
+    "ipc:///tmp/existing-shared.sock"
+  )
+  expect_identical(generated, 0L)
+
+  state$active <- FALSE
+  state$url <- NULL
+  starts <- 0L
+  testthat::local_mocked_bindings(
+    .addin_start_r_console_server = function(url, envir = globalenv(), echo = TRUE) {
+      starts <<- starts + 1L
+      state$active <- TRUE
+      state$url <- url
+      state$socket <- new.env(parent = emptyenv())
+      TRUE
+    }
+  )
+  first <- shinyAssistantUI:::.addin_ensure_r_console_server(
+    url_factory = function() "ipc:///tmp/new-shared.sock"
+  )
+  second <- shinyAssistantUI:::.addin_ensure_r_console_server(
+    url_factory = function() stop("must not allocate twice")
+  )
+  expect_identical(first, "ipc:///tmp/new-shared.sock")
+  expect_identical(second, first)
+  expect_identical(starts, 1L)
+})
+
+
+test_that("inactive package-owned console server restarts on its original URL", {
+  state <- shinyAssistantUI:::.claude_console_state
+  old <- as.list(state, all.names = TRUE)
+  old_names <- ls(state, all.names = TRUE)
+  on.exit({
+    for (name in ls(state, all.names = TRUE)) rm(list = name, envir = state)
+    for (name in old_names) assign(name, old[[name]], envir = state)
+  }, add = TRUE)
+
+  for (name in ls(state, all.names = TRUE)) rm(list = name, envir = state)
+  state$active <- FALSE
+  state$url <- "ipc:///tmp/restart-same.sock"
+  state$socket <- NULL
+  attempted <- character()
+  testthat::local_mocked_bindings(
+    .addin_start_r_console_server = function(url, envir = globalenv(), echo = TRUE) {
+      attempted <<- c(attempted, url)
+      state$active <- TRUE
+      state$url <- url
+      state$socket <- new.env(parent = emptyenv())
+      TRUE
+    }
+  )
+  actual <- shinyAssistantUI:::.addin_ensure_r_console_server(
+    url_factory = function() "ipc:///tmp/must-not-replace.sock"
+  )
+  expect_identical(actual, "ipc:///tmp/restart-same.sock")
+  expect_identical(attempted, "ipc:///tmp/restart-same.sock")
+})

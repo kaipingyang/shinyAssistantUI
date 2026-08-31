@@ -121,3 +121,122 @@
 .aui-user-message-content:has(> p:only-child > span[data-status]:only-child:empty) {
   display: none;
 }
+
+
+/* Plan 89: Assistant text size uses explicit px tokens so Small < Medium <
+   Default is inspectable and easy to tune. The scope is the assistant message
+   content because GroupedParts renders prose and tool calls as siblings. */
+[data-slot="aui_assistant-message-content"] {
+  --aui-assistant-font-size: 16px;
+  --aui-assistant-line-height: 26px;
+  --aui-assistant-code-size: 13px;
+  --aui-assistant-code-line-height: 19px;
+  --aui-tool-primary-size: 14px;
+  --aui-tool-primary-line-height: 20px;
+  --aui-tool-secondary-size: 12px;
+  --aui-tool-secondary-line-height: 16px;
+  --aui-tool-micro-size: 11px;
+  --aui-tool-micro-line-height: 16px;
+  --aui-tool-code-size: 12px;
+  --aui-tool-code-line-height: 18px;
+}
+
+[data-slot="aui_assistant-message-content"][data-assistant-text-size="compact"] {
+  --aui-assistant-font-size: 14px;
+  --aui-assistant-line-height: 21px;
+  --aui-assistant-code-size: 12px;
+  --aui-assistant-code-line-height: 18px;
+  --aui-tool-primary-size: 12px;
+  --aui-tool-primary-line-height: 18px;
+  --aui-tool-secondary-size: 11px;
+  --aui-tool-secondary-line-height: 16px;
+  --aui-tool-micro-size: 10px;
+  --aui-tool-micro-line-height: 14px;
+  --aui-tool-code-size: 11px;
+  --aui-tool-code-line-height: 16px;
+}
+
+[data-slot="aui_assistant-message-content"][data-assistant-text-size="small"] {
+  --aui-assistant-font-size: 12px;
+  --aui-assistant-line-height: 18px;
+  --aui-assistant-code-size: 11px;
+  --aui-assistant-code-line-height: 16px;
+  --aui-tool-primary-size: 11px;
+  --aui-tool-primary-line-height: 16px;
+  --aui-tool-secondary-size: 10px;
+  --aui-tool-secondary-line-height: 14px;
+  --aui-tool-micro-size: 9px;
+  --aui-tool-micro-line-height: 12px;
+  --aui-tool-code-size: 10px;
+  --aui-tool-code-line-height: 14px;
+}
+
+[data-slot="aui_assistant-message-content"] [data-slot="aui_assistant-text"] {
+  font-size: var(--aui-assistant-font-size);
+  line-height: var(--aui-assistant-line-height);
+}
+
+[data-slot="aui_assistant-message-content"] [data-slot="aui_assistant-text"] :is(pre, code),
+[data-slot="aui_assistant-message-content"] [data-slot="aui_assistant-text"] .aui-code-header-root {
+  font-size: var(--aui-assistant-code-size) !important;
+  line-height: var(--aui-assistant-code-line-height) !important;
+}
+
+/* Tool primary text: trigger labels, Markdown/result body and grouped content. */
+[data-slot="aui_assistant-message-content"] :is(
+  .aui-shiny-tool,
+  .aui-tool-fallback-trigger,
+  .aui-tool-fallback-content,
+  .aui-tool-group-trigger,
+  .aui-tool-group-content
+),
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool .text-sm {
+  font-size: var(--aui-tool-primary-size) !important;
+  line-height: var(--aui-tool-primary-line-height) !important;
+}
+
+/* Tool secondary text: args, results, tables and metadata labels. */
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool .text-xs,
+[data-slot="aui_assistant-message-content"] :is(
+  .aui-tool-fallback-duration,
+  .aui-tool-fallback-args,
+  .aui-tool-fallback-result-header,
+  .aui-tool-fallback-result-content,
+  .aui-source-cite
+) {
+  font-size: var(--aui-tool-secondary-size) !important;
+  line-height: var(--aui-tool-secondary-line-height) !important;
+}
+
+/* Tool micro controls such as Preview/Source toggles and row counts. */
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool .text-\[11px\] {
+  font-size: var(--aui-tool-micro-size) !important;
+  line-height: var(--aui-tool-micro-line-height) !important;
+}
+
+/* Tool source/code/diff includes Prism inline font sizes, hence !important. */
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool :is(pre, code),
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool .aui-diff-viewer,
+[data-slot="aui_assistant-message-content"] .aui-tool-fallback-args-value {
+  font-size: var(--aui-tool-code-size) !important;
+  line-height: var(--aui-tool-code-line-height) !important;
+}
+
+/* Markdown headings inside Write previews must scale from the tool body rather
+   than retain fixed Tailwind text-xl/lg sizes. */
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool [data-markdown-preview] .aui-md-h1 {
+  font-size: 1.25em !important;
+}
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool [data-markdown-preview] .aui-md-h2 {
+  font-size: 1.125em !important;
+}
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool [data-markdown-preview] :is(
+  .aui-md-h3, .aui-md-h4
+) {
+  font-size: 1em !important;
+}
+[data-slot="aui_assistant-message-content"] .aui-shiny-tool [data-markdown-preview] :is(
+  .aui-md-h5, .aui-md-h6
+) {
+  font-size: 0.875em !important;
+}

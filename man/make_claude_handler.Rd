@@ -16,8 +16,10 @@ make_claude_handler(
 \item{options}{A \code{ClaudeAgentOptions} object. Defaults to
 \code{ClaudeAgentOptions(permission_mode = "default", permission_prompt_tool_name = "stdio", include_partial_messages = TRUE)}.}
 
-\item{cwd_provider}{Optional zero-argument function returning the current
-working directory to connect the CLI in (used by the addin's dir picker).}
+\item{cwd_provider}{Optional function returning the working directory used
+when a thread's CLI client connects. It may declare \code{thread_id} and
+\code{project}; arguments are filtered by formals, so existing zero-argument
+providers remain compatible.}
 
 \item{thinking_provider}{Optional zero-argument function returning the current
 thinking level to apply on connect.}
@@ -31,6 +33,11 @@ selector (a "Default" option is always prepended).}
 }
 \value{
 A \code{coro::async} handler function compatible with \code{\link[=assistantUIServer]{assistantUIServer()}}.
+The returned handler declares \code{supports_concurrent_threads = TRUE}: each
+thread owns a separate Claude client while normal turns and compaction remain
+strict single-consumer operations within that thread. This lets
+\code{assistantUIServer(max_concurrent_runs = ...)} run different threads under
+its bounded global scheduler.
 }
 \description{
 Wraps \code{ClaudeAgentSDK} into an \code{assistantUIServer}-compatible handler.

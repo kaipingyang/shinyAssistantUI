@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  AssistantRuntimeProvider,
+  useExternalStoreRuntime,
+} from "@assistant-ui/react";
 import { ShinyConfigContext, type ShinyConfigCtx } from "../../shiny-config-context";
 import { WorkingDirBar } from "./working-dir-bar";
 
@@ -10,15 +14,34 @@ const base: ShinyConfigCtx = {
 };
 afterEach(cleanup);
 
-function renderBar(over: Partial<ShinyConfigCtx> = {}) {
-  return render(
-    <ShinyConfigContext.Provider value={{
-      ...base, workingDir: "/proj/app", projects: ["/a/one", "/b/two"],
-      setWorkingDir: vi.fn(), ...over,
-    }}>
-      <WorkingDirBar />
-    </ShinyConfigContext.Provider>,
+function BarHarness({
+  value,
+  isRunning,
+}: {
+  value: ShinyConfigCtx;
+  isRunning: boolean;
+}) {
+  const runtime = useExternalStoreRuntime({
+    messages: [],
+    isRunning,
+    convertMessage: (message) => message,
+    onNew: async () => {},
+  });
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ShinyConfigContext.Provider value={value}>
+        <WorkingDirBar />
+      </ShinyConfigContext.Provider>
+    </AssistantRuntimeProvider>
   );
+}
+
+function renderBar(over: Partial<ShinyConfigCtx> = {}, isRunning = false) {
+  const value = {
+    ...base, workingDir: "/proj/app", projects: ["/a/one", "/b/two"],
+    setWorkingDir: vi.fn(), ...over,
+  } as ShinyConfigCtx;
+  return render(<BarHarness value={value} isRunning={isRunning} />);
 }
 
 describe("WorkingDirBar favorites (collapsible)", () => {
@@ -68,5 +91,68 @@ describe("WorkingDirBar auto-run toggle", () => {
     expect(box.checked).toBe(false);
     fireEvent.click(box);
     expect(setAutoRunEnabled).toHaveBeenCalledWith(true);
+  });
+});
+
+
+describe("WorkingDirBar favorites ordering", () => {
+  it("renders a case-insensitive natural name order without mutating input", () => {
+    const projects = [
+      "/work/zeta",
+      "/work/project-10",
+      "/work/Alpha",
+      "/work/project-2",
+    ];
+    const original = [...projects];
+    const { container } = renderBar({ projects });
+
+    fireEvent.click(screen.getByRole("button", { name: /Favorites \(4\)/ }));
+    expect(Array.from(container.querySelectorAll("[data-slot=aui_project_item]"))
+      .map((node) => node.getAttribute("data-project")))
+      .toEqual([
+        "/work/Alpha",
+        "/work/project-2",
+        "/work/project-10",
+        "/work/zeta",
+      ]);
+    expect(projects).toEqual(original);
+  });
+});
+
+
+describe("WorkingDirBar run guard", () => {
+  it("opens the native picker while idle", () => {
+    const pickWorkingDir = vi.fn();
+    renderBar({ nativePicker: true, pickWorkingDir });
+
+    fireEvent.click(screen.getByRole("button", { name: "app" }));
+    expect(pickWorkingDir).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks native picker and favorite folder changes while running", () => {
+    const pickWorkingDir = vi.fn();
+    const setWorkingDir = vi.fn();
+    const { container } = renderBar({
+      nativePicker: true,
+      pickWorkingDir,
+      setWorkingDir,
+    }, true);
+
+    const change = container.querySelector(
+      '[data-slot="aui_working_dir_change"]',
+    ) as HTMLButtonElement;
+    expect(change.disabled).toBe(true);
+    expect(change.getAttribute("aria-disabled")).toBe("true");
+    expect(change.dataset.runningDisabled).toBe("true");
+    fireEvent.click(change);
+    expect(pickWorkingDir).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Favorites \(2\)/ }));
+    const jump = container.querySelector(
+      '[data-slot="aui_project_jump"]',
+    ) as HTMLButtonElement;
+    expect(jump.disabled).toBe(true);
+    fireEvent.click(jump);
+    expect(setWorkingDir).not.toHaveBeenCalled();
   });
 });

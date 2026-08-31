@@ -9,7 +9,7 @@ run_later_queue <- function(seconds = 0.3) {
   invisible(NULL)
 }
 
-test_that("historical loads warm asynchronously per thread without prewarm", {
+test_that("historical loads remain transcript-only without creating clients", {
   calls <- character()
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
@@ -29,37 +29,25 @@ test_that("historical loads warm asynchronously per thread without prewarm", {
     )
   }, {
     session$flushReact()
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "history-1"
-    ))
-    session$flushReact()
+    for (index in seq_len(5L)) {
+      session$setInputs(chat_input = list(
+        type = "load_session",
+        sessionId = paste0("s", index),
+        threadId = paste0("history-", index)
+      ))
+      session$flushReact()
+      run_later_queue()
+    }
     expect_length(calls, 0L)
-    run_later_queue()
-    expect_identical(calls, "history-1")
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-again", threadId = "history-1"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(calls, "history-1")
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s2", threadId = "history-2"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(calls, c("history-1", "history-2"))
   })
 })
 
-test_that("failed historical warmup clears state and can retry", {
+test_that("history loading never invokes a failing warmup hook", {
   attempts <- 0L
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
     attempts <<- attempts + 1L
-    if (attempts == 1L) stop("mock warmup failure")
-    invisible(NULL)
+    stop("history must not invoke warmup")
   }
   loader <- function(session_id, thread_id, send_thread) send_thread(list())
 
@@ -70,25 +58,11 @@ test_that("failed historical warmup clears state and can retry", {
   }, {
     session$flushReact()
     session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "retry-thread"
+      type = "load_session", sessionId = "s1", threadId = "history-thread"
     ))
     session$flushReact()
     run_later_queue()
-    expect_identical(attempts, 1L)
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-retry", threadId = "retry-thread"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(attempts, 2L)
-
-    session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1-dedup", threadId = "retry-thread"
-    ))
-    session$flushReact()
-    run_later_queue()
-    expect_identical(attempts, 2L)
+    expect_identical(attempts, 0L)
   })
 })
 
@@ -164,7 +138,7 @@ test_that("Claude session loader caches one converted snapshot and pages newest-
   ))
 
   local_mocked_bindings(
-    .get_claude_session_messages = function(session_id) {
+    .get_claude_session_messages = function(session_id, directory = NULL) {
       reads <<- reads + 1L
       raw
     }
@@ -200,9 +174,10 @@ test_that("Claude session loader caches one converted snapshot and pages newest-
   expect_false(pages[[3L]]$has_more)
 })
 
-test_that("older history pages forward cursor but never schedule another warmup", {
+test_that("older history pages forward cursor and request ids without another warmup", {
   warmups <- character()
   calls <- list()
+  sent <- list()
   handler <- function(...) NULL
   attr(handler, "warmup") <- function(thread_id) {
     warmups <<- c(warmups, thread_id)
@@ -225,17 +200,21 @@ test_that("older history pages forward cursor but never schedule another warmup"
       "chat", handler = handler, on_session_load = loader, prewarm = FALSE
     )
   }, {
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
     session$flushReact()
     session$setInputs(chat_input = list(
-      type = "load_session", sessionId = "s1", threadId = "history-1"
+      type = "load_session", sessionId = "s1", threadId = "history-1",
+      requestId = "history-initial-1"
     ))
     session$flushReact()
     run_later_queue()
-    expect_identical(warmups, "history-1")
+    expect_length(warmups, 0L)
 
     session$setInputs(chat_input = list(
       type = "load_session_page", sessionId = "s1", threadId = "history-1",
-      cursor = 50L, limit = 50L
+      cursor = 50L, limit = 50L, requestId = "history-page-1"
     ))
     session$flushReact()
     run_later_queue()
@@ -243,7 +222,15 @@ test_that("older history pages forward cursor but never schedule another warmup"
     expect_length(calls, 2L)
     expect_null(calls[[1L]]$cursor)
     expect_identical(calls[[2L]], list(cursor = 50L, limit = 50L))
-    expect_identical(warmups, "history-1")
+    expect_length(warmups, 0L)
+    history_responses <- Filter(
+      function(item) identical(item$type, "chat_input:load-thread"), sent
+    )
+    expect_length(history_responses, 2L)
+    expect_identical(
+      vapply(history_responses, function(item) item$message$requestId, character(1)),
+      c("history-initial-1", "history-page-1")
+    )
   })
 })
 
@@ -259,4 +246,285 @@ test_that("history snapshot cache evicts least-recently-used sessions", {
   expect_false(cache$has("b"))
   expect_true(cache$has("a"))
   expect_true(cache$has("c"))
+})
+
+
+test_that("Claude session loader refreshes an appended transcript on each initial load", {
+  path <- tempfile(fileext = ".rds")
+  reads <- 0L
+  raw <- lapply(seq_len(3L), function(i) list(
+    type = "user", uuid = paste0("u", i),
+    message = list(content = paste0("message-", i))
+  ))
+
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id, directory = NULL) {
+      reads <<- reads + 1L
+      raw
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  pages <- list()
+  capture <- function(messages, cursor = NULL, has_more = FALSE, ...) {
+    pages[[length(pages) + 1L]] <<- list(
+      messages = messages, cursor = cursor, has_more = has_more
+    )
+  }
+
+  loader("session-growing", "thread-growing", capture, limit = 2L)
+  expect_identical(reads, 1L)
+  expect_identical(
+    vapply(pages[[1L]]$messages, `[[`, character(1), "id"),
+    c("h-u2", "h-u3")
+  )
+  expect_identical(pages[[1L]]$cursor, 1L)
+
+  raw <- c(raw, list(
+    list(
+      type = "user", uuid = "synthetic-task",
+      message = list(content = paste0(
+        "<task-notification><task-id>background-1</task-id>",
+        "<status>completed</status></task-notification>"
+      ))
+    ),
+    list(
+      type = "assistant", uuid = "a4",
+      message = list(content = list(list(
+        type = "tool_use", id = "read-late", name = "Read",
+        input = list(file_path = "functions/process_sdtm_data.R")
+      )))
+    ),
+    list(
+      type = "assistant", uuid = "thinking-only",
+      message = list(content = list(list(
+        type = "thinking", thinking = "Continue after the completed task"
+      )))
+    )
+  ))
+
+  # Reopening the session starts a new traversal and must see the appended tail.
+  loader("session-growing", "thread-growing", capture, limit = 2L)
+  expect_identical(reads, 2L)
+  expect_identical(
+    vapply(pages[[2L]]$messages, `[[`, character(1), "id"),
+    c("h-u3", "h-a4")
+  )
+  expect_identical(pages[[2L]]$cursor, 2L)
+
+  # Older pages remain pinned to that refreshed snapshot.
+  loader("session-growing", "thread-growing", capture, cursor = 2L, limit = 2L)
+  expect_identical(reads, 2L)
+  expect_identical(
+    vapply(pages[[3L]]$messages, `[[`, character(1), "id"),
+    c("h-u1", "h-u2")
+  )
+})
+
+
+test_that("Claude session refresh keeps the last successful snapshot on read failure", {
+  path <- tempfile(fileext = ".rds")
+  reads <- 0L
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id, directory = NULL) {
+      reads <<- reads + 1L
+      if (reads > 1L) stop("transient transcript read failure")
+      list(list(
+        type = "user", uuid = "stable-user",
+        message = list(content = "last successful history")
+      ))
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  pages <- list()
+  capture <- function(messages, ...) pages[[length(pages) + 1L]] <<- messages
+  loader("session-transient", "thread-transient", capture)
+  loader("session-transient", "thread-transient", capture)
+
+  expect_identical(reads, 2L)
+  expect_identical(pages[[1L]], pages[[2L]])
+  expect_identical(pages[[2L]][[1L]]$id, "h-stable-user")
+})
+
+
+test_that("historical browsing stays transcript-only while foreground runs settle", {
+  entered <- character()
+  finish_run <- NULL
+  warmups <- character()
+  handler <- function(message, thread_id, on_done, ...) {
+    entered <<- c(entered, thread_id)
+    promises::promise(function(resolve, reject) {
+      finish_run <<- function() {
+        on_done()
+        resolve(NULL)
+      }
+    })
+  }
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+  loader <- function(session_id, thread_id, send_thread) send_thread(list())
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler, on_session_load = loader)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "hold foreground", threadId = "foreground", runId = "run-foreground"
+    ))
+    session$flushReact()
+    run_later_queue(0.1)
+    expect_identical(entered, "foreground")
+
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "history", threadId = "background"
+    ))
+    session$flushReact()
+    run_later_queue(0.2)
+    expect_length(warmups, 0L)
+
+    finish_run()
+    session$flushReact()
+    run_later_queue(0.3)
+    expect_length(warmups, 0L)
+  })
+})
+
+
+test_that("session close cancels pending warmup timers", {
+  warmups <- character()
+  handler <- function(...) NULL
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler, prewarm = TRUE)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input_warmup = list(threadId = "must-not-warm"))
+    session$flushReact()
+    session$close()
+    run_later_queue(0.4)
+    expect_length(warmups, 0L)
+  })
+})
+
+
+test_that("deleting a thread removes its queued warmup before foreground release", {
+  finish_run <- NULL
+  warmups <- character()
+  handler <- function(message, on_done, ...) {
+    promises::promise(function(resolve, reject) {
+      finish_run <<- function() { on_done(); resolve(NULL) }
+    })
+  }
+  attr(handler, "warmup") <- function(thread_id) {
+    warmups <<- c(warmups, thread_id)
+    invisible(NULL)
+  }
+  loader <- function(session_id, thread_id, send_thread) send_thread(list())
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat", handler = handler, on_session_load = loader,
+      on_delete_session = function(session_id) invisible(NULL)
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "foreground", threadId = "foreground", runId = "run-foreground"
+    ))
+    session$flushReact(); run_later_queue(0.1)
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "history", threadId = "history"
+    ))
+    session$flushReact(); run_later_queue(0.1)
+    session$setInputs(chat_input_delete_session = list(
+      sessionId = "history", ts = 1
+    ))
+    session$flushReact()
+    finish_run(); session$flushReact(); run_later_queue(0.3)
+    expect_length(warmups, 0L)
+  })
+})
+
+
+
+
+test_that("Claude history loader stays cold and the first client creation resumes its session", {
+  skip_if_not_installed("ClaudeAgentSDK")
+
+  path <- tempfile(fileext = ".rds")
+  connections <- 0L
+  created_options <- list()
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() {
+    connections <<- connections + 1L
+    invisible(NULL)
+  }
+  client$disconnect <- function() invisible(NULL)
+
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) {
+      created_options[[length(created_options) + 1L]] <<- options
+      client
+    },
+    .get_claude_session_messages = function(...) list(),
+    .claude_msgs_to_thread = function(messages, ...) messages
+  )
+
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", include_partial_messages = TRUE),
+    session_map_path = path
+  )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  loader <- make_claude_session_loader(path)
+
+  loader(
+    "saved-session", "history-thread",
+    send_thread = function(...) invisible(NULL)
+  )
+  expect_identical(connections, 0L)
+  expect_length(created_options, 0L)
+
+  attr(handler, "warmup")("history-thread")
+  expect_identical(connections, 1L)
+  expect_identical(created_options[[1L]]$resume, "saved-session")
+})
+test_that("Claude session loader routes Workspace history by project directory", {
+  path <- tempfile(fileext = ".rds")
+  reads <- list()
+  local_mocked_bindings(
+    .get_claude_session_messages = function(session_id, directory = NULL) {
+      reads[[length(reads) + 1L]] <<- list(
+        session_id = session_id, directory = directory
+      )
+      suffix <- basename(directory %||% "global")
+      list(list(
+        type = "user", uuid = paste0("user-", suffix),
+        message = list(content = paste("history from", suffix))
+      ))
+    }
+  )
+
+  loader <- make_claude_session_loader(path)
+  capture <- function(messages, ...) messages
+  project_a <- file.path(tempdir(), "workspace-history-a")
+  project_b <- file.path(tempdir(), "workspace-history-b")
+
+  page_a <- loader("shared-session", "thread-a", capture, project = project_a)
+  page_b <- loader("shared-session", "thread-b", capture, project = project_b)
+
+  expect_identical(
+    vapply(reads, `[[`, character(1), "directory"),
+    c(project_a, project_b)
+  )
+  expect_identical(page_a[[1L]]$id, "h-user-workspace-history-a")
+  expect_identical(page_b[[1L]]$id, "h-user-workspace-history-b")
+  expect_length(reads, 2L)
 })

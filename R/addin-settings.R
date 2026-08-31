@@ -1,5 +1,5 @@
 # ── addin UI 偏好持久化(Plan 46)────────────────────────────────────────────
-# 4 个用户偏好合并到单个 ~/.claude_addin/addin_settings.json(可读、可手改)。
+# Addin用户偏好合并到单个 ~/.claude_addin/addin_settings.json(可读、可手改)。
 # 名字 addin_settings 以和 Claude Code 的 ~/.claude/settings.json 消歧义。
 # 数据文件(session_map/archived/... /tool_decisions)仍是 RDS。`%||%` 见 handlers.R。
 
@@ -8,7 +8,9 @@
     defaultPermissionMode = "default",
     modeVisibility        = list(showBypass = TRUE, showYolo = TRUE),
     composerDensity       = "comfortable",
-    runREnabled           = TRUE
+    assistantTextSize      = "medium",
+    runREnabled           = TRUE,
+    autoStartCopilotApi   = TRUE
   )
 }
 
@@ -31,7 +33,11 @@
   )
   cd <- raw$composerDensity
   if (is.character(cd) && length(cd) >= 1L && cd[[1L]] %in% c("comfortable", "compact")) d$composerDensity <- cd[[1L]]
+  ats <- .normalize_assistant_text_size(raw$assistantTextSize)
+  if (!is.null(ats)) d$assistantTextSize <- ats
   if (!is.null(raw$runREnabled)) d$runREnabled <- isTRUE(raw$runREnabled)
+  if (!is.null(raw$autoStartCopilotApi))
+    d$autoStartCopilotApi <- isTRUE(raw$autoStartCopilotApi)
   d
 }
 

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { ShinyToolFallback } from "./shiny-tool-fallback";
+import { _clearToolCardStateForTests } from "./tool-ui/tool-card-frame";
 import { registerApprovalHandler, _clearApprovalHandlers } from "./approval-registry";
 
 afterEach(() => {
@@ -123,3 +124,145 @@ describe("ShinyToolFallback approval — always-allow (multi-select) & deny feed
     expect(queryByText(/Always allow/)).toBeNull();
   });
 });
+
+
+describe("ShinyToolFallback result viewport", () => {
+  it("bounds long Bash/default results in one shared scroll container", () => {
+    const result = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join("\n");
+    const props = {
+      toolName: "Bash",
+      toolCallId: "tc-long-result",
+      argsText: '{"command":"seq 200"}',
+      args: { command: "seq 200" },
+      result,
+      status: { type: "complete" },
+      artifact: { defaultOpen: true },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const { container } = render(<ShinyToolFallback {...props} />);
+    const viewport = container.querySelector('[data-slot="tool-result-scroll"]');
+    expect(viewport).not.toBeNull();
+    expect(viewport?.className).toContain("max-h-96");
+    expect(viewport?.className).toContain("overflow-auto");
+    expect(viewport?.textContent).toContain("line 200");
+  });
+});
+
+
+describe("ShinyToolFallback persistent tool view state", () => {
+  afterEach(() => _clearToolCardStateForTests());
+
+  it("restores a Write Markdown preview scroll position after the card remounts", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const clientDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 1000 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 100 });
+    const props = {
+      toolName: "Write",
+      toolCallId: "write-md-scroll",
+      argsText: "{}",
+      args: { file_path: "report.md", content: "# Report\n\n" + "Paragraph\n\n".repeat(100) },
+      result: "File written",
+      status: { type: "complete" },
+      artifact: { inputId: "chatA" },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    try {
+      const first = render(<ShinyToolFallback {...props} />);
+      const firstPreview = first.container.querySelector<HTMLElement>("[data-markdown-preview=true]")!;
+      expect(firstPreview).toBeTruthy();
+      firstPreview.scrollTop = 900;
+      fireEvent.scroll(firstPreview);
+      first.unmount();
+
+      const second = render(<ShinyToolFallback {...props} />);
+      const secondPreview = second.container.querySelector<HTMLElement>("[data-markdown-preview=true]")!;
+      expect(secondPreview).toBeTruthy();
+      expect(secondPreview).not.toBe(firstPreview);
+      expect(secondPreview.scrollTop).toBe(900);
+      expect(second.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("aria-expanded"))
+        .toBe("true");
+    } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, "scrollHeight", descriptor);
+      else delete (HTMLElement.prototype as any).scrollHeight;
+      if (clientDescriptor) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientDescriptor);
+      else delete (HTMLElement.prototype as any).clientHeight;
+    }
+  });
+});
+
+
+describe("ShinyToolFallback running activity", () => {
+  function renderRunning(toolName: string, status: "running" | "complete" = "running") {
+    const props = {
+      toolName,
+      toolCallId: `activity-${toolName}`,
+      argsText: "{}",
+      args: {},
+      result: status === "complete" ? "done" : undefined,
+      status: { type: status },
+      artifact: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    return render(<ShinyToolFallback {...props} />);
+  }
+
+  it("uses explicit present-tense activity for a running Bash tool", () => {
+    const { container, getByRole } = renderRunning("Bash");
+    expect(getByRole("button", { name: "Running tool: Bash" })).toBeTruthy();
+    expect(container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("data-status"))
+      .toBe("running");
+    expect(container.querySelector('[data-slot="tool-fallback-trigger-icon"]')?.getAttribute("class"))
+      .toContain("animate-spin");
+    expect(container.querySelector('[data-slot="tool-fallback-trigger-shimmer"]')).not.toBeNull();
+  });
+
+  it("says Agent is working until its tool call completes", () => {
+    const running = renderRunning("Agent");
+    expect(running.getByRole("button", { name: "Agent working: Agent" })).toBeTruthy();
+    expect(running.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("aria-label"))
+      .toContain("Agent working");
+    running.unmount();
+
+    const complete = renderRunning("Agent", "complete");
+    expect(complete.getByRole("button", { name: "Used tool: Agent" })).toBeTruthy();
+    expect(complete.queryByRole("button", { name: /Agent working/ })).toBeNull();
+    expect(complete.container.querySelector('[data-slot="tool-fallback-trigger-shimmer"]')).toBeNull();
+  });
+});
+
+  it("keeps an earlier concurrent tool visibly running while its result is pending", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:10.000Z"));
+    const props = {
+      toolName: "Bash",
+      toolCallId: "concurrent-pending-bash",
+      argsText: "{}",
+      args: {},
+      result: undefined,
+      timing: { startedAt: Date.now() - 1000 },
+      status: { type: "complete" },
+      artifact: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const view = render(<ShinyToolFallback {...props} />);
+    try {
+      expect(view.getByRole("button", { name: "Running tool: Bash" })).toBeTruthy();
+      expect(view.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("data-status"))
+        .toBe("running");
+      expect(view.container.querySelector('[data-slot="tool-fallback-duration"]')?.textContent)
+        .toBe("1.0s");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(view.container.querySelector('[data-slot="tool-fallback-duration"]')?.textContent)
+        .toBe("3.0s");
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });

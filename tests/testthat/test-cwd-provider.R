@@ -63,3 +63,118 @@ test_that("cwd_provider=NULL 时回退 options$cwd（非 addin 兼容）", {
   attr(handler, "warmup")("t1")
   expect_identical(received$cwd, "/tmp/static")
 })
+
+
+test_that("reset_clients waits for every concurrent normal turn and runs once", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  cancelled <- list(a = FALSE, b = FALSE)
+  finished <- list(a = FALSE, b = FALSE)
+  disconnects <- 0L
+  clients <- lapply(c("a", "b"), function(id) {
+    client <- new.env(parent = emptyenv())
+    client$connect <- function() invisible(NULL)
+    client$disconnect <- function() {
+      disconnects <<- disconnects + 1L
+      invisible(NULL)
+    }
+    client$send <- function(...) invisible(NULL)
+    client$interrupt <- function(...) invisible(NULL)
+    client$poll_messages <- function() list()
+    client$get_server_info <- function() list()
+    client
+  })
+  next_client <- 0L
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) {
+      next_client <<- next_client + 1L
+      clients[[next_client]]
+    },
+    .claude_drain_timeout_seconds = function() 0
+  )
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("a")
+  attr(handler, "warmup")("b")
+  invoke <- function(id) handler(
+    message = id, thread_id = id, attachments = list(),
+    on_chunk = function(...) NULL,
+    on_done = function(...) finished[[id]] <<- TRUE,
+    on_error = function(...) finished[[id]] <<- TRUE,
+    on_tool_call = function(...) NULL,
+    on_tool_result = function(...) NULL,
+    on_thinking = function(...) NULL,
+    is_cancelled = function() isTRUE(cancelled[[id]]),
+    wait_for_approval = function(...) promises::promise_resolve(list(approved = FALSE))
+  )
+  invoke("a")
+  invoke("b")
+  later::run_now()
+
+  attr(handler, "reset_clients")()
+  later::run_now()
+  expect_identical(disconnects, 0L)
+
+  cancelled$a <- TRUE
+  for (i in seq_len(100L)) {
+    later::run_now()
+    if (isTRUE(finished$a)) break
+    Sys.sleep(0.002)
+  }
+  expect_true(finished$a)
+  expect_false(finished$b)
+  expect_identical(disconnects, 0L)
+
+  cancelled$b <- TRUE
+  for (i in seq_len(100L)) {
+    later::run_now()
+    if (isTRUE(finished$b) && disconnects == 2L) break
+    Sys.sleep(0.002)
+  }
+  expect_true(finished$b)
+  expect_identical(disconnects, 2L)
+  later::run_now()
+  expect_identical(disconnects, 2L)
+})
+
+
+test_that("reset_clients waits for compact terminal before disconnecting", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  disconnects <- 0L
+  compact_terminal <- NULL
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() {
+    disconnects <<- disconnects + 1L
+    invisible(NULL)
+  }
+  client$send <- function(...) invisible(NULL)
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) client,
+    .claude_start_compact_poll = function(client, on_progress, on_terminal,
+                                           persist_result, ...) {
+      compact_terminal <<- on_terminal
+      invisible(NULL)
+    }
+  )
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("compact-thread")
+  attr(handler, "action_handler")(
+    "compact", "compact-thread", function(...) invisible(NULL)
+  )
+  expect_true(is.function(compact_terminal))
+
+  attr(handler, "reset_clients")()
+  later::run_now()
+  expect_identical(disconnects, 0L)
+
+  compact_terminal("ok", "Compacted")
+  later::run_now()
+  expect_identical(disconnects, 1L)
+})

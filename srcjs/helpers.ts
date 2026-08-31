@@ -28,7 +28,11 @@ export function markStaleToolCalls(
     const newContent = content.map((part) => {
       if (part?.type !== "tool-call" || part.result !== undefined) return part;
       touched = true;
-      return { ...part, result: resultText, isError: true };
+      const artifact = part.artifact && typeof part.artifact === "object" &&
+        part.artifact.argsStreaming === true
+        ? { ...part.artifact, argsStreaming: false }
+        : part.artifact;
+      return { ...part, artifact, result: resultText, isError: true };
     });
     if (!touched) return m;
     changed = true;

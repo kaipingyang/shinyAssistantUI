@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircleIcon,
   CheckIcon,
@@ -104,10 +104,36 @@ const formatToolDuration = (ms: number) => {
 };
 
 function ToolFallbackDuration({
+  timing,
+  running,
   className,
   ...props
-}: React.ComponentProps<"span">) {
-  const elapsedMs = useToolCallElapsed();
+}: React.ComponentProps<"span"> & {
+  timing?: ToolCallMessagePart["timing"];
+  running: boolean;
+}) {
+  const scopedElapsedMs = useToolCallElapsed();
+  const needsFallback =
+    scopedElapsedMs === undefined &&
+    running &&
+    timing !== undefined &&
+    timing.completedAt === undefined;
+  const [fallbackNow, setFallbackNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!needsFallback) return undefined;
+    setFallbackNow(Date.now());
+    const interval = window.setInterval(() => setFallbackNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [needsFallback]);
+
+  const elapsedMs = scopedElapsedMs ?? (
+    timing?.completedAt !== undefined
+      ? Math.max(0, timing.completedAt - timing.startedAt)
+      : needsFallback
+        ? Math.max(0, fallbackNow - timing.startedAt)
+        : undefined
+  );
   if (elapsedMs === undefined) return null;
 
   return (
@@ -127,11 +153,13 @@ function ToolFallbackDuration({
 function ToolFallbackTrigger({
   toolName,
   status,
+  timing,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
   status?: ToolCallMessagePartStatus;
+  timing?: ToolCallMessagePart["timing"];
 }) {
   const statusType = status?.type ?? "complete";
   const isRunning = statusType === "running";
@@ -139,11 +167,18 @@ function ToolFallbackTrigger({
     status?.type === "incomplete" && status.reason === "cancelled";
 
   const Icon = statusIconMap[statusType];
-  const label = isCancelled ? "Cancelled tool" : "Used tool";
+  const isAgent = /^Agent(?:\(|$)/i.test(toolName);
+  const label = isCancelled
+    ? "Cancelled tool"
+    : isRunning
+      ? isAgent ? "Agent working" : "Running tool"
+      : "Used tool";
 
   return (
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
+      data-status={statusType}
+      aria-label={`${label}: ${toolName}`}
       className={cn(
         "aui-tool-fallback-trigger group/trigger text-muted-foreground hover:text-foreground flex w-fit origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
         className,
@@ -178,7 +213,7 @@ function ToolFallbackTrigger({
           </span>
         )}
       </span>
-      <ToolFallbackDuration />
+      <ToolFallbackDuration timing={timing} running={isRunning} />
       <ChevronDownIcon
         data-slot="tool-fallback-trigger-chevron"
         className={cn(
