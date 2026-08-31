@@ -249,7 +249,7 @@
   ClaudeAgentSDK::rename_session(session_id, title, directory = directory)
 .find_claude_session_file <- function(session_id, directory = NULL) {
   finder <- tryCatch(
-    getFromNamespace(".find_session_file", "ClaudeAgentSDK"),
+    utils::getFromNamespace(".find_session_file", "ClaudeAgentSDK"),
     error = function(error) NULL
   )
   if (!is.function(finder)) return(NULL)

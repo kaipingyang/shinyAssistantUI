@@ -1,5 +1,23 @@
 # shinyAssistantUI 0.5.6
 
+- **Tool result 内存边界与历史按需加载**：折叠的历史 tool result 只保留轻量元数据，展开时
+  才按关联请求加载完整内容；缓存、压缩、working-directory 控件与 AskUserQuestion 恢复路径
+  均补齐释放和交互守卫。长会话 soak、GC pause、OOM、installed-package Chromium 以及历史
+  tool UI 回归共同覆盖，避免大结果长期驻留浏览器与 R session。
+- **Git branch、历史冷浏览与审批生命周期**：composer footer 显示当前项目 Git branch，并在
+  workspace/run/cancel 边界按原项目快照刷新。浏览历史不再启动 backend，首次继续发送时才
+  lazy resume 对应 Claude session。前台结束后的关联后台审批保留最小路由，脱离 run 的审批
+  自动 deny/interrupt；archive、delete 与 session end 会回收遗留审批，terminal Result 在
+  关联审批后等待 transcript 真正推进再释放。
+- **可靠的 model acknowledgement**：model 选择按 thread/request 关联，只在 Claude SDK 成功
+  确认后提交 canonical value；拒绝、过期回执和 client 替换均保留旧 model。健康冷启动回执
+  实测可越过旧 5 秒边界，因此 acknowledgement deadline 调整为 30 秒，并通过真实 Chromium
+  `Default → Sonnet → Default`、立即发送和零 console/runtime/network error 验证。
+- **可复现 JavaScript release 基线**：版本化快照记录 Node/npm、直接依赖的 declared/resolved
+  版本与 integrity、lockfile/package 数量，以及 manifest 和完整 production web tree 的
+  SHA-256。release tag、`package-lock.json` 与已提交 `inst/www` 共同构成回滚依据；重建必须使用
+  `npm ci`，避免 `latest` 或 semver range 在未来解析到不同版本。
+
 - **并行 Agent 输出隔离与及时顶层交付**：parented 子 Agent 的 text/thinking 不再混入
   顶层回复，两个并行 Agent 的卡片、nested tool、完成状态与最终顶层总结保持清晰顺序；
   无 partial `text_delta` 的完整顶层 `AssistantMessage` 在真实到达时立即过滤、去重并交付，

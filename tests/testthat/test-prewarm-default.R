@@ -6,12 +6,18 @@ test_that("Claude addins default to prewarm while the generic server stays lazy"
 })
 
 test_that("prewarm documentation matches the stdio run_r architecture", {
-  addin_source <- readLines(testthat::test_path("..", "..", "R", "addin.R"), warn = FALSE)
-  server_source <- readLines(testthat::test_path("..", "..", "R", "server.R"), warn = FALSE)
-  console_source <- readLines(
-    testthat::test_path("..", "..", "R", "addin-r-console.R"),
-    warn = FALSE
+  source_paths <- testthat::test_path(
+    "..", "..", "R",
+    c("addin.R", "server.R", "addin-r-console.R")
   )
+  skip_if_not(
+    all(file.exists(source_paths)),
+    "source-comment lint requires a source checkout"
+  )
+
+  addin_source <- readLines(source_paths[[1L]], warn = FALSE)
+  server_source <- readLines(source_paths[[2L]], warn = FALSE)
+  console_source <- readLines(source_paths[[3L]], warn = FALSE)
 
   expect_true(any(grepl(
     "@param prewarm Logical (default `TRUE`)",

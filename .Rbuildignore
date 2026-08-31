@@ -8,6 +8,8 @@
 ^package-lock\.json$
 ^vite\.config\.mts$
 ^vitest\.config\.ts$
+^tools$
+^dependency-snapshots$
 ^tsconfig\.json$
 ^examples$
 ^tests/verify$

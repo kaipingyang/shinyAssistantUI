@@ -5,7 +5,10 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dependencies:snapshot": "node tools/js-dependency-snapshot.mjs --write",
+    "dependencies:check": "node tools/js-dependency-snapshot.mjs --check",
+    "test:dependencies": "node --test tools/js-dependency-snapshot.test.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.1",
