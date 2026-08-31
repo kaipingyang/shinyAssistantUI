@@ -234,7 +234,9 @@
 #'       thread.
 #'
 #' @param on_edits Optional `function(edits)` called when the assistant proposes
-#'   file edits (used by the addin to show edit markers).
+#'   file edits (used by the addin to show edit markers). Returning exactly
+#'   `FALSE` also suppresses the automatic reveal of the last edited file;
+#'   metadata and chat diff payloads are unaffected.
 #' @param workspace_mode Logical. When `TRUE`, enables project-aware thread
 #'   metadata and navigation. Incoming requests may supply an optional `project`
 #'   snapshot; handlers, history callbacks, and thread-aware providers receive it
@@ -286,6 +288,11 @@
 #'   toggle (`NULL` hides it).
 #' @param on_toggle_run_r Optional `function(value)` called when the `run_r`
 #'   toggle changes.
+#' @param show_claude_edits_in_rstudio Optional logical initial state of the
+#'   addin's RStudio edit-presentation toggle (`NULL` hides it). When disabled,
+#'   the addin neither publishes edit markers nor automatically reveals edited files.
+#' @param on_toggle_claude_edits_in_rstudio Optional `function(value)` called
+#'   when the RStudio edit-presentation toggle changes.
 #' @param show_usage Logical (default `FALSE`); show the token-usage indicator.
 #' @param context_window Optional integer context-window size for the usage
 #'   indicator.
@@ -350,6 +357,8 @@ assistantUIServer <- function(id, handler,
                               on_set_assistant_text_size = NULL,
                               run_r_enabled = NULL,
                               on_toggle_run_r = NULL,
+                              show_claude_edits_in_rstudio = NULL,
+                              on_toggle_claude_edits_in_rstudio = NULL,
                               thread_max_width = NULL,
                               show_usage        = FALSE,
                               context_window    = NULL,
@@ -541,6 +550,9 @@ assistantUIServer <- function(id, handler,
   }
   # Plan 45:run_r MCP 开关(仅当 run_r 可用,即 on_toggle_run_r 提供时暴露)。
   if (!is.null(run_r_enabled)) config$run_r_enabled <- isTRUE(run_r_enabled)
+  # Addin-only RStudio marker preference. NULL means the host has no capability.
+  if (!is.null(show_claude_edits_in_rstudio))
+    config$show_claude_edits_in_rstudio <- isTRUE(show_claude_edits_in_rstudio)
   # 对话内容最大宽度(Plan 23)。NULL = 满宽(默认,像 CLI/VS Code);传 CSS 长度(如
   # "44rem"/"800px")= 居中限宽。前端缺省解析为 "none"(满宽)。
   if (!is.null(thread_max_width)) {
@@ -666,25 +678,27 @@ assistantUIServer <- function(id, handler,
         if (!settle_run("complete")) return(invisible(NULL))
         refresh_git_branch(project)
         forget_run_project(run_id)
-        if (!is.null(on_open_file)) {
-          reveal_path <- edit_reveal$flush()
-          if (!is.null(reveal_path)) {
-            tryCatch(.call_compatible_callback(on_open_file, list(
-              path = reveal_path,
-              line = NULL,
-              thread_id = thread_id,
-              project = project
-            )), error = function(e) NULL)
-          }
-        }
-        # 本轮所有成功编辑 → on_edits（addin 用于 Markers 面板可跳转清单）。始终 take 以清空累积。
+        reveal_path <- edit_reveal$flush()
+        # 本轮所有成功编辑 → on_edits。始终 take 以清空累积；callback 显式
+        # 返回 FALSE 时，host 选择隐藏整套 IDE edit presentation（markers + 自动 reveal）。
         run_edits <- edit_reveal$take_edits()
-        if (!is.null(on_edits) && length(run_edits))
-          tryCatch(.call_compatible_callback(on_edits, list(
+        reveal_edits <- TRUE
+        if (!is.null(on_edits) && length(run_edits)) {
+          edit_result <- tryCatch(.call_compatible_callback(on_edits, list(
             edits = run_edits,
             thread_id = thread_id,
             project = project
           )), error = function(e) NULL)
+          if (identical(edit_result, FALSE)) reveal_edits <- FALSE
+        }
+        if (isTRUE(reveal_edits) && !is.null(on_open_file) && !is.null(reveal_path)) {
+          tryCatch(.call_compatible_callback(on_open_file, list(
+            path = reveal_path,
+            line = NULL,
+            thread_id = thread_id,
+            project = project
+          )), error = function(e) NULL)
+        }
         session$sendCustomMessage(paste0(input_id, ":done"),
                                   list(suggestions = suggestions, threadId = thread_id,
                                        runId = run_id))
@@ -1094,6 +1108,22 @@ assistantUIServer <- function(id, handler,
       value <- if (is.list(msg)) msg$value else msg
       tryCatch(on_toggle_run_r(isTRUE(value)), error = function(e) NULL)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_toggle_claude_edits_in_rstudio)) {
+    shiny::observeEvent(
+      session$input[[paste0(input_id, "_show_claude_edits_in_rstudio")]],
+      {
+        msg <- session$input[[paste0(input_id, "_show_claude_edits_in_rstudio")]]
+        if (is.null(msg)) return()
+        value <- if (is.list(msg)) msg$value else msg
+        tryCatch(
+          on_toggle_claude_edits_in_rstudio(isTRUE(value)),
+          error = function(e) NULL
+        )
+      },
+      ignoreNULL = TRUE,
+      ignoreInit = TRUE
+    )
   }
   if (is.function(workspace_search_provider)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_workspace_search")]], {

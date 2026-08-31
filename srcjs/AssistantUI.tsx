@@ -182,6 +182,8 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     setAssistantTextSize: rt.setAssistantTextSize,
     runREnabled: rt.runREnabled,
     setRunREnabled: rt.setRunREnabled,
+    showClaudeEditsInRStudio: rt.showClaudeEditsInRStudio,
+    setShowClaudeEditsInRStudio: rt.setShowClaudeEditsInRStudio,
     autoStartCopilotApi: rt.autoStartCopilotApi,
     setAutoStartCopilotApi: rt.setAutoStartCopilotApi,
     threadMaxWidth: rt.threadMaxWidth,

@@ -64,6 +64,54 @@ test_that("model action commits only after async acknowledgement", {
 })
 
 
+test_that("model action retries one transient acknowledgement timeout", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  requests <- list()
+  results <- list()
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() invisible(NULL)
+  client$set_model_async <- function(model, timeout_ms = 5000L,
+                                     on_fulfilled = NULL, on_rejected = NULL) {
+    requests[[length(requests) + 1L]] <<- list(
+      model = model,
+      timeout_ms = timeout_ms,
+      resolve = on_fulfilled,
+      reject = on_rejected
+    )
+    invisible(paste0("model-request-", length(requests)))
+  }
+  testthat::local_mocked_bindings(.new_claude_client = function(options) client)
+
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default", permission_prompt_tool_name = "stdio",
+                   include_partial_messages = TRUE),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("t1")
+  attr(handler, "action_handler")(
+    "model:sonnet", "t1",
+    function(message, status = "ok", value = NULL) {
+      results[[length(results) + 1L]] <<- list(
+        message = message, status = status, value = value
+      )
+    }
+  )
+
+  expect_length(requests, 1L)
+  requests[[1L]]$reject(simpleError("Control request timeout: set_model"))
+  expect_length(requests, 2L)
+  expect_identical(requests[[2L]]$model, "sonnet")
+  expect_identical(requests[[2L]]$timeout_ms, 30000L)
+  expect_length(results, 0L)
+
+  requests[[2L]]$resolve(list())
+  expect_length(results, 1L)
+  expect_identical(results[[1L]]$status, "ok")
+  expect_identical(results[[1L]]$value, "sonnet")
+})
+
+
 test_that("model action rejection preserves the previous model", {
   skip_if_not_installed("ClaudeAgentSDK")
   received <- NULL

@@ -3180,6 +3180,7 @@ make_claude_handler <- function(options       = NULL,
         state$client <- cl
         state$model <- model
         state$settled <- FALSE
+        state$attempt <- 0L
         state$promise <- promises::promise(function(resolve, reject) {
           state$resolve <- resolve
         })
@@ -3208,15 +3209,37 @@ make_claude_handler <- function(options       = NULL,
           }, error = function(action_error) NULL)
           invisible(NULL)
         }
-        tryCatch(
-          set_model_async(
-            model,
-            timeout_ms = 30000L,
-            on_fulfilled = function(response) settle(),
-            on_rejected = function(error) settle(error)
-          ),
-          error = function(error) settle(error)
-        )
+        is_ack_timeout <- function(error) {
+          message <- tryCatch(conditionMessage(error), error = function(e) "")
+          identical(message, "Control request timeout: set_model")
+        }
+        send_model_request <- NULL
+        send_model_request <- function() {
+          if (isTRUE(state$settled)) return(invisible(NULL))
+          state$attempt <- state$attempt + 1L
+          tryCatch(
+            set_model_async(
+              model,
+              timeout_ms = 30000L,
+              on_fulfilled = function(response) settle(),
+              on_rejected = function(error) {
+                current <- identical(model_switches[[thread_id]], state) &&
+                  identical(clients[[thread_id]], cl)
+                # The transport drops a late acknowledgement after its timer.
+                # Reissuing the same set_model control is idempotent and usually
+                # acknowledges immediately if the first request already applied.
+                if (isTRUE(current) && state$attempt < 2L && is_ack_timeout(error)) {
+                  send_model_request()
+                } else {
+                  settle(error)
+                }
+              }
+            ),
+            error = function(error) settle(error)
+          )
+          invisible(NULL)
+        }
+        send_model_request()
         invisible(NULL)
       } else if (grepl("^permissions:", id)) {
         mode <- sub("^permissions:", "", id)

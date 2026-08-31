@@ -258,3 +258,41 @@ describe("Assistant text size and constrained Settings layout", () => {
     expect(header.className).toContain("sticky");
   });
 });
+
+
+describe("Show Claude edits in RStudio setting", () => {
+  it("renders only with capability and delegates the controlled checkbox", () => {
+    const setShowClaudeEditsInRStudio = vi.fn();
+    const context = {
+      ...baseContext,
+      showClaudeEditsInRStudio: true,
+      setShowClaudeEditsInRStudio,
+    } as ShinyConfigCtx;
+    render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Show Claude edits in RStudio",
+    }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    fireEvent.click(checkbox);
+    expect(setShowClaudeEditsInRStudio).toHaveBeenCalledOnce();
+    expect(setShowClaudeEditsInRStudio).toHaveBeenCalledWith(false);
+  });
+
+  it("does not expose the control without the RStudio capability", () => {
+    render(
+      <ShinyConfigContext.Provider value={baseContext}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("checkbox", {
+      name: "Show Claude edits in RStudio",
+    })).toBeNull();
+  });
+});

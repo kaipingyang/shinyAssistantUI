@@ -82,6 +82,11 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
   app <- .claude_chat_app(project, options = list(), prewarm = FALSE)
   shiny::testServer(app$serverFuncSource(), {
     session$flushReact()
+    expect_null(listed_directory)
+    expect_length(sent_sessions, 0L)
+
+    session$setInputs(chat_input_sessions_ready = list(ts = 1))
+    session$flushReact()
     session$setInputs(cancel = 1L)
     session$flushReact()
   })

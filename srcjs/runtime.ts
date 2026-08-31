@@ -414,6 +414,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
     () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
   );
+  const [showClaudeEditsInRStudio, setShowClaudeEditsInRStudioState] = useState<boolean | undefined>(
+    () => (typeof config?.show_claude_edits_in_rstudio === "boolean"
+      ? config.show_claude_edits_in_rstudio
+      : undefined),
+  );
   const [autoStartCopilotApi, setAutoStartCopilotApiState] = useState<boolean | undefined>(
     () => copilotServiceConfig?.state.autoStart,
   );
@@ -3011,6 +3016,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     setRunREnabled: (value: boolean) => {
       setRunREnabledState(value);
       bridge.current.sendRunREnabled(value);
+    },
+    showClaudeEditsInRStudio,
+    setShowClaudeEditsInRStudio: (value: boolean) => {
+      setShowClaudeEditsInRStudioState(value);
+      bridge.current.sendShowClaudeEditsInRStudio(value);
     },
     autoStartCopilotApi,
     setAutoStartCopilotApi: (value: boolean) => {

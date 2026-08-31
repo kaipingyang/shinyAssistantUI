@@ -48,6 +48,8 @@ assistantUIServer(
   on_set_assistant_text_size = NULL,
   run_r_enabled = NULL,
   on_toggle_run_r = NULL,
+  show_claude_edits_in_rstudio = NULL,
+  on_toggle_claude_edits_in_rstudio = NULL,
   thread_max_width = NULL,
   show_usage = FALSE,
   context_window = NULL,
@@ -228,7 +230,9 @@ live R session (visible, with their objects/packages/plots). When supplied, R co
 blocks show a run button. Leave \code{NULL} (default) outside RStudio.}
 
 \item{on_edits}{Optional \verb{function(edits)} called when the assistant proposes
-file edits (used by the addin to show edit markers).}
+file edits (used by the addin to show edit markers). Returning exactly
+\code{FALSE} also suppresses the automatic reveal of the last edited file;
+metadata and chat diff payloads are unaffected.}
 
 \item{on_archive_session}{Optional \verb{function(session_id, archived)} called when
 the user archives (\code{archived = TRUE}) or unarchives (\code{FALSE}) a session in the
@@ -314,6 +318,13 @@ toggle (\code{NULL} hides it).}
 
 \item{on_toggle_run_r}{Optional \verb{function(value)} called when the \code{run_r}
 toggle changes.}
+
+\item{show_claude_edits_in_rstudio}{Optional logical initial state of the
+addin's RStudio edit-presentation toggle (\code{NULL} hides it). When disabled,
+the addin neither publishes edit markers nor automatically reveals edited files.}
+
+\item{on_toggle_claude_edits_in_rstudio}{Optional \verb{function(value)} called
+when the RStudio edit-presentation toggle changes.}
 
 \item{thread_max_width}{Optional CSS length capping the chat content width
 (e.g. \code{"44rem"}, \code{"800px"}). Default \code{NULL} = \strong{full width} (fills the

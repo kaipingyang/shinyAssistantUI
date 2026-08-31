@@ -37,7 +37,34 @@ cat(sprintf("[%s] Settings has run_r toggle\n", if(isTRUE(has_runr))"PASS" else 
 ev("(function(){var c=document.querySelector('[data-slot=aui_run_r_toggle] input');if(c)c.click();return !!c})()"); Sys.sleep(1)
 srr <- any(grepl("SET_RUNR", tryCatch(readLines("/tmp/su.e"), error=function(e) character())))
 cat(sprintf("[%s] toggling run_r fires callback (SET_RUNR)\n", if(srr)"PASS" else "FAIL"))
+# RStudio Claude edits 开关默认开启，关闭后回传 FALSE。
+has_marker <- ev("!!document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio]')")
+marker_checked <- ev("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked === true")
+cat(sprintf("[%s] Settings has enabled Claude edits marker toggle\n",
+            if(isTRUE(has_marker) && isTRUE(marker_checked))"PASS" else "FAIL"))
+ev("(function(){var c=document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input');if(c)c.click();return !!c})()")
+Sys.sleep(1)
+marker_off <- ev("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked === false")
+sce <- any(grepl("SET_CLAUDE_EDITS=FALSE", tryCatch(readLines("/tmp/su.e"), error=function(e) character()), fixed=TRUE))
+cat(sprintf("[%s] disabling Claude edits round-trips FALSE\n", if(isTRUE(marker_off) && sce)"PASS" else "FAIL"))
+# 关闭后触发真实 Write callback：聊天工具卡保留，但 markers 与自动 reveal 均不执行。
+ev("(function(){var e=document.querySelector('.aui-lexical-input[contenteditable=true]');if(!e)return false;e.focus();return true})()")
+b$Input$insertText(text="edit while RStudio presentation is disabled")
+b$Input$dispatchKeyEvent(type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
+b$Input$dispatchKeyEvent(type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
+for (i in seq_len(30L)) {
+  Sys.sleep(0.2)
+  if (isTRUE(ev("document.body.innerText.includes('TYPOGRAPHY.md')"))) break
+}
+chat_diff_kept <- isTRUE(ev("document.body.innerText.includes('TYPOGRAPHY.md')"))
+edit_log <- tryCatch(readLines("/tmp/su.e"), error=function(e) character())
+no_marker_publish <- !any(grepl("PUBLISH_EDIT_MARKERS", edit_log, fixed=TRUE))
+no_auto_open <- !any(grepl("OPEN_EDIT=", edit_log, fixed=TRUE))
+cat(sprintf("[%s] disabled edit keeps chat card without markers or auto-open\n",
+            if(chat_diff_kept && no_marker_publish && no_auto_open)"PASS" else "FAIL"))
 cat(sprintf("[%s] no console errors (%d)\n", if(length(errs)==0)"PASS" else "FAIL", length(errs)))
+stopifnot(isTRUE(has_marker), isTRUE(marker_checked), isTRUE(marker_off), sce,
+          chat_diff_kept, no_marker_publish, no_auto_open, length(errs) == 0L)
 if(length(errs)) cat(head(unique(errs),3),sep="\n")
 b$close(); p$kill(); system("rm -f /tmp/su.*")
 cat("SETTINGS_UX_DONE\n")

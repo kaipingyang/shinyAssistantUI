@@ -1,3 +1,17 @@
+# shinyAssistantUI 0.5.7
+
+- **RStudio Claude edits 可配置**：Settings 新增默认开启的 **Show Claude edits in RStudio**。
+  关闭后不再向 RStudio `sourceMarkers()` 发布新的 “Claude edits”，也不再自动打开编辑后的
+  文件；聊天 diff、`diffStartLine` metadata、历史恢复与已有 markers 均不受影响。
+- **用量圆环保持稳定**：Claude 尚未回报真实 context usage 时显示不猜测数值的 `—` 占位环，
+  收到 `contextTokens/contextWindow` 后原位更新，避免首次回执前或 widget 恢复期间整块消失。
+- **Model 切换超时恢复**：SDK 精确报告 `Control request timeout: set_model` 时，在同一 client
+  和 pending request 仍有效的前提下透明幂等重试一次；普通拒绝、stale acknowledgement 与
+  client replacement 仍保持失败语义和旧 model。
+- **Workbench 返回不再被 session 扫描阻塞**：Claude Chat/Workspace 等 React 组件完成挂载并
+  发出 `sessions_ready` 后才首次扫描历史 session，避免共享存储或多项目枚举卡住 Shiny 首个
+  reactive flush。历史仍按 50 条分页，折叠的大 tool result 继续只在展开时加载。
+
 # shinyAssistantUI 0.5.6
 
 - **Tool result 内存边界与历史按需加载**：折叠的历史 tool result 只保留轻量元数据，展开时
