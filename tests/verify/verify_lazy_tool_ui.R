@@ -100,8 +100,8 @@ request_count <- function(id = "lazy_request_count") as.integer(ev(sprintf(
 )))
 
 assert(wait_for("!!document.querySelector('.aui-root')"), "installed widget mounted")
-assert(identical(ev("document.getElementById('installed-version').textContent.trim()"), "0.5.6"),
-       "Home installed package version 0.5.6")
+assert(identical(ev("document.getElementById('installed-version').textContent.trim()"), "0.5.7"),
+       "Home installed package version 0.5.7")
 
 # Drive the actual composer so runtime callbacks are registered for this thread.
 ev("document.querySelector('[contenteditable=true]').focus(); true")

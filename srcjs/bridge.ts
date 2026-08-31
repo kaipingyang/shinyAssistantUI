@@ -170,6 +170,7 @@ export interface ShinyBridge {
   sendComposerDensity: (value: string) => void;
   sendAssistantTextSize: (value: string) => void;
   sendRunREnabled: (value: boolean) => void;
+  sendShowClaudeEditsInRStudio: (value: boolean) => void;
   sendSaveProject: () => void;
   sendRemoveProject: (path: string) => void;
   sendLoadSession: (sessionId: string, threadId: string, requestId?: string, project?: string) => void;
@@ -651,6 +652,13 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     },
     sendRunREnabled(value) {
       Shiny.setInputValue(`${inputId}_run_r_enabled`, { value, ts: Date.now() }, { priority: "event" });
+    },
+    sendShowClaudeEditsInRStudio(value) {
+      Shiny.setInputValue(
+        `${inputId}_show_claude_edits_in_rstudio`,
+        { value, ts: Date.now() },
+        { priority: "event" },
+      );
     },
     onProjects(handler) {
       projectsHandler = handler;

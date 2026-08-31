@@ -3311,3 +3311,22 @@ describe("useShinyRuntime — proactive authoritative replacements", () => {
     await fireR("status", { threadId, status: "status", text: "Background task ready" });
     expect(result.current.statusText).toBe("Background task ready");
   });
+
+
+describe("useShinyRuntime — Claude edit marker preference", () => {
+  it("initializes from config and sends canonical optimistic changes", () => {
+    const { result } = setup({ show_claude_edits_in_rstudio: true });
+    expect(result.current.showClaudeEditsInRStudio).toBe(true);
+
+    act(() => result.current.setShowClaudeEditsInRStudio(false));
+    expect(result.current.showClaudeEditsInRStudio).toBe(false);
+    expect(inputs.find(
+      (item) => item.id === "test_show_claude_edits_in_rstudio",
+    )?.value).toMatchObject({ value: false });
+  });
+
+  it("is absent when the host does not advertise RStudio capability", () => {
+    const { result } = setup();
+    expect(result.current.showClaudeEditsInRStudio).toBeUndefined();
+  });
+});

@@ -467,3 +467,16 @@ describe("bridge proactive-messages global subscription", () => {
     expect(receivedB).toEqual([payloadB]);
   });
 });
+
+
+describe("Claude edit marker settings bridge", () => {
+  it("sends the selected boolean through the widget-specific input", () => {
+    const bridge = createShinyBridge("chat");
+    bridge.sendShowClaudeEditsInRStudio(false);
+    const event = inputValues.find(
+      (item) => item.id === "chat_show_claude_edits_in_rstudio",
+    );
+    expect(event).toBeTruthy();
+    expect(event!.value).toMatchObject({ value: false });
+  });
+});

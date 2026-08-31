@@ -279,6 +279,31 @@ function RunRToggle() {
   );
 }
 
+function ShowClaudeEditsInRStudioToggle() {
+  const {
+    showClaudeEditsInRStudio,
+    setShowClaudeEditsInRStudio,
+  } = useShinyConfig();
+  if (showClaudeEditsInRStudio === undefined || !setShowClaudeEditsInRStudio) {
+    return null;
+  }
+  return (
+    <label
+      className="aui-show-claude-edits-in-rstudio mt-3 flex cursor-pointer items-center gap-2 text-xs"
+      data-slot="aui_show_claude_edits_in_rstudio"
+    >
+      <input
+        type="checkbox"
+        checked={showClaudeEditsInRStudio}
+        onChange={(event) => setShowClaudeEditsInRStudio(event.target.checked)}
+      />
+      <span className="text-foreground font-medium">
+        Show Claude edits in RStudio
+      </span>
+    </label>
+  );
+}
+
 function CopilotAutoStartToggle() {
   const { autoStartCopilotApi, setAutoStartCopilotApi } = useShinyConfig();
   if (autoStartCopilotApi === undefined || !setAutoStartCopilotApi) return null;
@@ -304,6 +329,7 @@ export function SidebarSettings() {
     composerDensity,
     assistantTextSize,
     autoStartCopilotApi,
+    showClaudeEditsInRStudio,
   } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
@@ -315,7 +341,8 @@ export function SidebarSettings() {
   }, [open]);
 
   if (!permissionMode && !thinking && composerDensity === undefined &&
-      assistantTextSize === undefined && autoStartCopilotApi === undefined) return null;
+      assistantTextSize === undefined && autoStartCopilotApi === undefined &&
+      showClaudeEditsInRStudio === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -359,6 +386,7 @@ export function SidebarSettings() {
           <ComposerDensityControl />
           <AssistantTextSizeControl />
           <RunRToggle />
+          <ShowClaudeEditsInRStudioToggle />
           <CopilotAutoStartToggle />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
             Changes are submitted to the backend for this conversation.

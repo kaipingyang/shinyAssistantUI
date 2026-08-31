@@ -417,16 +417,46 @@ export {
 };
 
 
-// Shiny wrapper: reads ShinyConfig (show_usage / context_window / usage_style + live usage)
-// and renders the chosen preset, or nothing. usage.tokens is the latest turn's token count
-// (a rough gauge against the context window; cumulative context tracking is a future R-side
-// enhancement — see .claude/plans/33-token-usage-display.md).
+const ContextUsageUnavailable: FC = () => (
+  <TooltipProvider>
+    <Tooltip>
+      <ContextDisplayTrigger
+        className="text-muted-foreground/70 hover:text-foreground gap-1.5 px-1.5 py-1 text-xs"
+        aria-label="Context usage unavailable"
+        data-usage-unavailable="true"
+      >
+        <svg
+          aria-hidden="true"
+          width={RING_SIZE}
+          height={RING_SIZE}
+          viewBox={`0 0 ${RING_SIZE} ${RING_SIZE}`}
+        >
+          <circle
+            cx={RING_SIZE / 2}
+            cy={RING_SIZE / 2}
+            r={RING_RADIUS}
+            fill="none"
+            strokeWidth={RING_STROKE}
+            className="stroke-muted-foreground/35"
+          />
+        </svg>
+        <span className="font-mono tabular-nums">—</span>
+      </ContextDisplayTrigger>
+      <TooltipContent side="top" sideOffset={8}>
+        Context usage will appear after Claude reports it.
+      </TooltipContent>
+    </Tooltip>
+  </TooltipProvider>
+);
+
+// Shiny wrapper: keep a stable unknown affordance before the first real report
+// or after a host remount, but never invent a token count or denominator.
 export const ShinyContextDisplay: FC = () => {
   const { showUsage, usageStyle, usage } = useShinyConfig();
   if (!showUsage) return null;
-  // B:环/条/文本只在 get_context_usage() 同时给出【当前占用 + 真实窗口】时显示,二者任一
-  // 缺失即不显示——绝不猜分母(不回落静态 200k / [1m] 启发式),也不显示累计 tokens。
-  if (typeof usage?.contextTokens !== "number" || typeof usage?.contextWindow !== "number") return null;
+  if (typeof usage?.contextTokens !== "number" || typeof usage?.contextWindow !== "number") {
+    return <ContextUsageUnavailable />;
+  }
   const props = {
     modelContextWindow: usage.contextWindow,
     usage: { totalTokens: usage.contextTokens },

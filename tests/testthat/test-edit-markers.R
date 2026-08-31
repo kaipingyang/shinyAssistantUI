@@ -37,3 +37,100 @@ test_that(".addin_edit_markers 去重、相对路径转绝对、带 type/line/me
 test_that(".addin_edit_markers 空输入 → 空", {
   expect_length(shinyAssistantUI:::.addin_edit_markers(list(), "/proj"), 0L)
 })
+
+
+test_that("addin marker callback reads current setting and drains disabled-run edits", {
+  settings_state <- new.env(parent = emptyenv())
+  settings_state$v <- list(showClaudeEditsInRStudio = TRUE)
+  published <- list()
+  callback <- shinyAssistantUI:::.addin_make_edit_marker_callback(
+    settings_state = settings_state,
+    project_for = function(thread_id = NULL, project = NULL) project,
+    publish = function(edits, project) {
+      published[[length(published) + 1L]] <<- list(edits = edits, project = project)
+    }
+  )
+
+  first <- shinyAssistantUI:::.new_edit_reveal_tracker()
+  first$note_call("first", "Edit", list(file_path = "R/first.R"))
+  first$note_result("first", is_error = FALSE)
+  settings_state$v$showClaudeEditsInRStudio <- FALSE
+  first_edits <- first$take_edits()
+  callback(first_edits, thread_id = "thread-1", project = "/project")
+  expect_length(published, 0L)
+  expect_identical(first$take_edits(), list())
+
+  second <- shinyAssistantUI:::.new_edit_reveal_tracker()
+  second$note_call("second", "Edit", list(file_path = "R/second.R"))
+  second$note_result("second", is_error = FALSE)
+  settings_state$v$showClaudeEditsInRStudio <- TRUE
+  callback(second$take_edits(), thread_id = "thread-1", project = "/project")
+
+  expect_length(published, 1L)
+  expect_identical(published[[1L]]$project, "/project")
+  expect_identical(published[[1L]]$edits[[1L]]$path, "R/second.R")
+})
+
+test_that("disabled RStudio edit presentation preserves metadata and chat diff without reveal", {
+  project <- tempfile("marker-disabled-")
+  dir.create(file.path(project, "R"), recursive = TRUE)
+  writeLines(c("before", "tail"), file.path(project, "R", "demo.R"))
+  on.exit(unlink(project, recursive = TRUE), add = TRUE)
+
+  settings_state <- new.env(parent = emptyenv())
+  settings_state$v <- list(showClaudeEditsInRStudio = FALSE)
+  marker_publications <- list()
+  opened <- character()
+  metadata <- list()
+  sent <- list()
+
+  marker_callback <- shinyAssistantUI:::.addin_make_edit_marker_callback(
+    settings_state = settings_state,
+    project_for = function(thread_id = NULL, project = NULL) project,
+    publish = function(edits, project) {
+      marker_publications[[length(marker_publications) + 1L]] <<- list(edits, project)
+    }
+  )
+  handler <- function(message, on_tool_call, on_tool_result, on_done, ...) {
+    on_tool_call(
+      "edit-disabled", "Edit",
+      list(file_path = "R/demo.R", old_string = "before", new_string = "after")
+    )
+    on_tool_result("edit-disabled", "updated", is_error = FALSE)
+    on_done()
+  }
+  attr(handler, "record_tool_metadata") <- function(...) {
+    metadata[[length(metadata) + 1L]] <<- list(...)
+  }
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat",
+      handler = handler,
+      working_dir = project,
+      on_open_file = function(path, ...) opened <<- c(opened, path),
+      on_edits = marker_callback
+    )
+  }, {
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "edit", threadId = "thread-1", runId = "run-1", ts = 1
+    ))
+    session$flushReact()
+    later::run_now(0)
+  })
+
+  expect_length(marker_publications, 0L)
+  expect_identical(opened, character())
+  expect_length(metadata, 1L)
+  expect_identical(metadata[[1L]]$annotations$diffStartLine, 1L)
+  tool_messages <- Filter(
+    function(item) identical(item$type, "chat_input:tool-call"), sent
+  )
+  expect_length(tool_messages, 1L)
+  expect_identical(tool_messages[[1L]]$message$annotations$diffStartLine, 1L)
+  expect_identical(tool_messages[[1L]]$message$args$file_path, "R/demo.R")
+})

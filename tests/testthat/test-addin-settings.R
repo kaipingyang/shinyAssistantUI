@@ -113,3 +113,66 @@ test_that("assistantUIServer forwards normalized assistant text size changes", {
     expect_identical(observed, "medium")
   })
 })
+
+
+test_that("Claude edit markers default on, persist false, and reject malformed field values", {
+  defaults <- shinyAssistantUI:::.addin_settings_defaults()
+  expect_true(defaults$showClaudeEditsInRStudio)
+
+  path <- tempfile(fileext = ".json")
+  on.exit(unlink(path), add = TRUE)
+  settings <- defaults
+  settings$showClaudeEditsInRStudio <- FALSE
+  shinyAssistantUI:::.write_addin_settings(settings, path)
+  expect_false(
+    shinyAssistantUI:::.read_addin_settings(path)$showClaudeEditsInRStudio
+  )
+
+  invalid_json <- c(
+    '{"showClaudeEditsInRStudio":"false"}',
+    '{"showClaudeEditsInRStudio":0}',
+    '{"showClaudeEditsInRStudio":[false]}',
+    '{"showClaudeEditsInRStudio":{"value":false}}',
+    '{"showClaudeEditsInRStudio":null}'
+  )
+  for (text in invalid_json) {
+    writeLines(text, path)
+    expect_true(
+      shinyAssistantUI:::.read_addin_settings(path)$showClaudeEditsInRStudio,
+      info = text
+    )
+  }
+
+  writeLines('{"showClaudeEditsInRStudio":false}', path)
+  expect_false(
+    shinyAssistantUI:::.read_addin_settings(path)$showClaudeEditsInRStudio
+  )
+})
+
+test_that("assistantUIServer forwards Claude edit marker toggle events", {
+  observed <- logical()
+  handler <- function(message, on_done, ...) on_done()
+
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat",
+      handler = handler,
+      show_claude_edits_in_rstudio = TRUE,
+      on_toggle_claude_edits_in_rstudio = function(value) {
+        observed <<- c(observed, value)
+      }
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(
+      chat_input_show_claude_edits_in_rstudio = list(value = FALSE, ts = 1)
+    )
+    session$flushReact()
+    session$setInputs(
+      chat_input_show_claude_edits_in_rstudio = list(value = TRUE, ts = 2)
+    )
+    session$flushReact()
+  })
+
+  expect_identical(observed, c(FALSE, TRUE))
+})

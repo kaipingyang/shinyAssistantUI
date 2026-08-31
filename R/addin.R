@@ -364,6 +364,12 @@
         tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
         tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
       } else NULL,
+      show_claude_edits_in_rstudio = if (native_picker)
+        settings_state$v$showClaudeEditsInRStudio else NULL,
+      on_toggle_claude_edits_in_rstudio = if (native_picker) function(v) {
+        settings_state$v$showClaudeEditsInRStudio <- isTRUE(v)
+        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      } else NULL,
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
         follow_pref$on <- isTRUE(v)
@@ -399,9 +405,10 @@
         else
           function(code) { .addin_send_to_console(code); list(ok = TRUE, output = "", error = NULL) }
       } else NULL,
-      on_edits         = function(edits, thread_id = NULL, project = NULL) {
-        .addin_show_edit_markers(edits, project_for(thread_id, project))
-      },
+      on_edits         = .addin_make_edit_marker_callback(
+        settings_state = settings_state,
+        project_for = project_for
+      ),
       on_rename        = function(thread_id, title, project = NULL)
         .claude_rename_session(
           thread_id, title, session_map_path, project_for(thread_id, project)
@@ -471,12 +478,13 @@
       ctrl$send_sessions(payload)
     }
 
-    # on_session_load 只负责用户点击后加载消息；侧栏列表必须另行注入。
-    # assistantUIServer 会缓存首次发送，并在前端 :sessions handler ready 后补发，
-    # 因而这里可在初始 reactive flush 中安全发送。
-    shiny::observe({
+    # Session discovery can traverse several projects on shared storage. Running
+    # it in the initial reactive flush delays the output binding itself and leaves
+    # Workbench showing a blank pane. Wait until React has mounted and registered
+    # its :sessions handler, then scan once; later directory changes push directly.
+    shiny::observeEvent(session$input$chat_input_sessions_ready, {
       push_sessions()
-    })
+    }, once = TRUE, ignoreNULL = TRUE, ignoreInit = TRUE)
 
     # 最近工作目录（存 home，跨会话保留；最近在前，上限 8）。
     recent_path <- .claude_addin_path("recent_dirs.rds")
@@ -604,6 +612,24 @@
       p else file.path(project, p)
     list(type = "info", file = abs_path, line = 1L, column = 1L, message = "Edited by Claude")
   })
+}
+
+# 构造 addin 最后一跳 edit-presentation callback。每次完成时读取当前偏好，因此运行中关闭
+# 也立即生效；FALSE 同时让 server 抑制自动 reveal，publish 可注入以便无需 RStudio 测试。
+.addin_make_edit_marker_callback <- function(
+  settings_state,
+  project_for,
+  publish = .addin_show_edit_markers
+) {
+  force(settings_state)
+  force(project_for)
+  force(publish)
+  function(edits, thread_id = NULL, project = NULL) {
+    if (!isTRUE(settings_state$v$showClaudeEditsInRStudio))
+      return(invisible(FALSE))
+    publish(edits, project_for(thread_id, project))
+    invisible(TRUE)
+  }
 }
 
 # 把本轮编辑推进 RStudio Markers 面板（可点击跳转）。非 RStudio/空则 no-op。

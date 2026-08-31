@@ -55,6 +55,8 @@ history_loader <- function(session_id, thread_id, send_thread, ...) {
 
 ui <- assistantUIPage(div(style = "width:680px;height:100vh", assistantUIOutput("chat", height = "92vh")))
 server <- function(input, output, session) {
+  edit_presentation <- new.env(parent = emptyenv())
+  edit_presentation$enabled <- TRUE
   ctrl <- assistantUIServer(
     "chat", handler = handler, show_thread_list = TRUE,
     persistence = "server", on_session_load = history_loader,
@@ -68,7 +70,17 @@ server <- function(input, output, session) {
     assistant_text_size = "medium",
     on_set_assistant_text_size = function(value) message("SET_TEXT_SIZE=", value),
     run_r_enabled = TRUE,
-    on_toggle_run_r = function(v) message("SET_RUNR=", isTRUE(v))
+    on_toggle_run_r = function(v) message("SET_RUNR=", isTRUE(v)),
+    show_claude_edits_in_rstudio = TRUE,
+    on_toggle_claude_edits_in_rstudio = function(v) {
+      edit_presentation$enabled <- isTRUE(v)
+      message("SET_CLAUDE_EDITS=", isTRUE(v))
+    },
+    on_edits = function(...) {
+      if (isTRUE(edit_presentation$enabled)) message("PUBLISH_EDIT_MARKERS")
+      invisible(isTRUE(edit_presentation$enabled))
+    },
+    on_open_file = function(path, ...) message("OPEN_EDIT=", path)
   )
   session$onFlushed(function() {
     ctrl$send_sessions(list(sessions = list(list(

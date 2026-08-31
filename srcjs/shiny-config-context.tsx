@@ -154,6 +154,9 @@ export interface ShinyConfigCtx {
   /** Plan 45: whether the run_r MCP tool is loaded (addin; requires reconnect to apply). */
   runREnabled?: boolean;
   setRunREnabled?: (value: boolean) => void;
+  /** Addin-only: publish completed Claude edit paths to RStudio Markers. */
+  showClaudeEditsInRStudio?: boolean;
+  setShowClaudeEditsInRStudio?: (value: boolean) => void;
   autoStartCopilotApi?: boolean;
   setAutoStartCopilotApi?: (value: boolean) => void;
   /** Session-scoped progressive loader for metadata-only large tool results. */

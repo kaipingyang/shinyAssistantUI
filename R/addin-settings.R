@@ -5,12 +5,13 @@
 
 .addin_settings_defaults <- function() {
   list(
-    defaultPermissionMode = "default",
-    modeVisibility        = list(showBypass = TRUE, showYolo = TRUE),
-    composerDensity       = "comfortable",
-    assistantTextSize      = "medium",
-    runREnabled           = TRUE,
-    autoStartCopilotApi   = TRUE
+    defaultPermissionMode       = "default",
+    modeVisibility              = list(showBypass = TRUE, showYolo = TRUE),
+    composerDensity             = "comfortable",
+    assistantTextSize           = "medium",
+    runREnabled                 = TRUE,
+    autoStartCopilotApi         = TRUE,
+    showClaudeEditsInRStudio    = TRUE
   )
 }
 
@@ -22,7 +23,7 @@
 .read_addin_settings <- function(path = .addin_settings_path()) {
   d <- .addin_settings_defaults()
   raw <- if (!is.null(path) && nzchar(path %||% "") && file.exists(path))
-    tryCatch(jsonlite::fromJSON(path, simplifyVector = TRUE), error = function(e) NULL) else NULL
+    tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE), error = function(e) NULL) else NULL
   if (!is.list(raw)) return(d)
   dpm <- raw$defaultPermissionMode
   if (is.character(dpm) && length(dpm) >= 1L && nzchar(dpm[[1L]])) d$defaultPermissionMode <- dpm[[1L]]
@@ -38,6 +39,9 @@
   if (!is.null(raw$runREnabled)) d$runREnabled <- isTRUE(raw$runREnabled)
   if (!is.null(raw$autoStartCopilotApi))
     d$autoStartCopilotApi <- isTRUE(raw$autoStartCopilotApi)
+  show_edits <- raw$showClaudeEditsInRStudio
+  if (is.logical(show_edits) && length(show_edits) == 1L && !is.na(show_edits))
+    d$showClaudeEditsInRStudio <- show_edits
   d
 }
 

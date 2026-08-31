@@ -199,12 +199,20 @@ test_that("chat app keeps ordinary defaults and enables workspace defaults", {
   )
 
   ordinary <- .claude_chat_app(project, options = list())
-  shiny::testServer(ordinary$serverFuncSource(), session$flushReact())
+  shiny::testServer(ordinary$serverFuncSource(), {
+    session$flushReact()
+    session$setInputs(chat_input_sessions_ready = list(ts = 1))
+    session$flushReact()
+  })
   workspace <- .claude_chat_app(
     project, options = list(), workspace = TRUE,
     workspace_projects = other
   )
-  shiny::testServer(workspace$serverFuncSource(), session$flushReact())
+  shiny::testServer(workspace$serverFuncSource(), {
+    session$flushReact()
+    session$setInputs(chat_input_sessions_ready = list(ts = 2))
+    session$flushReact()
+  })
 
   expect_false(captured[[1L]]$workspace_mode)
   expect_identical(captured[[1L]]$max_concurrent_runs, 2L)
