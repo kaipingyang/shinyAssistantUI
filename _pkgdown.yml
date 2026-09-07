@@ -1,0 +1,78 @@
+url: https://kaipingyang.github.io/shinyAssistantUI/
+destination: docs
+
+template:
+  bootstrap: 5
+  light-switch: true
+  bslib:
+    primary: "#2563eb"
+    border-radius: 0.75rem
+
+home:
+  title: shinyAssistantUI
+  description: >
+    A backend-agnostic assistant-ui chat surface for Shiny applications.
+
+development:
+  mode: release
+
+navbar:
+  structure:
+    left: [home, overview, installation, articles, reference, news]
+    right: [search, github]
+  components:
+    overview:
+      text: Overview
+      href: articles/shiny-assistant-ui.html
+    installation:
+      text: Installation
+      href: articles/installation.html
+
+articles:
+- title: Start here
+  navbar: ~
+  contents:
+  - shiny-assistant-ui
+  - installation
+- title: Development
+  contents:
+  - upstream-alignment
+
+reference:
+- title: UI and server
+  desc: Create the chat surface and connect it to Shiny server logic.
+  contents:
+  - assistantUIPage
+  - assistantUIOutput
+  - renderAssistantUI
+  - assistantUIServer
+- title: Backend handlers
+  desc: Handler contracts and ready-to-use backend integrations.
+  contents:
+  - assistant-handler-contract
+  - make_claude_handler
+  - make_ellmer_handler
+  - make_codeagent_handler
+  - make_codeagent_remote_handler
+- title: Sessions and persistence
+  desc: Load, list, and persist backend conversations.
+  contents:
+  - make_claude_session_loader
+  - list_claude_sessions
+  - make_ellmer_session_loader
+  - ellmer_session_store
+- title: RStudio addins
+  desc: Run Claude chat and workspace surfaces inside RStudio.
+  contents:
+  - claude_addin
+  - claude_workspace_addin
+  - load_claude_skills
+- title: Themes and rich output
+  desc: Customize appearance and render tool or plot output.
+  contents:
+  - assistant_theme
+  - assistant_tool_view
+  - plot_data_uri
+- title: Package overview
+  contents:
+  - shinyAssistantUI-package

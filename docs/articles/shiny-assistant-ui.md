@@ -1,0 +1,99 @@
+# shinyAssistantUI overview
+
+## What shinyAssistantUI provides
+
+`shinyAssistantUI` brings the React Web surface from
+[assistant-ui](https://www.assistant-ui.com/) into a Shiny htmlwidget.
+It keeps the assistant-ui interaction model while using Shiny’s normal
+client/server channel and R callbacks for application logic.
+
+The package is backend-agnostic. You can supply a small R handler, use
+one of the packaged integrations, or build a handler around another
+service.
+
+| assistant-ui concept                  | shinyAssistantUI implementation                       |
+| ------------------------------------- | ----------------------------------------------------- |
+| Surface                               | React Web inside an htmlwidget                        |
+| Runtime                               | A custom `ExternalStoreRuntime` owned by the widget   |
+| Transport                             | Shiny inputs and custom messages over its WebSocket   |
+| Server/runtime                        | A backend-agnostic R handler                          |
+| Included integrations                 | ClaudeAgentSDK, ellmer, and custom/codeagent handlers |
+| Native or terminal surfaces           | Outside this package’s Shiny Web scope                |
+| AG-UI, A2A, or other runtime adapters | Not required or installed                             |
+
+This is the project’s mapping of the first assistant-ui Getting Started
+page, **Documentation**. It is a positioning guide rather than a
+separate JavaScript runtime.
+
+## Minimal Shiny app
+
+A handler receives the user’s text and callbacks used to stream or
+complete the response. The example below has no external AI dependency.
+
+``` r
+library(shiny)
+library(shinyAssistantUI)
+
+ui <- assistantUIPage(
+  assistantUIOutput("chat", height = "100%"),
+  title = "AI Assistant"
+)
+
+server <- function(input, output, session) {
+  assistantUIServer(
+    "chat",
+    handler = function(message, on_chunk, on_done, on_error) {
+      on_chunk("Hello! You said: ")
+      on_chunk(message)
+      on_done()
+    }
+  )
+}
+
+shinyApp(ui, server)
+```
+
+## Choose the R-side integration
+
+Use the smallest integration that matches the application:
+
+  - Pass a function directly to `assistantUIServer()` for a custom
+    backend.
+  - Use `make_claude_handler()` when ClaudeAgentSDK session and control
+    features are needed.
+  - Use `make_ellmer_handler()` for an ellmer chat backend.
+  - Use the codeagent helpers when that execution model is explicitly
+    required.
+
+The UI is not coupled to any one of these choices. Each integration
+translates backend events into the same widget-facing stream, tool,
+approval, session, and status messages.
+
+## Runtime flow
+
+``` text
+React composer
+  -> Shiny input
+  -> assistantUIServer()
+  -> R handler or packaged integration
+  -> Shiny custom messages
+  -> ExternalStoreRuntime
+  -> assistant-ui React components
+```
+
+assistant-ui owns the React interaction primitives. `shinyAssistantUI`
+owns the bridge that turns Shiny events into runtime state and turns R
+callbacks into incremental UI updates.
+
+## Scope decisions
+
+assistant-ui also documents React Native, terminal surfaces, hosted
+transports, and several runtime adapters. They are valid choices for
+other applications, but they are not prerequisites for this package’s
+React Web + Shiny architecture. In particular, this documentation
+foundation does not install A2UI or AG-UI packages and does not replace
+the existing custom runtime.
+
+For the ordered review record and deferred pages, see [Upstream
+documentation
+alignment](https://kaipingyang.github.io/shinyAssistantUI/articles/upstream-alignment.md).

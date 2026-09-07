@@ -1,6 +1,6 @@
 Package: shinyAssistantUI
 Title: AI Assistant Chat UI for Shiny
-Version: 0.5.7
+Version: 0.5.7.9000
 Authors@R: person("Kaiping", "Yang", role = c("aut", "cre"),
                   email = "1260146556@qq.com")
 Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
@@ -9,6 +9,9 @@ Description: Wraps the '@assistant-ui/react' JavaScript library as a Shiny
     Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based
     AI backend.
 License: MIT + file LICENSE
+URL: https://kaipingyang.github.io/shinyAssistantUI/,
+    https://github.com/kaipingyang/shinyAssistantUI
+BugReports: https://github.com/kaipingyang/shinyAssistantUI/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 Imports:
@@ -27,7 +30,7 @@ Suggests:
     promises,
     later,
     ellmer,
-    ClaudeAgentSDK (>= 0.2.2),
+    ClaudeAgentSDK (>= 0.2.5),
     here,
     rstudioapi,
     cli,
@@ -40,6 +43,9 @@ Suggests:
     writexl,
     pkgload,
     withr,
-    S7
+    S7,
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

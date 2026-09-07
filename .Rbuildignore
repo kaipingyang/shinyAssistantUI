@@ -28,3 +28,6 @@
 ^CLAUDE\.md$
 ^AGENTS\.md$
 ^CODE_REVIEW_dev_617934e\.md$
+^_pkgdown\.yml$
+^docs$
+^documents$

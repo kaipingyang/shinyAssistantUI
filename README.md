@@ -4,12 +4,34 @@ A Shiny htmlwidget that wraps [`@assistant-ui/react`](https://github.com/assista
 
 Backend-agnostic: works with [ClaudeAgentSDK](https://github.com/kaipingyang/ClaudeAgentSDK), [ellmer](https://github.com/tidyverse/ellmer), or any R-based AI backend.
 
+## How it maps to assistant-ui
+
+| assistant-ui concept | shinyAssistantUI implementation |
+|---|---|
+| Surface | React Web inside a Shiny htmlwidget |
+| Runtime | Custom `ExternalStoreRuntime` |
+| Transport | Shiny inputs and custom messages over its WebSocket |
+| Server | Backend-agnostic R handler |
+
+This React Web + Shiny architecture does not require React Native, Ink, A2UI, AG-UI, or every
+runtime adapter listed by assistant-ui. See the pkgdown
+[Overview](https://kaipingyang.github.io/shinyAssistantUI/articles/shiny-assistant-ui.html) and
+[ordered upstream alignment record](https://kaipingyang.github.io/shinyAssistantUI/articles/upstream-alignment.html).
+
 ## Installation
 
+The current public route installs the GitHub development version:
+
 ```r
-# GitHub (development)
 remotes::install_github("kaipingyang/shinyAssistantUI")
 ```
+
+The installed R package already ships its compiled React, assistant-ui, CSS, and KaTeX assets, so
+application users do **not** need Node.js, npm, shadcn, or the upstream assistant-ui CLI. Install
+only the optional R backend used by the app. See the pkgdown
+[Installation guide](https://kaipingyang.github.io/shinyAssistantUI/articles/installation.html) for
+custom handlers, ellmer, ClaudeAgentSDK, codeagent, RStudio addin prerequisites, contributor builds,
+and the current distribution/compatibility gaps.
 
 ## Usage
 
@@ -261,7 +283,8 @@ npm run build      # one-shot
 npm run dev        # watch mode
 ```
 
-Requires Node.js ≥ 18.
+Requires a Node version accepted by `package-lock.json`; the current full build-and-test toolchain
+supports Node 20.19.x, Node 22.13+, or Node 24+. Node.js is not required for package users.
 
 ## License
 

@@ -1,0 +1,2 @@
+# pkgdown output contains generated Markdown/HTML formatting whitespace.
+docs/** -whitespace

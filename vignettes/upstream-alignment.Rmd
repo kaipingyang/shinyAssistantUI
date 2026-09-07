@@ -1,0 +1,128 @@
+---
+title: "Upstream documentation alignment"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Upstream documentation alignment}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+## Purpose
+
+This ledger records how shinyAssistantUI evaluates the assistant-ui documentation in official
+order. A page moves from **Pending** only after its concepts have been checked against the current
+R, JavaScript, and Shiny architecture. Each record must identify current source evidence and classify
+missing one-to-one upstream behavior as covered, an architectural choice, not applicable, or a real
+gap. Later pages are not treated as adopted merely because a related feature already exists.
+
+## Ordered review status
+
+| Order | Official page | Status | Local landing point | Conclusion |
+|---:|---|---|---|---|
+| 1 | Documentation | Adopted | Homepage + [Overview](shiny-assistant-ui.html) | React Web + custom `ExternalStoreRuntime` + Shiny transport |
+| 2 | Installation | Adapted | [Installation](installation.html) | R package + bundled web assets + optional R backends; no end-user npm |
+| 3 | Agent Skills | Pending | — | Next official page; not yet investigated |
+
+The first two pages have been reviewed in official order. A later page advances only after its own
+upstream and local-source audit.
+
+## Record 1 — Documentation
+
+**Reviewed:** 2026-09-07
+
+**Upstream page:** [assistant-ui Documentation](https://www.assistant-ui.com/docs)
+
+**Result:** Adopted; documentation clarification only, with no product-code change.
+
+The upstream landing page is a map of assistant-ui rather than a single installation recipe. Its
+Quickstart, surface choices, runtime choices, and links to deeper guides establish four decisions
+for this package:
+
+| Upstream area | shinyAssistantUI interpretation | Decision |
+|---|---|---|
+| Quickstart | Start with a minimal Shiny app and an R handler | Document in the Overview |
+| Surface choices | Use the existing React Web surface inside an htmlwidget | Keep; React Native and Ink are out of scope |
+| Runtime choices | Use the package's custom `ExternalStoreRuntime` and R server bridge | Keep; "your own server" is the closest upstream model |
+| Quick links | Route users to Overview, articles, reference, and changelog | Represent in pkgdown navigation |
+
+### Architecture alignment
+
+```text
+assistant-ui React Web
+  + custom ExternalStoreRuntime
+  + Shiny R <-> JavaScript transport
+  + backend-agnostic R handler
+```
+
+This combination is intentional. The custom runtime is the adapter between assistant-ui's React
+state and Shiny's event channel; it does not require a hosted assistant-ui backend. ClaudeAgentSDK,
+ellmer, and custom handlers are integration choices above that bridge.
+
+### Explicit non-requirements
+
+The first page does not create a requirement to support every surface or install every listed
+adapter. For shinyAssistantUI:
+
+- React Native and Ink do not match the package's browser-based Shiny surface.
+- AG-UI, A2A, A2UI, and other runtime adapters are not installed by this work.
+- The existing Shiny transport and `ExternalStoreRuntime` are not replaced.
+- No Installation article is authored before the second official page is reviewed.
+
+### Local evidence
+
+The mapping is represented in three durable places:
+
+1. The pkgdown homepage states the package's React Web, Shiny, and backend-agnostic position.
+2. The [Overview](shiny-assistant-ui.html) provides a minimal app and concept mapping.
+3. The reference index groups all current documented package topics by user task.
+
+## Record 2 — Installation
+
+**Reviewed:** 2026-09-07
+
+**Upstream page:** [assistant-ui Installation](https://www.assistant-ui.com/docs/installation)
+
+**Result:** Adapted to the R package boundary; documentation changes only.
+
+The upstream page assumes a React application assembled with the assistant-ui CLI or shadcn, npm
+packages, a JavaScript AI SDK endpoint, environment credentials, and an explicit React runtime
+provider. The current shinyAssistantUI package was checked rather than treating those assumptions as
+universal requirements.
+
+### Source coverage
+
+| Installation concern | Local source evidence | Finding |
+|---|---|---|
+| Browser bundle | `R/assistantUI.R` resolves JS/CSS/KaTeX from installed `inst/www` | Users already receive the compiled surface |
+| Runtime wiring | `assistantUIOutput()` and `assistantUIServer()` connect Shiny to `ExternalStoreRuntime` | No React provider code required in the app |
+| Backend endpoint | `assistantUIServer()` invokes a callback contract | R handler replaces the Next.js API route |
+| Optional providers | DESCRIPTION Suggests plus Claude, ellmer, and codeagent handler factories | Install only the selected backend |
+| Thread navigation and modal | `show_thread_list` and `modal` server/output options | Existing source features, now exposed in installation docs |
+| Contributor rebuild | `package.json`, lockfile, Vite build, then R installation | Node/npm belong to source development only |
+
+### Omission classification
+
+| Difference from upstream | Classification | Reason |
+|---|---|---|
+| No assistant-ui CLI or shadcn command for users | Architecture choice | The component tree is maintained and compiled inside the R package |
+| No JavaScript AI SDK provider matrix | Ecosystem adaptation | R integrations use ellmer, ClaudeAgentSDK, codeagent, or the generic handler contract |
+| No single required API key | Architecture choice | Credentials are owned by the selected backend; a custom handler may need none |
+| No CRAN/stable package-manager route | Real distribution gap | The current public route is the GitHub development repository |
+| No declared minimum supported R version | Real metadata/test gap | No compatibility matrix supports a truthful version promise yet |
+| Remote codeagent cannot receive live host-defined tools | Real implementation limitation | Live ellmer chat objects are not serializable across the worker boundary |
+
+The audit found no missing installation step needed to make the existing core surface load from an
+installed package. It did find documentation omissions—the bundled asset boundary, optional backend
+prerequisites, existing thread-list/modal entry points, and contributor-only Node workflow—which
+are now covered by the [Installation guide](installation.html). The three real gaps remain explicit;
+this review does not claim to implement them.
+
+## Next review boundary
+
+`Agent Skills` is now the next official page and remains **Pending**. Its upstream behavior and the
+current `load_claude_skills()`/connected-CLI paths must be investigated in a separate source audit
+before its status changes.
