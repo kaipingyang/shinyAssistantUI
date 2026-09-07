@@ -8,7 +8,9 @@ suppressPackageStartupMessages({
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
 port <- 9188L
 failures <- character()
-unlink(c("/tmp/aui-slash-context-history.out", "/tmp/aui-slash-context-history.err"))
+source("tests/verify/owned_process_cleanup.R", local = TRUE)
+log_paths <- c("/tmp/aui-slash-context-history.out", "/tmp/aui-slash-context-history.err")
+unlink(log_paths)
 
 check <- function(name, condition, detail = "") {
   passed <- isTRUE(condition)
@@ -30,7 +32,12 @@ app <- callr::r_bg(
   stdout = "/tmp/aui-slash-context-history.out",
   stderr = "/tmp/aui-slash-context-history.err"
 )
-on.exit(try(app$kill(), silent = TRUE), add = TRUE)
+cleanup <- make_verification_cleanup(
+  browser_session = function() if (exists("browser", inherits = FALSE)) browser else NULL,
+  app_process = function() app,
+  paths = log_paths
+)
+on.exit(cleanup(), add = TRUE)
 
 for (i in seq_len(80)) {
   if (!app$is_alive()) break
@@ -45,13 +52,10 @@ if (!app$is_alive()) {
 
 chromote::set_chrome_args(unique(c(
   chromote::default_chrome_args(),
-  "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"
+  "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu",
+  "--disable-breakpad", "--disable-crash-reporter", "--no-crash-upload"
 )))
 browser <- ChromoteSession$new()
-on.exit({
-  try(browser$close(), silent = TRUE)
-  try(browser$parent$get_browser()$get_process()$kill(), silent = TRUE)
-}, add = TRUE)
 
 console_errors <- character()
 current_stage <- "boot"
@@ -272,8 +276,9 @@ check("no browser console errors or exceptions", length(console_errors) == 0L,
       if (length(console_errors)) paste(unique(console_errors), collapse = " | ") else "0 errors")
 check("widget survives full scenario", isTRUE(value("!!document.querySelector('.aui-root')")))
 
-try(browser$close(), silent = TRUE)
-try(app$kill(), silent = TRUE)
-unlink(c("/tmp/aui-slash-context-history.out", "/tmp/aui-slash-context-history.err"))
+cleanup()
+rm(browser)
+invisible(gc())
+Sys.sleep(0.3)
 if (length(failures)) stop("Chromium verification failed: ", paste(failures, collapse = ", "))
 cat("SLASH_CONTEXT_HISTORY_CHROMIUM_DONE\n")

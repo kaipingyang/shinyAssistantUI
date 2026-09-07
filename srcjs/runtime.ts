@@ -3,6 +3,7 @@
 export const sessionDates = new Map<string, string>();
 
 import { useRef, useCallback, useState, useEffect, useMemo } from "react";
+import { flushSync } from "react-dom";
 import {
   useExternalStoreRuntime, WebSpeechDictationAdapter, WebSpeechSynthesisAdapter,
   SimpleTextAttachmentAdapter, CompositeAttachmentAdapter,
@@ -931,16 +932,25 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     [messagesMap, currentThreadId]
   );
 
-  // 更新消息并持久化（server mode 下跳过写 localStorage）
-  const setCurrentMessages = useCallback(
-    (updater: (prev: ThreadMessageLike[]) => ThreadMessageLike[]) => {
+  // 更新指定线程消息并持久化。分支操作必须显式传入其绑定的 threadId，
+  // 避免线程切换与 ExternalStore adapter 重渲染之间的窗口写错线程。
+  const setThreadMessages = useCallback(
+    (threadId: string, updater: (prev: ThreadMessageLike[]) => ThreadMessageLike[]) => {
       setMessagesMap((prev) => {
-        const updated = updater(prev[currentThreadId] ?? []);
-        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, currentThreadId, updated);
-        return { ...prev, [currentThreadId]: updated };
+        const updated = updater(prev[threadId] ?? []);
+        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+        return { ...prev, [threadId]: updated };
       });
     },
-    [inputId, currentThreadId]
+    [inputId, usesClientPersistence]
+  );
+
+  // 当前线程的普通 UI 更新仍通过渲染时绑定的显式 ID。
+  const setCurrentMessages = useCallback(
+    (updater: (prev: ThreadMessageLike[]) => ThreadMessageLike[]) => {
+      setThreadMessages(currentThreadId, updater);
+    },
+    [currentThreadId, setThreadMessages]
   );
 
   // ── 切换到第一个可用线程或新建 ────────────────────────────────────────────
@@ -2399,8 +2409,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   // ── onEdit ───────────────────────────────────────────────────────────────
   // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新插入编辑后的
-  // user 消息并重发。必须重新插入——外部存储模式下框架不持有消息，messagesMap 是
-  // 唯一真相源，只截断不插入会导致编辑后的 user 气泡从界面消失。
+  // user 消息并重发。parentId 陈旧时必须 fail closed，不能降级成尾部新消息。
   const onEdit = useCallback(
     async (message: AppendMessage) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2409,7 +2418,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         .map((p: { text: string }) => p.text)
         .join("");
       if (!text.trim()) return;
-      const threadId = currentThreadIdRef.current;
+      // This adapter is bound to the render-time thread. Using the mutable current-thread
+      // ref here can pair a newly selected ID with the previous render's adapter callbacks.
+      const threadId = currentThreadId;
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
         ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
@@ -2418,12 +2429,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
       const parentId = message.parentId ?? null;
       const { attachmentData, storedAttachments } = extractAttachments(message);
-
-      // slash 命令展开（与 onNew 一致）
       const sendText = expandSlashCommands(text, commands);
-
-      // 标志：parentId 陈旧找不到时跳过本次编辑（连 startRun 一起跳过，
-      // 避免只发消息给 R 却不插 user 气泡，导致孤儿 assistant 回复 + UI/R 发散）。
       const newUserMessage: ThreadMessageLike = {
         id: `user-${Date.now()}-${++messageIdSeq.current}`,
         role: "user" as const,
@@ -2431,12 +2437,33 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
       };
-      setMessagesMap((prev) => {
-        const threadMsgs = prev[threadId] ?? [];
-        const updated = applyEdit(threadMsgs, parentId, newUserMessage);
-        if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
-        return { ...prev, [threadId]: updated };
+
+      // Validate and replace in the same latest-state transaction. flushSync is intentional:
+      // startRun must not escape before React has executed the functional updater and proved
+      // that the parent still exists. Only the target thread key is replaced, so concurrent
+      // chunks in other threads remain intact.
+      let editedMessages: ThreadMessageLike[] | null = null;
+      flushSync(() => {
+        setMessagesMap((previous) => {
+          // sourceId identifies the exact message whose edit composer submitted this
+          // AppendMessage. It is required even when parentId is null (the first turn).
+          if (!message.sourceId || !(previous[threadId] ?? []).some(
+            (candidate) => candidate.id === message.sourceId,
+          )) return previous;
+          const edit = applyEdit(previous[threadId] ?? [], parentId, newUserMessage);
+          if (!edit.applied) return previous;
+          editedMessages = edit.messages;
+          if (usesClientPersistence) {
+            saveMessages(inputId, usesClientPersistence, threadId, edit.messages);
+          }
+          return { ...previous, [threadId]: edit.messages };
+        });
       });
+      if (editedMessages === null) {
+        console.warn("[shinyAssistantUI] edit aborted because its parent message is stale");
+        return;
+      }
+      messageQueueRef.current.delete(threadId);
       startRun(threadId, (runId) => {
         requestIdeContextFor(threadId);
         bridge.current.sendUserMessage(
@@ -2450,12 +2477,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         );
       });
     },
-    [inputId, startRun, commands, projectForThreadId] // eslint-disable-line react-hooks/exhaustive-deps
+    [inputId, startRun, commands, currentThreadId, projectForThreadId, requestIdeContextFor, capabilityContract.ide, usesClientPersistence]
   );
 
-  // ── onReload ─────────────────────────────────────────────────────────────  // parentId = 触发本次 assistant 回复的 user 消息 ID
+  // ── onReload ─────────────────────────────────────────────────────────────
+  // parentId = 触发本次 assistant 回复的原 user 消息 ID。
   const onReload = useCallback(
-    async (parentId: string | null, _config: StartRunConfig) => {
+    async (parentId: string | null, config: StartRunConfig) => {
       const threadId = currentThreadId;
       if (blockingActionsRef.current[threadId]) return;
       const serviceBlocked = serviceStateRef.current !== undefined &&
@@ -2463,34 +2491,105 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
         pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
       if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
-      const msgs = messagesMap[threadId] ?? [];
 
-      // 找到 parent user 消息的文本
-      const parentMsg = parentId ? msgs.find((m) => m.id === parentId) : null;
-      const rawContent = parentMsg?.content;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const contentArr: any[] = Array.isArray(rawContent) ? rawContent : [];
-      const userText = contentArr
-        .filter((c) => c?.type === "text")
-        .map((c) => c.text as string)
-        .join("");
+      type ReloadRequest = {
+        userText: string;
+        attachmentData: AttachmentData[];
+        quote: QuoteInfo | undefined;
+      };
+      const transaction: { request?: ReloadRequest; unavailableBinary: boolean } = {
+        unavailableBinary: false,
+      };
 
-      if (!userText) return;
+      // The reload adapter is render-bound, but its branch can be replaced before React
+      // invokes this callback. Validate source + parent, derive replay data, and truncate
+      // against one latest-state snapshot so a stale adapter cannot escape into startRun.
+      flushSync(() => {
+        setMessagesMap((previous) => {
+          const previousMessages = previous[threadId] ?? [];
+          const sourceId = config.sourceId;
+          const sourceIndex = sourceId
+            ? previousMessages.findIndex((message) => message.id === sourceId)
+            : -1;
+          const parentIndex = parentId
+            ? previousMessages.findIndex((message) => message.id === parentId)
+            : -1;
+          const sourceMessage = sourceIndex >= 0 ? previousMessages[sourceIndex] : undefined;
+          const parentMessage = parentIndex >= 0 ? previousMessages[parentIndex] : undefined;
+          if (
+            config.parentId !== parentId ||
+            sourceIndex <= parentIndex ||
+            sourceMessage?.role !== "assistant" ||
+            parentMessage?.role !== "user"
+          ) return previous;
 
-      // 删除 parentId 之后的所有消息（即上一条 assistant 回复）
-      setCurrentMessages((prev) => {
-        const idx = parentId ? prev.findIndex((m) => m.id === parentId) : -1;
-        return idx >= 0 ? prev.slice(0, idx + 1) : prev;
+          const rawContent = parentMessage.content;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const contentArr: any[] = Array.isArray(rawContent) ? rawContent : [];
+          const userText = contentArr
+            .filter((content) => content?.type === "text")
+            .map((content) => content.text as string)
+            .join("");
+          if (!userText) return previous;
+
+          const { attachmentData } = extractAttachments(parentMessage);
+          const missingBinary = attachmentData.some(
+            (attachment) => attachment.type !== "text" && !attachment.data,
+          );
+          if (missingBinary) {
+            transaction.unavailableBinary = true;
+            const warningId = `reload-attachment-unavailable-${parentId}`;
+            if (previousMessages.some((message) => message.id === warningId)) return previous;
+            const warnedMessages: ThreadMessageLike[] = [
+              ...previousMessages,
+              {
+                id: warningId,
+                role: "assistant" as const,
+                status: { type: "complete" as const, reason: "stop" as const },
+                content: [{
+                  type: "text" as const,
+                  text: "⚠ Cannot regenerate this response because attachment data is no longer available. Reattach the file and send a new message.",
+                }],
+              },
+            ];
+            if (usesClientPersistence) {
+              saveMessages(inputId, usesClientPersistence, threadId, warnedMessages);
+            }
+            return { ...previous, [threadId]: warnedMessages };
+          }
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const quote = (parentMessage as any).metadata?.custom?.quote as QuoteInfo | undefined;
+          const reloadedMessages = previousMessages.slice(0, parentIndex + 1);
+          transaction.request = { userText, attachmentData, quote };
+          if (usesClientPersistence) {
+            saveMessages(inputId, usesClientPersistence, threadId, reloadedMessages);
+          }
+          return { ...previous, [threadId]: reloadedMessages };
+        });
       });
 
+      const request = transaction.request;
+      if (!request) {
+        if (!transaction.unavailableBinary) {
+          console.warn("[shinyAssistantUI] reload aborted because its source or parent message is stale");
+        }
+        return;
+      }
+
+      // Branch-changing operations own queue hygiene: old clock items must not drain onto
+      // the replacement branch. This does not change Stop/cancel's separate continue policy.
+      messageQueueRef.current.delete(threadId);
       startRun(threadId, (runId) => bridge.current.sendReload(
-        userText,
+        request.userText,
         threadId,
         runId,
         projectForThreadId(threadId),
+        request.attachmentData.length > 0 ? request.attachmentData : undefined,
+        request.quote,
       ));
     },
-    [currentThreadId, messagesMap, setCurrentMessages, startRun, projectForThreadId]
+    [currentThreadId, inputId, startRun, projectForThreadId, usesClientPersistence]
   );
 
   // ── onCancel ─────────────────────────────────────────────────────────────
@@ -2936,7 +3035,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       attachments: attachmentAdapter.current,
       dictation: WebSpeechDictationAdapter.isSupported() ? new WebSpeechDictationAdapter() : undefined,
       speech: (typeof window !== "undefined" && "speechSynthesis" in window) ? new WebSpeechSynthesisAdapter() : undefined,
-      feedback: feedbackAdapter.current,
+      feedback: config?.feedback_enabled === true ? feedbackAdapter.current : undefined,
     },
   });
   runtimeRef.current = runtime;

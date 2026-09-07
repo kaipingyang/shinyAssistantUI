@@ -496,6 +496,7 @@ assistantUIServer <- function(id, handler,
     code_theme       = code_theme,
     dark_mode        = dark_mode,
     show_timestamps  = show_timestamps,
+    feedback_enabled = is.function(on_feedback),
     modal            = modal,
     workspace_mode   = isTRUE(workspace_mode),
     run_state_protocol = 1L,
@@ -1713,11 +1714,11 @@ assistantUIServer <- function(id, handler,
         )
       else NULL
 
-    # 划词引用:UI 划选的文本经 msg$quote({text,messageId})随本次提交带来;非 reload 时
-    # 前置成 markdown blockquote 注入 prompt(对齐上游 injectQuoteContext,后端无关)。
+    # 划词引用：首次发送与 reload 都使用该 turn 自带的原始 quote；reload 不采样
+    # 当前 IDE selection，但必须保留原 turn 的引用上下文。
     user_text <- msg$text
     quote <- msg$quote
-    if (!is_reload && is.list(quote) && nzchar(trimws(quote$text %||% "")))
+    if (is.list(quote) && nzchar(trimws(quote$text %||% "")))
       user_text <- .prepend_quote(user_text, quote$text)
 
     incoming_run_id <- msg$runId %||% NULL

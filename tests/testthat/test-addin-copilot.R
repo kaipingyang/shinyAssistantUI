@@ -286,8 +286,16 @@ test_that("direct launcher returns promptly and leaves no fixture process or loc
   expect_true(file.exists(pid_file))
 
   pid <- suppressWarnings(as.integer(readLines(pid_file, warn = FALSE)[[1L]]))
-  Sys.sleep(0.1)
-  expect_false(file.exists(file.path("/proc", as.character(pid))))
+  proc_state <- function(pid) {
+    status <- file.path("/proc", as.character(pid), "status")
+    if (!file.exists(status)) return(NULL)
+    state <- grep("^State:", readLines(status, warn = FALSE), value = TRUE)
+    if (length(state)) sub("^State:\\s*([A-Z]).*$", "\\1", state[[1L]]) else NULL
+  }
+  exit_deadline <- .copilot_monotonic_now() + 3
+  while (!is.null(proc_state(pid)) && !identical(proc_state(pid), "Z") &&
+         .copilot_monotonic_now() < exit_deadline) Sys.sleep(0.02)
+  expect_true(is.null(proc_state(pid)) || identical(proc_state(pid), "Z"))
   expect_identical(
     suppressWarnings(system2(Sys.which("flock"), c("-n", lock_file, "-c", "true"))),
     0L

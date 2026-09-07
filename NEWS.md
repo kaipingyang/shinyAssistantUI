@@ -1,10 +1,19 @@
-# shinyAssistantUI 0.5.7
+# shinyAssistantUI 0.5.7.9000
+
+- **assistant-ui 核心依赖对齐**：`@assistant-ui/react` 升至 0.15.17，Lexical/Markdown
+  适配包分别升至 0.2.11/0.14.13，Lexical 核心统一为 0.49.0；React 仍保持 19.2.7。
+  A2UI/AG-UI 可选包未引入，后续按独立 PoC 评估。
 
 - **RStudio Claude edits 可配置**：Settings 新增默认开启的 **Show Claude edits in RStudio**。
   关闭后不再向 RStudio `sourceMarkers()` 发布新的 “Claude edits”，也不再自动打开编辑后的
   文件；聊天 diff、`diffStartLine` metadata、历史恢复与已有 markers 均不受影响。
 - **用量圆环保持稳定**：Claude 尚未回报真实 context usage 时显示不猜测数值的 `—` 占位环，
   收到 `contextTokens/contextWindow` 后原位更新，避免首次回执前或 widget 恢复期间整块消失。
+
+- **消息分支操作不再丢数据**：Refresh 会重用当前 runtime 中该用户轮次已有的 quote 与可重放附件；若历史二进制内容已被剥离则明确拒绝重跑，不伪造缺失数据。Edit 会在最新线程快照上原子校验原消息与 parent，清除旧 queue，且不会覆盖其他线程同时到达的 chunk。
+- **Feedback 按后端能力显示**：仅当 `on_feedback` 是可调用回调时暴露正/负反馈按钮并转发选择；未配置回调的 widget 不再显示无效操作。
+- **LaTeX 与金额可同时安全渲染**：启用 LaTeX 时使用 assistant-ui 官方 `preprocess` 契约归一化 `\\(...\\)`、`\\[...\\]` 和自定义 math delimiters，并保护 `$5`/`$10` 等货币文本及 inline code。
+- **`/context` 保持异步且诊断准确**：按已加载 namespace（而非磁盘上可能已更新的副本）判断 ClaudeAgentSDK；不兼容时要求 `>= 0.2.5` 与重启 R。完整 library path 仅写服务器日志，不回显到浏览器。
 - **Model 切换超时恢复**：SDK 精确报告 `Control request timeout: set_model` 时，在同一 client
   和 pending request 仍有效的前提下透明幂等重试一次；普通拒绝、stale acknowledgement 与
   client replacement 仍保持失败语义和旧 model。

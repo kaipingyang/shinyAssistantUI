@@ -5,6 +5,8 @@ import "@assistant-ui/react-markdown/styles/dot.css";
 import {
   type CodeHeaderProps,
   MarkdownTextPrimitive,
+  escapeCurrencyDollars,
+  normalizeMathDelimiters,
   unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
@@ -22,6 +24,9 @@ import { safeUrl, parseFileRef } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
 import { useOpeningFile } from "@/hooks/use-opening-file";
 
+export const preprocessLatexMarkdown = (text: string): string =>
+  escapeCurrencyDollars(normalizeMathDelimiters(text));
+
 const MarkdownTextImpl = () => {
   // LaTeX 数学(Plan 34,opt-in via assistantUIServer(latex=TRUE))。默认关。
   const { latex } = useShinyConfig();
@@ -35,6 +40,7 @@ const MarkdownTextImpl = () => {
   );
   return (
     <MarkdownTextPrimitive
+      preprocess={latex ? preprocessLatexMarkdown : undefined}
       remarkPlugins={remarkPlugins}
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rehypePlugins={rehypePlugins as any}

@@ -152,7 +152,7 @@ export interface ShinyBridge {
   sendUserMessage: (text: string, threadId: string, attachments?: AttachmentData[], ideContext?: IdeContextPolicy, quote?: QuoteInfo, runId?: string, submissionId?: string, project?: string, continuationKind?: AutoContinueKind) => void;
   reserveIdeContext: (submissionId: string, threadId: string, selectionVisible: boolean, project?: string) => void;
   cancelReservedSubmissions: (submissionIds: string[]) => void;
-  sendReload: (text: string, threadId: string, runId?: string, project?: string) => void;
+  sendReload: (text: string, threadId: string, runId?: string, project?: string, attachments?: AttachmentData[], quote?: QuoteInfo) => void;
   sendCancel: (threadId: string, runId?: string) => void;
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions, project?: string) => void;
@@ -386,10 +386,17 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendReload(text, threadId, runId, project) {
+    sendReload(text, threadId, runId, project, attachments, quote) {
       Shiny.setInputValue(
         inputId,
-        { type: "reload", text, threadId, ...(runId && { runId }), ...(project && { project }), ts: Date.now() },
+        {
+          type: "reload", text, threadId,
+          ...(attachments && attachments.length > 0 && { attachments }),
+          ...(quote && { quote }),
+          ...(runId && { runId }),
+          ...(project && { project }),
+          ts: Date.now(),
+        },
         { priority: "event" }
       );
     },

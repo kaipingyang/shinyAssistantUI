@@ -46,6 +46,10 @@
 <ul><li><p><strong>assistant-ui 核心依赖对齐</strong>：<code>@assistant-ui/react</code> 升至 0.15.17，Lexical/Markdown 适配包分别升至 0.2.11/0.14.13，Lexical 核心统一为 0.49.0；React 仍保持 19.2.7。 A2UI/AG-UI 可选包未引入，后续按独立 PoC 评估。</p></li>
 <li><p><strong>RStudio Claude edits 可配置</strong>：Settings 新增默认开启的 <strong>Show Claude edits in RStudio</strong>。 关闭后不再向 RStudio <code>sourceMarkers()</code> 发布新的 “Claude edits”，也不再自动打开编辑后的 文件；聊天 diff、<code>diffStartLine</code> metadata、历史恢复与已有 markers 均不受影响。</p></li>
 <li><p><strong>用量圆环保持稳定</strong>：Claude 尚未回报真实 context usage 时显示不猜测数值的 <code>—</code> 占位环， 收到 <code>contextTokens/contextWindow</code> 后原位更新，避免首次回执前或 widget 恢复期间整块消失。</p></li>
+<li><p><strong>消息分支操作不再丢数据</strong>：Refresh 会重用当前 runtime 中该用户轮次已有的 quote 与可重放附件；若历史二进制内容已被剥离则明确拒绝重跑，不伪造缺失数据。Edit 会在最新线程快照上原子校验原消息与 parent，清除旧 queue，且不会覆盖其他线程同时到达的 chunk。</p></li>
+<li><p><strong>Feedback 按后端能力显示</strong>：仅当 <code>on_feedback</code> 是可调用回调时暴露正/负反馈按钮并转发选择；未配置回调的 widget 不再显示无效操作。</p></li>
+<li><p><strong>LaTeX 与金额可同时安全渲染</strong>：启用 LaTeX 时使用 assistant-ui 官方 <code>preprocess</code> 契约归一化 <code>\\(...\\)</code>、<code>\\[...\\]</code> 和自定义 math delimiters，并保护 <code>$5</code>/<code>$10</code> 等货币文本及 inline code。</p></li>
+<li><p><strong><code>/context</code> 保持异步且诊断准确</strong>：按已加载 namespace（而非磁盘上可能已更新的副本）判断 ClaudeAgentSDK；不兼容时要求 <code>&gt;= 0.2.5</code> 与重启 R。完整 library path 仅写服务器日志，不回显到浏览器。</p></li>
 <li><p><strong>Model 切换超时恢复</strong>：SDK 精确报告 <code>Control request timeout: set_model</code> 时，在同一 client 和 pending request 仍有效的前提下透明幂等重试一次；普通拒绝、stale acknowledgement 与 client replacement 仍保持失败语义和旧 model。</p></li>
 <li><p><strong>Workbench 返回不再被 session 扫描阻塞</strong>：Claude Chat/Workspace 等 React 组件完成挂载并 发出 <code>sessions_ready</code> 后才首次扫描历史 session，避免共享存储或多项目枚举卡住 Shiny 首个 reactive flush。历史仍按 50 条分页，折叠的大 tool result 继续只在展开时加载。</p></li>
 </ul></div>

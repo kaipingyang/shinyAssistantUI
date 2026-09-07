@@ -1682,6 +1682,291 @@ describe("useShinyRuntime — live IDE context capability", () => {
     expect(reload).toBeDefined();
     expect(reload!.value.ideContext).toBeUndefined();
   });
+
+  it("reload preserves replayable metadata supplied by a server-loaded message", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "session-reload-fidelity";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Reload fidelity" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    await fireR("load-thread", {
+      threadId,
+      messages: [
+        {
+          id: "quoted-user", role: "user", content: [{ type: "text", text: "analyze" }],
+          attachments: [{
+            name: "notes.txt", contentType: "text/plain",
+            content: [{ type: "text", text: "ATTACHMENT_BODY" }],
+          }],
+          metadata: { custom: { quote: { text: "ORIGINAL_QUOTE", messageId: "source-1" } } },
+        },
+        {
+          id: "quoted-answer", role: "assistant",
+          status: { type: "complete", reason: "stop" },
+          content: [{ type: "text", text: "answer" }],
+        },
+      ],
+    });
+
+    await act(async () => {
+      result.current.runtime.thread.getMessageById("quoted-answer").reload();
+    });
+    const reload = inputs.find((item) => item.id === "test" && item.value.type === "reload");
+    expect(reload?.value.attachments).toEqual([{
+      type: "text", name: "notes.txt", data: "ATTACHMENT_BODY", contentType: "text/plain",
+    }]);
+    expect(reload?.value.quote).toEqual({ text: "ORIGINAL_QUOTE", messageId: "source-1" });
+  });
+
+  it("reload fails closed when server-loaded binary attachment data was stripped", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "session-reload-stripped";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Stripped" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    await fireR("load-thread", {
+      threadId,
+      messages: [
+        {
+          id: "binary-user", role: "user", content: [{ type: "text", text: "inspect" }],
+          attachments: [{
+            name: "plot.png", contentType: "image/png",
+            content: [{ type: "image", image: "" }],
+          }],
+        },
+        {
+          id: "binary-answer", role: "assistant",
+          status: { type: "complete", reason: "stop" },
+          content: [{ type: "text", text: "original answer" }],
+        },
+      ],
+    });
+
+    await act(async () => {
+      result.current.runtime.thread.getMessageById("binary-answer").reload();
+    });
+    expect(inputs.filter((item) => item.id === "test" && item.value.type === "reload"))
+      .toHaveLength(0);
+    expect(messages(result).some((message) => message.id === "binary-answer")).toBe(true);
+    expect(messages(result).some((message) =>
+      message.role === "assistant" && message.content.some((part) =>
+        part.type === "text" && part.text.includes("attachment data is no longer available"),
+      ),
+    )).toBe(true);
+  });
+
+  it("reload fails closed when its source vanished before the adapter ran", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "session-reload-stale-source";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Stale reload" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    await fireR("load-thread", {
+      threadId,
+      messages: [
+        { id: "stale-reload-user", role: "user", content: [{ type: "text", text: "old prompt" }] },
+        {
+          id: "stale-reload-answer", role: "assistant",
+          status: { type: "complete", reason: "stop" },
+          content: [{ type: "text", text: "old answer" }],
+        },
+      ],
+    });
+    const reload = result.current.runtime.thread.getMessageById("stale-reload-answer").reload;
+
+    await act(async () => {
+      handlers.get("test:proactive-messages")?.({
+        version: 1,
+        operation: "replace",
+        threadId,
+        revision: 1,
+        messages: [{
+          id: "authoritative-replacement", role: "user",
+          content: [{ type: "text", text: "new history" }],
+        }],
+      });
+      await reload();
+    });
+
+    expect(inputs.some((item) => item.id === "test" && item.value.type === "reload"))
+      .toBe(false);
+    expect(messages(result).map((message) => message.id)).toEqual(["authoritative-replacement"]);
+  });
+
+  it("reload preserves a concurrent chunk written to another thread", async () => {
+    const { result } = setup({ persistence: "server" });
+    const reloadThread = "session-reload-concurrent-a";
+    const streamingThread = "session-reload-concurrent-b";
+    await fireR("sessions", {
+      sessions: [
+        { id: reloadThread, title: "Reloaded" },
+        { id: streamingThread, title: "Streaming" },
+      ],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(reloadThread));
+    await fireR("load-thread", {
+      threadId: reloadThread,
+      messages: [
+        { id: "reload-concurrent-user", role: "user", content: [{ type: "text", text: "retry me" }] },
+        {
+          id: "reload-concurrent-answer", role: "assistant",
+          status: { type: "complete", reason: "stop" },
+          content: [{ type: "text", text: "answer" }],
+        },
+      ],
+    });
+    const reload = result.current.runtime.thread.getMessageById("reload-concurrent-answer").reload;
+
+    await act(async () => result.current.runtime.threads.switchToThread(streamingThread));
+    await fireR("load-thread", { threadId: streamingThread, messages: [] });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("background run");
+      await result.current.runtime.thread.composer.send();
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(reloadThread));
+    await act(async () => {
+      handlers.get("test:chunk")?.({ text: "reload concurrent chunk", threadId: streamingThread });
+      await reload();
+    });
+
+    await act(async () => result.current.runtime.threads.switchToThread(streamingThread));
+    const backgroundText = messages(result).flatMap((message) =>
+      (message.content as Array<{ type: string; text?: string }>))
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("\n");
+    expect(backgroundText).toContain("reload concurrent chunk");
+  });
+
+  it("reload clears stale clock-queued text before starting the replacement run", async () => {
+    const { result } = setup(config);
+    await act(async () => {
+      await result.current.runtime.thread.composer.setText("original");
+      await result.current.runtime.thread.composer.send();
+    });
+    const tid = currentThreadId(result);
+    const firstRun = inputs.find((item) => item.id === "test")!.value.runId;
+    await fireR("chunk", { text: "answer", threadId: tid });
+    await fireR("done", { threadId: tid, runId: firstRun });
+    const assistant = messages(result).find((message) => message.role === "assistant")!;
+    await act(async () => {
+      result.current.enqueueMessage("stale queued text");
+      result.current.runtime.thread.getMessageById(assistant.id).reload();
+    });
+    const reload = inputs.find((item) => item.id === "test" && item.value.type === "reload")!;
+    await fireR("done", { threadId: tid, runId: reload.value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .not.toContain("stale queued text");
+  });
+
+  it("edit clears stale clock-queued text before starting the replacement run", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "session-edit-queue";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Edit queue" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    await fireR("load-thread", {
+      threadId,
+      messages: [
+        { id: "edit-parent", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "parent" }] },
+        { id: "edit-user", role: "user", content: [{ type: "text", text: "before" }] },
+        { id: "edit-answer", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "answer" }] },
+      ],
+    });
+    const editor = result.current.runtime.thread.getMessageById("edit-user").composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("after edit");
+      result.current.enqueueMessage("stale after edit");
+      editor.send();
+    });
+    const editRun = inputs.find((item) => item.id === "test" && item.value.text === "after edit")!;
+    expect(editRun).toBeDefined();
+    await fireR("done", { threadId, runId: editRun.value.runId });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    expect(inputs.filter((item) => item.id === "test").map((item) => item.value.text))
+      .not.toContain("stale after edit");
+  });
+
+  it("edit fails closed when its parent vanished after the editor opened", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "session-edit-stale-parent";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Stale edit" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    await fireR("load-thread", {
+      threadId,
+      messages: [
+        { id: "initial-user", role: "user", content: [{ type: "text", text: "first" }] },
+        { id: "stale-parent", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "parent" }] },
+        { id: "stale-user", role: "user", content: [{ type: "text", text: "before" }] },
+        { id: "stale-answer", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "answer" }] },
+      ],
+    });
+    const editor = result.current.runtime.thread.getMessageById("stale-user").composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("must not send");
+    });
+    await act(async () => {
+      handlers.get("test:proactive-messages")?.({
+        version: 1,
+        operation: "replace",
+        threadId,
+        revision: 1,
+        messages: [{
+          id: "replacement", role: "user",
+          content: [{ type: "text", text: "new history" }],
+        }],
+      });
+      await editor.send();
+    });
+
+    expect(inputs.some((item) => item.id === "test" && item.value.text === "must not send"))
+      .toBe(false);
+    expect(messages(result).map((message) => message.id)).toEqual(["replacement"]);
+  });
+
+  it("edit preserves a concurrent chunk written to another thread", async () => {
+    const { result } = setup({ persistence: "server" });
+    const editedThread = "session-edit-concurrent-a";
+    const streamingThread = "session-edit-concurrent-b";
+    await fireR("sessions", {
+      sessions: [
+        { id: editedThread, title: "Edited" },
+        { id: streamingThread, title: "Streaming" },
+      ],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(editedThread));
+    await fireR("load-thread", {
+      threadId: editedThread,
+      messages: [
+        { id: "concurrent-initial-user", role: "user", content: [{ type: "text", text: "first" }] },
+        { id: "concurrent-parent", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "parent" }] },
+        { id: "concurrent-user", role: "user", content: [{ type: "text", text: "before" }] },
+        { id: "concurrent-answer", role: "assistant", status: { type: "complete", reason: "stop" }, content: [{ type: "text", text: "answer" }] },
+      ],
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(streamingThread));
+    await fireR("load-thread", { threadId: streamingThread, messages: [] });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("background run");
+      await result.current.runtime.thread.composer.send();
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(editedThread));
+    const editor = result.current.runtime.thread.getMessageById("concurrent-user").composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("edited while background streams");
+      handlers.get("test:chunk")?.({ text: "concurrent chunk", threadId: streamingThread });
+      await editor.send();
+    });
+
+    await act(async () => result.current.runtime.threads.switchToThread(streamingThread));
+    const backgroundText = messages(result).flatMap((message) =>
+      (message.content as Array<{ type: string; text?: string }>))
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("\n");
+    expect(backgroundText).toContain("concurrent chunk");
+  });
+
 });
 
 

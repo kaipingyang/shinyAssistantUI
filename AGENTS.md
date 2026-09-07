@@ -173,14 +173,31 @@ Use `chromote` (real headless Chromium) — see the `shiny-browser-verify` skill
   memory limit (`cat /sys/fs/cgroup/memory.max`); strict per-app Chrome cleanup.
 - SDK-alignment checks: `tests/verify/verify_sdk_alignment.R`, `verify_task_progress.R`.
 
+## 🔴 Rule #3 — Use the project bounded-verification skill
+
+For non-trivial verification in this workspace, invoke the project skill instead of launching
+an unbounded full suite manually:
+
+```text
+/shinyassistantui-verify targeted|js-full|r-full|browser|full|resume|benchmark
+```
+
+The skill lives at `.kiro/skills/shinyassistantui-verify/SKILL.md` and calls its reusable
+`scripts/run-verification-bounded.mjs` runner. Its batch limits, Linux child-subreaper plus
+TERM→KILL descendant cleanup, fingerprinted resume state, HOME-only install boundary, per-batch progress,
+and final evidence report are mandatory. Keep `.kiro/` untracked as required by Rule #0.
+A cancelled or timed-out outer tool call is not cleanup evidence: confirm the exact owned child
+processes exited before starting replacement work. Never rerun an already evidenced successful
+batch merely to improve output wording.
+
 ## Test & regress
 
 ```bash
-npx vitest run --no-file-parallelism --pool=forks   # JS (103 cases); single-fork caps memory
+node .kiro/skills/shinyassistantui-verify/scripts/run-verification-bounded.mjs js
+node .kiro/skills/shinyassistantui-verify/scripts/run-verification-bounded.mjs r
 ```
-```r
-devtools::load_all("."); testthat::test_dir("tests/testthat")   # R helpers
-```
+
+Use `--files` for targeted checks and `--resume` only with a matching runner fingerprint.
 
 ## Git
 
@@ -202,7 +219,7 @@ devtools::load_all("."); testthat::test_dir("tests/testthat")   # R helpers
 - Aligned SDK→UI signals: cost/usage footer, subagent/Task progress cards (+ Stop → `stop_task`),
   rate-limit banner, status line, command auto-discovery (`get_server_info`), server-tool badge,
   approval card title/displayName/description, `task_updated` terminal state, hook-event status.
-- SDK now at **v0.2.1** (installed): parses `server_tool_use`/`advisor_tool_result`/`task_updated`/
+- SDK now at **v0.2.5** (installed): parses `server_tool_use`/`advisor_tool_result`/`task_updated`/
   `HookEventMessage`; `PermissionRequestMessage` has title/display_name/description;
   `ResultMessage` has api_error_status/deferred_tool_use; options add
   include_hook_events/strict_mcp_config/skills.

@@ -241,6 +241,36 @@
 # Small SDK seams keep handler behavior unit-testable without network or CLI.
 .new_claude_options <- function(...) ClaudeAgentSDK::ClaudeAgentOptions(...)
 .new_claude_client <- function(options) ClaudeAgentSDK::ClaudeSDKClient$new(options)
+
+.claude_sdk_identity <- function(
+    namespace = tryCatch(asNamespace("ClaudeAgentSDK"), error = function(error) NULL),
+    namespace_info = getNamespaceInfo,
+    fallback_version = function() as.character(utils::packageVersion("ClaudeAgentSDK")),
+    fallback_path = function() find.package("ClaudeAgentSDK")) {
+  spec <- if (is.null(namespace)) NULL else tryCatch(
+    namespace_info(namespace, "spec"),
+    error = function(error) NULL
+  )
+  version <- tryCatch(spec[["version"]], error = function(error) NULL)
+  if (is.null(version) || !length(version) || !nzchar(as.character(version[[1L]]))) {
+    version <- tryCatch(fallback_version(), error = function(error) "unknown")
+  }
+
+  path <- if (is.null(namespace)) NULL else tryCatch(
+    namespace_info(namespace, "path"),
+    error = function(error) NULL
+  )
+  if (is.null(path) || !length(path) || !nzchar(as.character(path[[1L]]))) {
+    path <- tryCatch(fallback_path(), error = function(error) "unknown path")
+  }
+
+  raw_path <- as.character(path[[1L]])
+  list(
+    version = as.character(version[[1L]]),
+    path = if (identical(raw_path, "unknown path")) raw_path else
+      normalizePath(raw_path, winslash = "/", mustWork = FALSE)
+  )
+}
 # 删除会话 transcript 的 seam（可单测 mock）。失败时 delete_session 会 stop()（不静默）。
 .delete_claude_session <- function(session_id, directory = NULL)
   ClaudeAgentSDK::delete_session(session_id, directory = directory)
@@ -3279,7 +3309,17 @@ make_claude_handler <- function(options       = NULL,
           names(formals(get_context_usage_async))
         } else character(0)
         if (!all(c("on_fulfilled", "on_rejected") %in% async_formals)) {
-          err("Connected ClaudeAgentSDK does not support asynchronous context usage")
+          sdk_identity <- .claude_sdk_identity()
+          message(
+            "[shinyAssistantUI] incompatible loaded ClaudeAgentSDK ",
+            sdk_identity$version, " at ", sdk_identity$path
+          )
+          err(paste0(
+            "Connected ClaudeAgentSDK ", sdk_identity$version,
+            " does not support asynchronous context usage. ",
+            "Install ClaudeAgentSDK >= 0.2.5 and restart R. ",
+            "The loaded package location was written to the server log."
+          ))
           return(invisible(NULL))
         }
         tryCatch(

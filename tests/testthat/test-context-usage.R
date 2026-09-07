@@ -119,6 +119,80 @@ test_that("context action returns the trimmed formatter output offline", {
 })
 
 
+test_that("context action identifies an incompatible loaded SDK", {
+  skip_if_not_installed("ClaudeAgentSDK")
+
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() invisible(NULL)
+
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) client
+  )
+
+  handler <- make_claude_handler(
+    options = list(
+      permission_mode = "default",
+      permission_prompt_tool_name = "stdio",
+      include_partial_messages = TRUE
+    ),
+    session_map_path = tempfile(fileext = ".rds")
+  )
+  attr(handler, "warmup")("thread-old-context-sdk")
+  result <- NULL
+  server_messages <- character()
+  withCallingHandlers(
+    attr(handler, "action_handler")(
+      "context", "thread-old-context-sdk",
+      function(message, status = "ok", value = NULL) {
+        result <<- list(message = message, status = status, value = value)
+      }
+    ),
+    message = function(condition) {
+      server_messages <<- c(server_messages, conditionMessage(condition))
+      invokeRestart("muffleMessage")
+    }
+  )
+
+  sdk_version <- as.character(utils::packageVersion("ClaudeAgentSDK"))
+  sdk_path <- normalizePath(find.package("ClaudeAgentSDK"), winslash = "/")
+  expect_identical(result$status, "error")
+  expect_match(result$message, paste("ClaudeAgentSDK", sdk_version), fixed = TRUE)
+  expect_false(grepl(sdk_path, result$message, fixed = TRUE))
+  expect_true(any(grepl(sdk_path, server_messages, fixed = TRUE)))
+  expect_match(result$message, "server log", fixed = TRUE)
+  expect_match(result$message, "ClaudeAgentSDK >= 0.2.5", fixed = TRUE)
+  expect_match(result$message, "restart R", fixed = TRUE)
+})
+
+
+test_that("SDK diagnostics prefer the loaded namespace identity", {
+  identity <- .claude_sdk_identity(
+    namespace = new.env(parent = emptyenv()),
+    namespace_info = function(namespace, field) {
+      switch(
+        field,
+        spec = c(name = "ClaudeAgentSDK", version = "0.2.4"),
+        path = "/loaded/ClaudeAgentSDK"
+      )
+    },
+    fallback_version = function() "0.2.5",
+    fallback_path = function() "/new-library/ClaudeAgentSDK"
+  )
+
+  expect_identical(identity$version, "0.2.4")
+  expect_identical(identity$path, "/loaded/ClaudeAgentSDK")
+
+  unknown <- .claude_sdk_identity(
+    namespace = NULL,
+    fallback_version = function() "unknown",
+    fallback_path = function() stop("missing")
+  )
+  expect_identical(unknown$path, "unknown path")
+})
+
+
 test_that("context formatter renders summary + category table, no detail tables", {
   usage <- list(
     model = "claude-sonnet-4.6",

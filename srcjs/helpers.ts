@@ -325,27 +325,25 @@ export function createRemovalWatcher(el: Element, onRemove: () => void): () => v
 
 // 计算编辑消息后的新消息数组：截断到 parentId（含）之后，再追加编辑后的 user 消息。
 // - parentId === null：从头截断（编辑首条消息）
-// - parentId 找不到（陈旧 id / 切线程竞态）：返回 aborted=true，调用方应放弃本次编辑
-//   （不截断、不发消息），避免只发 R 却不插 user 气泡导致 UI/R 发散。
-// 不在内部构造 id（依赖时钟），由调用方传入 newUserMessage。
+// 编辑必须是原子性的：parentId 找不到（陈旧 id / 切线程竞态）时返回
+// applied=false，调用方必须放弃本次后端 run，避免把编辑静默变成尾部新消息。
 export function applyEdit(
   threadMsgs: ThreadMessageLike[],
   parentId: string | null,
   newUserMessage: ThreadMessageLike,
-): ThreadMessageLike[] {
+): { messages: ThreadMessageLike[]; applied: boolean } {
   let cutIdx: number;
   if (parentId === null) {
     cutIdx = 0;
   } else {
     const idx = threadMsgs.findIndex((m) => m.id === parentId);
-    if (idx < 0) {
-      // parentId 找不到(如历史加载 / 工具轮次后消息 id 方案不一致):把编辑后的消息追加到
-      // 末尾并照常重发(不静默丢弃,否则"编辑后 Update 无反应")。
-      return [...threadMsgs, newUserMessage];
-    }
+    if (idx < 0) return { messages: threadMsgs, applied: false };
     cutIdx = idx + 1;
   }
-  return [...threadMsgs.slice(0, cutIdx), newUserMessage];
+  return {
+    messages: [...threadMsgs.slice(0, cutIdx), newUserMessage],
+    applied: true,
+  };
 }
 
 

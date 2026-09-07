@@ -3,7 +3,11 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { visualizer } from "rollup-plugin-visualizer";
 import { resolve } from "path";
-import { writeFileSync, mkdirSync, copyFileSync, readdirSync } from "fs";
+import { writeFileSync, mkdirSync, copyFileSync, readdirSync, readFileSync } from "fs";
+
+const description = readFileSync(resolve(import.meta.dirname, "DESCRIPTION"), "utf8");
+const widgetVersion = description.match(/^Version:\s*(\S+)\s*$/m)?.[1];
+if (!widgetVersion) throw new Error("DESCRIPTION has no Version field");
 
 export default defineConfig({
   resolve: {
@@ -19,8 +23,7 @@ export default defineConfig({
     {
       name: "bump-widget-version",
       closeBundle() {
-        const version = `0.0.${Math.floor(Date.now() / 60000)}`;
-        const yaml = `dependencies:\n  - name: shinyAssistantUI\n    version: ${version}\n    src: www\n    script: shinyAssistantUI.js\n    stylesheet: style.css\n`;
+        const yaml = `dependencies:\n  - name: shinyAssistantUI\n    version: ${widgetVersion}\n    src: www\n    script: shinyAssistantUI.js\n    stylesheet: style.css\n`;
         writeFileSync("inst/htmlwidgets/assistantUI.yaml", yaml);
 
         // Plan 34 (fix): bundle KaTeX CSS + woff2 fonts LOCALLY into inst/www/katex/ so LaTeX

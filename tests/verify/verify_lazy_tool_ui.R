@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R", local = TRUE)
 #!/usr/bin/env Rscript
 
 home_lib <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
@@ -22,13 +23,12 @@ proc <- callr::r_bg(function(app_file, port, home_lib) {
 stdout = log_file, stderr = log_file)
 
 b <- NULL
-on.exit({
-  if (!is.null(b)) {
-    try(b$close(), silent = TRUE)
-    try(b$parent$get_browser()$get_process()$kill(), silent = TRUE)
-  }
-  try(proc$kill(), silent = TRUE)
-}, add = TRUE)
+cleanup <- make_verification_cleanup(
+  browser_session = function() b,
+  app_process = function() proc,
+  paths = log_file
+)
+on.exit(cleanup(), add = TRUE)
 
 ready <- FALSE
 for (i in seq_len(60L)) {
@@ -100,8 +100,8 @@ request_count <- function(id = "lazy_request_count") as.integer(ev(sprintf(
 )))
 
 assert(wait_for("!!document.querySelector('.aui-root')"), "installed widget mounted")
-assert(identical(ev("document.getElementById('installed-version').textContent.trim()"), "0.5.7"),
-       "Home installed package version 0.5.7")
+assert(identical(ev("document.getElementById('installed-version').textContent.trim()"), "0.5.7.9000"),
+       "Home installed package version 0.5.7.9000")
 
 # Drive the actual composer so runtime callbacks are registered for this thread.
 ev("document.querySelector('[contenteditable=true]').focus(); true")
@@ -188,4 +188,5 @@ Sys.sleep(1)
 all_errors <- c(console_errors, runtime_errors)
 assert(length(all_errors) == 0L, "zero console/runtime errors")
 assert(length(network_errors) == 0L, "zero network loading failures")
+cleanup()
 cat("SUMMARY lazy tool UI browser verification: PASS\n")

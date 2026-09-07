@@ -68,6 +68,8 @@ import {
   PencilIcon,
   RefreshCwIcon,
   SquareIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
 } from "lucide-react";
 import {
   createContext,
@@ -1339,6 +1341,26 @@ const AssistantActionBar: FC = () => {
           <RefreshCwIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Reload>
+      <AuiIf condition={(s) => s.thread.capabilities.feedback}>
+        <ActionBarPrimitive.FeedbackPositive asChild>
+          <TooltipIconButton
+            tooltip="Good response"
+            className="aui-feedback-positive data-[submitted]:text-green-600"
+          >
+            <ThumbsUpIcon />
+          </TooltipIconButton>
+        </ActionBarPrimitive.FeedbackPositive>
+      </AuiIf>
+      <AuiIf condition={(s) => s.thread.capabilities.feedback}>
+        <ActionBarPrimitive.FeedbackNegative asChild>
+          <TooltipIconButton
+            tooltip="Bad response"
+            className="aui-feedback-negative data-[submitted]:text-red-600"
+          >
+            <ThumbsDownIcon />
+          </TooltipIconButton>
+        </ActionBarPrimitive.FeedbackNegative>
+      </AuiIf>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
@@ -1370,7 +1392,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [&:where(>*)]:col-start-2"
+      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [&>*]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />

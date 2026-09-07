@@ -256,26 +256,29 @@ describe("applyEdit", () => {
 
   it("parentId=null 从头截断后追加（编辑首条）", () => {
     const msgs = [mk("u1"), mk("a1", "assistant"), mk("u2")];
-    const updated = applyEdit(msgs, null, newMsg);
-    expect(updated).toEqual([newMsg]); // 全截断 + 新消息
+    const result = applyEdit(msgs, null, newMsg);
+    expect(result.applied).toBe(true);
+    expect(result.messages).toEqual([newMsg]);
   });
 
   it("parentId 命中：截断到其后再追加", () => {
     const msgs = [mk("u1"), mk("a1", "assistant"), mk("u2"), mk("a2", "assistant")];
-    const updated = applyEdit(msgs, "a1", newMsg);
-    expect(updated.map((m: any) => m.id)).toEqual(["u1", "a1", "new-user"]);
+    const result = applyEdit(msgs, "a1", newMsg);
+    expect(result.applied).toBe(true);
+    expect(result.messages.map((m: any) => m.id)).toEqual(["u1", "a1", "new-user"]);
   });
 
-  it("parentId 找不到:追加到末尾并重发(不丢弃)", () => {
+  it("parentId 找不到时保持原消息并显式中止", () => {
     const msgs = [mk("u1"), mk("a1", "assistant")];
-    const updated = applyEdit(msgs, "ghost", newMsg);
-    // 不再丢弃:追加到末尾并重发(修复"编辑后 Update 无反应")
-    expect(updated).toEqual([...msgs, newMsg]);
+    const result = applyEdit(msgs, "ghost", newMsg);
+    expect(result.applied).toBe(false);
+    expect(result.messages).toBe(msgs);
   });
 
   it("空 thread + parentId=null：仅追加新消息", () => {
-    const updated = applyEdit([], null, newMsg);
-    expect(updated).toEqual([newMsg]);
+    const result = applyEdit([], null, newMsg);
+    expect(result.applied).toBe(true);
+    expect(result.messages).toEqual([newMsg]);
   });
 });
 

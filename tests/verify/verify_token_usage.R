@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R", local = TRUE)
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
@@ -12,13 +13,18 @@ app <- callr::r_bg(function(project, port) {
   setwd(project); suppressPackageStartupMessages(library(shiny))
   shiny::runApp("tests/verify/token_usage_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
 }, args = list(project = project, port = port), stdout = "/tmp/aui-tok.out", stderr = "/tmp/aui-tok.err")
-on.exit(try(app$kill(), silent = TRUE), add = TRUE)
+browser <- NULL
+cleanup <- make_verification_cleanup(
+  browser_session = function() browser,
+  app_process = function() app,
+  paths = c("/tmp/aui-tok.out", "/tmp/aui-tok.err")
+)
+on.exit(cleanup(), add = TRUE)
 for (i in seq_len(100)) { if (!app$is_alive()) break; if (file.exists("/tmp/aui-tok.err") && any(grepl("Listening on", readLines("/tmp/aui-tok.err", warn = FALSE)))) break; Sys.sleep(0.25) }
 if (!app$is_alive()) { cat(tail(readLines("/tmp/aui-tok.err", warn = FALSE), 20), sep = "\n"); stop("boot failed") }
 
 chromote::set_chrome_args(unique(c(chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu")))
 browser <- ChromoteSession$new(width = 720, height = 860)
-on.exit({ try(browser$close(), silent = TRUE); try(browser$parent$get_browser()$get_process()$kill(), silent = TRUE) }, add = TRUE)
 console_errors <- character()
 browser$Runtime$enable()
 browser$Runtime$consoleAPICalled(callback_ = function(m) if (identical(m$type, "error")) console_errors <<- c(console_errors, "err"))
@@ -50,6 +56,6 @@ chk("usage tooltip shows 25% (50k/200k)",
     value("(document.querySelector('[data-slot=\"context-display-popover\"]')?.textContent||'').slice(0,60)"))
 
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
-try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
 if (length(failures)) stop("verification failed: ", paste(failures, collapse = ", "))
+cleanup()
 cat("TOKEN_USAGE_VERIFY_DONE\n")

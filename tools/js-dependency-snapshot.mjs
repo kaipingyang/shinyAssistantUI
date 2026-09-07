@@ -25,8 +25,12 @@ const sortedObject = (entries) => Object.fromEntries(
 
 function packageVersion(repositoryRoot) {
   const description = readFileSync(resolve(repositoryRoot, "DESCRIPTION"), "utf8");
-  const match = description.match(/^Version:\s*(\d+\.\d+\.\d+)\s*$/m);
-  if (!match) throw new Error("DESCRIPTION must contain a three-part Version field");
+  const match = description.match(/^Version:\s*(\d+(?:\.\d+){2,})\s*$/m);
+  if (!match) {
+    throw new Error(
+      "DESCRIPTION must contain a Version with at least three numeric components",
+    );
+  }
   return match[1];
 }
 
