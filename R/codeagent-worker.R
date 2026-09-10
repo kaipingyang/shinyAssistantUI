@@ -1,7 +1,7 @@
 # Out-of-process codeagent worker transport (Plan 52.A).
 #
-# Runs a codeagent turn in a separate R process pinned to a lib with a new curl
-# (for example Rlibs/codeagent/R-4.4), so the MAIN Shiny/ERP process never loads
+# Runs a codeagent turn in a separate R process pinned to an isolated library
+# with compatible worker dependencies, so the MAIN Shiny process never loads
 # codeagent/ellmer/curl. Streaming deltas, tool events, and interactive
 # permission approval are marshaled over a socket as newline-delimited JSON.
 #

@@ -62,7 +62,7 @@
   <main id="main" class="col-md-9"><div class="section level1">
 <div class="page-header"><h1 id="shinyassistantui">shinyAssistantUI<a class="anchor" aria-label="anchor" href="#shinyassistantui"></a>
 </h1></div>
-<p>A Shiny htmlwidget that wraps <a href="https://github.com/assistant-ui/assistant-ui" class="external-link"><code>@assistant-ui/react</code></a> — giving Shiny apps a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display.</p>
+<p>A native Shiny output binding that wraps <a href="https://github.com/assistant-ui/assistant-ui" class="external-link"><code>@assistant-ui/react</code></a> — giving Shiny apps a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display.</p>
 <p>Backend-agnostic: works with <a href="https://github.com/kaipingyang/ClaudeAgentSDK" class="external-link">ClaudeAgentSDK</a>, <a href="https://github.com/tidyverse/ellmer" class="external-link">ellmer</a>, or any R-based AI backend.</p>
 <div class="section level2">
 <h2 id="how-it-maps-to-assistant-ui">How it maps to assistant-ui<a class="anchor" aria-label="anchor" href="#how-it-maps-to-assistant-ui"></a>
@@ -75,7 +75,7 @@
 <tbody>
 <tr class="odd">
 <td>Surface</td>
-<td>React Web inside a Shiny htmlwidget</td>
+<td>React Web inside a native Shiny output binding</td>
 </tr>
 <tr class="even">
 <td>Runtime</td>
@@ -97,9 +97,10 @@
 <div class="section level2">
 <h2 id="installation">Installation<a class="anchor" aria-label="anchor" href="#installation"></a>
 </h2>
-<p>The current public route installs the GitHub development version:</p>
+<p>This development site tracks the <code>dev</code> branch. Install the matching development version explicitly:</p>
 <div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span><span class="st">"kaipingyang/shinyAssistantUI"</span><span class="op">)</span></span></code></pre></div>
+<code class="sourceCode R"><span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span><span class="st">"kaipingyang/shinyAssistantUI"</span>, ref <span class="op">=</span> <span class="st">"dev"</span><span class="op">)</span></span></code></pre></div>
+<p>GitHub’s default branch is <code>main</code>, so omitting <code>ref</code> installs a different floating branch that may not match this site. For production, replace <code>"dev"</code> with a validated release tag or full commit SHA.</p>
 <p>The installed R package already ships its compiled React, assistant-ui, CSS, and KaTeX assets, so application users do <strong>not</strong> need Node.js, npm, shadcn, or the upstream assistant-ui CLI. Install only the optional R backend used by the app. See the pkgdown <a href="https://kaipingyang.github.io/shinyAssistantUI/articles/installation.html">Installation guide</a> for custom handlers, ellmer, ClaudeAgentSDK, codeagent, RStudio addin prerequisites, contributor builds, and the current distribution/compatibility gaps.</p>
 </div>
 <div class="section level2">
@@ -218,7 +219,7 @@
 <h3 id="assistantuioutputoutputid-width-height-">
 <code>assistantUIOutput(outputId, width, height, ...)</code><a class="anchor" aria-label="anchor" href="#assistantuioutputoutputid-width-height-"></a>
 </h3>
-<p>Creates the chat widget placeholder in UI. Standard htmlwidget output function.</p>
+<p>Creates the chat placeholder for the native Shiny output binding.</p>
 </div>
 <div class="section level3">
 <h3 id="assistantuiserverid-handler">
@@ -296,7 +297,7 @@
   └─► Shiny.setInputValue → R observeEvent → your handler
         └─► on_chunk(text) → sendCustomMessage → React ExternalStoreRuntime
               └─► @assistant-ui/react renders streaming message</code></pre>
-<p>The React component (<code>@assistant-ui/react</code>) manages all UI state internally via Zustand. R communicates via <code>session$sendCustomMessage()</code> for streaming and <code>input$*</code> for user events — the standard htmlwidgets pattern.</p>
+<p>The React component (<code>@assistant-ui/react</code>) manages all UI state internally via Zustand. R communicates via <code>session$sendCustomMessage()</code> for streaming and <code>input$*</code> for user events — the native Shiny output binding pattern.</p>
 </div>
 <div class="section level2">
 <h2 id="development">Development<a class="anchor" aria-label="anchor" href="#development"></a>
@@ -304,7 +305,7 @@
 <p>Rebuild the JS bundle after editing <code>srcjs/</code>:</p>
 <div class="sourceCode" id="cb11"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="ex">npm</span> run build      # one-shot</span>
 <span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a><span class="ex">npm</span> run dev        # watch mode</span></code></pre></div>
-<p>Requires a Node version accepted by <code>package-lock.json</code>; the current full build-and-test toolchain supports Node 20.19.x, Node 22.13+, or Node 24+. Node.js is not required for package users.</p>
+<p>Requires a Node version accepted by the root <code>engines</code> declaration and lockfile: <code>^20.19.0 || ^22.12.0 || &gt;=24.0.0</code>. Node.js is not required for package users.</p>
 </div>
 <div class="section level2">
 <h2 id="license">License<a class="anchor" aria-label="anchor" href="#license"></a>

@@ -1,8 +1,8 @@
 # shinyAssistantUI: AI Assistant Chat UI for Shiny
 
-Wraps the '@assistant-ui/react' JavaScript library as a Shiny
-htmlwidget, providing a full-featured AI chat UI with streaming output,
-slash command menu, file attachments, and tool call display.
+Wraps the '@assistant-ui/react' JavaScript library in a native Shiny
+output binding, providing a full-featured AI chat UI with streaming
+output, slash command menu, file attachments, and tool call display.
 Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based AI
 backend.
 

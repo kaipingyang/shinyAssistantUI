@@ -72,7 +72,7 @@
 <div class="section level2">
 <h2 id="what-shinyassistantui-provides">What shinyAssistantUI provides<a class="anchor" aria-label="anchor" href="#what-shinyassistantui-provides"></a>
 </h2>
-<p><code>shinyAssistantUI</code> brings the React Web surface from <a href="https://www.assistant-ui.com/" class="external-link">assistant-ui</a> into a Shiny htmlwidget. It keeps the assistant-ui interaction model while using Shiny’s normal client/server channel and R callbacks for application logic.</p>
+<p><code>shinyAssistantUI</code> brings the React Web surface from <a href="https://www.assistant-ui.com/" class="external-link">assistant-ui</a> through a native Shiny output binding. It keeps the assistant-ui interaction model while using Shiny’s normal client/server channel and R callbacks for application logic.</p>
 <p>The package is backend-agnostic. You can supply a small R handler, use one of the packaged integrations, or build a handler around another service.</p>
 <table class="table">
 <colgroup>
@@ -86,7 +86,7 @@
 <tbody>
 <tr class="odd">
 <td>Surface</td>
-<td>React Web inside an htmlwidget</td>
+<td>React Web inside a native Shiny output binding</td>
 </tr>
 <tr class="even">
 <td>Runtime</td>
@@ -109,7 +109,7 @@
 <td>Outside this package’s Shiny Web scope</td>
 </tr>
 <tr class="odd">
-<td>AG-UI, A2A, or other runtime adapters</td>
+<td>A2UI, AG-UI, or other runtime adapters</td>
 <td>Not required or installed</td>
 </tr>
 </tbody>

@@ -3,23 +3,24 @@
 ## What shinyAssistantUI provides
 
 `shinyAssistantUI` brings the React Web surface from
-[assistant-ui](https://www.assistant-ui.com/) into a Shiny htmlwidget.
-It keeps the assistant-ui interaction model while using Shiny’s normal
-client/server channel and R callbacks for application logic.
+[assistant-ui](https://www.assistant-ui.com/) through a native Shiny
+output binding. It keeps the assistant-ui interaction model while using
+Shiny’s normal client/server channel and R callbacks for application
+logic.
 
 The package is backend-agnostic. You can supply a small R handler, use
 one of the packaged integrations, or build a handler around another
 service.
 
-| assistant-ui concept                  | shinyAssistantUI implementation                       |
-| ------------------------------------- | ----------------------------------------------------- |
-| Surface                               | React Web inside an htmlwidget                        |
-| Runtime                               | A custom `ExternalStoreRuntime` owned by the widget   |
-| Transport                             | Shiny inputs and custom messages over its WebSocket   |
-| Server/runtime                        | A backend-agnostic R handler                          |
-| Included integrations                 | ClaudeAgentSDK, ellmer, and custom/codeagent handlers |
-| Native or terminal surfaces           | Outside this package’s Shiny Web scope                |
-| AG-UI, A2A, or other runtime adapters | Not required or installed                             |
+| assistant-ui concept                   | shinyAssistantUI implementation                       |
+| -------------------------------------- | ----------------------------------------------------- |
+| Surface                                | React Web inside a native Shiny output binding        |
+| Runtime                                | A custom `ExternalStoreRuntime` owned by the widget   |
+| Transport                              | Shiny inputs and custom messages over its WebSocket   |
+| Server/runtime                         | A backend-agnostic R handler                          |
+| Included integrations                  | ClaudeAgentSDK, ellmer, and custom/codeagent handlers |
+| Native or terminal surfaces            | Outside this package’s Shiny Web scope                |
+| A2UI, AG-UI, or other runtime adapters | Not required or installed                             |
 
 This is the project’s mapping of the first assistant-ui Getting Started
 page, **Documentation**. It is a positioning guide rather than a

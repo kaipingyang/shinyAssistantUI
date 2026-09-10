@@ -80,30 +80,73 @@
 <li>React, Base UI, Lexical, Markdown, syntax-highlighting, and styling code;</li>
 <li>compiled JavaScript, CSS, and KaTeX assets under <code>inst/www</code>.</li>
 </ul>
+<p>The browser surface mounts through a native Shiny output binding with an <code><a href="https://rstudio.github.io/htmltools/reference/htmlDependency.html" class="external-link">htmltools::htmlDependency()</a></code>; it is not an htmlwidgets widget.</p>
 <p>Consequently, <strong>package users do not need Node.js, npm, the assistant-ui CLI, shadcn, Next.js, or Vite</strong>. Those are maintainer/contributor tools, not application prerequisites.</p>
 </div>
 <div class="section level2">
 <h2 id="install-the-core-package">Install the core package<a class="anchor" aria-label="anchor" href="#install-the-core-package"></a>
 </h2>
-<p>The current public installation route is the GitHub development repository:</p>
+<p>This development site is built from the <code>dev</code> branch. Install that branch explicitly to match the published documentation:</p>
 <div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/utils/install.packages.html" class="external-link">install.packages</a></span><span class="op">(</span><span class="st">"remotes"</span><span class="op">)</span></span>
-<span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span><span class="st">"kaipingyang/shinyAssistantUI"</span><span class="op">)</span></span></code></pre></div>
-<p>There is not yet a CRAN release or a separately documented stable R-package channel. Production projects should therefore record the Git reference they have validated rather than assuming the GitHub head will never change.</p>
-<p>After installation, the browser assets should resolve from the installed package:</p>
+<span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span></span>
+<span>  <span class="st">"kaipingyang/shinyAssistantUI"</span>,</span>
+<span>  ref <span class="op">=</span> <span class="st">"dev"</span></span>
+<span><span class="op">)</span></span></code></pre></div>
+<p>GitHub’s default branch is <code>main</code>, so omitting <code>ref</code> resolves to <code>main</code> and may install code that differs from this site. Both <code>main</code> and <code>dev</code> are floating branches. GitHub release tags may be available but can lag either branch; there is currently no CRAN or R-universe release.</p>
+<table class="table">
+<thead><tr class="header">
+<th>Installation goal</th>
+<th><code>ref</code></th>
+<th>Reproducibility</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td>Match this development site</td>
+<td><code>"dev"</code></td>
+<td>Floating branch</td>
+</tr>
+<tr class="even">
+<td>Follow the default branch</td>
+<td><code>"main"</code></td>
+<td>Floating branch</td>
+</tr>
+<tr class="odd">
+<td>Reproduce a validated deployment</td>
+<td>Release tag or full commit SHA</td>
+<td>Pinned</td>
+</tr>
+</tbody>
+</table>
+<p>For production, install a version your deployment has validated rather than a moving branch:</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span></span>
+<span>  <span class="st">"kaipingyang/shinyAssistantUI"</span>,</span>
+<span>  ref <span class="op">=</span> <span class="st">"&lt;validated-tag-or-full-commit-sha&gt;"</span></span>
+<span><span class="op">)</span></span></code></pre></div>
+<p>After installation, the browser assets should resolve from the installed package:</p>
+<div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://kaipingyang.github.io/shinyAssistantUI/">shinyAssistantUI</a></span><span class="op">)</span></span>
 <span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/utils/packageDescription.html" class="external-link">packageVersion</a></span><span class="op">(</span><span class="st">"shinyAssistantUI"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/stopifnot.html" class="external-link">stopifnot</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/nchar.html" class="external-link">nzchar</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/system.file.html" class="external-link">system.file</a></span><span class="op">(</span><span class="st">"www"</span>, <span class="st">"shinyAssistantUI.js"</span>,</span>
-<span>                            package <span class="op">=</span> <span class="st">"shinyAssistantUI"</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
+<span><span class="va">package_path</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/normalizePath.html" class="external-link">normalizePath</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/find.package.html" class="external-link">find.package</a></span><span class="op">(</span><span class="st">"shinyAssistantUI"</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="va">package_version</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/utils/packageDescription.html" class="external-link">packageVersion</a></span><span class="op">(</span><span class="st">"shinyAssistantUI"</span><span class="op">)</span></span>
+<span></span>
+<span><span class="va">package_path</span></span>
+<span><span class="va">package_version</span></span>
+<span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/stopifnot.html" class="external-link">stopifnot</a></span><span class="op">(</span></span>
+<span>  <span class="fu"><a href="https://rdrr.io/r/base/nchar.html" class="external-link">nzchar</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/system.file.html" class="external-link">system.file</a></span><span class="op">(</span></span>
+<span>    <span class="st">"www"</span>, <span class="st">"shinyAssistantUI.js"</span>,</span>
+<span>    package <span class="op">=</span> <span class="st">"shinyAssistantUI"</span></span>
+<span>  <span class="op">)</span><span class="op">)</span></span>
+<span><span class="op">)</span></span></code></pre></div>
 <p>The package does not currently declare and test a minimum supported R version. That is a real metadata and compatibility-matrix gap, so this guide does not invent a version guarantee.</p>
 </div>
 <div class="section level2">
 <h2 id="start-without-another-ai-package">Start without another AI package<a class="anchor" aria-label="anchor" href="#start-without-another-ai-package"></a>
 </h2>
 <p>The core package only requires an R handler. This deterministic example verifies the UI and Shiny transport without an API key or optional backend package:</p>
-<div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb4"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://shiny.posit.co/" class="external-link">shiny</a></span><span class="op">)</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://kaipingyang.github.io/shinyAssistantUI/">shinyAssistantUI</a></span><span class="op">)</span></span>
 <span></span>
@@ -165,15 +208,16 @@
 </tr>
 <tr class="odd">
 <td>codeagent, isolated worker</td>
-<td>
-<code>callr</code> plus a separate compatible R library</td>
-<td>Worker library supplied through <code>libpath</code>
+<td>Host packages: <code>callr</code>, <code>jsonlite</code>, <code>later</code>, <code>promises</code>
+</td>
+<td>Compatible worker library containing <code>codeagent</code>, <code>ellmer</code>, <code>jsonlite</code>, <code>later</code>, <code>promises</code>, and <code>curl</code>; pass its root through <code>libpath</code>
 </td>
 </tr>
 </tbody>
 </table>
+<p>The worker library’s provisioning and location are deployment-specific. The public contract is only that <code>libpath</code> identifies a caller-provided isolated R library root containing those compatible worker dependencies.</p>
 <p>For ellmer:</p>
-<div class="sourceCode" id="cb4"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb5"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/utils/install.packages.html" class="external-link">install.packages</a></span><span class="op">(</span><span class="st">"ellmer"</span><span class="op">)</span></span>
 <span></span>
 <span><span class="va">handler</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/make_ellmer_handler.html">make_ellmer_handler</a></span><span class="op">(</span></span>
@@ -181,7 +225,7 @@
 <span><span class="op">)</span></span></code></pre></div>
 <p>Provider credentials belong to the provider, not to <code>shinyAssistantUI</code>. Keep them in environment variables or an external secret manager, never in committed R files. For example, an ellmer provider may read <code>OPENAI_API_KEY</code> from the environment.</p>
 <p>For ClaudeAgentSDK:</p>
-<div class="sourceCode" id="cb5"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu">remotes</span><span class="fu">::</span><span class="fu"><a href="https://remotes.r-lib.org/reference/install_github.html" class="external-link">install_github</a></span><span class="op">(</span><span class="st">"kaipingyang/ClaudeAgentSDK"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/stopifnot.html" class="external-link">stopifnot</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/utils/packageDescription.html" class="external-link">packageVersion</a></span><span class="op">(</span><span class="st">"ClaudeAgentSDK"</span><span class="op">)</span> <span class="op">&gt;=</span> <span class="st">"0.2.5"</span><span class="op">)</span></span>
 <span></span>
@@ -192,7 +236,7 @@
 <h2 id="use-the-packaged-surfaces">Use the packaged surfaces<a class="anchor" aria-label="anchor" href="#use-the-packaged-surfaces"></a>
 </h2>
 <p>The upstream page shows separate React wiring for Thread, ThreadList, and AssistantModal. These are already exposed through the R API rather than separate npm component installs:</p>
-<div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="co"># Inline thread with conversation navigation</span></span>
 <span><span class="fu"><a href="../reference/assistantUIOutput.html">assistantUIOutput</a></span><span class="op">(</span><span class="st">"chat"</span>, height <span class="op">=</span> <span class="st">"100%"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="../reference/assistantUIServer.html">assistantUIServer</a></span><span class="op">(</span><span class="st">"chat"</span>, handler <span class="op">=</span> <span class="va">my_handler</span>, show_thread_list <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span></span>
@@ -267,9 +311,9 @@
 <td>Covered</td>
 </tr>
 <tr class="odd">
-<td>Stable package-manager release</td>
-<td>GitHub development install only</td>
-<td>Real distribution gap</td>
+<td>CRAN or R-universe distribution</td>
+<td>Not currently available</td>
+<td>Real distribution gap; use a validated Git tag or full commit SHA</td>
 </tr>
 <tr class="even">
 <td>Declared minimum R version</td>
@@ -290,10 +334,10 @@
 <h2 id="build-from-source-as-a-contributor">Build from source as a contributor<a class="anchor" aria-label="anchor" href="#build-from-source-as-a-contributor"></a>
 </h2>
 <p>Only contributors changing <code>srcjs/</code> need the JavaScript toolchain. Use the lockfile rather than the upstream <code>latest</code> commands:</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="ex">npm</span> ci</span>
-<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a><span class="ex">npm</span> run build</span>
-<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a><span class="ex">R</span> CMD INSTALL --no-multiarch --with-keep.source .</span></code></pre></div>
-<p>The required order is build first, then install: the R installation copies the newly compiled <code>inst/www</code> assets. Use a Node version accepted by the committed lockfile; the current full build-and-test toolchain supports Node 20.19.x, Node 22.13 or newer, or Node 24 or newer. Node 18 is not sufficient for all locked development dependencies. Ordinary package users should not run these commands.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a><span class="ex">npm</span> ci</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a><span class="ex">npm</span> run build</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a><span class="ex">R</span> CMD INSTALL --no-multiarch --with-keep.source .</span></code></pre></div>
+<p>The required order is build first, then install: the R installation copies the newly compiled <code>inst/www</code> assets. The root <code>package.json</code> and lockfile declare the same Node engine range: <code>^20.19.0 || ^22.12.0 || &gt;=24.0.0</code>. Node 18 and Node 23 do not satisfy that range. These commands are for source contributors, not ordinary package users.</p>
 <p>For the architectural context, see the <a href="shiny-assistant-ui.html">Overview</a>. The source-by-source review status is recorded in <a href="upstream-alignment.html">Upstream documentation alignment</a>.</p>
 </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

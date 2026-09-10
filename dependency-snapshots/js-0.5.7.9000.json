@@ -13,8 +13,8 @@
     "packageEntries": 575
   },
   "artifacts": {
-    "packageJsonSha256": "4ada1a1e1809e9760c0e270f59fe2e3d263ba877ca86d0c7967ccd0150f7bc67",
-    "packageLockSha256": "7fdf2518d7917c7c0d5e4a745f6871119a664f6696bf06a406292678525e6dc9",
+    "packageJsonSha256": "2ebb11e0fde2c22612c214fb9486fd410a4b9fe463b9733ed2c495e6990122b6",
+    "packageLockSha256": "7e4e7d171878f7ec21092c1a8eb384e02d9dc51ebd0822961cb4a5b631526c4f",
     "bundleSha256": "2bdb4a8cfe731e7b4bf2b0480cd1030752b0afe76f312f0c4ed9ade5e55537b3",
     "stylesheetSha256": "bf35b2e78ee8a9a109abdf575fc72c7b111d624eb08da9f0b590bac60707cde9",
     "webAssetFiles": 23,

@@ -70,243 +70,1579 @@
     
     
 <div class="section level2">
-<h2 id="purpose">Purpose<a class="anchor" aria-label="anchor" href="#purpose"></a>
+<h2 id="purpose-and-review-rules">Purpose and review rules<a class="anchor" aria-label="anchor" href="#purpose-and-review-rules"></a>
 </h2>
-<p>This ledger records how shinyAssistantUI evaluates the assistant-ui documentation in official order. A page moves from <strong>Pending</strong> only after its concepts have been checked against the current R, JavaScript, and Shiny architecture. Each record must identify current source evidence and classify missing one-to-one upstream behavior as covered, an architectural choice, not applicable, or a real gap. Later pages are not treated as adopted merely because a related feature already exists.</p>
+<p>This ledger reviews the assistant-ui documentation in the visible sidebar order defined by the upstream <code>meta.json</code> files. It translates relevant concepts to the public R/Shiny package boundary and prevents a React component, similarly named feature, or generic backend callback from being mistaken for a complete integration.</p>
+<p><strong>Reviewed:</strong> 2026-09-10 against the current upstream navigation and the package source using <code>@assistant-ui/react</code> 0.15.17.</p>
+<p>Statuses have strict meanings:</p>
+<ul>
+<li>
+<strong>Adopted</strong> — the upstream behavior is present end to end.</li>
+<li>
+<strong>Adapted</strong> — the user need is met through a deliberate R/Shiny-specific contract.</li>
+<li>
+<strong>Partial</strong> — useful pieces exist, but a required behavior, public extension point, or backend semantic is missing.</li>
+<li>
+<strong>Future plan</strong> — the capability is intentionally visible on the roadmap but is not supported now.</li>
+<li>
+<strong>Not adopted</strong> — an upstream integration exists, but this package has not implemented it.</li>
+<li>
+<strong>Not applicable</strong> — a different platform or ecosystem does not belong in this browser-based Shiny package.</li>
+<li>
+<strong>Maintainer-only</strong> — relevant to the bundled React implementation, not an R user API.</li>
+</ul>
+<p>Three rules apply throughout:</p>
+<ol style="list-style-type: decimal">
+<li>A generic R handler can call many services, but that does not create a first-party adapter for AI SDK, LangGraph, LangChain, AG-UI, A2A, or another protocol.</li>
+<li>A visible component is not proof of complete semantics. For example, the current edit and reload paths truncate a linear message array; a hidden <code>BranchPicker</code> does not preserve alternative branches by itself.</li>
+<li>Public documentation describes portable package contracts only. Worker provisioning, library location, authentication, and deployment topology remain deployment-specific.</li>
+</ol>
 </div>
 <div class="section level2">
-<h2 id="ordered-review-status">Ordered review status<a class="anchor" aria-label="anchor" href="#ordered-review-status"></a>
+<h2 id="selected-architecture">Selected architecture<a class="anchor" aria-label="anchor" href="#selected-architecture"></a>
+</h2>
+<pre class="text"><code>assistant-ui React Web components
+  -&gt; custom ExternalStoreRuntime adapter
+  -&gt; Shiny inputs and custom messages
+  -&gt; assistantUIServer() R callback contract
+  -&gt; ellmer, ClaudeAgentSDK, codeagent, or application-owned R code</code></pre>
+<p>The package does <strong>not</strong> use <code>LocalRuntime</code>, the assistant-ui Data Stream protocol, or Assistant Transport. It uses a native Shiny output binding and an <code>htmlDependency()</code> to ship the compiled web surface. Client, server, or disabled persistence is owned by the package and application, not by Assistant Cloud.</p>
+</div>
+<div class="section level2">
+<h2 id="ordered-family-status">Ordered family status<a class="anchor" aria-label="anchor" href="#ordered-family-status"></a>
 </h2>
 <table class="table">
 <colgroup>
-<col width="25%">
-<col width="18%">
-<col width="18%">
-<col width="18%">
-<col width="18%">
+<col width="40%">
+<col width="30%">
+<col width="30%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Sidebar order</th>
+<th>Family</th>
+<th>Overall result</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Getting Started</td>
+<td>R installation and architecture adapted; RTL partial; CLI user workflow not applicable</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Guides</td>
+<td>Core chat guides mixed: several adopted, several partial, resilience/voice gaps explicit</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Tools</td>
+<td>Shiny-native tool UI adopted; Toolkit/MCP browser ecosystems not adopted; A2UI is a future plan</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Primitives</td>
+<td>Most primitives used internally; public API remains R-level</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Components</td>
+<td>Main thread/composer/tool components adopted; optional add-ons reviewed individually</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Runtimes</td>
+<td>ExternalStore adopted; all named framework/protocol runtimes remain unadopted</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Integrations</td>
+<td>R-native alternatives exist for some needs; no automatic JavaScript ecosystem adapters</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>React Native</td>
+<td>Not applicable</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>Ink</td>
+<td>Not applicable</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Cloud</td>
+<td>Not adopted</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>Utilities</td>
+<td>Optional or not applicable</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Migrations</td>
+<td>Maintainer-only</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>Copilots (experimental)</td>
+<td>Related product ideas, but no public API compatibility</td>
+</tr>
+<tr class="even">
+<td align="right">14</td>
+<td>API Reference</td>
+<td>Internal React implementation map; not converted into R exports</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="getting-started">Getting Started<a class="anchor" aria-label="anchor" href="#getting-started"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
 </colgroup>
 <thead><tr class="header">
 <th align="right">Order</th>
 <th>Official page</th>
 <th>Status</th>
-<th>Local landing point</th>
-<th>Conclusion</th>
+<th>R/Shiny decision</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
 <td align="right">1</td>
 <td>Documentation</td>
-<td>Adopted</td>
-<td>Homepage + <a href="shiny-assistant-ui.html">Overview</a>
-</td>
-<td>React Web + custom <code>ExternalStoreRuntime</code> + Shiny transport</td>
+<td>Adapted</td>
+<td>The local <a href="shiny-assistant-ui.html">Overview</a> starts with a Shiny app and R handler rather than a React scaffold.</td>
 </tr>
 <tr class="even">
 <td align="right">2</td>
 <td>Installation</td>
 <td>Adapted</td>
-<td><a href="installation.html">Installation</a></td>
-<td>R package + bundled web assets + optional R backends; no end-user npm</td>
+<td>The <a href="installation.html">Installation guide</a> installs an R package with bundled assets; npm and shadcn are contributor-only.</td>
 </tr>
 <tr class="odd">
 <td align="right">3</td>
 <td>Agent Skills</td>
-<td>Pending</td>
-<td>—</td>
-<td>Next official page; not yet investigated</td>
+<td>Adapted, distinct</td>
+<td>
+<code><a href="../reference/load_claude_skills.html">load_claude_skills()</a></code> discovers Claude Code skills/commands for the addin menu. It does not install the upstream <code>assistant-ui/skills</code> authoring skills or docs MCP server.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>CLI</td>
+<td>Not applicable to users</td>
+<td>
+<code>assistant-ui init/create/add</code> target JavaScript source projects. R users call package functions; maintainers use the locked npm/Vite build.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Architecture</td>
+<td>Adapted</td>
+<td>UI, runtime, R backend, and persistence remain separate layers; Assistant Cloud is not part of the selected stack.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>RTL Support</td>
+<td>Partial</td>
+<td>Logical CSS utilities and some RTL transforms exist, but there is no public R <code>dir</code> option, direction-provider contract, or complete browser RTL gate.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Radix UI and Base UI</td>
+<td>Maintainer-only</td>
+<td>Component flavor and migration are bundled implementation choices. R users do not configure a shadcn registry.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>DevTools</td>
+<td>Maintainer-only</td>
+<td>The upstream modal exists only in a special development bundle built with <code>AUI_DEVTOOLS=1</code>; it is absent from ordinary package builds.</td>
 </tr>
 </tbody>
 </table>
-<p>The first two pages have been reviewed in official order. A later page advances only after its own upstream and local-source audit.</p>
 </div>
 <div class="section level2">
-<h2 id="record-1-documentation">Record 1 — Documentation<a class="anchor" aria-label="anchor" href="#record-1-documentation"></a>
+<h2 id="guides">Guides<a class="anchor" aria-label="anchor" href="#guides"></a>
 </h2>
-<p><strong>Reviewed:</strong> 2026-09-07</p>
-<p><strong>Upstream page:</strong> <a href="https://www.assistant-ui.com/docs" class="external-link">assistant-ui Documentation</a></p>
-<p><strong>Result:</strong> Adopted; documentation clarification only, with no product-code change.</p>
-<p>The upstream landing page is a map of assistant-ui rather than a single installation recipe. Its Quickstart, surface choices, runtime choices, and links to deeper guides establish four decisions for this package:</p>
-<table class="table">
+<div class="section level3">
+<h3 id="composer">Composer<a class="anchor" aria-label="anchor" href="#composer"></a>
+</h3>
+<table style="width:100%;" class="table">
 <colgroup>
-<col width="33%">
-<col width="33%">
-<col width="33%">
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
 </colgroup>
 <thead><tr class="header">
-<th>Upstream area</th>
-<th>shinyAssistantUI interpretation</th>
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Guides overview</td>
+<td>Adapted</td>
+<td>This ledger, the Overview, examples, and R reference replace React recipe navigation.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>File Attachments</td>
+<td>Adapted</td>
+<td>Composer add/drop/paste, previews, R payloads, and supported backend conversions work; the package does not expose every upstream JavaScript <code>AttachmentAdapter</code> extension point.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Mentions in Chat</td>
+<td>Partial</td>
+<td>Workspace file/folder mentions and IDE context work in the addin. They remain literal backend text and are not the upstream general directive/tool/document protocol.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Slash Commands</td>
+<td>Adapted</td>
+<td>R-configured commands, Claude Code commands/skills, and deterministic local actions share the slash menu. Exact controls are dispatched on submit rather than through the upstream selection-time Action model.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Input History</td>
+<td>Not adopted</td>
+<td>Thread history exists, but ArrowUp/ArrowDown composer recall with draft preservation does not.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Headless Composer Input</td>
+<td>Maintainer-only</td>
+<td>The package owns a Lexical composer internally; it does not expose <code>unstable_useComposerInput</code> as a public R extension point.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Quote Selected Text</td>
+<td>Adopted</td>
+<td>Selection toolbar, quote preview, message metadata, Shiny transport, and backend prompt injection are connected end to end.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>Speech-to-Text Dictation</td>
+<td>Adapted</td>
+<td>Browser Web Speech dictation is wired when supported. No R server-side STT adapter contract is exposed.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level3">
+<h3 id="messages-and-display">Messages and display<a class="anchor" aria-label="anchor" href="#messages-and-display"></a>
+</h3>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">9</td>
+<td>Suggested Prompts</td>
+<td>Adopted</td>
+<td>Static starter prompts plus <code>on_done(suggestions=)</code> and <code>on_suggestions()</code> follow-ups are supported.</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Message Editing</td>
+<td>Partial</td>
+<td>The UI edits and re-submits a user turn after atomically truncating later local messages. Generic persistent backends are not rewound to an earlier checkpoint automatically.</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>Message Branching</td>
+<td>Partial</td>
+<td>Edit/reload and a BranchPicker component exist, but old alternatives are not retained in the package’s linear message array; switchable branch history is not complete.</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Message Timing &amp; Token Stats</td>
+<td>Not adopted</td>
+<td>Optional timestamps and run-level usage are not TTFT, token rate, chunk count, and per-message generation timing.</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>Image Generation</td>
+<td>Adapted</td>
+<td>
+<code>on_image()</code> renders a backend-produced image part. Selecting an image model, generation lifecycle, and regeneration remain application/backend responsibilities.</td>
+</tr>
+<tr class="even">
+<td align="right">14</td>
+<td>Chain of Thought UI</td>
+<td>Adopted</td>
+<td>
+<code>on_thinking()</code> streams reasoning; grouped reasoning and tool calls render in collapsible UI.</td>
+</tr>
+<tr class="odd">
+<td align="right">15</td>
+<td>LaTeX in Chat Messages</td>
+<td>Adopted</td>
+<td>Optional KaTeX with local assets, math normalization, and streaming Markdown rendering is implemented.</td>
+</tr>
+<tr class="even">
+<td align="right">16</td>
+<td>Thread Virtualization</td>
+<td>Not adopted</td>
+<td>Long transcripts are not virtualized with the upstream virtual-message APIs.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level3">
+<h3 id="audio-programmatic-apis-environments-and-resilience">Audio, programmatic APIs, environments, and resilience<a class="anchor" aria-label="anchor" href="#audio-programmatic-apis-environments-and-resilience"></a>
+</h3>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">17</td>
+<td>Realtime Voice Chat</td>
+<td>Not adopted</td>
+<td>Dictation is not a bidirectional realtime voice session with connect, mute, audio streaming, and interruption.</td>
+</tr>
+<tr class="even">
+<td align="right">18</td>
+<td>Text-to-Speech</td>
+<td>Partial</td>
+<td>A browser speech adapter can be configured internally, but the current fixed action bar exposes no Speak/Stop control.</td>
+</tr>
+<tr class="odd">
+<td align="right">19</td>
+<td>Assistant Context API</td>
+<td>Maintainer-only</td>
+<td>React state/context hooks are used inside the compiled widget; they are not public R hooks or component slots.</td>
+</tr>
+<tr class="even">
+<td align="right">20</td>
+<td>ChatGPT Subscription</td>
+<td>Not adopted</td>
+<td>Codex OAuth and the upstream local proxy are not package integrations.</td>
+</tr>
+<tr class="odd">
+<td align="right">21</td>
+<td>Electron</td>
+<td>Not adopted</td>
+<td>A browser surface can theoretically be hosted by Electron, but secure preload/IPC and packaged-app integration are absent.</td>
+</tr>
+<tr class="even">
+<td align="right">22</td>
+<td>Resumable Streams</td>
+<td>Not adopted</td>
+<td>Stored completed history and reconnecting Shiny sessions do not resume an in-flight byte stream.</td>
+</tr>
+<tr class="odd">
+<td align="right">23</td>
+<td>Custom Resumable Stream Stores</td>
+<td>Not adopted</td>
+<td>No resumable-stream cursor/store interface or producer ownership protocol exists.</td>
+</tr>
+<tr class="even">
+<td align="right">24</td>
+<td>Resumable Stream Deployment</td>
+<td>Not adopted</td>
+<td>Tenant keys, TTL, serverless lifetime, observability, and recovery controls for resumable streams are therefore also absent.</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level2">
+<h2 id="tools">Tools<a class="anchor" aria-label="anchor" href="#tools"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Tools overview</td>
+<td>Adapted</td>
+<td>R callbacks and handler factories replace the JavaScript Toolkit authoring model.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Defining Tools</td>
+<td>Adapted</td>
+<td>Backends define tools in their own R APIs and emit <code>on_tool_call()</code> events; no <code>defineToolkit()</code> or <code>"use generative"</code> compiler API is exposed.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Backend Tools</td>
+<td>Adapted</td>
+<td>ellmer, ClaudeAgentSDK, codeagent, and custom R handlers execute backend tools without a Vercel AI SDK route.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Dynamic Tools</td>
+<td>Not adopted</td>
+<td>The package does not expose React-state closures through <code>stubTool()</code>/tool overrides.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Tool UI</td>
+<td>Adopted</td>
+<td>Streaming arguments, fallback cards, dedicated views, results/errors, lazy history, and human approval are connected through Shiny.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Generative UI</td>
+<td>Partial</td>
+<td>A local display allowlist and interactive <code>PromptUser</code> UI exist, but the package does not expose the upstream <code>JSONGenerativeUI</code> Toolkit, default vocabulary, or action registry.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Generative UI on Slack</td>
+<td>Not applicable</td>
+<td>No Slack Block Kit conversion or bot action decoder is part of the package.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>Generative UI on Teams</td>
+<td>Not applicable</td>
+<td>No Adaptive Card conversion or Teams bot action decoder is part of the package.</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>Generative UI primitive</td>
+<td>Adopted</td>
+<td>
+<code>on_generative_ui(spec)</code> renders a JSON layout through <code>MessagePrimitive.GenerativeUI</code> and a fixed display-only allowlist.</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Interactable Tool UIs</td>
+<td>Not adopted</td>
+<td>Artifact/data views are not versioned model-editable state with companion tools.</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>A2UI over AG-UI</td>
+<td><strong>Future plan</strong></td>
+<td>Evaluate an optional A2UI surface-operation converter and action bridge while retaining the Shiny transport and current Data/Generative UI paths. No current A2UI or AG-UI support is claimed.</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>OpenUI</td>
+<td>Not adopted</td>
+<td>No OpenUI Lang renderer or transport dependency is bundled.</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>Model Context Protocol</td>
+<td>Partial, backend-only</td>
+<td>Selected backends may expose MCP tools, which render as ordinary tool calls. The browser package has no general MCP client/toolkit.</td>
+</tr>
+<tr class="even">
+<td align="right">14</td>
+<td>User-managed MCP servers</td>
+<td>Not adopted</td>
+<td>Browser-managed servers, connector UI, OAuth, and storage are absent.</td>
+</tr>
+<tr class="odd">
+<td align="right">15</td>
+<td>MCP Apps</td>
+<td>Not adopted</td>
+<td>Sandboxed HTML results are not MCP resources and do not implement the MCP Apps JSON-RPC host bridge.</td>
+</tr>
+<tr class="even">
+<td align="right">16</td>
+<td>Multi-Agent Chat UI</td>
+<td>Partial</td>
+<td>Task/subagent cards and nested tool depth exist, but recursive read-only sub-conversations in tool parts are not implemented.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="primitives">Primitives<a class="anchor" aria-label="anchor" href="#primitives"></a>
+</h2>
+<p>These React primitives are implementation building blocks, not standalone R exports.</p>
+<table class="table">
+<colgroup>
+<col width="40%">
+<col width="30%">
+<col width="30%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status inside the widget</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Overview</td>
+<td>Maintainer-only mapping to the integrated R widget</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Composer</td>
+<td>Adopted</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Thread</td>
+<td>Adopted</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Message</td>
+<td>Adopted</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>ActionBar</td>
+<td>Adapted; copy/reload/edit/feedback/export are used, speech actions are absent</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>BranchPicker</td>
+<td>Partial; component present, persistent alternative branches absent</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>ThreadList</td>
+<td>Adapted for client/server package persistence</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>AssistantModal</td>
+<td>Adopted through <code>modal = TRUE</code>
+</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>Attachment</td>
+<td>Adopted within the package’s supported attachment types</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Suggestion</td>
+<td>Adopted</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>SelectionToolbar</td>
+<td>Adopted for quoting</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Error</td>
+<td>Adopted</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>ChainOfThought</td>
+<td>Adopted through current grouped-parts APIs</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="components">Components<a class="anchor" aria-label="anchor" href="#components"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Thread</td>
+<td>Adopted</td>
+<td>Main integrated chat surface.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Assistant Modal</td>
+<td>Adopted</td>
+<td>Public <code>modal = TRUE</code> mode.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Assistant Sidebar</td>
+<td>Not adopted</td>
+<td>The local sidebar is thread navigation/settings, not the upstream resizable chat-side-panel composition.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Attachment</td>
+<td>Adopted</td>
+<td>Composer and user-message attachment UI.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Composer Trigger Popover</td>
+<td>Adapted</td>
+<td>Slash commands and workspace mentions.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Context Display</td>
+<td>Adapted</td>
+<td>R usage callbacks drive ring/bar/text context views.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Directive Text</td>
+<td>Partial</td>
+<td>Directive chips exist in the composer; sent-message directives are not rendered through the upstream general directive component.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>Custom Scrollbar</td>
+<td>Not adopted</td>
+<td>Standard browser overflow is used.</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>File</td>
+<td>Partial</td>
+<td>Files appear as attachments or downloadable tool results; a general file message-part renderer is not wired.</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Follow-up Suggestions</td>
+<td>Adopted</td>
+<td>R callbacks update per-thread suggestions.</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>Image</td>
+<td>Partial</td>
+<td>Inline images render, without the full upstream loading/fullscreen/action composition.</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Markdown Text</td>
+<td>Adopted</td>
+<td>GFM, links, tables, code, optional math, and safe rendering.</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>MCP Config</td>
+<td>Not adopted</td>
+<td>No browser MCP manager/config dialog.</td>
+</tr>
+<tr class="even">
+<td align="right">14</td>
+<td>Mermaid Diagram</td>
+<td>Not adopted</td>
+<td>Data UI flow diagrams are not Mermaid parsing/rendering.</td>
+</tr>
+<tr class="odd">
+<td align="right">15</td>
+<td>Model Selector</td>
+<td>Adapted</td>
+<td>Capability-driven model choices and backend acknowledgement are supported where a handler advertises them.</td>
+</tr>
+<tr class="even">
+<td align="right">16</td>
+<td>Quote</td>
+<td>Adopted</td>
+<td>Selection, preview, transport, and display.</td>
+</tr>
+<tr class="odd">
+<td align="right">17</td>
+<td>Reasoning</td>
+<td>Adopted</td>
+<td>Streaming and grouped collapsible reasoning.</td>
+</tr>
+<tr class="even">
+<td align="right">18</td>
+<td>Sources</td>
+<td>Partial</td>
+<td>
+<code>on_source()</code> creates safe clickable citation pills, not the complete favicon/document-source component family.</td>
+</tr>
+<tr class="odd">
+<td align="right">19</td>
+<td>Streamdown</td>
+<td>Not adopted</td>
+<td>The package uses its existing React Markdown pipeline.</td>
+</tr>
+<tr class="even">
+<td align="right">20</td>
+<td>Syntax Highlighting</td>
+<td>Adopted</td>
+<td>A bounded Prism language set includes R and common tool languages.</td>
+</tr>
+<tr class="odd">
+<td align="right">21</td>
+<td>Thread List</td>
+<td>Adapted</td>
+<td>Create, switch, rename, archive, delete, load, and persistence are Shiny-specific.</td>
+</tr>
+<tr class="even">
+<td align="right">22</td>
+<td>Tool Fallback</td>
+<td>Adapted</td>
+<td>Shiny tool cards provide status, arguments, results, errors, approval, and lazy results.</td>
+</tr>
+<tr class="odd">
+<td align="right">23</td>
+<td>Tool Group</td>
+<td>Adopted</td>
+<td>Consecutive tool parts can be grouped through current grouped-parts APIs.</td>
+</tr>
+<tr class="even">
+<td align="right">24</td>
+<td>Voice</td>
+<td>Partial</td>
+<td>Dictation only; no realtime voice session UI.</td>
+</tr>
+<tr class="odd">
+<td align="right">25</td>
+<td>Message Timing</td>
+<td>Not adopted</td>
+<td>Timestamps/tool durations do not satisfy the upstream metrics contract.</td>
+</tr>
+<tr class="even">
+<td align="right">26</td>
+<td>Message Part Grouping</td>
+<td>Adopted</td>
+<td>Current <code>MessagePrimitive.GroupedParts</code> is used for reasoning and tool groups.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="runtimes">Runtimes<a class="anchor" aria-label="anchor" href="#runtimes"></a>
+</h2>
+<div class="section level3">
+<h3 id="runtime-concepts-and-custom-backends">Runtime concepts and custom backends<a class="anchor" aria-label="anchor" href="#runtime-concepts-and-custom-backends"></a>
+</h3>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Picking a runtime</td>
+<td>Adapted</td>
+<td>The package has already selected ExternalStoreRuntime plus Shiny transport.</td>
+</tr>
+<tr class="even">
+<td align="right">2.1</td>
+<td>Runtime architecture</td>
+<td>Adopted concept</td>
+<td>UI, runtime, transport, backend, and persistence ownership are documented separately.</td>
+</tr>
+<tr class="odd">
+<td align="right">2.2</td>
+<td>Adapters</td>
+<td>Partial</td>
+<td>Attachments, speech, feedback, history, and suggestions have local equivalents, but not every upstream adapter contract is public.</td>
+</tr>
+<tr class="even">
+<td align="right">2.3</td>
+<td>Threads</td>
+<td>Adapted</td>
+<td>Package-owned client/server/none persistence replaces Cloud/RemoteThreadList patterns.</td>
+</tr>
+<tr class="odd">
+<td align="right">2.4</td>
+<td>Stability</td>
+<td>Maintainer-only</td>
+<td>Upstream experimental/stable labels guide dependency upgrades.</td>
+</tr>
+<tr class="even">
+<td align="right">3.1</td>
+<td>Custom Runtime overview</td>
+<td>Adapted</td>
+<td>Only the ExternalStore route is selected.</td>
+</tr>
+<tr class="odd">
+<td align="right">3.2</td>
+<td>LocalRuntime</td>
+<td>Not adopted</td>
+<td>An R callback is not a JavaScript <code>ChatModelAdapter</code>.</td>
+</tr>
+<tr class="even">
+<td align="right">3.3</td>
+<td>ExternalStoreRuntime</td>
+<td>Adopted</td>
+<td>The package owns message/thread/run state and provides edit/reload/new-message callbacks.</td>
+</tr>
+<tr class="odd">
+<td align="right">3.4</td>
+<td>Data Stream Protocol</td>
+<td>Not adopted</td>
+<td>Shiny chunk/tool messages do not implement the Data Stream wire format.</td>
+</tr>
+<tr class="even">
+<td align="right">3.5</td>
+<td>Assistant Transport</td>
+<td>Not adopted</td>
+<td>The Shiny bridge does not implement Assistant Transport state snapshots, commands, and converters.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level3">
+<h3 id="named-runtime-integrations">Named runtime integrations<a class="anchor" aria-label="anchor" href="#named-runtime-integrations"></a>
+</h3>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
 <th>Decision</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td>Quickstart</td>
-<td>Start with a minimal Shiny app and an R handler</td>
-<td>Document in the Overview</td>
+<td align="right">4.1</td>
+<td>AI SDK overview</td>
+<td>Not adopted</td>
+<td>No <code>@assistant-ui/ai-sdk</code> runtime.</td>
 </tr>
 <tr class="even">
-<td>Surface choices</td>
-<td>Use the existing React Web surface inside an htmlwidget</td>
-<td>Keep; React Native and Ink are out of scope</td>
+<td align="right">4.2</td>
+<td>AI SDK v7</td>
+<td>Not adopted</td>
+<td>R/Shiny messages are not AI SDK UIMessage transport.</td>
 </tr>
 <tr class="odd">
-<td>Runtime choices</td>
-<td>Use the package’s custom <code>ExternalStoreRuntime</code> and R server bridge</td>
-<td>Keep; “your own server” is the closest upstream model</td>
+<td align="right">4.3</td>
+<td>AI SDK v6 legacy</td>
+<td>Not adopted</td>
+<td>Legacy integration is not bundled.</td>
 </tr>
 <tr class="even">
-<td>Quick links</td>
-<td>Route users to Overview, articles, reference, and changelog</td>
-<td>Represent in pkgdown navigation</td>
+<td align="right">4.4</td>
+<td>AI SDK v5 legacy</td>
+<td>Not adopted</td>
+<td>Legacy integration is not bundled.</td>
+</tr>
+<tr class="odd">
+<td align="right">4.5</td>
+<td>AI SDK v4 legacy</td>
+<td>Not adopted</td>
+<td>Its data-stream route is also not bundled.</td>
+</tr>
+<tr class="even">
+<td align="right">5.1</td>
+<td>Eve overview</td>
+<td>Not adopted</td>
+<td>No Eve channel/session converter.</td>
+</tr>
+<tr class="odd">
+<td align="right">5.2</td>
+<td>Eve quickstart</td>
+<td>Not adopted</td>
+<td>Eve CLI/Next.js setup is outside the R package.</td>
+</tr>
+<tr class="even">
+<td align="right">6.1</td>
+<td>LangGraph overview</td>
+<td>Not adopted</td>
+<td>No LangGraph SDK runtime or graph-state converter.</td>
+</tr>
+<tr class="odd">
+<td align="right">6.2</td>
+<td>LangGraph quickstart</td>
+<td>Not adopted</td>
+<td>No <code>useLangGraphRuntime</code> path.</td>
+</tr>
+<tr class="even">
+<td align="right">6.3</td>
+<td>LangGraph streaming</td>
+<td>Not adopted</td>
+<td>Shiny events are not LangGraph event streams.</td>
+</tr>
+<tr class="odd">
+<td align="right">6.4</td>
+<td>LangGraph Generative UI</td>
+<td>Not adopted</td>
+<td>Local <code>on_data_ui()</code>/<code>on_generative_ui()</code> are not a LangGraph adapter.</td>
+</tr>
+<tr class="even">
+<td align="right">6.5</td>
+<td>LangGraph interrupts and editing</td>
+<td>Not adopted</td>
+<td>Local approvals/edits have no checkpoint semantics.</td>
+</tr>
+<tr class="odd">
+<td align="right">6.6</td>
+<td>LangGraph threads</td>
+<td>Not adopted</td>
+<td>Package thread IDs are not LangGraph thread lifecycle.</td>
+</tr>
+<tr class="even">
+<td align="right">6.7</td>
+<td>LangGraph agent state</td>
+<td>Not adopted</td>
+<td>Similar local state snapshots are not AG/LangGraph protocol compatibility.</td>
+</tr>
+<tr class="odd">
+<td align="right">6.8.1</td>
+<td>LangGraph tutorial introduction</td>
+<td>Not applicable now</td>
+<td>Depends on the unadopted runtime.</td>
+</tr>
+<tr class="even">
+<td align="right">6.8.2</td>
+<td>Tutorial: setup frontend</td>
+<td>Not applicable now</td>
+<td>Next.js template setup is not an R installation path.</td>
+</tr>
+<tr class="odd">
+<td align="right">6.8.3</td>
+<td>Tutorial: generative UI</td>
+<td>Not applicable now</td>
+<td>Local data UI does not establish LangGraph tool binding.</td>
+</tr>
+<tr class="even">
+<td align="right">6.8.4</td>
+<td>Tutorial: approval UI</td>
+<td>Not applicable now</td>
+<td>Local approval cards are not LangGraph interrupt/resume.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>LangChain React Runtime</td>
+<td>Not adopted</td>
+<td>No <code>@assistant-ui/react-langchain</code>; ellmer is not JavaScript LangChain.</td>
+</tr>
+<tr class="even">
+<td align="right">8.1</td>
+<td>Google ADK overview</td>
+<td>Not adopted</td>
+<td>No ADK event/session schema.</td>
+</tr>
+<tr class="odd">
+<td align="right">8.2</td>
+<td>Google ADK quickstart</td>
+<td>Not adopted</td>
+<td>No ADK route/stream/runtime helpers.</td>
+</tr>
+<tr class="even">
+<td align="right">8.3</td>
+<td>Google ADK API reference</td>
+<td>Not adopted</td>
+<td>Local session loaders are not ADK adapters.</td>
+</tr>
+<tr class="odd">
+<td align="right">8.4</td>
+<td>Google ADK hooks</td>
+<td>Not adopted</td>
+<td>Similar callbacks do not implement typed ADK events.</td>
+</tr>
+<tr class="even">
+<td align="right">9.1</td>
+<td>A2A overview</td>
+<td>Not adopted</td>
+<td>No A2A v1.0 client/task/artifact state machine.</td>
+</tr>
+<tr class="odd">
+<td align="right">9.2</td>
+<td>A2A quickstart</td>
+<td>Not adopted</td>
+<td>A generic R HTTP handler is not <code>useA2ARuntime</code>.</td>
+</tr>
+<tr class="even">
+<td align="right">9.3</td>
+<td>A2A client and hooks</td>
+<td>Not adopted</td>
+<td>No A2A JSON/SSE/ProtoJSON client.</td>
+</tr>
+<tr class="odd">
+<td align="right">10.1</td>
+<td>AG-UI overview</td>
+<td>Not adopted</td>
+<td>No AG-UI client or event converter.</td>
+</tr>
+<tr class="even">
+<td align="right">10.2</td>
+<td>AG-UI quickstart</td>
+<td>Not adopted</td>
+<td>Shiny transport is not AG-UI wire compatibility.</td>
+</tr>
+<tr class="odd">
+<td align="right">10.3</td>
+<td>AG-UI runtime options</td>
+<td>Not adopted</td>
+<td>Threads, steering, and interrupt metadata are different contracts.</td>
+</tr>
+<tr class="even">
+<td align="right">10.4</td>
+<td>AG-UI agent state</td>
+<td>Not adopted</td>
+<td>Local state messages are not <code>STATE_SNAPSHOT/STATE_DELTA</code> events.</td>
+</tr>
+<tr class="odd">
+<td align="right">11.1</td>
+<td>OpenCode overview</td>
+<td>Not adopted</td>
+<td>OpenCode has its own SDK/runtime; the R package named codeagent is unrelated.</td>
+</tr>
+<tr class="even">
+<td align="right">11.2</td>
+<td>OpenCode quickstart</td>
+<td>Not adopted</td>
+<td>No OpenCode server/client runtime.</td>
+</tr>
+<tr class="odd">
+<td align="right">11.3</td>
+<td>OpenCode hooks</td>
+<td>Not adopted</td>
+<td>Local permissions/questions do not implement OpenCode hooks.</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Claude Managed Agents</td>
+<td>Not adopted</td>
+<td>
+<code><a href="../reference/make_claude_handler.html">make_claude_handler()</a></code> drives ClaudeAgentSDK/CLI, not hosted Managed Agents sessions and event logs.</td>
 </tr>
 </tbody>
 </table>
-<div class="section level3">
-<h3 id="architecture-alignment">Architecture alignment<a class="anchor" aria-label="anchor" href="#architecture-alignment"></a>
-</h3>
-<pre class="text"><code>assistant-ui React Web
-  + custom ExternalStoreRuntime
-  + Shiny R &lt;-&gt; JavaScript transport
-  + backend-agnostic R handler</code></pre>
-<p>This combination is intentional. The custom runtime is the adapter between assistant-ui’s React state and Shiny’s event channel; it does not require a hosted assistant-ui backend. ClaudeAgentSDK, ellmer, and custom handlers are integration choices above that bridge.</p>
-</div>
-<div class="section level3">
-<h3 id="explicit-non-requirements">Explicit non-requirements<a class="anchor" aria-label="anchor" href="#explicit-non-requirements"></a>
-</h3>
-<p>The first page does not create a requirement to support every surface or install every listed adapter. For shinyAssistantUI:</p>
-<ul>
-<li>React Native and Ink do not match the package’s browser-based Shiny surface.</li>
-<li>AG-UI, A2A, A2UI, and other runtime adapters are not installed by this work.</li>
-<li>The existing Shiny transport and <code>ExternalStoreRuntime</code> are not replaced.</li>
-<li>No Installation article is authored before the second official page is reviewed.</li>
-</ul>
-</div>
-<div class="section level3">
-<h3 id="local-evidence">Local evidence<a class="anchor" aria-label="anchor" href="#local-evidence"></a>
-</h3>
-<p>The mapping is represented in three durable places:</p>
-<ol style="list-style-type: decimal">
-<li>The pkgdown homepage states the package’s React Web, Shiny, and backend-agnostic position.</li>
-<li>The <a href="shiny-assistant-ui.html">Overview</a> provides a minimal app and concept mapping.</li>
-<li>The reference index groups all current documented package topics by user task.</li>
-</ol>
 </div>
 </div>
 <div class="section level2">
-<h2 id="record-2-installation">Record 2 — Installation<a class="anchor" aria-label="anchor" href="#record-2-installation"></a>
+<h2 id="integrations">Integrations<a class="anchor" aria-label="anchor" href="#integrations"></a>
 </h2>
-<p><strong>Reviewed:</strong> 2026-09-07</p>
-<p><strong>Upstream page:</strong> <a href="https://www.assistant-ui.com/docs/installation" class="external-link">assistant-ui Installation</a></p>
-<p><strong>Result:</strong> Adapted to the R package boundary; documentation changes only.</p>
-<p>The upstream page assumes a React application assembled with the assistant-ui CLI or shadcn, npm packages, a JavaScript AI SDK endpoint, environment credentials, and an explicit React runtime provider. The current shinyAssistantUI package was checked rather than treating those assumptions as universal requirements.</p>
-<div class="section level3">
-<h3 id="source-coverage">Source coverage<a class="anchor" aria-label="anchor" href="#source-coverage"></a>
-</h3>
-<table class="table">
+<table style="width:100%;" class="table">
 <colgroup>
-<col width="33%">
-<col width="33%">
-<col width="33%">
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
 </colgroup>
 <thead><tr class="header">
-<th>Installation concern</th>
-<th>Local source evidence</th>
-<th>Finding</th>
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td>Browser bundle</td>
-<td>
-<code>R/assistantUI.R</code> resolves JS/CSS/KaTeX from installed <code>inst/www</code>
-</td>
-<td>Users already receive the compiled surface</td>
+<td align="right">1</td>
+<td>Integrations overview</td>
+<td>Adapted concept</td>
+<td>Runtime and backend infrastructure remain separate, but no third-party adapter is implied.</td>
 </tr>
 <tr class="even">
-<td>Runtime wiring</td>
-<td>
-<code><a href="../reference/assistantUIOutput.html">assistantUIOutput()</a></code> and <code><a href="../reference/assistantUIServer.html">assistantUIServer()</a></code> connect Shiny to <code>ExternalStoreRuntime</code>
-</td>
-<td>No React provider code required in the app</td>
+<td align="right">2.1</td>
+<td>Vercel AI SDK</td>
+<td>Not adopted</td>
+<td>No AI SDK runtime/package.</td>
 </tr>
 <tr class="odd">
-<td>Backend endpoint</td>
-<td>
-<code><a href="../reference/assistantUIServer.html">assistantUIServer()</a></code> invokes a callback contract</td>
-<td>R handler replaces the Next.js API route</td>
+<td align="right">2.2</td>
+<td>Cloudflare Agents</td>
+<td>Not adopted</td>
+<td>No Durable Object/WebSocket AI SDK integration.</td>
 </tr>
 <tr class="even">
-<td>Optional providers</td>
-<td>DESCRIPTION Suggests plus Claude, ellmer, and codeagent handler factories</td>
-<td>Install only the selected backend</td>
+<td align="right">2.3.1</td>
+<td>Mastra overview</td>
+<td>Not adopted</td>
+<td>No Mastra or AI SDK bridge.</td>
 </tr>
 <tr class="odd">
-<td>Thread navigation and modal</td>
-<td>
-<code>show_thread_list</code> and <code>modal</code> server/output options</td>
-<td>Existing source features, now exposed in installation docs</td>
+<td align="right">2.3.2</td>
+<td>Mastra full-stack</td>
+<td>Not applicable</td>
+<td>Next.js co-located route architecture is not the Shiny server.</td>
 </tr>
 <tr class="even">
-<td>Contributor rebuild</td>
-<td>
-<code>package.json</code>, lockfile, Vite build, then R installation</td>
-<td>Node/npm belong to source development only</td>
+<td align="right">2.3.3</td>
+<td>Mastra separate server</td>
+<td>Not adopted</td>
+<td>No Mastra AssistantTransport client.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>LLM Gateways</td>
+<td>Backend-owned, not an adapter</td>
+<td>Applications may configure compatible R clients, but the package does not claim named gateway integrations.</td>
+</tr>
+<tr class="even">
+<td align="right">4.1</td>
+<td>Helicone</td>
+<td>Not adopted</td>
+<td>No built-in proxy/telemetry wiring.</td>
+</tr>
+<tr class="odd">
+<td align="right">4.2</td>
+<td>Langfuse</td>
+<td>Not adopted</td>
+<td>No AI SDK/OpenTelemetry integration.</td>
+</tr>
+<tr class="even">
+<td align="right">4.3</td>
+<td>LangSmith</td>
+<td>Not adopted</td>
+<td>No AI SDK wrapper or LangGraph integration.</td>
+</tr>
+<tr class="odd">
+<td align="right">5.1</td>
+<td>Clerk</td>
+<td>Not applicable</td>
+<td>Host deployment authentication is not a Clerk/Next.js adapter.</td>
+</tr>
+<tr class="even">
+<td align="right">5.2</td>
+<td>better-auth</td>
+<td>Not applicable</td>
+<td>Shiny sessions are not better-auth sessions.</td>
+</tr>
+<tr class="odd">
+<td align="right">5.3</td>
+<td>Auth.js</td>
+<td>Not applicable</td>
+<td>No Auth.js route/session integration.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Custom thread persistence</td>
+<td>Adapted</td>
+<td>Client storage, server loaders, and R stores meet related needs but do not implement <code>RemoteThreadListAdapter</code>/<code>ThreadHistoryAdapter</code>.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Custom attachment uploads</td>
+<td>Partial</td>
+<td>Built-in attachment transfer works; presigned object-storage upload/cancel/remove is not provided.</td>
 </tr>
 </tbody>
 </table>
-</div>
-<div class="section level3">
-<h3 id="omission-classification">Omission classification<a class="anchor" aria-label="anchor" href="#omission-classification"></a>
-</h3>
-<table class="table">
-<colgroup>
-<col width="33%">
-<col width="33%">
-<col width="33%">
-</colgroup>
-<thead><tr class="header">
-<th>Difference from upstream</th>
-<th>Classification</th>
-<th>Reason</th>
-</tr></thead>
-<tbody>
-<tr class="odd">
-<td>No assistant-ui CLI or shadcn command for users</td>
-<td>Architecture choice</td>
-<td>The component tree is maintained and compiled inside the R package</td>
-</tr>
-<tr class="even">
-<td>No JavaScript AI SDK provider matrix</td>
-<td>Ecosystem adaptation</td>
-<td>R integrations use ellmer, ClaudeAgentSDK, codeagent, or the generic handler contract</td>
-</tr>
-<tr class="odd">
-<td>No single required API key</td>
-<td>Architecture choice</td>
-<td>Credentials are owned by the selected backend; a custom handler may need none</td>
-</tr>
-<tr class="even">
-<td>No CRAN/stable package-manager route</td>
-<td>Real distribution gap</td>
-<td>The current public route is the GitHub development repository</td>
-</tr>
-<tr class="odd">
-<td>No declared minimum supported R version</td>
-<td>Real metadata/test gap</td>
-<td>No compatibility matrix supports a truthful version promise yet</td>
-</tr>
-<tr class="even">
-<td>Remote codeagent cannot receive live host-defined tools</td>
-<td>Real implementation limitation</td>
-<td>Live ellmer chat objects are not serializable across the worker boundary</td>
-</tr>
-</tbody>
-</table>
-<p>The audit found no missing installation step needed to make the existing core surface load from an installed package. It did find documentation omissions—the bundled asset boundary, optional backend prerequisites, existing thread-list/modal entry points, and contributor-only Node workflow—which are now covered by the <a href="installation.html">Installation guide</a>. The three real gaps remain explicit; this review does not claim to implement them.</p>
-</div>
 </div>
 <div class="section level2">
-<h2 id="next-review-boundary">Next review boundary<a class="anchor" aria-label="anchor" href="#next-review-boundary"></a>
+<h2 id="react-native-and-ink">React Native and Ink<a class="anchor" aria-label="anchor" href="#react-native-and-ink"></a>
 </h2>
-<p><code>Agent Skills</code> is now the next official page and remains <strong>Pending</strong>. Its upstream behavior and the current <code><a href="../reference/load_claude_skills.html">load_claude_skills()</a></code>/connected-CLI paths must be investigated in a separate source audit before its status changes.</p>
+<p>Both families are <strong>Not applicable</strong> to a browser-based native Shiny output binding. Their index, migration, custom-backend, primitives, hooks, and adapters pages describe separate <code>@assistant-ui/react-native</code> or <code>@assistant-ui/react-ink</code> applications. Shared runtime ideas do not make native views, terminal components, or their adapters part of this R package.</p>
+</div>
+<div class="section level2">
+<h2 id="cloud">Cloud<a class="anchor" aria-label="anchor" href="#cloud"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>Decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Cloud Persistence</td>
+<td>Future option, not adopted</td>
+<td>Existing package persistence is not Assistant Cloud.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>AI SDK</td>
+<td>Not adopted</td>
+<td>Requires an unadopted AI SDK/Cloud stack.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>AI SDK + assistant-ui</td>
+<td>Not adopted</td>
+<td>Cloud-backed hooks do not replace the Shiny ExternalStore bridge.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>LangGraph + assistant-ui</td>
+<td>Not adopted</td>
+<td>Requires the unadopted LangGraph runtime.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>User Authorization</td>
+<td>Future security design</td>
+<td>A hosted Cloud token/workspace model would require a separate public integration and threat review.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="utilities">Utilities<a class="anchor" aria-label="anchor" href="#utilities"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>Decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>heat-graph</td>
+<td>Not applicable</td>
+<td>Standalone React activity visualization, not a current R wrapper.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>tw-shimmer</td>
+<td>Maintainer option</td>
+<td>A CSS plugin is not an end-user package capability.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>react-o11y</td>
+<td>Future option</td>
+<td>Trace visualization would require an explicit R/backend span contract.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="migrations">Migrations<a class="anchor" aria-label="anchor" href="#migrations"></a>
+</h2>
+<p>All migration pages are <strong>Maintainer-only</strong> unless noted. R users receive a precompiled bundle and do not run React codemods.</p>
+<table class="table">
+<colgroup>
+<col width="40%">
+<col width="30%">
+<col width="30%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Migration Guides</td>
+<td>Upstream maintenance index.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Deprecation Policy</td>
+<td>Governance input; it does not replace this package’s R lifecycle policy.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Tools to Toolkits</td>
+<td>Not applied to the public R callback contract.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Migration to v0.11</td>
+<td>Current source already uses MessagePart-era concepts.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Migration to v0.12</td>
+<td>Current internal runtime/state APIs have been updated where used.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Migration to v0.14</td>
+<td>Relevant component changes are absorbed in the bundled tree.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Migration to v0.15</td>
+<td>Current package pins the 0.15 line.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>react-langgraph v0.7</td>
+<td>Not applicable because LangGraph is not adopted.</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>Old React versions</td>
+<td>Contributors follow the lockfile; R users do not provide React.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="copilots-experimental">Copilots (experimental)<a class="anchor" aria-label="anchor" href="#copilots-experimental"></a>
+</h2>
+<table style="width:100%;" class="table">
+<colgroup>
+<col width="30%">
+<col width="23%">
+<col width="23%">
+<col width="23%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Order</th>
+<th>Official page</th>
+<th>Status</th>
+<th>R/Shiny decision</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Intelligent Components</td>
+<td>Partial concept</td>
+<td>The addin has IDE context and tools, but no compatibility with the experimental Copilots API.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td><code>makeAssistantVisible</code></td>
+<td>Not adopted</td>
+<td>Arbitrary host Shiny DOM is not serialized into model-readable/editable components.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td><code>useAssistantInstructions</code></td>
+<td>Backend-owned equivalent</td>
+<td>Handler/provider instructions may be configured in R; the React hook is not exported.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Model Context</td>
+<td>Partial</td>
+<td>Selected IDE context and capability metadata use a narrower Shiny-owned protocol.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>Assistant Frame API</td>
+<td>Not adopted</td>
+<td>Sandboxed artifact iframes are not an Assistant Frame model-context bridge.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="api-reference-boundary">API Reference boundary<a class="anchor" aria-label="anchor" href="#api-reference-boundary"></a>
+</h2>
+<p>The upstream API Reference documents React packages. The public R API remains the package reference for <code><a href="../reference/assistantUIOutput.html">assistantUIOutput()</a></code>, <code><a href="../reference/assistantUIServer.html">assistantUIServer()</a></code>, handler factories, stores, themes, addins, session loaders, tool-view configuration, and plotting helpers.</p>
+<table class="table">
+<colgroup>
+<col width="40%">
+<col width="30%">
+<col width="30%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">API family order</th>
+<th>Upstream child pages</th>
+<th>Local classification</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>Overview</td>
+<td>Architecture mapping only; not an R export catalog.</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>Tools: overview, toolkits, component tools, rendering, status, interactables, legacy interactables</td>
+<td>Rendering/status map to R callbacks; toolkits/interactables are not exposed.</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Model Context: overview, context, registry</td>
+<td>Partial concept mapping; React registries remain internal.</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Transport: overview, Assistant Transport, Assistant Frame</td>
+<td>Shiny transport is custom and is not protocol-compatible with either named API.</td>
+</tr>
+<tr class="odd">
+<td align="right">5</td>
+<td>External Store: overview, message conversion, runtime</td>
+<td>Closest internal mapping; React types/helpers are not public R objects.</td>
+</tr>
+<tr class="even">
+<td align="right">6</td>
+<td>Voice: overview, sessions, speech/dictation</td>
+<td>Dictation is adapted; speech UI partial; realtime sessions absent.</td>
+</tr>
+<tr class="odd">
+<td align="right">7</td>
+<td>Generative UI: overview, JSONGenerativeUI, components, actions, spec, rendering, Slack, Teams, A2UI, tokens</td>
+<td>Local primitive/data callbacks are narrower; A2UI remains a future plan.</td>
+</tr>
+<tr class="even">
+<td align="right">8</td>
+<td>Primitives: all primitive pages</td>
+<td>Internal building blocks configured through whole-widget R options/callbacks.</td>
+</tr>
+<tr class="odd">
+<td align="right">9</td>
+<td>Hooks: overview, composer triggers, model context, primitives, runtimes, state</td>
+<td>Internal React lifecycle/state APIs only.</td>
+</tr>
+<tr class="even">
+<td align="right">10</td>
+<td>Adapters: overview, attachments, feedback, model, persistence, runtime, suggestions</td>
+<td>Several needs have Shiny-native equivalents; interfaces are not R exports.</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>Runtimes: assistant, attachment, composer, message part, message, queue, thread list/item/thread</td>
+<td>Internal state machine only.</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Context Providers: overview, AssistantRuntimeProvider, scoped providers</td>
+<td>Mounted internally by the widget.</td>
+</tr>
+<tr class="odd">
+<td align="right">13</td>
+<td>Integrations: overview, AI SDK, data stream, Cloud AI SDK, Eve</td>
+<td>Not adopted.</td>
+</tr>
+<tr class="even">
+<td align="right">14</td>
+<td>Utilities: overview, miscellaneous</td>
+<td>Internal or not exposed.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="indexed-pages-outside-the-current-sidebar">Indexed pages outside the current sidebar<a class="anchor" aria-label="anchor" href="#indexed-pages-outside-the-current-sidebar"></a>
+</h2>
+<p>The upstream index also exposes pages that are not currently in the visible root navigation. Their status follows the same evidence: WebMCP is not adopted; Vue is a separate, not-applicable surface; Streamdown, Mermaid, custom scrollbar, message timing, and part grouping are already classified above through their visible component pages. Examples and design-system catalogs are inspiration, not automatic package commitments.</p>
+</div>
+<div class="section level2">
+<h2 id="current-gaps-and-future-plans">Current gaps and future plans<a class="anchor" aria-label="anchor" href="#current-gaps-and-future-plans"></a>
+</h2>
+<p>A2UI is the explicit future protocol plan: it is not a current AG-UI or A2UI integration. True branching remains partial because edit/reload currently replaces the linear message tail rather than preserving switchable alternatives. AI SDK, LangGraph, LangChain, A2A, AG-UI, OpenCode, and the other named runtimes remain unadopted until their protocol and lifecycle contracts are implemented and verified, not merely called through a generic R handler.</p>
+<table class="table">
+<colgroup>
+<col width="40%">
+<col width="30%">
+<col width="30%">
+</colgroup>
+<thead><tr class="header">
+<th align="right">Priority</th>
+<th>Item</th>
+<th>Current boundary</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td align="right">Future plan</td>
+<td>A2UI</td>
+<td>Add only after a Shiny-facing contract, surface lifecycle/history, action security, optional dependency review, and browser tests exist.</td>
+</tr>
+<tr class="even">
+<td align="right">Gap</td>
+<td>True branching</td>
+<td>Preserve and switch alternative message/backend histories instead of truncating a linear array.</td>
+</tr>
+<tr class="odd">
+<td align="right">Gap</td>
+<td>Resumable streams</td>
+<td>Resume in-flight output across disconnects; completed history reload is not sufficient.</td>
+</tr>
+<tr class="even">
+<td align="right">Gap</td>
+<td>Long-thread virtualization</td>
+<td>Avoid mounting an entire very long transcript.</td>
+</tr>
+<tr class="odd">
+<td align="right">Gap</td>
+<td>Realtime voice and speech controls</td>
+<td>Dictation alone does not satisfy these pages.</td>
+</tr>
+<tr class="even">
+<td align="right">Gap</td>
+<td>Message timing</td>
+<td>Add explicit TTFT, duration, rate, and count metadata if product demand justifies it.</td>
+</tr>
+<tr class="odd">
+<td align="right">Gap</td>
+<td>Browser MCP/MCP Apps</td>
+<td>Backend MCP tools do not provide browser server management or MCP resource apps.</td>
+</tr>
+<tr class="even">
+<td align="right">Optional</td>
+<td>Mermaid/Streamdown</td>
+<td>Evaluate security, bundle size, and streaming behavior before adding either renderer.</td>
+</tr>
+<tr class="odd">
+<td align="right">Optional</td>
+<td>RTL</td>
+<td>Expose direction, wire providers, remove remaining physical styles, and add browser verification before claiming support.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level2">
+<h2 id="re-review-boundary">Re-review boundary<a class="anchor" aria-label="anchor" href="#re-review-boundary"></a>
+</h2>
+<p>This review covers the current visible sidebar order and relevant indexed pages. A status changes only when source, public R contract, tests, and installed-package browser behavior support the claim. New upstream pages or dependency upgrades should be reviewed in their new navigation position rather than treated as adopted by association.</p>
 </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
     </nav></aside>

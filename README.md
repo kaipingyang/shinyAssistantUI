@@ -1,6 +1,6 @@
 # shinyAssistantUI
 
-A Shiny htmlwidget that wraps [`@assistant-ui/react`](https://github.com/assistant-ui/assistant-ui) — giving Shiny apps a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display.
+A native Shiny output binding that wraps [`@assistant-ui/react`](https://github.com/assistant-ui/assistant-ui) — giving Shiny apps a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display.
 
 Backend-agnostic: works with [ClaudeAgentSDK](https://github.com/kaipingyang/ClaudeAgentSDK), [ellmer](https://github.com/tidyverse/ellmer), or any R-based AI backend.
 
@@ -8,7 +8,7 @@ Backend-agnostic: works with [ClaudeAgentSDK](https://github.com/kaipingyang/Cla
 
 | assistant-ui concept | shinyAssistantUI implementation |
 |---|---|
-| Surface | React Web inside a Shiny htmlwidget |
+| Surface | React Web inside a native Shiny output binding |
 | Runtime | Custom `ExternalStoreRuntime` |
 | Transport | Shiny inputs and custom messages over its WebSocket |
 | Server | Backend-agnostic R handler |
@@ -20,11 +20,15 @@ runtime adapter listed by assistant-ui. See the pkgdown
 
 ## Installation
 
-The current public route installs the GitHub development version:
+This development site tracks the `dev` branch. Install the matching development version explicitly:
 
 ```r
-remotes::install_github("kaipingyang/shinyAssistantUI")
+remotes::install_github("kaipingyang/shinyAssistantUI", ref = "dev")
 ```
+
+GitHub's default branch is `main`, so omitting `ref` installs a different floating branch that may
+not match this site. For production, replace `"dev"` with a validated release tag or full commit
+SHA.
 
 The installed R package already ships its compiled React, assistant-ui, CSS, and KaTeX assets, so
 application users do **not** need Node.js, npm, shadcn, or the upstream assistant-ui CLI. Install
@@ -183,7 +187,7 @@ environments. Permission changes are submitted silently and do not add chat bubb
 
 ### `assistantUIOutput(outputId, width, height, ...)`
 
-Creates the chat widget placeholder in UI. Standard htmlwidget output function.
+Creates the chat placeholder for the native Shiny output binding.
 
 ### `assistantUIServer(id, handler)`
 
@@ -272,7 +276,7 @@ User input (React Composer)
               └─► @assistant-ui/react renders streaming message
 ```
 
-The React component (`@assistant-ui/react`) manages all UI state internally via Zustand. R communicates via `session$sendCustomMessage()` for streaming and `input$*` for user events — the standard htmlwidgets pattern.
+The React component (`@assistant-ui/react`) manages all UI state internally via Zustand. R communicates via `session$sendCustomMessage()` for streaming and `input$*` for user events — the native Shiny output binding pattern.
 
 ## Development
 
@@ -283,8 +287,8 @@ npm run build      # one-shot
 npm run dev        # watch mode
 ```
 
-Requires a Node version accepted by `package-lock.json`; the current full build-and-test toolchain
-supports Node 20.19.x, Node 22.13+, or Node 24+. Node.js is not required for package users.
+Requires a Node version accepted by the root `engines` declaration and lockfile:
+`^20.19.0 || ^22.12.0 || >=24.0.0`. Node.js is not required for package users.
 
 ## License
 

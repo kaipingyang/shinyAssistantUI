@@ -2,7 +2,7 @@
 % Please edit documentation in R/handler-codeagent-remote.R
 \name{make_codeagent_remote_handler}
 \alias{make_codeagent_remote_handler}
-\title{Use codeagent as an OUT-OF-PROCESS backend engine (ERP-safe isolation)}
+\title{Use codeagent as an out-of-process backend engine}
 \usage{
 make_codeagent_remote_handler(
   config = list(),
@@ -18,8 +18,9 @@ the worker: \code{base_url}, \code{model}, \code{api_key}, \code{cwd}. Missing v
 to \code{OPENAI_BASE_URL} / \code{OPENAI_MODEL} / \code{OPENAI_API_KEY} (read from
 \code{renviron}). A live \code{Chat} object cannot be passed (not serializable).}
 
-\item{libpath}{Library path the worker prepends to \code{.libPaths()} — the
-isolated codeagent lib (new curl), e.g. the shared \code{Rlibs/codeagent/R-4.4}.}
+\item{libpath}{Isolated R library root the worker prepends to \code{.libPaths()}.
+It must contain compatible \code{codeagent}, \code{ellmer}, and \code{curl} versions;
+provisioning and location are deployment-specific.}
 
 \item{renviron}{Optional path to a \code{.Renviron} the worker reads for
 credentials (a fresh R process does not auto-read a project \code{.Renviron}).}
@@ -35,8 +36,8 @@ A \code{coro::async} handler for \code{\link[=assistantUIServer]{assistantUIServ
 }
 \description{
 Like \code{\link[=make_codeagent_handler]{make_codeagent_handler()}}, but runs the \code{codeagent} agent in a separate
-R \strong{worker process} pinned to a library with a compatible (new) \code{curl}
-(e.g. \code{Rlibs/codeagent/R-4.4}). The MAIN Shiny process \strong{never loads
+R \strong{worker process} pinned to an isolated library with compatible
+\code{codeagent}, \code{ellmer}, and \code{curl} versions. The MAIN Shiny process \strong{never loads
 codeagent / ellmer / curl} — so it is safe inside a session whose default
 library has an old, incompatible \code{curl} (the R "one namespace version per
 session" trap). Streaming, tool display, and permission approval are marshaled
@@ -45,7 +46,7 @@ unchanged, just across the process boundary.
 }
 \details{
 Use this when the host session cannot load the new \code{curl}/\code{ellmer} in-process
-(e.g. Posit Workbench / ERP with a legacy system stack). On a machine whose
+(for example, a long-lived host session with a legacy system stack). On a machine whose
 whole environment already has a new \code{curl}, the lighter in-process
 \code{\link[=make_codeagent_handler]{make_codeagent_handler()}} works too.
 

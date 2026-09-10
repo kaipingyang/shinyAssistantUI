@@ -25,7 +25,7 @@ Handler contracts and ready-to-use backend integrations.
     assistantUIServer
   - `make_codeagent_handler()` : Use codeagent as the backend engine
   - `make_codeagent_remote_handler()` : Use codeagent as an
-    OUT-OF-PROCESS backend engine (ERP-safe isolation)
+    out-of-process backend engine
 
 ## Sessions and persistence
 

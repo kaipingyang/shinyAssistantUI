@@ -6,7 +6,7 @@
 \alias{shinyAssistantUI-package}
 \title{shinyAssistantUI: AI Assistant Chat UI for Shiny}
 \description{
-Wraps the '@assistant-ui/react' JavaScript library as a Shiny htmlwidget, providing a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display. Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based AI backend.
+Wraps the '@assistant-ui/react' JavaScript library in a native Shiny output binding, providing a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display. Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based AI backend.
 }
 \author{
 \strong{Maintainer}: Kaiping Yang \email{1260146556@qq.com}
