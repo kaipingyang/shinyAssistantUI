@@ -921,35 +921,20 @@ make_ellmer_handler <- function(chat,
 # callback declares (or all fields when it has ...), preserving the original
 # three-argument loader and one-argument send_thread contracts.
 
-.new_history_snapshot_cache <- function(max_entries = 3L) {
-  data <- new.env(parent = emptyenv())
-  order <- character()
-  max_entries <- max(1L, as.integer(max_entries))
-
-  touch <- function(key) {
-    order <<- c(setdiff(order, key), key)
-  }
+.new_history_snapshot_cache <- function(
+    max_entries = 3L,
+    max_bytes = getOption("shinyAssistantUI.history_cache_bytes", 32 * 1024^2)) {
+  cache <- .new_history_page_cache(max_entries = max_entries, max_bytes = max_bytes)
   list(
-    has = function(key) exists(key, envir = data, inherits = FALSE),
-    get = function(key) {
-      touch(key)
-      get(key, envir = data, inherits = FALSE)
-    },
-    set = function(key, value) {
-      assign(key, value, envir = data)
-      touch(key)
-      while (length(order) > max_entries) {
-        evict <- order[[1L]]
-        order <<- order[-1L]
-        if (exists(evict, envir = data, inherits = FALSE)) {
-          rm(list = evict, envir = data)
-        }
-      }
-      invisible(value)
-    },
-    keys = function() order
+    has = cache$has,
+    get = cache$get,
+    set = cache$set,
+    release = cache$release,
+    keys = cache$keys,
+    stats = cache$stats
   )
 }
+
 .call_history_callback <- function(callback, args) {
   params <- names(formals(callback))
   call_args <- if (is.null(params) || "..." %in% params) {
@@ -974,6 +959,7 @@ make_ellmer_session_loader <- function(store) {
 
   function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L) {
     cache_key <- as.character(session_id %||% thread_id)
+    uncached_messages <- NULL
     if (!snapshots$has(cache_key)) {
       saved <- tryCatch(store$load(thread_id), error = function(e) NULL)
       messages <- list()
@@ -988,12 +974,21 @@ make_ellmer_session_loader <- function(store) {
         })
         messages <- .ellmer_turns_to_messages(turns)
       }
-      snapshots$set(cache_key, messages)
+      if (!snapshots$set(cache_key, messages)) {
+        # A snapshot larger than the global byte budget is never retained. Send
+        # only a capped tail and close this traversal instead of full-parsing it
+        # again for every older-page request.
+        uncached_messages <- utils::tail(messages, 200L)
+      }
     }
 
     page <- .history_message_page(
-      snapshots$get(cache_key), cursor, limit
+      uncached_messages %||% snapshots$get(cache_key), cursor, limit
     )
+    if (!is.null(uncached_messages)) {
+      page$cursor <- NULL
+      page$has_more <- FALSE
+    }
     .call_history_callback(send_thread, list(
       messages = page$messages,
       cursor = page$cursor,
@@ -1429,6 +1424,116 @@ make_ellmer_session_loader <- function(store) {
     }
   )
 }
+.notify_memory_observation <- function(callback, sample, previous_state, next_state) {
+  if (!is.function(callback)) return(FALSE)
+  tryCatch({
+    .call_compatible_callback(callback, list(
+      sample = sample,
+      previous_state = previous_state,
+      next_state = next_state
+    ))
+    TRUE
+  }, error = function(error) FALSE)
+}
+
+.claude_diagnostics_batch_events <- function(messages) {
+  if (!is.list(messages)) messages <- list()
+  events <- list()
+  if (length(messages)) {
+    events[[1L]] <- list(
+      event = "poll_batch",
+      metrics = list(batch_count = length(messages))
+    )
+  }
+  known_classes <- .diagnostics_enum_metrics$message_class
+  classes <- vapply(messages, function(message) {
+    matched <- intersect(class(message), known_classes)
+    if (length(matched)) matched[[1L]] else "UnknownMessage"
+  }, character(1))
+  if (length(classes)) {
+    counts <- table(factor(classes, levels = known_classes))
+    for (name in names(counts)[counts > 0L]) {
+      events[[length(events) + 1L]] <- list(
+        event = "message_class",
+        metrics = list(message_class = name, count = as.integer(counts[[name]]))
+      )
+    }
+  }
+
+  stream_types <- character()
+  delta_count <- 0L
+  delta_bytes <- 0
+  result_count <- 0L
+  result_success <- TRUE
+  for (message in messages) {
+    message_fields <- if (is.list(message)) message else list()
+    if (inherits(message, "StreamEvent")) {
+      event <- message_fields$event
+      if (!is.list(event)) event <- list()
+      raw_type <- event$type
+      stream_type <- if (.diagnostics_scalar_character(raw_type)) raw_type[[1L]] else "unknown"
+      if (!stream_type %in% .diagnostics_enum_metrics$stream_type) stream_type <- "unknown"
+      stream_types <- c(stream_types, stream_type)
+      delta <- event$delta
+      if (!is.list(delta)) delta <- list()
+      if (identical(stream_type, "content_block_delta") &&
+          identical(delta$type %||% NULL, "input_json_delta")) {
+        value <- delta$partial_json
+        if (is.character(value) && length(value) == 1L && !is.na(value)) {
+          delta_count <- delta_count + 1L
+          delta_bytes <- delta_bytes + nchar(value, type = "bytes")
+        }
+      }
+    }
+    if (inherits(message, "ResultMessage")) {
+      result_count <- result_count + 1L
+      result_success <- result_success && !isTRUE(message_fields$is_error)
+    }
+  }
+  if (length(stream_types)) {
+    counts <- table(factor(
+      stream_types, levels = .diagnostics_enum_metrics$stream_type
+    ))
+    for (name in names(counts)[counts > 0L]) {
+      events[[length(events) + 1L]] <- list(
+        event = "stream_event_type",
+        metrics = list(stream_type = name, count = as.integer(counts[[name]]))
+      )
+    }
+  }
+  if (delta_count > 0L) {
+    events[[length(events) + 1L]] <- list(
+      event = "tool_delta_summary",
+      metrics = list(count = delta_count, bytes = delta_bytes)
+    )
+  }
+  if (result_count > 0L) {
+    events[[length(events) + 1L]] <- list(
+      event = "result",
+      metrics = list(count = result_count, success = result_success)
+    )
+  }
+  events
+}
+
+.claude_poll_with_diagnostics <- function(poller, on_diagnostics = NULL) {
+  if (!is.function(poller)) return(list())
+  messages <- poller() %||% list()
+  if (is.function(on_diagnostics)) {
+    tryCatch({
+      for (item in .claude_diagnostics_batch_events(messages)) {
+        tryCatch(
+          .call_compatible_callback(on_diagnostics, list(
+            event = item$event, metrics = item$metrics
+          )),
+          error = function(error) NULL
+        )
+      }
+    }, error = function(error) NULL)
+  }
+  messages
+}
+
 # owner may poll; idle work yields to queued foreground/compact owners only after
 # its terminal Result has been reconciled.
 .new_claude_consumer_coordinator <- function(
@@ -1441,6 +1546,7 @@ make_ellmer_session_loader <- function(store) {
     handle_idle_permission = NULL,
     deny_idle_permission,
     interrupt,
+    can_open_idle = function() TRUE,
     poll_interval = 0.1,
     max_idle_poll_interval = 0.5,
     idle_timeout = 120) {
@@ -1545,6 +1651,14 @@ make_ellmer_session_loader <- function(store) {
   }
   poll_idle <- function(token) {
     if (!identical(token, generation) || !idle_enabled) return(invisible(NULL))
+    if (is.null(idle_opened_at)) {
+      admitted <- tryCatch(isTRUE(can_open_idle()), error = function(error) TRUE)
+      if (!admitted) {
+        if (identical(owner, "idle")) release_owner("idle")
+        schedule_idle()
+        return(invisible(NULL))
+      }
+    }
     if (!is.null(owner) && !identical(owner, "idle")) {
       return(invisible(NULL))
     }
@@ -2407,6 +2521,12 @@ make_ellmer_session_loader <- function(store) {
 #'   thinking level to apply on connect.
 #' @param models Optional character vector of model ids to offer in the model
 #'   selector (a "Default" option is always prepended).
+#' @param memory_guard_config Optional internal memory-pressure guard configuration.
+#'   `NULL` keeps the guard disabled for generic handlers.
+#' @param on_memory_observation Optional callback receiving the guard's exact
+#'   sampled observation and state transition.
+#' @param memory_sampler Optional internal sampler injection used by deterministic
+#'   verification; production callers should leave it `NULL`.
 #'
 #' @return A `coro::async` handler function compatible with [assistantUIServer()].
 #'   The returned handler declares `supports_concurrent_threads = TRUE`: each
@@ -2437,7 +2557,10 @@ make_claude_handler <- function(options       = NULL,
                                 cwd_provider     = NULL,
                                 thinking_provider = NULL,
                                 models            = NULL,
-                                session_map_path = ".claude_session_map.rds") {
+                                session_map_path = ".claude_session_map.rds",
+                                memory_guard_config = NULL,
+                                on_memory_observation = NULL,
+                                memory_sampler = NULL) {
   if (is.null(options)) {
     options <- .new_claude_options(
       permission_mode             = "default",
@@ -2561,6 +2684,7 @@ make_claude_handler <- function(options       = NULL,
   strict_resume_sids <- list()
   commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
   active_turns <- list()
+  active_turn_owners <- list()
   compact_in_progress <- list()
   reset_clients_pending <- FALSE
   consumer_records <- list()
@@ -2576,6 +2700,112 @@ make_claude_handler <- function(options       = NULL,
   persistent_routes <- list()
   owner_serial <- 0L
   retire_serial <- 0L
+
+  memory_guard_busy_snapshot <- function() {
+    coordinator_busy <- any(vapply(consumer_records, function(record) {
+      metrics <- tryCatch(record$coordinator$metrics(), error = function(error) NULL)
+      is.list(metrics) && (
+        !identical(metrics$owner %||% "none", "none") ||
+          as.integer(metrics$waiters %||% 0L) > 0L ||
+          as.integer(metrics$buffered_messages %||% 0L) > 0L ||
+          isTRUE(metrics$idle_open)
+      )
+    }, logical(1)))
+    list(
+      busy = any(vapply(active_turns, isTRUE, logical(1))) ||
+        any(vapply(compact_in_progress, isTRUE, logical(1))) ||
+        any(vapply(model_switches, function(state) {
+          !is.null(state) && !isTRUE(state$settled)
+        }, logical(1))) ||
+        usage_probe_manager$pending_count() > 0L || coordinator_busy
+    )
+  }
+  emit_memory_diagnostics <- function(sample, previous_state, next_state) {
+    .notify_memory_observation(
+      on_memory_observation, sample, previous_state, next_state
+    )
+    callbacks <- lapply(persistent_routes, function(route) route$on_diagnostics)
+    callbacks <- Filter(is.function, callbacks)
+    if (!length(callbacks)) return(invisible(NULL))
+    metrics <- list(
+      guard_state = next_state,
+      soft_pss_bytes = effective_memory_guard_config$soft_pss_bytes,
+      hard_pss_bytes = effective_memory_guard_config$hard_pss_bytes,
+      soft_rss_bytes = effective_memory_guard_config$soft_rss_bytes,
+      hard_rss_bytes = effective_memory_guard_config$hard_rss_bytes
+    )
+    if (is.numeric(sample$pss_bytes) && length(sample$pss_bytes) == 1L &&
+        is.finite(sample$pss_bytes)) metrics$pss_bytes <- as.numeric(sample$pss_bytes)
+    if (is.numeric(sample$rss_bytes) && length(sample$rss_bytes) == 1L &&
+        is.finite(sample$rss_bytes)) metrics$rss_bytes <- as.numeric(sample$rss_bytes)
+    if (is.numeric(sample$cgroup_current_bytes) && length(sample$cgroup_current_bytes) == 1L &&
+        is.finite(sample$cgroup_current_bytes)) {
+      metrics$cgroup_current_bytes <- as.numeric(sample$cgroup_current_bytes)
+    }
+    if (is.numeric(sample$cgroup_max_bytes) && length(sample$cgroup_max_bytes) == 1L) {
+      if (is.finite(sample$cgroup_max_bytes) && sample$cgroup_max_bytes > 0) {
+        metrics$cgroup_max_bytes <- as.numeric(sample$cgroup_max_bytes)
+        metrics$cgroup_limit <- "limited"
+      } else if (is.infinite(sample$cgroup_max_bytes)) {
+        metrics$cgroup_limit <- "unlimited"
+      }
+    }
+    safe_state <- function(value) {
+      if (identical(value, "normal")) return("normal")
+      if (identical(value, "soft")) return("soft")
+      if (value %in% c("hard_pending", "hard_idle")) return("hard")
+      "unknown"
+    }
+    for (callback in callbacks) {
+      if (length(metrics)) tryCatch(
+        .call_compatible_callback(callback, list(
+          event = "memory_sample", metrics = metrics
+        )),
+        error = function(error) NULL
+      )
+      if (!identical(previous_state, next_state)) tryCatch(
+        .call_compatible_callback(callback, list(
+          event = "guard_transition",
+          metrics = list(guard_state = safe_state(next_state))
+        )),
+        error = function(error) NULL
+      )
+    }
+    invisible(NULL)
+  }
+
+  effective_memory_guard_config <- .normalize_memory_guard_config(
+    memory_guard_config %||% list(enabled = FALSE)
+  )
+  production_memory_sample <- if (is.function(memory_sampler)) {
+    memory_sampler
+  } else {
+    .new_linux_memory_guard_sampler(
+      cgroup_every = 10L,
+      pss_trigger_bytes = effective_memory_guard_config$soft_pss_bytes
+    )
+  }
+  memory_guard <- .new_memory_pressure_guard(
+    sample = production_memory_sample,
+    busy_snapshot = memory_guard_busy_snapshot,
+    gc_full = .claude_full_gc,
+    schedule = function(callback, delay) {
+      timer <- later::later(callback, delay = delay)
+      function() .cancel_later_timer(timer)
+    },
+    config = effective_memory_guard_config,
+    on_observation = emit_memory_diagnostics
+  )
+  memory_pressure_message <- paste(
+    "Memory pressure is above the safe limit.",
+    "Close and reopen the addin to recycle its Background Job R process",
+    "before starting more model work."
+  )
+  memory_guard_admits <- function(operation, observe = TRUE) {
+    memory_guard$start()
+    if (isTRUE(observe)) memory_guard$observe()
+    memory_guard$allows(operation)
+  }
 
   canonical_project <- function(project) {
     if (is.null(project) || !length(project) || is.na(project[[1L]]) ||
@@ -2595,6 +2825,9 @@ make_claude_handler <- function(options       = NULL,
     route$last_run_id <- NULL
     route$proactive_published <- FALSE
     route$pending_messages <- NULL
+    route$ui_owner <- NULL
+    route$ui_generation <- 0L
+    route$ui_callbacks <- NULL
     route$on_messages <- NULL
     route$on_task <- NULL
     route$on_rate_limit <- NULL
@@ -2605,6 +2838,106 @@ make_claude_handler <- function(options       = NULL,
     route$background_tasks <- .new_claude_background_task_ownership()
     persistent_routes[[thread_id]] <<- route
     route
+  }
+
+  persistent_callback_aliases <- c(
+    on_messages = "on_proactive_messages",
+    on_task = "on_proactive_task",
+    on_rate_limit = "on_proactive_rate_limit",
+    on_status = "on_proactive_status",
+    on_tool_call = "on_tool_call",
+    on_tool_result = "on_tool_result",
+    wait_for_approval = "wait_for_approval",
+    on_diagnostics = "on_diagnostics"
+  )
+
+  owner_dispatch <- function(thread_id, owner, generation, callback_name,
+                             fallback = function(...) invisible(NULL)) {
+    force(thread_id); force(owner); force(generation); force(callback_name); force(fallback)
+    function(...) {
+      route <- persistent_routes[[thread_id]]
+      if (is.null(route) || !identical(route$ui_owner, owner) ||
+          !identical(route$ui_generation, generation)) {
+        return(do.call(fallback, list(...)))
+      }
+      callback <- route$ui_callbacks[[callback_name]]
+      if (!is.function(callback)) {
+        return(.call_compatible_callback(fallback, list(...)))
+      }
+      .call_compatible_callback(callback, list(...))
+    }
+  }
+
+  attach_ui_owner <- function(thread_id, ui_owner, callbacks = list(),
+                              run_id = NULL, history_only = FALSE,
+                              allow_handoff = TRUE) {
+    thread_id <- as.character(thread_id %||% "")[[1L]]
+    ui_owner <- as.character(ui_owner %||% "")[[1L]]
+    if (!nzchar(thread_id) || !nzchar(ui_owner) || !is.list(callbacks)) return(FALSE)
+    active_owner <- active_turn_owners[[thread_id]]
+    if (!is.null(active_owner) && !identical(active_owner, ui_owner)) return(FALSE)
+    route <- route_for(thread_id)
+    if (!isTRUE(allow_handoff) && !is.null(route$ui_owner) &&
+        !identical(route$ui_owner, ui_owner)) return(FALSE)
+
+    normalized <- callbacks
+    for (target in names(persistent_callback_aliases)) {
+      source <- persistent_callback_aliases[[target]]
+      if (!is.function(normalized[[target]]) && is.function(normalized[[source]])) {
+        normalized[[target]] <- normalized[[source]]
+      }
+    }
+    route$ui_generation <- as.integer(route$ui_generation %||% 0L) + 1L
+    route$ui_owner <- ui_owner
+    route$ui_callbacks <- normalized
+    generation <- route$ui_generation
+    for (target in names(persistent_callback_aliases)) {
+      callback <- normalized[[target]]
+      route[[target]] <- if (is.function(callback)) {
+        owner_dispatch(thread_id, ui_owner, generation, target)
+      } else {
+        NULL
+      }
+    }
+    # A detached traversal is reconstructed from canonical history. Never replay
+    # a full transcript payload captured for an older browser owner.
+    route$pending_messages <- NULL
+    TRUE
+  }
+
+  detach_ui_owner <- function(ui_owner) {
+    ui_owner <- as.character(ui_owner %||% "")[[1L]]
+    if (!nzchar(ui_owner)) return(FALSE)
+    detached <- FALSE
+    for (thread_id in names(persistent_routes)) {
+      route <- persistent_routes[[thread_id]]
+      if (is.null(route) || !identical(route$ui_owner, ui_owner)) next
+      route$ui_generation <- as.integer(route$ui_generation %||% 0L) + 1L
+      route$ui_owner <- NULL
+      route$ui_callbacks <- NULL
+      route$pending_messages <- NULL
+      for (target in names(persistent_callback_aliases)) route[[target]] <- NULL
+      detached <- TRUE
+    }
+    detached
+  }
+
+  ui_owner_snapshot <- function(thread_id) {
+    route <- persistent_routes[[as.character(thread_id)[[1L]]]]
+    if (is.null(route)) {
+      return(list(owner = NULL, generation = 0L, has_callbacks = FALSE,
+                  pending_refresh = FALSE))
+    }
+    list(
+      owner = route$ui_owner,
+      generation = route$ui_generation,
+      has_callbacks = is.list(route$ui_callbacks) && length(route$ui_callbacks) > 0L,
+      pending_refresh = is.list(route$pending_messages) &&
+        isTRUE(route$pending_messages$refresh),
+      pending_has_messages = is.list(route$pending_messages) &&
+        !is.null(route$pending_messages$messages),
+      pending_bytes = as.numeric(utils::object.size(route$pending_messages))
+    )
   }
 
   publish_persistent_messages <- function(thread_id, messages, revision, after_run_id) {
@@ -2622,7 +2955,11 @@ make_claude_handler <- function(options       = NULL,
         after_run_id = after_run_id
       )
     } else {
-      route$pending_messages <- payload
+      # Preserve only a bounded invalidation marker. The next browser traversal
+      # reloads actual content from the canonical Claude transcript.
+      route$pending_messages <- list(
+        revision = revision, after_run_id = after_run_id, refresh = TRUE
+      )
     }
     invisible(NULL)
   }
@@ -2769,8 +3106,9 @@ make_claude_handler <- function(options       = NULL,
 
     raw_poll <- function() {
       poller <- tryCatch(client$poll_messages, error = function(error) NULL)
-      if (!is.function(poller)) return(list())
-      poller() %||% list()
+      .claude_poll_with_diagnostics(
+        poller, route_for(thread_id)$on_diagnostics
+      )
     }
 
     valid_idle_sid <- function(value) {
@@ -3046,7 +3384,8 @@ make_claude_handler <- function(options       = NULL,
           interrupt = TRUE
         )
       },
-      interrupt = function() client$interrupt()
+      interrupt = function() client$interrupt(),
+      can_open_idle = function() memory_guard_admits("proactive", observe = FALSE)
     )
     consumer_records[[thread_id]] <<- record
 
@@ -3188,6 +3527,10 @@ make_claude_handler <- function(options       = NULL,
     cl <- clients[[thread_id]]
     ok <- function(msg, value = NULL) send_action_result(msg, "ok", value = value)
     err <- function(msg) send_action_result(msg, "error")
+    if (id %in% c("compact", "resume") && !memory_guard_admits(id)) {
+      err(memory_pressure_message)
+      return(invisible(NULL))
+    }
     tryCatch({
       if (grepl("^model:", id)) {
         model <- sub("^model:", "", id)
@@ -3196,6 +3539,11 @@ make_claude_handler <- function(options       = NULL,
         }
         if (!is.null(pending_model_switch(thread_id))) {
           err("Model switch already in progress")
+          return(invisible(NULL))
+        }
+        if (!memory_guard_admits("foreground")) {
+          assign(thread_id, model, envir = model_states)
+          ok(paste("Model preference saved.", memory_pressure_message), value = model)
           return(invisible(NULL))
         }
         if (is.null(cl)) cl <- get_client(thread_id)
@@ -3500,8 +3848,26 @@ make_claude_handler <- function(options       = NULL,
   # 通过 attr 暴露给 assistantUIServer，在 session 结束时调用，防止长生命周期
   # Shiny session 不断新建线程导致子进程累积泄漏。
   cleanup <- function() {
+    memory_guard$dispose()
     usage_probe_manager$close()
     retire_threads(names(clients), async = FALSE)
+    for (route in persistent_routes) {
+      if (is.null(route)) next
+      route$ui_generation <- as.integer(route$ui_generation %||% 0L) + 1L
+      route$ui_owner <- NULL
+      route$ui_callbacks <- NULL
+      route$pending_messages <- NULL
+      for (target in names(persistent_callback_aliases)) route[[target]] <- NULL
+      tryCatch(route$background_tasks$clear(), error = function(error) NULL)
+    }
+    for (reconciler in transcript_reconcilers) {
+      if (!is.null(reconciler) && is.function(reconciler$invalidate)) {
+        tryCatch(reconciler$invalidate(), error = function(error) NULL)
+      }
+    }
+    persistent_routes <<- list()
+    transcript_reconcilers <<- list()
+    active_turn_owners <<- list()
     invisible(NULL)
   }
 
@@ -3516,8 +3882,10 @@ make_claude_handler <- function(options       = NULL,
     on_proactive_messages = NULL, on_proactive_task = NULL,
     on_proactive_rate_limit = NULL, on_proactive_status = NULL,
     on_commands = NULL, on_warming = NULL, on_run_phase = NULL,
+    on_diagnostics = NULL,
     ide_context = NULL, project = NULL, run_id = NULL,
-    continuation_kind = NULL
+    continuation_kind = NULL,
+    ui_owner = NULL
   ) {
     continuation_kind <- .normalize_claude_continuation_kind(continuation_kind)
     emit_run_phase <- function(stage) {
@@ -3529,6 +3897,10 @@ make_claude_handler <- function(options       = NULL,
       on_done()
       TRUE
     }
+    if (!memory_guard_admits("foreground")) {
+      on_error(memory_pressure_message)
+      return(invisible(NULL))
+    }
     route <- route_for(thread_id)
     existing_record <- consumer_records[[thread_id]]
     if (!is.null(existing_record)) {
@@ -3536,38 +3908,83 @@ make_claude_handler <- function(options       = NULL,
     } else if (!is.null(project)) {
       route$project <- canonical_project(project)
     }
-    if (is.function(on_proactive_messages)) route$on_messages <- on_proactive_messages
-    if (is.function(on_proactive_task)) route$on_task <- on_proactive_task
-    if (is.function(on_proactive_rate_limit)) route$on_rate_limit <- on_proactive_rate_limit
-    if (is.function(on_proactive_status)) route$on_status <- on_proactive_status
-    if (is.function(on_tool_call)) route$on_tool_call <- on_tool_call
-    if (is.function(on_tool_result)) route$on_tool_result <- on_tool_result
-    if (is.function(wait_for_approval)) route$wait_for_approval <- wait_for_approval
-    if (!is.null(route$pending_messages) && is.function(route$on_messages)) {
-      pending <- route$pending_messages
-      route$pending_messages <- NULL
-      tryCatch(route$on_messages(
-        messages = pending$messages,
-        revision = pending$revision,
-        after_run_id = pending$after_run_id
-      ), error = function(error) {
-        route$pending_messages <- pending
-      })
-    }
+    original_on_error <- on_error
     if (isTRUE(compact_in_progress[[thread_id]])) {
-      on_error("Conversation compaction is still running; retry after it finishes")
+      original_on_error("Conversation compaction is still running; retry after it finishes")
       return(invisible(NULL))
     }
     if (isTRUE(active_turns[[thread_id]])) {
-      on_error("A response is already running for this conversation")
+      original_on_error("A response is already running for this conversation")
       return(invisible(NULL))
     }
+
+    owner_serial <<- owner_serial + 1L
+    ui_owner <- as.character(ui_owner %||% paste0("legacy:", owner_serial))[[1L]]
+    ui_callbacks <- list(
+      on_chunk = on_chunk, on_done = on_done, on_error = on_error,
+      on_tool_call = on_tool_call, on_tool_result = on_tool_result,
+      on_thinking = on_thinking, is_cancelled = is_cancelled,
+      wait_for_approval = wait_for_approval,
+      on_tool_call_start = on_tool_call_start,
+      on_tool_call_delta = on_tool_call_delta,
+      on_auto_continue = on_auto_continue, on_usage = on_usage,
+      on_task = on_task, on_rate_limit = on_rate_limit, on_status = on_status,
+      on_proactive_messages = on_proactive_messages,
+      on_proactive_task = on_proactive_task,
+      on_proactive_rate_limit = on_proactive_rate_limit,
+      on_proactive_status = on_proactive_status,
+      on_commands = on_commands, on_warming = on_warming,
+      on_run_phase = on_run_phase,
+      on_diagnostics = on_diagnostics
+    )
+    if (!attach_ui_owner(thread_id, ui_owner, ui_callbacks, run_id = run_id)) {
+      original_on_error("This conversation is controlled by another browser session")
+      return(invisible(NULL))
+    }
+    generation <- route$ui_generation
+    bind_owner_callback <- function(name, fallback = function(...) invisible(NULL)) {
+      if (!is.function(route$ui_callbacks[[name]])) return(NULL)
+      owner_dispatch(thread_id, ui_owner, generation, name, fallback)
+    }
+    on_chunk <- bind_owner_callback("on_chunk")
+    on_done <- bind_owner_callback("on_done")
+    on_error <- bind_owner_callback("on_error")
+    on_tool_call <- bind_owner_callback("on_tool_call")
+    on_tool_result <- bind_owner_callback("on_tool_result")
+    on_thinking <- bind_owner_callback("on_thinking")
+    is_cancelled <- bind_owner_callback("is_cancelled", function(...) TRUE)
+    wait_for_approval <- bind_owner_callback(
+      "wait_for_approval",
+      function(...) promises::promise_resolve(list(approved = FALSE))
+    )
+    on_tool_call_start <- bind_owner_callback("on_tool_call_start")
+    on_tool_call_delta <- bind_owner_callback("on_tool_call_delta")
+    on_auto_continue <- bind_owner_callback("on_auto_continue")
+    on_usage <- bind_owner_callback("on_usage")
+    on_task <- bind_owner_callback("on_task")
+    on_rate_limit <- bind_owner_callback("on_rate_limit")
+    on_status <- bind_owner_callback("on_status")
+    on_proactive_messages <- bind_owner_callback("on_proactive_messages")
+    on_proactive_task <- bind_owner_callback("on_proactive_task")
+    on_proactive_rate_limit <- bind_owner_callback("on_proactive_rate_limit")
+    on_proactive_status <- bind_owner_callback("on_proactive_status")
+    on_commands <- bind_owner_callback("on_commands")
+    on_warming <- bind_owner_callback("on_warming")
+    on_run_phase <- bind_owner_callback("on_run_phase")
+    on_diagnostics <- bind_owner_callback("on_diagnostics")
+    rm(ui_callbacks, original_on_error)
+
     active_turns[[thread_id]] <<- TRUE
+    active_turn_owners[[thread_id]] <<- ui_owner
     usage_generation <- as.integer(usage_generations[[thread_id]] %||% 0L) + 1L
     usage_generations[[thread_id]] <<- usage_generation
     on.exit({
       active_turns[[thread_id]] <<- NULL
+      if (identical(active_turn_owners[[thread_id]], ui_owner)) {
+        active_turn_owners[[thread_id]] <<- NULL
+      }
       flush_pending_client_reset()
+      memory_guard$on_idle()
     }, add = TRUE)
     if (finish_cancelled_before_send()) return(invisible(NULL))
 
@@ -4662,11 +5079,35 @@ make_claude_handler <- function(options       = NULL,
       usage_probes_pending = as.integer(usage_probe_manager$pending_count()),
       transcript_reconcilers = non_null_count(transcript_reconcilers),
       persistent_routes = non_null_count(persistent_routes),
+      attached_ui_owners = as.integer(sum(vapply(
+        persistent_routes,
+        function(route) !is.null(route) && !is.null(route$ui_owner),
+        logical(1)
+      ))),
+      ui_callback_routes = as.integer(sum(vapply(
+        persistent_routes,
+        function(route) !is.null(route) && is.list(route$ui_callbacks) &&
+          length(route$ui_callbacks) > 0L,
+        logical(1)
+      ))),
       reset_pending = isTRUE(reset_clients_pending),
+      memory_guard = memory_guard$snapshot(),
       threads = threads
     )
   }
   attr(handler_fn, "cleanup") <- cleanup
+  attr(handler_fn, "attach_ui_owner") <- attach_ui_owner
+  attr(handler_fn, "detach_ui_owner") <- detach_ui_owner
+  attr(handler_fn, "ui_owner_snapshot") <- ui_owner_snapshot
+  # Internal read-only hooks keep generation/retention tests on the same route
+  # machinery used by idle reconciliation without exposing captured UI closures.
+  attr(handler_fn, ".ui_owner_dispatch") <- function(thread_id, callback_name) {
+    route <- persistent_routes[[as.character(thread_id)[[1L]]]]
+    if (is.null(route)) NULL else route[[callback_name]]
+  }
+  attr(handler_fn, ".publish_persistent_messages") <- publish_persistent_messages
+  attr(handler_fn, ".memory_guard_observe") <- memory_guard$observe
+  attr(handler_fn, ".memory_guard_snapshot") <- memory_guard$snapshot
   attr(handler_fn, "supports_concurrent_threads") <- TRUE
   attr(handler_fn, "action_handler") <- claude_action
   attr(handler_fn, "ui_capabilities") <- list(
@@ -4685,6 +5126,9 @@ make_claude_handler <- function(options       = NULL,
   )
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
   attr(handler_fn, "warmup") <- function(thread_id, project = NULL) {
+    if (!memory_guard_admits("warmup")) {
+      stop(memory_pressure_message, call. = FALSE)
+    }
     client <- get_client(thread_id, project)
     coordinator_for(thread_id, client, project)$coordinator$start_idle(
       .claude_idle_start_delay_seconds()
@@ -4719,6 +5163,7 @@ make_claude_handler <- function(options       = NULL,
     reset_clients()
     invisible(run_r_state$enabled)
   }
+  memory_guard$start()
   handler_fn
 }
 
@@ -4809,13 +5254,33 @@ list_claude_sessions <- function(directory = here::here(), limit = 100L,
 #'
 #' @export
 make_claude_session_loader <- function(session_map_path = ".claude_session_map.rds") {
-  snapshots <- .new_history_snapshot_cache(3L)
+  traversals <- .new_history_page_cache(
+    max_entries = getOption("shinyAssistantUI.history_traversal_entries", 8L),
+    max_bytes = getOption("shinyAssistantUI.history_cache_bytes", 32 * 1024^2)
+  )
+  active_traversals <- new.env(parent = emptyenv())
+  traversal_serial <- 0L
+
+  release_traversal <- function(session_key, traversal_id = NULL) {
+    current <- get0(session_key, envir = active_traversals, inherits = FALSE)
+    target <- traversal_id %||% current
+    if (!is.null(target)) traversals$release(target)
+    if (!is.null(current) && (is.null(traversal_id) || identical(current, traversal_id))) {
+      rm(list = session_key, envir = active_traversals)
+    }
+    invisible(NULL)
+  }
+  finish_page <- function(page, session_key, traversal_id, send_thread) {
+    if (!isTRUE(page$has_more)) release_traversal(session_key, traversal_id)
+    .call_history_callback(send_thread, list(
+      messages = page$messages,
+      cursor = page$cursor,
+      has_more = page$has_more
+    ))
+  }
 
   function(session_id, thread_id, send_thread, cursor = NULL, limit = 50L,
            project = NULL) {
-    # Pre-fill the mapping before the initial page is delivered so the first
-    # explicit foreground send resumes this historical SDK session instead of
-    # starting fresh. Browsing itself remains transcript-only.
     if (is.null(cursor) && !is.null(session_id) && nzchar(session_id %||% "")) {
       tryCatch(
         .update_claude_session_map(session_map_path, thread_id, session_id),
@@ -4829,54 +5294,150 @@ make_claude_session_loader <- function(session_map_path = ".claude_session_map.r
     } else {
       as.character(project[[1L]])
     }
-    directory_key <- if (is.null(directory)) {
-      ""
-    } else {
-      tryCatch(
-        normalizePath(path.expand(directory), winslash = "/", mustWork = FALSE),
-        error = function(e) directory
-      )
-    }
-    # The same session id must never share a converted snapshot across projects.
-    cache_key <- paste(directory_key, as.character(session_id %||% thread_id), sep = "
+    directory_key <- if (is.null(directory)) "" else tryCatch(
+      normalizePath(path.expand(directory), winslash = "/", mustWork = FALSE),
+      error = function(error) directory
+    )
+    session_key <- paste(directory_key, as.character(session_id %||% thread_id), sep = "
 ")
-    # `cursor = NULL` starts a new browser traversal. Re-read the transcript so
-    # sessions that kept appending after an earlier open do not remain pinned to
-    # a stale tail. Non-NULL cursors continue against one immutable snapshot,
-    # preventing records appended between pages from causing skips/duplicates.
-    # A missing cursor snapshot (for example after LRU eviction) is rebuilt once.
-    if (is.null(cursor) || !snapshots$has(cache_key)) {
-      # ClaudeAgentSDK's current limit/offset API still parses the complete JSONL
-      # session internally. Convert once per traversal and page that snapshot in
-      # memory; this reduces browser transfer/render work, but not the SDK's
-      # one-time full-file parsing cost.
-      loaded <- tryCatch(
-        list(ok = TRUE, messages = .get_claude_session_messages(
-          session_id, directory = directory
-        )),
-        error = function(e) list(ok = FALSE)
+    decisions <- .read_tool_decisions(.claude_decisions_path(session_map_path))
+    metadata <- .read_tool_metadata(.claude_tool_metadata_path(session_map_path))
+
+    if (!is.null(cursor)) {
+      decoded <- .decode_history_cursor(cursor)
+      active_id <- get0(session_key, envir = active_traversals, inherits = FALSE)
+      if (is.null(decoded) || is.null(active_id) || !identical(decoded$t, active_id)) {
+        return(finish_page(.history_stale_page(), session_key, active_id, send_thread))
+      }
+      state <- traversals$get(active_id)
+      if (is.null(state)) {
+        release_traversal(session_key, active_id)
+        return(finish_page(.history_stale_page(), session_key, active_id, send_thread))
+      }
+      if (identical(state$backend, "index")) {
+        capability <- .claude_history_index_capability()
+        index <- if (isTRUE(capability$ok) && file.exists(state$path)) tryCatch(
+          .load_claude_history_index(
+            state$path,
+            sdk_version = capability$version
+          ),
+          error = function(error) NULL
+        ) else NULL
+        if (is.null(index) || !identical(index$revision, state$revision)) {
+          release_traversal(session_key, active_id)
+          return(finish_page(
+            .history_stale_page(state$revision), session_key, active_id, send_thread
+          ))
+        }
+        page <- .claude_index_page(
+          index, cursor = cursor, limit = limit, traversal_id = active_id,
+          decisions = decisions, metadata = metadata
+        )
+        return(finish_page(page, session_key, active_id, send_thread))
+      }
+      if (!identical(state$backend, "fallback")) {
+        release_traversal(session_key, active_id)
+        return(finish_page(.history_stale_page(), session_key, active_id, send_thread))
+      }
+      page <- .fallback_history_page(
+        state$messages, cursor = cursor, limit = limit,
+        traversal_id = active_id, revision = state$revision
       )
-      if (isTRUE(loaded$ok)) {
-        snapshots$set(cache_key, .claude_msgs_to_thread(
-          loaded$messages,
-          decisions = .read_tool_decisions(.claude_decisions_path(session_map_path)),
-          metadata = .read_tool_metadata(.claude_tool_metadata_path(session_map_path))
-        ))
-      } else if (!snapshots$has(cache_key)) {
-        # Preserve a prior successful traversal across transient filesystem/SDK
-        # failures. Only a first-ever failed load has no snapshot to fall back to.
-        snapshots$set(cache_key, list())
+      if (!isTRUE(page$has_more)) {
+        traversals$set(paste0("last:", .history_hash_text(session_key)), state)
+      }
+      return(finish_page(page, session_key, active_id, send_thread))
+    }
+
+    previous_id <- get0(session_key, envir = active_traversals, inherits = FALSE)
+    last_success_key <- paste0("last:", .history_hash_text(session_key))
+    previous_state <- if (!is.null(previous_id)) traversals$get(previous_id) else NULL
+    if (is.null(previous_state)) previous_state <- traversals$get(last_success_key)
+    traversal_serial <<- traversal_serial + 1L
+    traversal_id <- paste0(
+      "history-", traversal_serial, "-",
+      .history_hash_text(c(session_key, format(Sys.time(), digits = 17)))
+    )
+
+    capability <- .claude_history_index_capability()
+    indexed <- NULL
+    if (isTRUE(capability$ok)) {
+      transcript_path <- tryCatch(
+        capability$finder(session_id, directory),
+        error = function(error) NULL
+      )
+      if (!is.null(transcript_path) && file.exists(transcript_path)) {
+        indexed <- tryCatch(
+          .load_claude_history_index(
+            transcript_path,
+            sdk_version = capability$version
+          ),
+          error = function(error) NULL
+        )
       }
     }
 
-    page <- .history_message_page(
-      snapshots$get(cache_key), cursor, limit
+    if (!is.null(indexed)) {
+      page <- .claude_index_page(
+        indexed, limit = limit, traversal_id = traversal_id,
+        decisions = decisions, metadata = metadata
+      )
+      state <- list(
+        backend = "index", path = indexed$source$path,
+        revision = indexed$revision
+      )
+      stored <- !isTRUE(page$has_more) || traversals$set(traversal_id, state)
+      if (!is.null(previous_id)) release_traversal(session_key, previous_id)
+      if (isTRUE(page$has_more) && isTRUE(stored)) {
+        assign(session_key, traversal_id, envir = active_traversals)
+      } else if (isTRUE(page$has_more)) {
+        page$has_more <- FALSE
+        page$cursor <- NULL
+      }
+      return(finish_page(page, session_key, traversal_id, send_thread))
+    }
+
+    # Compatibility fallback: exactly one public SDK full parse for this new
+    # traversal, then retain only a capped converted tail in the byte-bounded LRU.
+    loaded <- tryCatch(
+      list(ok = TRUE, messages = .get_claude_session_messages(
+        session_id, directory = directory
+      )),
+      error = function(error) list(ok = FALSE)
     )
-    .call_history_callback(send_thread, list(
-      messages = page$messages,
-      cursor = page$cursor,
-      has_more = page$has_more
+    messages <- if (isTRUE(loaded$ok)) {
+      converted <- .claude_msgs_to_thread(
+        loaded$messages, decisions = decisions, metadata = metadata
+      )
+      fallback_limit <- suppressWarnings(as.integer(
+        getOption("shinyAssistantUI.history_fallback_messages", 200L)
+      )[[1L]])
+      if (is.na(fallback_limit) || fallback_limit < 1L) fallback_limit <- 200L
+      fallback_limit <- min(fallback_limit, 1000L)
+      utils::tail(converted, fallback_limit)
+    } else if (identical(previous_state$backend, "fallback")) {
+      previous_state$messages
+    } else {
+      list()
+    }
+    revision <- .history_hash_text(c(
+      "fallback", traversal_id, length(messages),
+      if (length(messages)) messages[[length(messages)]]$id %||% "" else ""
     ))
+    page <- .fallback_history_page(
+      messages, limit = limit, traversal_id = traversal_id, revision = revision
+    )
+    state <- list(backend = "fallback", revision = revision, messages = messages)
+    traversals$set(last_success_key, state)
+    stored <- !isTRUE(page$has_more) || traversals$set(traversal_id, state)
+    if (!is.null(previous_id)) release_traversal(session_key, previous_id)
+    if (isTRUE(page$has_more) && isTRUE(stored)) {
+      assign(session_key, traversal_id, envir = active_traversals)
+    } else if (isTRUE(page$has_more)) {
+      page$has_more <- FALSE
+      page$cursor <- NULL
+    }
+    finish_page(page, session_key, traversal_id, send_thread)
   }
 }
 

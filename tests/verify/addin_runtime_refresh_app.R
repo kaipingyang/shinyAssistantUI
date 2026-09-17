@@ -77,7 +77,7 @@ server <- function(input, output, session) {
   )
   mock_scope <- new.env(parent = environment())
   testthat::local_mocked_bindings(
-    .get_claude_session_messages = function(session_id) {
+    .get_claude_session_messages = function(session_id, directory = NULL) {
       history_state$reads <- history_state$reads + 1L
       history_state$raw
     },

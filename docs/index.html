@@ -191,6 +191,7 @@
 <div class="sourceCode" id="cb6"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="fu">{</span> <span class="dt">"permissions"</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">"ask"</span><span class="fu">:</span> <span class="ot">[</span><span class="st">"*"</span><span class="ot">]</span> <span class="fu">}</span> <span class="fu">}</span></span></code></pre></div>
 <p><code>ask</code> rules also accept per-tool / per-path patterns such as <code>"Bash(rm*)"</code> or <code>"Read(/tmp/**)"</code>.</p>
 </li>
+<li><p><strong>Local diagnostics and performance</strong>: the addin shows a compact Performance Orb and writes privacy-filtered operational summaries to <code>~/.claude_addin/diagnostics</code> by default. Logs are local only, retain at most 50 MiB / 7 days, and exclude prompts, responses, file paths, environment values, raw IDs, error text, and stacks. Use <strong>Settings → Save diagnostic logs</strong> to opt out; stop the existing Background Job and reopen the addin for the logging change to take effect. Hiding the Orb does not disable the memory guard.</p></li>
 <li><p>Requires the <a href="https://github.com/kaipingyang/ClaudeAgentSDK" class="external-link"><code>ClaudeAgentSDK</code></a> package and a working <code>claude</code> CLI. Runs in the browser if called outside RStudio.</p></li>
 </ul>
 </div>

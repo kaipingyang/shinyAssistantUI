@@ -25,7 +25,8 @@ test_that(".read_addin_settings defaults copilot auto-start on missing / bad / p
 
   bad <- tempfile(fileext = ".json"); writeLines("{not valid json", bad); on.exit(unlink(bad), add = TRUE)
   bad_result <- shinyAssistantUI:::.read_addin_settings(bad)
-  expect_identical(bad_result, shinyAssistantUI:::.addin_settings_defaults())
+  expect_false(bad_result$diagnosticsEnabled)
+  expect_true(bad_result$showPerformanceOrb)
   expect_true(bad_result$autoStartCopilotApi)
 
   part <- tempfile(fileext = ".json"); writeLines('{"composerDensity":"compact"}', part); on.exit(unlink(part), add = TRUE)
@@ -38,22 +39,26 @@ test_that(".read_addin_settings defaults copilot auto-start on missing / bad / p
   expect_true(r$autoStartCopilotApi)
 })
 
-test_that(".migrate_addin_settings folds old rds into json then deletes them; idempotent", {
+test_that(".migrate_addin_settings folds private old rds into json and deletes matching inputs", {
   home <- tempfile("home"); dir.create(file.path(home, ".claude_addin"), recursive = TRUE)
   on.exit(unlink(home, recursive = TRUE), add = TRUE)
   P <- function(n) shinyAssistantUI:::.claude_addin_path(n, home)
-  saveRDS("acceptEdits", P("default_permission_mode.rds"))
-  saveRDS(list(showBypass = TRUE, showYolo = FALSE), P("mode_visibility.rds"))
-  saveRDS("compact", P("composer_density.rds"))
-  saveRDS(FALSE, P("run_r_enabled.rds"))
+  legacy_names <- c(
+    "default_permission_mode.rds", "mode_visibility.rds",
+    "composer_density.rds", "run_r_enabled.rds"
+  )
+  saveRDS("acceptEdits", P(legacy_names[[1L]]))
+  saveRDS(list(showBypass = TRUE, showYolo = FALSE), P(legacy_names[[2L]]))
+  saveRDS("compact", P(legacy_names[[3L]]))
+  saveRDS(FALSE, P(legacy_names[[4L]]))
+  for (name in legacy_names) Sys.chmod(P(name), "0600", use_umask = FALSE)
   expect_true(shinyAssistantUI:::.migrate_addin_settings(home))
   r <- shinyAssistantUI:::.read_addin_settings(shinyAssistantUI:::.addin_settings_path(home))
   expect_identical(r$defaultPermissionMode, "acceptEdits")
   expect_false(r$modeVisibility$showYolo)
   expect_identical(r$composerDensity, "compact")
   expect_false(r$runREnabled)
-  expect_false(file.exists(P("default_permission_mode.rds")))  # 旧 rds 已删
-  expect_false(file.exists(P("run_r_enabled.rds")))
+  expect_false(any(file.exists(vapply(legacy_names, P, character(1)))))
   expect_false(shinyAssistantUI:::.migrate_addin_settings(home))  # json 已存在 → no-op
 })
 
@@ -175,4 +180,59 @@ test_that("assistantUIServer forwards Claude edit marker toggle events", {
   })
 
   expect_identical(observed, c(FALSE, TRUE))
+})
+
+
+test_that("diagnostics and performance Orb default on; invalid fields fail safe", {
+  defaults <- shinyAssistantUI:::.addin_settings_defaults()
+  expect_true(defaults$diagnosticsEnabled)
+  expect_true(defaults$showPerformanceOrb)
+
+  path <- tempfile(fileext = ".json")
+  on.exit(unlink(path), add = TRUE)
+  invalid <- c(
+    '{"diagnosticsEnabled":null}',
+    '{"diagnosticsEnabled":"true"}',
+    '{"diagnosticsEnabled":1}',
+    '{"diagnosticsEnabled":[true]}',
+    '{"diagnosticsEnabled":{"value":true}}'
+  )
+  for (text in invalid) {
+    writeLines(text, path)
+    expect_false(
+      shinyAssistantUI:::.read_addin_settings(path)$diagnosticsEnabled,
+      info = text
+    )
+  }
+  writeLines('{"diagnosticsEnabled":true,"showPerformanceOrb":false}', path)
+  settings <- shinyAssistantUI:::.read_addin_settings(path)
+  expect_true(settings$diagnosticsEnabled)
+  expect_false(settings$showPerformanceOrb)
+})
+
+test_that("diagnostics preference transaction commits only after CAS read-back", {
+  directory <- tempfile("settings-cas-")
+  dir.create(directory)
+  path <- file.path(directory, "addin_settings.json")
+  on.exit(unlink(directory, recursive = TRUE, force = TRUE), add = TRUE)
+  initial <- shinyAssistantUI:::.read_addin_settings_document(path)
+  create <- shinyAssistantUI:::.transact_addin_setting(
+    "diagnosticsEnabled", initial$revisions$diagnosticsEnabled, FALSE, path
+  )
+  expect_identical(create$category, "ok")
+
+  state <- new.env(parent = emptyenv())
+  document <- shinyAssistantUI:::.read_addin_settings_document(path)
+  state$v <- document$settings
+  state$revisions <- document$revisions
+  expect_true(shinyAssistantUI:::.persist_addin_diagnostics_setting(
+    state, TRUE, path
+  ))
+  expect_true(state$v$diagnosticsEnabled)
+  expect_identical(state$revisions$diagnosticsEnabled, 2)
+  stale <- shinyAssistantUI:::.transact_addin_setting(
+    "diagnosticsEnabled", 1, FALSE, path
+  )
+  expect_identical(stale$category, "stale_revision")
+  expect_true(stale$value)
 })

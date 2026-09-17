@@ -10,8 +10,8 @@
 }
 
 # 客户端本地动作项（不发给 AI）：上下文用量 / compact / 清空 / MCP 状态。
-.claude_action_items <- function() {
-  list(
+.claude_action_items <- function(include_export = TRUE) {
+  items <- list(
     list(section = "Context", id = "context", command = "context",
          label = "Context usage", description = "Show current context-window usage"),
     list(section = "Context", id = "compact", command = "compact",
@@ -21,6 +21,12 @@
     list(section = "Customize", id = "mcp", command = "mcp",
          label = "MCP status", description = "Show connected MCP servers"),
     list(section = "Customize", id = "model", command = "model",
-         label = "Switch model", description = "Choose which model answers your prompts")
+         label = "Switch model", description = "Choose which model answers your prompts"),
+    list(section = "Support", id = "export-support-bundle",
+         command = "export-support-bundle", label = "Export support bundle",
+         description = "Create a private diagnostics bundle for support")
+  )
+  if (isTRUE(include_export)) items else Filter(
+    function(item) !identical(item$id, "export-support-bundle"), items
   )
 }

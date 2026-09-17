@@ -1,5 +1,9 @@
 # shinyAssistantUI 0.5.7.9000
 
+- **默认本地诊断与 Performance Orb**：Claude addin 默认显示可关闭的性能浮球，并默认将严格隐私白名单内的内存 guard、运行阶段和前端摘要写入 `~/.claude_addin/diagnostics`；日志全局限制为 50 MiB/7 天，支持安全导出，Settings 可关闭且重启 Background Job 后生效。普通 `assistantUIServer()` 继续默认不启用 diagnostics。
+- **Background Job 内存与生命周期保护**：复用同一次现有 sampler observation 显示 process PSS/RSS、session cgroup 和阈值；折叠时不向浏览器持续推样本。Background Job 从项目外中立目录启动，固定主 session 的 package/library identity，并增加 owner-scoped cleanup、bounded history 与大 tool result 按需加载。
+- **AskUserQuestion 与窄面板兼容**：支持 Claude Code 新增的 option `preview` 字段，以有界纯文本预览安全呈现；其他未知字段仍严格拒绝。Thread viewport 不再产生 RStudio Viewer 底部全局横向滚动条，代码块和表格仍保留各自局部横向滚动。
+
 - **assistant-ui 核心依赖对齐**：`@assistant-ui/react` 升至 0.15.17，Lexical/Markdown
   适配包分别升至 0.2.11/0.14.13，Lexical 核心统一为 0.49.0；React 仍保持 19.2.7。
   A2UI/AG-UI 可选包未引入，后续按独立 PoC 评估。

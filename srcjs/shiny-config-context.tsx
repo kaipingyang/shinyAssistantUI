@@ -1,6 +1,13 @@
 import { createContext, useContext } from "react";
 import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 import type { CopilotServiceState } from "./copilot-service-addon";
+import type {
+  MemoryGuardState,
+  MemoryMonitorFrame,
+  MemoryMonitorSample,
+} from "./memory-monitor-addon";
+import type { DiagnosticsSettingsCategory } from "./diagnostics-settings-addon";
+import type { PerformanceOrbController } from "./performance-orb";
 import type { ChecklistSnapshot } from "./checklist-reducer";
 import type { MonitoredTask } from "./task-monitor";
 import type { LazyToolResultClient } from "./lazy-tool-result";
@@ -107,6 +114,27 @@ export interface ShinyConfigCtx {
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
   serviceState?: CopilotServiceState;
+  memoryMonitor?: {
+    state: MemoryGuardState | "waiting";
+    sample: MemoryMonitorSample | null;
+    frame: MemoryMonitorFrame | null;
+    setVisible: (visible: boolean) => void;
+  };
+  diagnosticsLogging?: {
+    desired: boolean;
+    launchEnabled: boolean;
+    environmentOverride: "none" | "on" | "off";
+    launchKind: "job" | "foreground";
+    writerStartup: "pending" | "started" | "off" | "failed";
+    saving: boolean;
+    saveFailed: boolean;
+    category?: DiagnosticsSettingsCategory;
+    setEnabled: (value: boolean) => void;
+  };
+  showPerformanceOrb?: boolean;
+  setShowPerformanceOrb?: (value: boolean) => void;
+  performanceOrbController?: PerformanceOrbController;
+  recordOwnedMarkdownPreprocess?: (durationUs: number) => void;
   pendingServiceSubmissions?: number;
   retryService?: () => void;
   cancelPendingServiceSubmissions?: () => void;

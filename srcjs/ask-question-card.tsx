@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
-export type AskOption = { label: string; description?: string };
+export type AskOption = { label: string; description?: string; preview?: string };
 export type AskQuestion = {
   question: string;
   header?: string;
@@ -73,25 +73,34 @@ export function AskQuestionCard({
           <p className="text-sm font-medium">{q.question}</p>
           <div className="flex flex-col gap-1">
             {(q.options ?? []).map((o, oi) => (
-              <label
-                key={oi}
-                data-ask-option={o.label}
-                className="aui-ask-option flex cursor-pointer items-start gap-2 text-xs"
-              >
-                <input
-                  type={q.multiSelect ? "checkbox" : "radio"}
-                  name={`aui-ask-${qi}`}
-                  className="mt-0.5"
-                  checked={(sel[qi] ?? []).includes(o.label)}
-                  onChange={() => toggle(qi, o.label, !!q.multiSelect)}
-                />
-                <span>
-                  {o.label}
-                  {o.description ? (
-                    <span className="text-muted-foreground"> — {o.description}</span>
-                  ) : null}
-                </span>
-              </label>
+              <div key={oi} className="aui-ask-option-group">
+                <label
+                  data-ask-option={o.label}
+                  className="aui-ask-option flex cursor-pointer items-start gap-2 text-xs"
+                >
+                  <input
+                    type={q.multiSelect ? "checkbox" : "radio"}
+                    name={`aui-ask-${qi}`}
+                    className="mt-0.5"
+                    checked={(sel[qi] ?? []).includes(o.label)}
+                    onChange={() => toggle(qi, o.label, !!q.multiSelect)}
+                  />
+                  <span>
+                    {o.label}
+                    {o.description ? (
+                      <span className="text-muted-foreground"> — {o.description}</span>
+                    ) : null}
+                  </span>
+                </label>
+                {o.preview ? (
+                  <pre
+                    data-ask-option-preview={o.label}
+                    className="bg-muted/50 text-muted-foreground ms-6 mt-1 max-h-40 overflow-auto rounded-md border p-2 text-[11px] leading-4 whitespace-pre-wrap break-words"
+                  >
+                    {o.preview}
+                  </pre>
+                ) : null}
+              </div>
             ))}
             <div
               data-ask-custom-row={qi}

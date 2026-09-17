@@ -22,3 +22,9 @@ inst/www/bundle-stats.html
 # 本地工具索引/配置（不入库）
 .codegraph/
 .kiro/
+
+# Native compilation artifacts are local build products.
+src/*.o
+src/*.so
+src/**/*.o
+src/**/*.so

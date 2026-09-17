@@ -166,6 +166,15 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
     `ask` rules also accept per-tool / per-path patterns such as
     `"Bash(rm*)"` or `"Read(/tmp/**)"`.
 
+  - **Local diagnostics and performance**: the addin shows a compact
+    Performance Orb and writes privacy-filtered operational summaries to
+    `~/.claude_addin/diagnostics` by default. Logs are local only,
+    retain at most 50 MiB / 7 days, and exclude prompts, responses, file
+    paths, environment values, raw IDs, error text, and stacks. Use
+    **Settings → Save diagnostic logs** to opt out; stop the existing
+    Background Job and reopen the addin for the logging change to take
+    effect. Hiding the Orb does not disable the memory guard.
+
   - Requires the
     [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK)
     package and a working `claude` CLI. Runs in the browser if called

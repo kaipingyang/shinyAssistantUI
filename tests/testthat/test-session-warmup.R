@@ -152,20 +152,26 @@ test_that("Claude session loader caches one converted snapshot and pages newest-
   }
 
   loader("session-1", "thread-1", capture, limit = 50L)
-  loader("session-1", "thread-1", capture, cursor = 73L, limit = 50L)
-  loader("session-1", "thread-1", capture, cursor = 23L, limit = 50L)
+  loader(
+    "session-1", "thread-1", capture,
+    cursor = pages[[1L]]$cursor, limit = 50L
+  )
+  loader(
+    "session-1", "thread-1", capture,
+    cursor = pages[[2L]]$cursor, limit = 50L
+  )
 
   expect_identical(reads, 1L)
   expect_length(pages[[1L]]$messages, 50L)
   expect_identical(pages[[1L]]$messages[[1L]]$id, "h-u74")
   expect_identical(pages[[1L]]$messages[[50L]]$id, "h-u123")
-  expect_identical(pages[[1L]]$cursor, 73L)
+  expect_identical(.decode_history_cursor(pages[[1L]]$cursor)$u, 73L)
   expect_true(pages[[1L]]$has_more)
 
   expect_length(pages[[2L]]$messages, 50L)
   expect_identical(pages[[2L]]$messages[[1L]]$id, "h-u24")
   expect_identical(pages[[2L]]$messages[[50L]]$id, "h-u73")
-  expect_identical(pages[[2L]]$cursor, 23L)
+  expect_identical(.decode_history_cursor(pages[[2L]]$cursor)$u, 23L)
   expect_true(pages[[2L]]$has_more)
 
   expect_length(pages[[3L]]$messages, 23L)
@@ -278,7 +284,7 @@ test_that("Claude session loader refreshes an appended transcript on each initia
     vapply(pages[[1L]]$messages, `[[`, character(1), "id"),
     c("h-u2", "h-u3")
   )
-  expect_identical(pages[[1L]]$cursor, 1L)
+  expect_identical(.decode_history_cursor(pages[[1L]]$cursor)$u, 1L)
 
   raw <- c(raw, list(
     list(
@@ -310,10 +316,13 @@ test_that("Claude session loader refreshes an appended transcript on each initia
     vapply(pages[[2L]]$messages, `[[`, character(1), "id"),
     c("h-u3", "h-a4")
   )
-  expect_identical(pages[[2L]]$cursor, 2L)
+  expect_identical(.decode_history_cursor(pages[[2L]]$cursor)$u, 2L)
 
   # Older pages remain pinned to that refreshed snapshot.
-  loader("session-growing", "thread-growing", capture, cursor = 2L, limit = 2L)
+  loader(
+    "session-growing", "thread-growing", capture,
+    cursor = pages[[2L]]$cursor, limit = 2L
+  )
   expect_identical(reads, 2L)
   expect_identical(
     vapply(pages[[3L]]$messages, `[[`, character(1), "id"),

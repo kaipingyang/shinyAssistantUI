@@ -145,7 +145,7 @@ Assistant Cloud.
 | 8 | Generative UI on Teams | Not applicable | No Adaptive Card conversion or Teams bot action decoder is part of the package. |
 | 9 | Generative UI primitive | Adopted | `on_generative_ui(spec)` renders a JSON layout through `MessagePrimitive.GenerativeUI` and a fixed display-only allowlist. |
 | 10 | Interactable Tool UIs | Not adopted | Artifact/data views are not versioned model-editable state with companion tools. |
-| 11 | A2UI over AG-UI | **Future plan** | Evaluate an optional A2UI surface-operation converter and action bridge while retaining the Shiny transport and current Data/Generative UI paths. No current A2UI or AG-UI support is claimed. |
+| 11 | A2UI over AG-UI | **Future plan** | The [A2UI over Shiny future contract](a2ui-shiny-contract.html) evaluates an optional surface-operation converter and action bridge while retaining the Shiny transport and current Data/Generative UI paths. No current A2UI or AG-UI support is claimed. |
 | 12 | OpenUI | Not adopted | No OpenUI Lang renderer or transport dependency is bundled. |
 | 13 | Model Context Protocol | Partial, backend-only | Selected backends may expose MCP tools, which render as ordinary tool calls. The browser package has no general MCP client/toolkit. |
 | 14 | User-managed MCP servers | Not adopted | Browser-managed servers, connector UI, OAuth, and storage are absent. |

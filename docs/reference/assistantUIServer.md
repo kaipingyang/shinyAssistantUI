@@ -69,7 +69,8 @@ assistantUIServer(
   modal = FALSE,
   prewarm = FALSE,
   allow_warmup = TRUE,
-  max_concurrent_runs = 1L
+  max_concurrent_runs = 1L,
+  diagnostics = NULL
 )
 ```
 
@@ -589,6 +590,12 @@ assistantUIServer(
     "supports_concurrent_threads") <- TRUE`; all other handlers remain
     globally serial for backward compatibility. Invocations within one
     thread are always strict FIFO and never overlap.
+
+  - diagnostics:
+    
+    Optional diagnostics configuration. `NULL` (the default) disables
+    telemetry for generic widgets; `TRUE` or a validated named list
+    enables bounded privacy-filtered diagnostics.
 
 ## Value
 

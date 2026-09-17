@@ -10,6 +10,7 @@ script_path <- if (length(file_arg)) {
   normalizePath("tests/verify/verify_addin_runtime_refresh.R")
 }
 PROJ <- normalizePath(file.path(dirname(script_path), "../.."))
+source(file.path(PROJ, "tests/verify/owned_process_cleanup.R"), local = TRUE)
 PORT <- httpuv::randomPort()
 LOG_OUT <- tempfile(paste0("addin-runtime-refresh-", Sys.getpid(), "-"), fileext = ".out")
 LOG_ERR <- tempfile(paste0("addin-runtime-refresh-", Sys.getpid(), "-"), fileext = ".err")
@@ -38,6 +39,12 @@ chromote::set_chrome_args(c(
   "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"
 ))
 b <- chromote::ChromoteSession$new()
+cleanup <- make_verification_cleanup(
+  browser_session = function() b,
+  app_process = function() proc,
+  paths = c(LOG_OUT, LOG_ERR)
+)
+on.exit(cleanup(), add = TRUE)
 on.exit(try(b$close(), silent = TRUE), add = TRUE)
 errors <- character()
 b$Runtime$enable()
@@ -185,7 +192,7 @@ clear_editor()
 check("history item exists", wait_until("Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).some(e=>e.innerText.includes('Checklist history'))"))
 ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).find(e=>e.innerText.includes('Checklist history'));if(e)e.querySelector('[data-slot=aui_thread-list-item-trigger]').click();return !!e})()")
 check("historical checklist restored", wait_until("document.querySelectorAll('#chat [data-slot=aui_claude_checklist] li').length===2"))
-check("completed checklist offers close", isTRUE(ev("!!document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')")))
+check("completed checklist offers close", wait_until("!!document.querySelector('#chat [aria-label=\"Close checklist\"]')"))
 check("late history tail absent from first snapshot", !grepl("process_sdtm_data.R", ev("document.querySelector('#chat').innerText"), fixed = TRUE))
 # The fixture appends task-notification -> Read -> thinking-only after the first
 # load. Switching away and back must issue a fresh cursor=NULL traversal.
@@ -194,7 +201,7 @@ check("switches away from growing history", wait_until("!document.querySelector(
 ev("(function(){var e=Array.from(document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')).find(e=>e.innerText.includes('Checklist history'));if(e)e.querySelector('[data-slot=aui_thread-list-item-trigger]').click();return !!e})()")
 check("reopened history includes appended Read", wait_until("document.querySelector('#chat')?.innerText.includes('process_sdtm_data.R')"))
 check("historical checklist remains after refresh", isTRUE(ev("document.querySelectorAll('#chat [data-slot=aui_claude_checklist] li').length===2")))
-ev("document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')?.click();true")
+ev("document.querySelector('#chat [aria-label=\"Close checklist\"]')?.click();true")
 check("user can close completed checklist", wait_until("!document.querySelector('#chat [data-slot=aui_claude_checklist]')"))
 
 before_new_task <- length(handler_messages())
@@ -219,7 +226,7 @@ check(
   wait_until("!!document.querySelector('#chat [data-slot=aui_claude_checklist][data-all-completed=false]')"),
   ev("JSON.stringify({messages:[...document.querySelectorAll('#chat [data-role]')].map(e=>e.innerText),checklists:[...document.querySelectorAll('#chat [data-slot=aui_claude_checklist]')].map(e=>({revision:e.dataset.checklistRevision,completed:e.dataset.allCompleted,text:e.innerText}))})")
 )
-check("active checklist has no close action", !isTRUE(ev("!!document.querySelector('#chat [aria-label=\"Dismiss completed checklist\"]')")))
+check("active checklist offers close", isTRUE(ev("!!document.querySelector('#chat [aria-label=\"Close checklist\"]')")))
 send_text("many checklist tasks")
 check("large current checklist shows an actionable +6 more", wait_until(
   "!!document.querySelector('#chat [data-slot=aui_checklist_overflow][aria-label=\"Show 6 more checklist items\"]')"
@@ -300,7 +307,4 @@ check("zero browser console/runtime errors", length(errors) == 0L,
       if (length(errors)) paste(unique(errors), collapse = " | ") else "")
 
 cat("ADDIN_RUNTIME_REFRESH_VERIFY_DONE\n")
-try(b$close(), silent = TRUE)
-try(proc$kill(), silent = TRUE)
-try(chromote::default_chromote_object()$get_browser()$get_process()$kill(), silent = TRUE)
-unlink(c(LOG_OUT, LOG_ERR))
+cleanup()

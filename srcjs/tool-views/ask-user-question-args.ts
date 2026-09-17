@@ -28,12 +28,14 @@ export function parseAskUserQuestionArgs(value: unknown): QuestionSummary[] | nu
 
     const options: QuestionSummary["options"] = [];
     for (const rawOption of (raw.options as unknown[] | undefined) ?? []) {
-      if (!isRecord(rawOption) || !hasOnlyKeys(rawOption, ["label", "description"])) return null;
+      if (!isRecord(rawOption) || !hasOnlyKeys(rawOption, ["label", "description", "preview"])) return null;
       if (typeof rawOption.label !== "string" || !rawOption.label.trim()) return null;
       if (rawOption.description !== undefined && typeof rawOption.description !== "string") return null;
+      if (rawOption.preview !== undefined && typeof rawOption.preview !== "string") return null;
       options.push({
         label: rawOption.label,
         ...(typeof rawOption.description === "string" ? { description: rawOption.description } : {}),
+        ...(typeof rawOption.preview === "string" ? { preview: rawOption.preview } : {}),
       });
     }
 

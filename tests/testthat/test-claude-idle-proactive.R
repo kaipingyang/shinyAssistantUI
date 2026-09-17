@@ -1536,3 +1536,75 @@ test_that("make_claude_handler routes owned background approval and reconciles d
   )))
   expect_identical(events[seq_len(min(2L, length(events)))], c("transcript", "status"))
 })
+
+
+test_that("memory admission gate prevents a new idle opener without polling", {
+  scheduler <- plan91_scheduler()
+  allowed <- FALSE
+  polls <- 0L
+  coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
+    poll_messages = function() {
+      polls <<- polls + 1L
+      list(plan91_sdk_message("AssistantMessage", content = list()))
+    },
+    schedule = scheduler$schedule,
+    now = function() 0,
+    on_idle_event = function(message) stop("blocked opener was dispatched"),
+    on_idle_result = function(message, on_complete) on_complete(),
+    on_idle_failure = function(reason) stop(plan91_reason_text(reason)),
+    deny_idle_permission = function(message) stop("unexpected permission"),
+    interrupt = function() stop("unexpected interrupt"),
+    can_open_idle = function() allowed
+  )
+
+  coordinator$start_idle(0.1)
+  expect_equal(scheduler$run_next(), 0.1)
+  expect_identical(polls, 0L)
+  expect_false(coordinator$is_busy())
+  expect_identical(coordinator$metrics()$idle_open, FALSE)
+
+  allowed <- TRUE
+  expect_equal(scheduler$run_next(), 0.1)
+  expect_identical(polls, 1L)
+})
+
+test_that("memory admission gate lets an already-open idle turn drain to Result", {
+  scheduler <- plan91_scheduler()
+  allowed <- TRUE
+  polls <- 0L
+  events <- results <- 0L
+  queue <- list(
+    list(plan91_sdk_message("AssistantMessage", content = list())),
+    list(plan91_sdk_message("ResultMessage", session_id = "guard-drain"))
+  )
+  coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
+    poll_messages = function() {
+      polls <<- polls + 1L
+      value <- queue[[1L]] %||% list()
+      queue <<- queue[-1L]
+      value
+    },
+    schedule = scheduler$schedule,
+    now = function() 0,
+    on_idle_event = function(message) events <<- events + 1L,
+    on_idle_result = function(message, on_complete) {
+      results <<- results + 1L
+      on_complete()
+    },
+    on_idle_failure = function(reason) stop(plan91_reason_text(reason)),
+    deny_idle_permission = function(message) stop("unexpected permission"),
+    interrupt = function() stop("unexpected interrupt"),
+    can_open_idle = function() allowed
+  )
+
+  coordinator$start_idle()
+  scheduler$run_next()
+  expect_true(coordinator$metrics()$idle_open)
+  allowed <- FALSE
+  scheduler$run_next()
+
+  expect_identical(polls, 2L)
+  expect_identical(events, 1L)
+  expect_identical(results, 1L)
+  expect_false(coordinator$is_busy())
+})

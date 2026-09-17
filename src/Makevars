@@ -1,0 +1,3 @@
+OBJECTS = init.o native/secure_fs.o
+PKG_CPPFLAGS = -D_GNU_SOURCE
+PKG_LIBS = -pthread

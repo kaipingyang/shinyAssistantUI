@@ -41,6 +41,7 @@ assistantUIPage <- function(..., title = NULL, padding = 0,
   }
 
   page_head <- shiny::tags$head(
+    shiny::tags$link(rel = "icon", href = "data:,"),
     shiny::tags$meta(
       name = "viewport",
       content = "width=device-width, initial-scale=1"

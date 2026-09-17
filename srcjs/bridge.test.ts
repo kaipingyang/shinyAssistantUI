@@ -480,3 +480,17 @@ describe("Claude edit marker settings bridge", () => {
     expect(event!.value).toMatchObject({ value: false });
   });
 });
+
+
+describe("bridge diagnostics telemetry", () => {
+  it("sends the already-sanitized batch on the isolated telemetry input", () => {
+    const b = createShinyBridge("chat");
+    const batch = {
+      version: 2 as const,
+      schema: 1 as const,
+      rows: [{ schema: 1 as const, event: "frontend_mount" as const, ts: 1, metrics: {} }],
+    };
+    b.sendDiagnostics(batch);
+    expect(inputValues.at(-1)).toEqual({ id: "chat_telemetry", value: batch });
+  });
+});

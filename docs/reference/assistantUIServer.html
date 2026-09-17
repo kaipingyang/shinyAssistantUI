@@ -113,7 +113,8 @@ user messages, calls a backend handler, and streams responses back to the UI.</p
 <span>  modal <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  prewarm <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  allow_warmup <span class="op">=</span> <span class="cn">TRUE</span>,</span>
-<span>  max_concurrent_runs <span class="op">=</span> <span class="fl">1L</span></span>
+<span>  max_concurrent_runs <span class="op">=</span> <span class="fl">1L</span>,</span>
+<span>  diagnostics <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -580,6 +581,12 @@ when <code>handler</code> explicitly declares
 <code>attr(handler, "supports_concurrent_threads") &lt;- TRUE</code>; all other handlers
 remain globally serial for backward compatibility. Invocations within one
 thread are always strict FIFO and never overlap.</p></dd>
+
+
+<dt id="arg-diagnostics">diagnostics<a class="anchor" aria-label="anchor" href="#arg-diagnostics"></a></dt>
+<dd><p>Optional diagnostics configuration. <code>NULL</code> (the default)
+disables telemetry for generic widgets; <code>TRUE</code> or a validated named list
+enables bounded privacy-filtered diagnostics.</p></dd>
 
 </dl></div>
     <div class="section level2">

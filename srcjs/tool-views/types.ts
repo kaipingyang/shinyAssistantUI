@@ -3,7 +3,7 @@
 
 export type TodoItem = { content: string; status: string; activeForm?: string };
 export type QueryField = { label: string; value: string; href?: string };
-export type QuestionOptionSummary = { label: string; description?: string };
+export type QuestionOptionSummary = { label: string; description?: string; preview?: string };
 export type QuestionSummary = {
   question: string;
   header?: string;

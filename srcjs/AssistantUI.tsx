@@ -22,6 +22,7 @@ import { ShinyToolFallback } from "./shiny-tool-fallback";
 import { ArtifactPanel } from "./artifact-panel";
 import { registerApprovalHandler, unregisterApprovalHandler } from "./approval-registry";
 import { ShinyConfigContext } from "./shiny-config-context";
+import { PerformanceOrb } from "./performance-orb";
 
 // Dev-only(默认关):在浏览器加 `?aui-devtools=1`(或 config.devtools=TRUE)时,挂载官方
 // @assistant-ui/react-devtools 的浮层 modal,便于迁移期检查 ExternalStore 运行时/消息 parts。
@@ -88,6 +89,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
 
   const activeArtifact = rt.artifacts.find((a) => a.id === rt.activeArtifactId) ?? null;
   const showThreadList = config?.show_thread_list === true;
+  const orbActivity = rt.runPhase === "running"
+    ? (rt.runStage === "finalizing" ? "Finalizing" : "Streaming")
+    : rt.runPhase === "queued" ? "Queued"
+      : rt.runPhase === "connecting" ? "Connecting"
+        : rt.warming ? "Warming"
+          : "Idle";
   const isModal = config?.modal === true;
   // 侧栏默认展开：用户经常需要从历史列表里选会话，打开就该看得到。
   // 折叠只在本会话有效、不持久化（不传 storageKey），因此每次重开 addin 都回到展开态；
@@ -141,6 +148,12 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     rateLimit: rt.rateLimit,
     statusText: rt.statusText,
     serviceState: rt.serviceState,
+    memoryMonitor: rt.memoryMonitor,
+    diagnosticsLogging: rt.diagnosticsLogging,
+    showPerformanceOrb: rt.showPerformanceOrb,
+    setShowPerformanceOrb: rt.setShowPerformanceOrb,
+    performanceOrbController: rt.performanceOrbController,
+    recordOwnedMarkdownPreprocess: rt.recordOwnedMarkdownPreprocess,
     pendingServiceSubmissions: rt.pendingServiceSubmissions,
     retryService: rt.retryService,
     cancelPendingServiceSubmissions: rt.cancelPendingSubmissions,
@@ -214,7 +227,16 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               sideOffset={16}
               className="aui-root bg-popover text-popover-foreground z-50 h-[500px] w-[400px] overflow-clip rounded-xl border p-0 shadow-md outline-none"
             >
-              <div className="flex h-full flex-col">{threadEl}</div>
+              <div className="relative flex h-full flex-col">
+                {threadEl}
+                {rt.showPerformanceOrb && rt.performanceOrbController && (
+                  <PerformanceOrb
+                    controller={rt.performanceOrbController}
+                    memoryMonitor={rt.memoryMonitor}
+                    activity={orbActivity}
+                  />
+                )}
+              </div>
             </AssistantModalPrimitive.Content>
           </AssistantModalPrimitive.Root>
           <ShinyDevTools config={config ?? {}} />
@@ -245,6 +267,13 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
               />
             )}
             {threadEl}
+            {rt.showPerformanceOrb && rt.performanceOrbController && (
+              <PerformanceOrb
+                controller={rt.performanceOrbController}
+                memoryMonitor={rt.memoryMonitor}
+                activity={orbActivity}
+              />
+            )}
           </div>
           {activeArtifact && (
             <div className="w-[45%] min-w-[320px] shrink-0">

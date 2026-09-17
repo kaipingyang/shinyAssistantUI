@@ -2,10 +2,11 @@ pandoc: 2.9.2.1
 pkgdown: 2.2.1
 pkgdown_sha: ~
 articles:
+  a2ui-shiny-contract: a2ui-shiny-contract.html
   installation: installation.html
   shiny-assistant-ui: shiny-assistant-ui.html
   upstream-alignment: upstream-alignment.html
-last_built: 2026-09-10T03:03Z
+last_built: 2026-09-17T03:14Z
 urls:
   reference: https://kaipingyang.github.io/shinyAssistantUI/reference
   article: https://kaipingyang.github.io/shinyAssistantUI/articles

@@ -2,6 +2,7 @@
 // 封装 Shiny.setInputValue 和 addCustomMessageHandler
 
 import type { LazyToolResultChunk, LazyToolResultRequest } from "./lazy-tool-result";
+import type { DiagnosticsBatch } from "./diagnostics";
 
 declare const Shiny: {
   setInputValue: (id: string, value: unknown, opts?: { priority?: string }) => void;
@@ -176,6 +177,7 @@ export interface ShinyBridge {
   sendLoadSession: (sessionId: string, threadId: string, requestId?: string, project?: string) => void;
   sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string, project?: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
+  sendDiagnostics: (batch: DiagnosticsBatch) => void;
   sendReady: () => void;
   sendWarmup: (threadId: string, project?: string) => void;
   requestIdeContext: (requestId: string, threadId: string, project?: string) => void;
@@ -493,6 +495,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         `${inputId}_feedback`,
         { messageId, type, ts: Date.now() },
         { priority: "event" }
+      );
+    },
+
+    sendDiagnostics(batch) {
+      Shiny.setInputValue(
+        `${inputId}_telemetry`,
+        batch,
+        { priority: "event" },
       );
     },
 

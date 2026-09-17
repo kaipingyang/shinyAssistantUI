@@ -59,7 +59,10 @@ and session persistence across R restarts.</p>
 <span>  cwd_provider <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  thinking_provider <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  models <span class="op">=</span> <span class="cn">NULL</span>,</span>
-<span>  session_map_path <span class="op">=</span> <span class="st">".claude_session_map.rds"</span></span>
+<span>  session_map_path <span class="op">=</span> <span class="st">".claude_session_map.rds"</span>,</span>
+<span>  memory_guard_config <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  on_memory_observation <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  memory_sampler <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -93,6 +96,21 @@ selector (a "Default" option is always prepended).</p></dd>
 <dd><p>Path to the <code>.rds</code> file used to persist
 <code>thread_id -&gt; session_id</code> mappings. Defaults to
 <code>".claude_session_map.rds"</code> in the current working directory.</p></dd>
+
+
+<dt id="arg-memory-guard-config">memory_guard_config<a class="anchor" aria-label="anchor" href="#arg-memory-guard-config"></a></dt>
+<dd><p>Optional internal memory-pressure guard configuration.
+<code>NULL</code> keeps the guard disabled for generic handlers.</p></dd>
+
+
+<dt id="arg-on-memory-observation">on_memory_observation<a class="anchor" aria-label="anchor" href="#arg-on-memory-observation"></a></dt>
+<dd><p>Optional callback receiving the guard's exact
+sampled observation and state transition.</p></dd>
+
+
+<dt id="arg-memory-sampler">memory_sampler<a class="anchor" aria-label="anchor" href="#arg-memory-sampler"></a></dt>
+<dd><p>Optional internal sampler injection used by deterministic
+verification; production callers should leave it <code>NULL</code>.</p></dd>
 
 </dl></div>
     <div class="section level2">

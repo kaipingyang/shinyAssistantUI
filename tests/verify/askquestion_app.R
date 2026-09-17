@@ -6,7 +6,13 @@ library(coro)
 
 qs <- list(
   list(question = "Fav color?", header = "Color", multiSelect = FALSE,
-       options = list(list(label = "Red"), list(label = "Blue"))),
+       options = list(
+         list(
+           label = "Red",
+           preview = "Color preview\n├─ red swatch\n└─ <iframe src=/PRIVATE must render as text>"
+         ),
+         list(label = "Blue")
+       )),
   list(question = "Which langs?", header = "Langs", multiSelect = TRUE,
        options = list(list(label = "R"), list(label = "Python")))
 )

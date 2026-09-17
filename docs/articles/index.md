@@ -10,3 +10,5 @@
 
   - [Upstream documentation
     alignment](https://kaipingyang.github.io/shinyAssistantUI/articles/upstream-alignment.md):
+  - [A2UI over Shiny: future design
+    contract](https://kaipingyang.github.io/shinyAssistantUI/articles/a2ui-shiny-contract.md):

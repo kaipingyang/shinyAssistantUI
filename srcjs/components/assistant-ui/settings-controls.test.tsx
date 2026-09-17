@@ -178,6 +178,148 @@ describe("SidebarSettings", () => {
     expect(setAutoStartCopilotApi).toHaveBeenCalledOnce();
     expect(setAutoStartCopilotApi).toHaveBeenCalledWith(false);
   });
+
+  it("shows an addin-only memory monitor collapsed and closes visibility exactly", () => {
+    const setVisible = vi.fn();
+    const context = ctxWith({
+      memoryMonitor: {
+        state: "normal",
+        sample: {
+          state: "normal", pssBytes: 80, rssBytes: 90,
+          cgroupCurrentBytes: 2465 * 1024 ** 2,
+          cgroupMaxBytes: 29296 * 1024 ** 2,
+          cgroupLimited: true,
+          softPssBytes: 100, hardPssBytes: 200,
+          softRssBytes: 125, hardRssBytes: 225,
+        },
+        frame: null,
+        setVisible,
+      },
+    });
+    const rendered = render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const trigger = screen.getByRole("button", { name: "Memory monitor" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("PSS 80 B")).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(setVisible).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText("PSS 80 B")).toBeTruthy();
+    expect(screen.getByText("RSS 90 B")).toBeTruthy();
+    expect(screen.getByText("Normal")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(setVisible).toHaveBeenLastCalledWith(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("button", { name: "Memory monitor" }).getAttribute("aria-expanded"))
+      .toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Memory monitor" }));
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Settings" }), { key: "Escape" });
+    expect(setVisible).toHaveBeenLastCalledWith(false);
+
+    rendered.unmount();
+    expect(setVisible).toHaveBeenLastCalledWith(false);
+  });
+
+  it("renders unavailable metrics for an exact state-only guard sample", () => {
+    const context = ctxWith({
+      memoryMonitor: {
+        state: "unknown",
+        sample: null,
+        frame: null,
+        setVisible: vi.fn(),
+      },
+    });
+    render(
+      <ShinyConfigContext.Provider value={context}>
+        <SidebarSettings />
+      </ShinyConfigContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Memory monitor" }));
+    expect(screen.getByText("PSS Unavailable")).toBeTruthy();
+    expect(screen.getByText("RSS Unavailable")).toBeTruthy();
+    expect(screen.getByText("Unknown")).toBeTruthy();
+  });
+
+  it("shows confirmed diagnostics preference and truthful Job restart guidance", () => {
+    const setEnabled = vi.fn();
+    const context = ctxWith({
+      diagnosticsLogging: {
+        desired: false,
+        launchEnabled: false,
+        environmentOverride: "none",
+        launchKind: "job",
+        writerStartup: "off",
+        saving: false,
+        saveFailed: false,
+        setEnabled,
+      },
+    });
+    const rendered = render(
+      <ShinyConfigContext.Provider value={context}><SidebarSettings /></ShinyConfigContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Save diagnostic logs" }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(screen.getByText("Logging was not requested for this process.")).toBeTruthy();
+    fireEvent.click(checkbox);
+    expect(setEnabled).toHaveBeenCalledWith(true);
+
+    rendered.rerender(
+      <ShinyConfigContext.Provider value={ctxWith({
+        diagnosticsLogging: {
+          ...context.diagnosticsLogging!, desired: true,
+        },
+      })}><SidebarSettings /></ShinyConfigContext.Provider>,
+    );
+    expect(screen.getByText(/Restart Background Job to apply this change/)).toBeTruthy();
+  });
+
+  it("shows the Performance Orb preference default-on and delegates immediate hide", () => {
+    const setShowPerformanceOrb = vi.fn();
+    render(<ShinyConfigContext.Provider value={ctxWith({
+      showPerformanceOrb: true,
+      setShowPerformanceOrb,
+    })}><SidebarSettings /></ShinyConfigContext.Provider>);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const toggle = screen.getByRole("checkbox", { name: "Show Performance Orb" }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    expect(setShowPerformanceOrb).toHaveBeenCalledWith(false);
+  });
+
+  it("distinguishes writer startup failure and environment override from restart", () => {
+    const context = ctxWith({
+      diagnosticsLogging: {
+        desired: true,
+        launchEnabled: true,
+        environmentOverride: "on",
+        launchKind: "foreground",
+        writerStartup: "failed",
+        saving: false,
+        saveFailed: false,
+        setEnabled: vi.fn(),
+      },
+    });
+    render(
+      <ShinyConfigContext.Provider value={context}><SidebarSettings /></ShinyConfigContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Save diagnostic logs" }) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(true);
+    expect(screen.getByText(/Logging could not start for this browser session/)).toBeTruthy();
+    expect(screen.getByText(/SHINYASSISTANTUI_DIAGNOSTICS controls startup/)).toBeTruthy();
+    expect(screen.queryByText(/Restart Background Job/)).toBeNull();
+  });
 });
 
 describe("ThinkingControl", () => {

@@ -49,6 +49,42 @@ describe("AskUserQuestionToolUI runtime validation", () => {
     });
   });
 
+  it("accepts and renders an option preview without weakening the strict payload", () => {
+    const decide = vi.fn();
+    registerApprovalHandler("chat-preview", decide);
+    const args = {
+      questions: [{
+        question: "这个 Shiny 插件式封装，你想给谁用？",
+        header: "使用范围",
+        options: [{
+          label: "只给我自己用(Recommended)",
+          description: "在你自己的 Workbench session 里使用。",
+          preview: "Shiny app(你一人用)\n├─ [启动 DSH] 按钮\n└─ <iframe src=当前 session 的 /p/3080/ 路径>",
+        }],
+        multiSelect: false,
+      }],
+    };
+    const view = renderTool(args, undefined, "ask-preview", "chat-preview");
+    expect(view.container.querySelector("[data-ask-questions-invalid]")).toBeNull();
+    const preview = view.container.querySelector('[data-ask-option-preview="只给我自己用(Recommended)"]');
+    expect(preview?.textContent).toContain("[启动 DSH] 按钮");
+    expect(preview?.textContent).toContain("<iframe src=当前 session");
+    fireEvent.click(view.getByRole("radio", { name: /^只给我自己用\(Recommended\)/ }));
+    fireEvent.click(view.getByText("Submit answer"));
+    expect(decide).toHaveBeenCalledWith("ask-preview", true, {
+      answers: { "这个 Shiny 插件式封装，你想给谁用？": "只给我自己用(Recommended)" },
+    });
+    view.unmount();
+
+    const hostile = renderTool({
+      questions: [{
+        question: "Unsafe?",
+        options: [{ label: "No", preview: "safe text", path: "/PRIVATE" }],
+      }],
+    }, undefined, "ask-preview-hostile", "chat-preview");
+    expect(hostile.container.querySelector("[data-ask-questions-invalid]")).not.toBeNull();
+  });
+
   it("renders historical answers without restoring the interactive form", () => {
     const args = {
       questions: [{ question: "Fav color?", options: [{ label: "Blue" }] }],

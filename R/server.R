@@ -309,6 +309,9 @@
 #'   `attr(handler, "supports_concurrent_threads") <- TRUE`; all other handlers
 #'   remain globally serial for backward compatibility. Invocations within one
 #'   thread are always strict FIFO and never overlap.
+#' @param diagnostics Optional diagnostics configuration. `NULL` (the default)
+#'   disables telemetry for generic widgets; `TRUE` or a validated named list
+#'   enables bounded privacy-filtered diagnostics.
 #' @return A list with a `clear()` function that creates a new thread in the UI,
 #'   `send_tool_call()` / `send_tool_result()` for manual tool card control, and
 #'   `send_sessions(sessions)` for injecting a list of historical session stubs
@@ -375,7 +378,8 @@ assistantUIServer <- function(id, handler,
                               modal             = FALSE,
                               prewarm           = FALSE,
                               allow_warmup      = TRUE,
-                              max_concurrent_runs = 1L) {
+                              max_concurrent_runs = 1L,
+                              diagnostics       = NULL) {
   force(show_thread_list); force(suggestions); force(commands)
   persistence <- tryCatch(
     match.arg(persistence),
@@ -428,6 +432,72 @@ assistantUIServer <- function(id, handler,
   effective_concurrency <- .effective_max_concurrent_runs(handler, requested_concurrency)
   session  <- shiny::getDefaultReactiveDomain()
   input_id <- paste0(id, "_input")
+  session_token <- tryCatch(as.character(session$token %||% "")[[1L]], error = function(e) "")
+  if (!nzchar(session_token)) {
+    session_token <- sub("^<environment: (.*)>$", "\\1", format(session))
+  }
+  ui_owner <- paste0(input_id, ":", session_token)
+  handler_attach_ui_owner <- attr(handler, "attach_ui_owner")
+  handler_detach_ui_owner <- attr(handler, "detach_ui_owner")
+
+  diagnostics_service <- attr(handler, "diagnostics_service")
+  if (!is.list(diagnostics_service) ||
+      !all(c("emit", "ingest_frontend_batch", "bind_session", "snapshot") %in% names(diagnostics_service))) {
+    diagnostics_service <- NULL
+  }
+  diagnostics_owned <- is.null(diagnostics_service)
+  diagnostics_config <- if (diagnostics_owned) {
+    .normalize_diagnostics_config(diagnostics)
+  } else {
+    .normalize_diagnostics_config(TRUE, sample_uniform = function() 0)
+  }
+  diagnostics_context <- NULL
+  diagnostics_writer <- NULL
+  diagnostics_active <- FALSE
+  diagnostics_closing <- FALSE
+  diagnostics_unbind <- NULL
+  telemetry_observer <- NULL
+  if (!diagnostics_owned) {
+    diagnostics_active <- identical(
+      tryCatch(diagnostics_service$snapshot()$state, error = function(error) "failed"),
+      "started"
+    )
+    if (diagnostics_active) {
+      diagnostics_unbind <- tryCatch(diagnostics_service$bind_session(), error = function(error) NULL)
+      diagnostics_writer <- list(
+        write_event = function(source, event, metrics = list(), ...) {
+          diagnostics_service$emit(event, metrics)
+        },
+        ingest_frontend_batch = diagnostics_service$ingest_frontend_batch,
+        stop_timer = function() TRUE,
+        close = function() TRUE,
+        snapshot = diagnostics_service$snapshot
+      )
+    }
+  } else if (isTRUE(diagnostics_config$enabled)) {
+    started <- .start_diagnostics_writer(diagnostics_config)
+    diagnostics_context <- started$context
+    diagnostics_writer <- started$writer
+    diagnostics_active <- identical(started$state, "started")
+  }
+  diagnostics_emit <- function(event, metrics = list(), thread_id = NULL,
+                               run_id = NULL, source = "backend",
+                               flush_now = FALSE) {
+    if (!diagnostics_active || diagnostics_closing || is.null(diagnostics_writer)) {
+      return(invisible(FALSE))
+    }
+    tryCatch(
+      diagnostics_writer$write_event(
+        source, event, metrics,
+        thread_id = thread_id, run_id = run_id, flush_now = flush_now
+      ),
+      error = function(error) FALSE
+    )
+  }
+  if (diagnostics_active && diagnostics_owned) {
+    diagnostics_emit("diagnostics_start", list(success = TRUE))
+  }
+
   lazy_tool_results <- .new_lazy_tool_result_store()
   tool_result_annotations <- new.env(parent = emptyenv())
   tool_result_key <- function(thread_id, tool_call_id) {
@@ -569,11 +639,38 @@ assistantUIServer <- function(id, handler,
   if (isTRUE(latex)) config$latex <- TRUE
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
+  if (diagnostics_active) {
+    config$diagnostics <- list(
+      version = 2L,
+      enabled = TRUE,
+      schema = 1L,
+      batchMax = diagnostics_config$frontend_batch_max,
+      queueMax = diagnostics_config$frontend_queue_max,
+      batchMaxBytes = diagnostics_config$frontend_batch_max_bytes,
+      eventMaxBytes = diagnostics_config$event_max_bytes
+    )
+  }
 
   session$output[[id]] <- renderAssistantUI(
     config   = config,
     outputId = id
   )
+
+  if (diagnostics_active) {
+    telemetry_observer <- shiny::observeEvent(
+      session$input[[paste0(input_id, "_telemetry")]],
+      {
+        if (diagnostics_closing) return()
+        batch <- session$input[[paste0(input_id, "_telemetry")]]
+        tryCatch(
+          diagnostics_writer$ingest_frontend_batch(batch),
+          error = function(error) FALSE
+        )
+      },
+      ignoreNULL = TRUE,
+      ignoreInit = TRUE
+    )
+  }
 
   # 每线程 active run ID：取消只能触碰与请求 runId 匹配的当前 owner。
   active_run_ids <- new.env(parent = emptyenv())
@@ -665,6 +762,11 @@ assistantUIServer <- function(id, handler,
       invisible(accepted)
     }
     list(
+      on_diagnostics = function(event, metrics = list()) {
+        diagnostics_emit(
+          event, metrics, thread_id = thread_id, run_id = run_id
+        )
+      },
       on_run_phase = function(stage) {
         if (settled) return(invisible(FALSE))
         phase <- if (stage %in% c("streaming", "finalizing")) "running" else "connecting"
@@ -677,6 +779,7 @@ assistantUIServer <- function(id, handler,
       },
       on_done = function(suggestions = list()) {
         if (!settle_run("complete")) return(invisible(NULL))
+        diagnostics_emit("turn_done", list(success = TRUE), thread_id, run_id)
         refresh_git_branch(project)
         forget_run_project(run_id)
         reveal_path <- edit_reveal$flush()
@@ -712,6 +815,10 @@ assistantUIServer <- function(id, handler,
       },
       on_error_fn = function(msg) {
         if (!settle_run("error")) return(invisible(NULL))
+        diagnostics_emit(
+          "turn_error", list(success = FALSE, reason_category = "closed"),
+          thread_id, run_id
+        )
         refresh_git_branch(project)
         forget_run_project(run_id)
         session$sendCustomMessage(paste0(input_id, ":error"),
@@ -1305,7 +1412,6 @@ assistantUIServer <- function(id, handler,
     }
     invisible(NULL)
   }
-  session$onSessionEnded(function() cancel_pending_approvals())
 
   # 方案B：Archive 软隐藏（可恢复，持久化在服务端）。
   if (!is.null(on_archive_session)) {
@@ -1365,6 +1471,10 @@ assistantUIServer <- function(id, handler,
       rm(list = thread_id, envir = cancel_fns)
     }
     cbs <- make_callbacks(thread_id, run_id, project)
+    diagnostics_emit(
+      "turn_admitted", list(active_turns = length(ls(active_run_ids))),
+      thread_id, run_id
+    )
     is_cancelled <- function() {
       identical(get0(thread_id, envir = active_run_ids), run_id) &&
         isTRUE(get0(thread_id, envir = cancel_flags))
@@ -1405,6 +1515,7 @@ assistantUIServer <- function(id, handler,
       on_proactive_status = cbs$on_proactive_status,
       on_warming        = cbs$on_warming,
       on_run_phase      = cbs$on_run_phase,
+      on_diagnostics    = cbs$on_diagnostics,
       on_state          = cbs$on_state,
       on_commands       = cbs$on_commands,
       on_suggestions    = cbs$on_suggestions,
@@ -1418,6 +1529,7 @@ assistantUIServer <- function(id, handler,
       continuation_kind = continuation_kind
     )
     handler_params <- names(formals(handler))
+    if ("ui_owner" %in% handler_params) all_args$ui_owner <- ui_owner
     call_args <- if ("..." %in% handler_params) all_args
                  else all_args[names(all_args) %in% handler_params]
 
@@ -1468,6 +1580,9 @@ assistantUIServer <- function(id, handler,
       send_run_state(thread_id, run_id, phase, queue_position)
     },
     on_cancelled_settled = function(thread_id, run_id) {
+      diagnostics_emit(
+        "turn_cancelled", list(success = TRUE), thread_id, run_id
+      )
       refresh_git_branch(get0(run_id, envir = run_projects, inherits = FALSE))
       forget_run_project(run_id)
       if (exists(run_id, envir = run_states, inherits = FALSE)) {
@@ -1480,7 +1595,7 @@ assistantUIServer <- function(id, handler,
       )
     }
   )
-  session$onSessionEnded(function() run_scheduler$close())
+  # Session cleanup is consolidated after all resources are defined.
 
   # ── sessions ready 握手：JS handler 注册后补发 sessions ────────────────────
   # React 18 createRoot().render() 是异步的，Shiny 首次 flush 时 :sessions
@@ -1493,8 +1608,6 @@ assistantUIServer <- function(id, handler,
   # Handlers that own external resources (e.g. make_codeagent_remote_handler's
   # worker processes) may expose a `teardown` attribute; stop them on session end.
   .teardown_fn <- attr(handler, "teardown")
-  if (is.function(.teardown_fn))
-    session$onSessionEnded(function() tryCatch(.teardown_fn(), error = function(e) NULL))
   warmup_states <- new.env(parent = emptyenv())
   warmup_projects <- new.env(parent = emptyenv())
   warmup_queue <- character()
@@ -1631,14 +1744,7 @@ assistantUIServer <- function(id, handler,
     schedule_warmup_pump()
     invisible(TRUE)
   }
-  session$onSessionEnded(function() {
-    warmup_closed <<- TRUE
-    warmup_queue <<- character()
-    if (is.function(warmup_timer)) warmup_timer()
-    if (is.function(warmup_yield_timer)) warmup_yield_timer()
-    warmup_timer <<- NULL
-    warmup_yield_timer <<- NULL
-  })
+  # Warmup timers are cancelled by the consolidated session finalizer.
 
   shiny::observeEvent(session$input[[paste0(input_id, "_sessions_ready")]], {
     if (!is.null(pending_sessions)) {
@@ -1661,6 +1767,16 @@ assistantUIServer <- function(id, handler,
         length(msg$attachments %||% list()) == 0) return()
 
     if (is_history_request && !is.null(on_session_load)) {
+      if (is.function(handler_attach_ui_owner)) {
+        history_callbacks <- make_callbacks(msg$threadId, NULL, msg$project)
+        tryCatch(
+          handler_attach_ui_owner(
+            msg$threadId, ui_owner, history_callbacks,
+            run_id = NULL, history_only = TRUE
+          ),
+          error = function(error) FALSE
+        )
+      }
       send_thread <- function(messages, cursor = NULL, has_more = FALSE) {
         messages <- prepare_lazy_history_results(messages, msg$threadId)
         session$sendCustomMessage(
@@ -1795,13 +1911,61 @@ assistantUIServer <- function(id, handler,
     session$sendCustomMessage(paste0(input_id, ":tool-result-chunk"), response)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-  # Session-owned lazy artifacts and optional backend resources share one cleanup
-  # callback so both paths run even if backend cleanup is absent or interrupted.
+  # One ordered, idempotent session finalizer owns every session resource.
   handler_cleanup <- attr(handler, "cleanup")
-  session$onSessionEnded(function() {
+  session_finalized <- FALSE
+  teardown_session <- function() {
+    if (session_finalized) return(invisible(FALSE))
+    session_finalized <<- TRUE
+    diagnostics_closing <<- TRUE
+
+    if (!is.null(telemetry_observer)) {
+      tryCatch(telemetry_observer$destroy(), error = function(error) NULL)
+      telemetry_observer <<- NULL
+    }
+    if (!is.null(diagnostics_writer)) {
+      tryCatch(diagnostics_writer$stop_timer(), error = function(error) NULL)
+    }
+    tryCatch(run_scheduler$close(), error = function(error) NULL)
+    warmup_closed <<- TRUE
+    warmup_queue <<- character()
+    if (is.function(warmup_timer)) tryCatch(warmup_timer(), error = function(error) NULL)
+    if (is.function(warmup_yield_timer)) {
+      tryCatch(warmup_yield_timer(), error = function(error) NULL)
+    }
+    warmup_timer <<- NULL
+    warmup_yield_timer <<- NULL
+    if (is.function(.teardown_fn)) {
+      tryCatch(.teardown_fn(), error = function(error) NULL)
+    }
+
+    if (diagnostics_active && diagnostics_owned && !is.null(diagnostics_writer)) {
+      tryCatch(diagnostics_writer$write_event(
+        "backend", "cleanup_start", list(cleanup_state = "start"),
+        flush_now = TRUE
+      ), error = function(error) NULL)
+    }
+    cancel_pending_approvals()
     lazy_tool_results$cleanup()
-    if (is.function(handler_cleanup)) .run_handler_cleanup(handler_cleanup)
-  })
+    if (is.function(handler_detach_ui_owner)) {
+      .run_handler_cleanup(function() handler_detach_ui_owner(ui_owner))
+    } else if (is.function(handler_cleanup)) {
+      .run_handler_cleanup(handler_cleanup)
+    }
+    if (diagnostics_active && diagnostics_owned && !is.null(diagnostics_writer)) {
+      tryCatch(diagnostics_writer$write_event(
+        "backend", "cleanup_end", list(cleanup_state = "end"),
+        flush_now = TRUE
+      ), error = function(error) NULL)
+      tryCatch(diagnostics_writer$close(), error = function(error) NULL)
+    }
+    if (is.function(diagnostics_unbind)) {
+      tryCatch(diagnostics_unbind(), error = function(error) NULL)
+      diagnostics_unbind <<- NULL
+    }
+    invisible(TRUE)
+  }
+  session$onSessionEnded(teardown_session)
 
   invisible(list(
     clear = function() {

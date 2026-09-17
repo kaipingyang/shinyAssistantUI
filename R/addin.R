@@ -99,11 +99,101 @@
 #' @return A [shiny::shinyApp] object.
 #' @keywords internal
 #' @noRd
+.claude_once_handler_cleanup <- function(handler) {
+  cleaned <- FALSE
+  function() {
+    if (cleaned) return(invisible(FALSE))
+    cleaned <<- TRUE
+    handler_cleanup <- attr(handler, "cleanup")
+    if (is.function(handler_cleanup)) .run_handler_cleanup(handler_cleanup)
+    invisible(TRUE)
+  }
+}
+
+# Apply only the current-process effects that historically accompanied addin
+# setting callbacks. Durable state and frontend canonical state are updated by
+# the CAS coordinator; diagnostics deliberately remains restart-bound.
+.apply_addin_setting_side_effect <- function(
+    field, value, handler = NULL, copilot_plugins = list(),
+    run_r_available = TRUE) {
+  normalized <- .addin_setting_value(field, value, invalid_default = FALSE)
+  if (is.null(normalized)) return(FALSE)
+  invoke <- function(callback, ...) {
+    if (!is.function(callback)) return(invisible(FALSE))
+    tryCatch({ callback(...); TRUE }, error = function(error) FALSE)
+  }
+  plugins <- if (is.environment(copilot_plugins)) {
+    mget(ls(copilot_plugins, all.names = TRUE), envir = copilot_plugins,
+         inherits = FALSE)
+  } else if (is.list(copilot_plugins)) {
+    copilot_plugins
+  } else {
+    list()
+  }
+  if (identical(field, "autoStartCopilotApi")) {
+    for (plugin in plugins) {
+      setter <- if (is.list(plugin)) plugin$set_auto_start else NULL
+      invoke(setter, isTRUE(normalized))
+    }
+  } else if (identical(field, "defaultPermissionMode")) {
+    invoke(attr(handler, "set_default_permission_mode"), normalized)
+  } else if (identical(field, "runREnabled") && isTRUE(run_r_available)) {
+    invoke(attr(handler, "set_run_r_enabled"), isTRUE(normalized))
+  }
+  TRUE
+}
+
+.addin_diagnostics_launch_config <- function(
+    launch_values, diagnostics_service = NULL,
+    captured_diagnostics = list(), launch_kind = c("job", "foreground")) {
+  launch_kind <- match.arg(launch_kind)
+  launch_enabled <- is.list(launch_values) &&
+    is.list(launch_values$diagnostics) &&
+    isTRUE(launch_values$diagnostics$enabled)
+  service_snapshot <- if (is.list(diagnostics_service) &&
+      is.function(diagnostics_service$snapshot)) {
+    tryCatch(diagnostics_service$snapshot(), error = function(error) NULL)
+  } else {
+    NULL
+  }
+  service_state <- if (is.list(service_snapshot) &&
+      is.character(service_snapshot$state) && length(service_snapshot$state) == 1L) {
+    service_snapshot$state[[1L]]
+  } else {
+    "failed"
+  }
+  writer_startup <- if (!launch_enabled) {
+    "off"
+  } else if (identical(service_state, "started")) {
+    "started"
+  } else if (identical(service_state, "pending")) {
+    "pending"
+  } else {
+    "failed"
+  }
+  environment_override <- if (identical(captured_diagnostics$source, "env")) {
+    if (isTRUE(captured_diagnostics$value)) "on" else "off"
+  } else {
+    "none"
+  }
+  list(
+    version = 2L,
+    launchEnabled = launch_enabled,
+    environmentOverride = environment_override,
+    launchKind = launch_kind,
+    writerStartup = writer_startup
+  )
+}
+
 .claude_chat_app <- function(project, ctx = NULL, options = NULL,
                               permission_mode = "default", prewarm = TRUE,
                               models = NULL, console_url = NULL,
                               workspace = FALSE, workspace_projects = NULL,
-                              lifecycle_nonce = NULL, lifecycle_mode = NULL) {
+                              lifecycle_nonce = NULL, lifecycle_mode = NULL,
+                              memory_guard_config = NULL,
+                              memory_sampler = NULL,
+                              diagnostics = NULL,
+                              launch_contract = NULL) {
   if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE))
     stop("The Claude Code addin needs the 'ClaudeAgentSDK' package. Install it first.",
          call. = FALSE)
@@ -121,9 +211,63 @@
   # Plan 45/46:持久化 UI 偏好 —— 合并到 ~/.claude_addin/addin_settings.json(JSON,可手改)。
   # 首次运行若发现旧的 *_.rds 偏好,一次性迁移进 json 并删除旧文件(老用户无感)。
   .migrate_addin_settings()
+  settings_document <- .read_addin_settings_document()
   settings_state <- new.env(parent = emptyenv())
-  settings_state$v <- .read_addin_settings()
-  options$permission_mode <- settings_state$v$defaultPermissionMode  # handler 初始 + 新线程默认
+  settings_state$v <- settings_document$settings
+  settings_state$revisions <- settings_document$revisions
+  if (is.null(settings_state$revisions)) {
+    settings_state$revisions <- setNames(
+      as.list(rep(0, length(.addin_settings_fields()))), .addin_settings_fields()
+    )
+  }
+  if (is.null(launch_contract)) {
+    launch_contract <- .capture_addin_launch_contract(
+      settings_state$v, settings_state$revisions
+    )
+  }
+  launch_values <- .resolve_addin_launch_contract(
+    launch_contract,
+    diagnostics_override = if (is.null(diagnostics)) NULL else {
+      isTRUE(diagnostics) || (is.list(diagnostics) && isTRUE(diagnostics$enabled))
+    }
+  )
+  diagnostics_config <- if (!is.null(diagnostics)) diagnostics else launch_values$diagnostics
+  diagnostics_service <- if (isTRUE(diagnostics_config) ||
+      (is.list(diagnostics_config) && isTRUE(diagnostics_config$enabled))) {
+    tryCatch(.new_diagnostics_service(diagnostics_config), error = function(error) NULL)
+  } else NULL
+  export_capability <- .diagnostics_export_capability()
+  export_root <- .normalize_diagnostics_config(
+    if (isTRUE(diagnostics_config)) list(enabled = TRUE) else diagnostics_config %||% list(enabled = TRUE),
+    sample_uniform = function() 0
+  )$directory %||% .diagnostics_default_dir()
+  support_bundle_controller <- if (isTRUE(export_capability$available))
+    .new_support_bundle_controller(export_root) else NULL
+  handler <- NULL
+  run_r_server <- NULL
+  copilot_plugins <- new.env(hash = TRUE, parent = emptyenv())
+  copilot_plugin_serial <- 0L
+  apply_confirmed_setting <- function(field, value) {
+    .apply_addin_setting_side_effect(
+      field, value, handler = handler, copilot_plugins = copilot_plugins,
+      run_r_available = !is.null(run_r_server)
+    )
+  }
+  settings_coordinator <- .new_addin_settings_coordinator(
+    document = settings_document,
+    transact = function(field, expected_revision, value) {
+      tx <- .transact_addin_setting(field, expected_revision, value)
+      if (isTRUE(tx$ok)) {
+        settings_state$v <- tx$settings
+        settings_state$revisions <- .read_addin_settings_document()$revisions
+      }
+      tx
+    },
+    on_confirmed = function(field, value, transaction) {
+      apply_confirmed_setting(field, value)
+    }
+  )
+  options$permission_mode <- settings_state$v$defaultPermissionMode  # handler initial + new-thread default
   # session_map stored in user home to survive project switches
   session_map_path <- .claude_addin_path("session_map.rds")
   # 归档软隐藏存储（per-project，存于 home 以跨会话保留）
@@ -166,12 +310,27 @@
     ms[["r_session"]] <- run_r_server
     options$mcp_servers <- ms
   }
-  handler <- make_claude_handler(
+  effective_memory_guard_config <- .normalize_memory_guard_config(
+    memory_guard_config %||% list(enabled = FALSE)
+  )
+  memory_monitor_plugin <- if (isTRUE(effective_memory_guard_config$enabled)) {
+    .new_memory_monitor_addin_plugin(effective_memory_guard_config)
+  } else {
+    NULL
+  }
+  handler <- .call_compatible_callback(make_claude_handler, list(
     options          = options,
     cwd_provider     = if (isTRUE(workspace)) project_for else cur_dir,
     models           = models,
-    session_map_path = session_map_path
-  )
+    session_map_path = session_map_path,
+    memory_guard_config = effective_memory_guard_config,
+    memory_sampler = memory_sampler,
+    on_memory_observation = if (is.null(memory_monitor_plugin)) {
+      NULL
+    } else {
+      memory_monitor_plugin$observe
+    }
+  ))
   # 应用持久化的 run_r 开关(仅当 run_r 可用;首次连接前设置,reset_clients 无 client 时无副作用)。
   if (!is.null(run_r_server))
     tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
@@ -281,18 +440,73 @@
     }
     for (attribute_name in names(attributes(handler)))
       attr(server_handler, attribute_name) <- attr(handler, attribute_name)
+    base_action_handler <- attr(server_handler, "action_handler")
+    if (!is.null(support_bundle_controller)) {
+      attr(server_handler, "action_handler") <- function(id, ...) {
+        if (identical(as.character(id)[[1L]], "export-support-bundle"))
+          return(support_bundle_controller$pick())
+        if (is.function(base_action_handler))
+          return(.call_compatible_callback(base_action_handler, c(list(id = id), list(...))))
+        invisible(NULL)
+      }
+    }
 
-    # Internal addin feature: the generic assistant server only transports this
-    # opaque initial config and never probes, starts, or controls copilot-api.
+    # Every production settings write captures one target-field revision and
+    # schedules a zero-delay one-shot. Shiny/chat callbacks never acquire the
+    # cross-process lock or perform filesystem I/O on their own stack.
+    enqueue_setting_write <- function(field, value, on_success = NULL) {
+      normalized <- .addin_setting_value(field, value, invalid_default = FALSE)
+      expected <- settings_state$revisions[[field]]
+      if (is.null(normalized) || is.null(expected) ||
+          !requireNamespace("later", quietly = TRUE)) return(FALSE)
+      later::later(function() {
+        tx <- .transact_addin_setting(field, expected, normalized)
+        if (!isTRUE(tx$ok)) return(invisible(FALSE))
+        settings_state$v <- tx$settings
+        settings_state$revisions <- .read_addin_settings_document()$revisions
+        apply_confirmed_setting(field, normalized)
+        if (is.function(on_success)) tryCatch(on_success(normalized), error = function(e) NULL)
+        invisible(TRUE)
+      }, delay = 0)
+      TRUE
+    }
+
     copilot_plugin <- .new_copilot_addin_plugin(
       auto_start = settings_state$v$autoStartCopilotApi,
-      persist_auto_start = function(value) {
-        settings_state$v$autoStartCopilotApi <- isTRUE(value)
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+      persist_auto_start = function(value, on_confirmed) {
+        enqueue_setting_write("autoStartCopilotApi", isTRUE(value))
       }
     )
+    copilot_plugin_serial <- copilot_plugin_serial + 1L
+    copilot_plugin_key <- paste0("copilot-", copilot_plugin_serial)
+    assign(copilot_plugin_key, copilot_plugin, envir = copilot_plugins)
+    session$onSessionEnded(function() {
+      if (exists(copilot_plugin_key, envir = copilot_plugins, inherits = FALSE)) {
+        rm(list = copilot_plugin_key, envir = copilot_plugins)
+      }
+      invisible(NULL)
+    })
+    settings_binding <- settings_coordinator$bind(session, "chat_input")
+    memory_binding <- if (!is.null(memory_monitor_plugin)) {
+      memory_monitor_plugin$bind(session, "chat_input")
+    } else NULL
+    if (!is.null(diagnostics_service)) {
+      attr(server_handler, "diagnostics_service") <- diagnostics_service
+    }
     ui_addons <- attr(server_handler, "ui_addons") %||% list()
     ui_addons$copilotService <- copilot_plugin$config()
+    if (!is.null(settings_binding)) {
+      ui_addons$diagnosticsSettings <- settings_binding$config
+    }
+    if (!is.null(memory_binding)) ui_addons$memoryMonitor <- memory_binding$config
+    captured_diagnostics <- launch_contract$captured_addin$diagnostics %||% list()
+    ui_addons$diagnosticsLaunch <- .addin_diagnostics_launch_config(
+      launch_values = launch_values,
+      diagnostics_service = diagnostics_service,
+      captured_diagnostics = captured_diagnostics,
+      launch_kind = if (!is.null(lifecycle_nonce)) "job" else "foreground"
+    )
+    ui_addons$diagnosticsExport <- export_capability
     attr(server_handler, "ui_addons") <- ui_addons
 
     base_session_loader <- make_claude_session_loader(
@@ -338,37 +552,37 @@
       # Plan 45:Settings 偏好 —— 新会话默认权限模式 + 危险模式可见性。
       default_permission_mode = settings_state$v$defaultPermissionMode,
       on_set_default_permission_mode = function(m) {
-        settings_state$v$defaultPermissionMode <- as.character(m)[[1L]]
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
-        tryCatch(attr(handler, "set_default_permission_mode")(settings_state$v$defaultPermissionMode),
-                 error = function(e) NULL)
+        enqueue_setting_write(
+          "defaultPermissionMode", as.character(m)[[1L]]
+        )
       },
       mode_visibility = settings_state$v$modeVisibility,
       on_set_mode_visibility = function(v) {
-        settings_state$v$modeVisibility <- list(showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo))
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        enqueue_setting_write("modeVisibility", list(
+          showBypass = isTRUE(v$showBypass), showYolo = isTRUE(v$showYolo)
+        ))
       },
       composer_density = settings_state$v$composerDensity,
       on_set_composer_density = function(d) {
-        settings_state$v$composerDensity <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        value <- if (identical(as.character(d), "compact")) "compact" else "comfortable"
+        enqueue_setting_write("composerDensity", value)
       },
       assistant_text_size = settings_state$v$assistantTextSize,
       on_set_assistant_text_size = function(value) {
-        settings_state$v$assistantTextSize <- .normalize_assistant_text_size(value) %||% "medium"
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        enqueue_setting_write(
+          "assistantTextSize", .normalize_assistant_text_size(value) %||% "medium"
+        )
       },
       run_r_enabled = if (!is.null(run_r_server)) settings_state$v$runREnabled else NULL,
       on_toggle_run_r = if (!is.null(run_r_server)) function(v) {
-        settings_state$v$runREnabled <- isTRUE(v)
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
-        tryCatch(attr(handler, "set_run_r_enabled")(settings_state$v$runREnabled), error = function(e) NULL)
+        enqueue_setting_write(
+          "runREnabled", isTRUE(v)
+        )
       } else NULL,
       show_claude_edits_in_rstudio = if (native_picker)
         settings_state$v$showClaudeEditsInRStudio else NULL,
       on_toggle_claude_edits_in_rstudio = if (native_picker) function(v) {
-        settings_state$v$showClaudeEditsInRStudio <- isTRUE(v)
-        tryCatch(.write_addin_settings(settings_state$v), error = function(e) NULL)
+        enqueue_setting_write("showClaudeEditsInRStudio", isTRUE(v))
       } else NULL,
       files_pane_follow = if (native_picker) follow_pref$on else NULL,
       on_toggle_files_pane_follow = function(v) {
@@ -385,7 +599,9 @@
       } else NULL,
       on_session_load  = session_loader,
       commands         = skills,
-      action_items     = .claude_action_items(),
+      action_items     = .claude_action_items(
+        include_export = !is.null(support_bundle_controller)
+      ),
       on_open_file     = if (native_picker) {
         function(path, line = NULL, thread_id = NULL, project = NULL) {
           target <- project_for(thread_id, project)
@@ -437,7 +653,8 @@
       workspace_search_provider = workspace_search,
       warming_label    = "Starting Claude Code\u2026",
       prewarm          = prewarm,
-      max_concurrent_runs = if (isTRUE(workspace)) 4L else 2L
+      max_concurrent_runs = if (isTRUE(workspace)) 4L else 2L,
+      diagnostics      = if (is.null(diagnostics_service)) FALSE else NULL
     )
 
     # Binding is session-local. The plugin starts its independent service only
@@ -539,7 +756,36 @@
       invisible(nd)
     }
   }
-  shiny::shinyApp(ui, server)
+  handler_cleanup <- .claude_once_handler_cleanup(handler)
+  app_cleaned <- FALSE
+  app_cleanup <- function() {
+    if (app_cleaned) return(invisible(FALSE))
+    app_cleaned <<- TRUE
+    tryCatch(settings_coordinator$dispose(), error = function(error) NULL)
+    if (!is.null(memory_monitor_plugin)) {
+      tryCatch(memory_monitor_plugin$dispose(), error = function(error) NULL)
+    }
+    if (!is.null(diagnostics_service)) {
+      tryCatch(diagnostics_service$close(), error = function(error) NULL)
+    }
+    if (!is.null(support_bundle_controller)) {
+      tryCatch(support_bundle_controller$close(), error = function(error) NULL)
+    }
+    if (.diagnostics_callr_supervisor$references == 0L)
+      tryCatch(.release_package_callr_supervisor(), error = function(error) NULL)
+    handler_cleanup()
+    invisible(TRUE)
+  }
+  cleanup_guard <- new.env(parent = emptyenv())
+  reg.finalizer(cleanup_guard, function(environment) app_cleanup(), onexit = TRUE)
+  app <- shiny::shinyApp(
+    ui,
+    server,
+    onStart = function() shiny::onStop(app_cleanup, session = NULL)
+  )
+  attr(app, "shinyAssistantUI_cleanup") <- app_cleanup
+  attr(app, "shinyAssistantUI_cleanup_guard") <- cleanup_guard
+  app
 }
 
 # 删除一个会话：先断开仍连着它的 client（否则 CLI 会把 transcript 写回 → 删了又出现），
@@ -939,9 +1185,94 @@
   )
 }
 
+# Capture the exact package selected by the main session. The background Job
+# uses this explicit identity rather than re-running the project's renv startup.
+.claude_bg_package_identity <- function() {
+  path <- normalizePath(
+    find.package("shinyAssistantUI"), winslash = "/", mustWork = TRUE
+  )
+  list(
+    path = path,
+    version = as.character(utils::packageVersion("shinyAssistantUI")),
+    library = dirname(path)
+  )
+}
+
+.claude_bg_path_within <- function(path, parent) {
+  if (is.null(path) || is.null(parent) || !length(path) || !length(parent)) return(FALSE)
+  path <- normalizePath(path.expand(as.character(path[[1L]])), winslash = "/", mustWork = FALSE)
+  parent <- normalizePath(path.expand(as.character(parent[[1L]])), winslash = "/", mustWork = FALSE)
+  identical(path, parent) || startsWith(path, paste0(sub("/+$", "", parent), "/"))
+}
+
+# A neutral startup cwd prevents R from discovering the project's .Rprofile.
+# Prefer the main-session temp root; if the project contains that root (for
+# example a project opened at /tmp), fall back to plugin-owned HOME storage.
+.claude_bg_startup_root <- function(project = NULL) {
+  roots <- path.expand(c(
+    file.path(tempdir(), "shinyAssistantUI-job-startup"),
+    .claude_addin_path("job-startup")
+  ))
+  usable <- roots[!vapply(roots, .claude_bg_path_within, logical(1), parent = project)]
+  if (!length(usable)) {
+    stop("Could not allocate a neutral background-Job startup directory outside the project.",
+         call. = FALSE)
+  }
+  usable[[1L]]
+}
+
+.claude_bg_startup_dir <- function(nonce, root = NULL, project = NULL,
+                                   generation = NULL, transaction_id = NULL) {
+  root <- if (is.null(root)) .claude_bg_startup_root(project) else
+    path.expand(as.character(root[[1L]]))
+  if (.claude_bg_path_within(root, project)) {
+    stop("Could not allocate a neutral background-Job startup directory outside the project.",
+         call. = FALSE)
+  }
+  if (!dir.exists(root) && !dir.create(root, recursive = TRUE, mode = "0700")) {
+    stop("Could not create the background-Job startup root.", call. = FALSE)
+  }
+  identity <- Filter(function(value) !is.null(value) && length(value) &&
+                       !is.na(value[[1L]]) && nzchar(as.character(value[[1L]])),
+                     list(nonce, generation, transaction_id))
+  safe_nonce <- gsub(
+    "[^A-Za-z0-9._-]", "-",
+    paste(vapply(identity, function(value) as.character(value[[1L]]), character(1)),
+          collapse = "-")
+  )
+  if (!nzchar(safe_nonce)) stop("Background-Job startup nonce is empty.", call. = FALSE)
+  path <- file.path(root, safe_nonce)
+  if (file.exists(path) || dir.exists(path)) {
+    stop("Background-Job startup directory already exists.", call. = FALSE)
+  }
+  if (!dir.create(path, mode = "0700")) {
+    stop("Could not create the background-Job startup directory.", call. = FALSE)
+  }
+  try(Sys.chmod(path, mode = "0700"), silent = TRUE)
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
+.claude_bg_remove_startup_dir <- function(path) {
+  if (is.null(path) || !length(path) || is.na(path[[1L]]) || !nzchar(path[[1L]])) {
+    return(invisible(FALSE))
+  }
+  path <- normalizePath(path.expand(as.character(path[[1L]])),
+                        winslash = "/", mustWork = FALSE)
+  if (!dir.exists(path)) return(invisible(FALSE))
+  if (.claude_bg_path_within(getwd(), path)) {
+    fallback <- tempdir()
+    if (.claude_bg_path_within(fallback, path)) fallback <- path.expand("~")
+    try(setwd(fallback), silent = TRUE)
+  }
+  unlink(path, recursive = TRUE, force = TRUE)
+  invisible(!dir.exists(path))
+}
+
 # Generate a background script with explicit identity/diagnostic parameters.
 .claude_bg_launch_script <- function(spec_path, port, host, libpaths,
-                                     log_path = NULL, nonce = NULL, mode = NULL) {
+                                     log_path = NULL, nonce = NULL, mode = NULL,
+                                     package_path = NULL, package_version = NULL,
+                                     startup_dir = NULL) {
   args <- c(
     deparse(spec_path),
     sprintf("port = %dL", as.integer(port)),
@@ -950,24 +1281,57 @@
   if (!is.null(log_path)) args <- c(args, sprintf("log_path = %s", deparse(log_path)))
   if (!is.null(nonce)) args <- c(args, sprintf("nonce = %s", deparse(nonce)))
   if (!is.null(mode)) args <- c(args, sprintf("mode = %s", deparse(mode)))
-  c(
+  if (!is.null(startup_dir)) {
+    args <- c(args, sprintf("startup_dir = %s", deparse(startup_dir)))
+  }
+  identity <- character()
+  if (!is.null(package_path) && !is.null(package_version)) {
+    identity <- c(
+      sprintf(".claude_expected_package <- normalizePath(%s, winslash = \"/\", mustWork = TRUE)", deparse(package_path)),
+      ".claude_resolved_package <- normalizePath(find.package(\"shinyAssistantUI\"), winslash = \"/\", mustWork = TRUE)",
+      "if (!identical(.claude_resolved_package, .claude_expected_package)) stop(\"Background Job resolved a different shinyAssistantUI installation.\", call. = FALSE)",
+      sprintf(".claude_expected_version <- %s", deparse(as.character(package_version))),
+      "if (!identical(as.character(utils::packageVersion(\"shinyAssistantUI\")), .claude_expected_version)) stop(\"Background Job resolved a different shinyAssistantUI version.\", call. = FALSE)"
+    )
+  }
+  body <- c(
     sprintf(".libPaths(%s)", paste(deparse(as.character(libpaths)), collapse = "")),
+    identity,
     "library(shinyAssistantUI)",
-    sprintf("shinyAssistantUI:::.claude_run_in_job(%s)", paste(args, collapse = ", "))
+    sprintf("utils::getFromNamespace(\".claude_run_in_job\", \"shinyAssistantUI\")(%s)", paste(args, collapse = ", "))
+  )
+  if (is.null(startup_dir)) return(body)
+  c(
+    "(function() {",
+    sprintf(".claude_startup_dir <- %s", deparse(startup_dir)),
+    "on.exit(unlink(.claude_startup_dir, recursive = TRUE, force = TRUE), add = TRUE)",
+    body,
+    "})()"
   )
 }
 
 # Job process: read immutable launch parameters, construct the shared app core,
 # and append only allowlisted lifecycle events to the dedicated log.
 .claude_run_in_job <- function(spec_path, port, host = "127.0.0.1",
-                               log_path = NULL, nonce = NULL, mode = NULL) {
+                               log_path = NULL, nonce = NULL, mode = NULL,
+                               startup_dir = NULL, diagnostics = NULL) {
   outcome <- "stopped"
+  on.exit(.claude_bg_remove_startup_dir(startup_dir), add = TRUE)
   .claude_bg_log_event(log_path, "starting", mode = mode, nonce = nonce, port = port)
   on.exit(.claude_bg_log_event(
     log_path, outcome, mode = mode, nonce = nonce, port = port
   ), add = TRUE)
   tryCatch({
     spec <- readRDS(spec_path)
+    launch_contract <- spec$launch_contract
+    diagnostics_value <- if (!is.null(diagnostics)) {
+      diagnostics
+    } else if (is.list(launch_contract) &&
+               identical(launch_contract$launch_contract_version, 2L)) {
+      .resolve_addin_launch_contract(launch_contract)$diagnostics
+    } else {
+      .diagnostics_launch_from_env()
+    }
     nonce <- nonce %||% spec$.claude_bg_nonce
     mode <- mode %||% spec$.claude_bg_mode %||% .claude_bg_mode(spec)
     app <- .call_compatible_callback(.claude_chat_app, list(
@@ -980,7 +1344,10 @@
       workspace = isTRUE(spec$workspace),
       workspace_projects = spec$workspace_projects,
       lifecycle_nonce = nonce,
-      lifecycle_mode = mode
+      lifecycle_mode = mode,
+      memory_guard_config = .memory_guard_default_config(),
+      diagnostics = diagnostics_value,
+      launch_contract = launch_contract
     ))
     .claude_bg_log_event(log_path, "app_built", mode = mode, nonce = nonce, port = port)
     result <- shiny::runApp(app, port = as.integer(port), host = host, launch.browser = FALSE)
@@ -1005,8 +1372,17 @@
     log_path = NULL,
     log_path_factory = .claude_bg_log_path,
     instance_probe = .claude_bg_probe_instance,
-    job_state = .claude_bg_default_job_state) {
+    job_state = .claude_bg_default_job_state,
+    startup_dir_factory = .claude_bg_startup_dir,
+    package_identity = .claude_bg_package_identity()) {
   stopifnot(is.environment(registry))
+  if (!is.list(package_identity) ||
+      !is.character(package_identity$path) || length(package_identity$path) != 1L ||
+      is.na(package_identity$path) || !nzchar(package_identity$path) ||
+      !is.character(package_identity$version) || length(package_identity$version) != 1L ||
+      is.na(package_identity$version) || !nzchar(package_identity$version)) {
+    stop("Invalid shinyAssistantUI package identity for background Job.", call. = FALSE)
+  }
   show_viewer <- show_viewer %||% function(u) {
     rstudioapi::viewer(tryCatch(
       rstudioapi::translateLocalUrl(u, absolute = TRUE), error = function(e) u
@@ -1106,7 +1482,7 @@
     generation = generation, transaction_id = transaction_id,
     nonce = transaction_id, job_id = NULL,
     host = host, port = 0L, url = "",
-    script = NULL, spec_path = NULL, log_path = NULL,
+    script = NULL, spec_path = NULL, log_path = NULL, startup_dir = NULL,
     status = "submitting", job_state = NA_character_,
     created_at = Sys.time(), last_checked_at = Sys.time()
   )
@@ -1120,9 +1496,20 @@
     invisible(TRUE)
   }
 
+  startup_value <- NULL
   prepared <- tryCatch({
     port_value <- as.integer(port %||% .call_compatible_callback(port_factory, list()))
     nonce_value <- as.character(.call_compatible_callback(nonce_factory, list()))[[1L]]
+    startup_root <- .claude_bg_startup_root(request$project)
+    startup_value <- .call_compatible_callback(startup_dir_factory, list(
+      nonce = nonce_value, root = startup_root, project = request$project,
+      generation = generation, transaction_id = transaction_id, spec = request
+    ))
+    startup_value <- normalizePath(as.character(startup_value)[[1L]],
+                                   winslash = "/", mustWork = TRUE)
+    if (.claude_bg_path_within(startup_value, request$project)) {
+      stop("Background-Job startup directory must be outside the project.", call. = FALSE)
+    }
     url_value <- sprintf("http://%s:%d", host, port_value)
     log_value <- log_path
     if (is.null(log_value)) {
@@ -1139,21 +1526,30 @@
     materialized$.claude_bg_mode <- mode
     materialized$.claude_bg_generation <- generation
     materialized$.claude_bg_log_path <- log_value
+    materialized$.claude_bg_startup_dir <- startup_value
+    materialized$.claude_bg_package_path <- as.character(package_identity$path)[[1L]]
+    materialized$.claude_bg_package_version <- as.character(package_identity$version)[[1L]]
     saveRDS(materialized, spec_value)
     writeLines(.claude_bg_launch_script(
       spec_value, port_value, host, libpaths,
-      log_path = log_value, nonce = nonce_value, mode = mode
+      log_path = log_value, nonce = nonce_value, mode = mode,
+      package_path = materialized$.claude_bg_package_path,
+      package_version = materialized$.claude_bg_package_version,
+      startup_dir = startup_value
     ), script_value)
     list(
       port = port_value, nonce = nonce_value, url = url_value,
-      log_path = log_value, spec_path = spec_value, script = script_value
+      log_path = log_value, spec_path = spec_value, script = script_value,
+      startup_dir = startup_value
     )
   }, error = function(e) {
+    .claude_bg_remove_startup_dir(startup_value)
     rollback()
     stop(e)
   })
   if (!.claude_bg_record_current(registry, key, generation, transaction_id)) {
     unlink(c(prepared$spec_path, prepared$script))
+    .claude_bg_remove_startup_dir(prepared$startup_dir)
     return(.claude_bg_result(
       record, ready = FALSE, reused = FALSE, superseded = TRUE
     ))
@@ -1164,6 +1560,7 @@
   record$log_path <- prepared$log_path
   record$spec_path <- prepared$spec_path
   record$script <- prepared$script
+  record$startup_dir <- prepared$startup_dir
   assign(key, record, envir = registry)
 
   job_run <- job_run %||% function(path, name, workingDir) {
@@ -1186,7 +1583,7 @@
                        port = record$port)
   job_id <- tryCatch(
     .call_compatible_callback(job_run, list(
-      path = record$script, name = job_name, workingDir = request$project
+      path = record$script, name = job_name, workingDir = record$startup_dir
     )),
     error = function(e) {
       .claude_bg_log_event(record$log_path, "submission_failed", mode = mode,
@@ -1194,6 +1591,7 @@
                            port = record$port, condition = e)
       rollback()
       unlink(c(record$spec_path, record$script))
+      .claude_bg_remove_startup_dir(record$startup_dir)
       stop(e)
     }
   )
@@ -1357,6 +1755,12 @@ claude_workspace_addin <- function(
   project <- project %||% .addin_project()
   in_rstudio <- requireNamespace("rstudioapi", quietly = TRUE) &&
     isTRUE(tryCatch(rstudioapi::isAvailable(child_ok = TRUE), error = function(e) FALSE))
+  .migrate_addin_settings()
+  launch_document <- .read_addin_settings_document()
+  launch_contract <- .capture_addin_launch_contract(
+    launch_document$settings,
+    launch_document$revisions %||% setNames(as.list(rep(0, 9)), .addin_settings_fields())
+  )
 
   can_background <- isTRUE(background) && in_rstudio &&
     ("jobRunScript" %in% getNamespaceExports("rstudioapi"))
@@ -1374,6 +1778,7 @@ claude_workspace_addin <- function(
       console_url = console_url,
       workspace = isTRUE(workspace),
       workspace_projects = projects,
+      launch_contract = launch_contract,
       job_name = if (isTRUE(workspace)) "Claude Workspace" else "Claude Code Chat"
     )
     return(invisible(.run_claude_bg_job(spec)))
@@ -1386,7 +1791,8 @@ claude_workspace_addin <- function(
     prewarm = prewarm,
     models = models,
     workspace = workspace,
-    workspace_projects = projects
+    workspace_projects = projects,
+    launch_contract = launch_contract
   )
   viewer_function <- if (!in_rstudio) {
     shiny::browserViewer()

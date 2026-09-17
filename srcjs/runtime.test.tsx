@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import React from "react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useShinyRuntime } from "./runtime";
@@ -22,6 +23,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 // 模拟 R 发送 customMessage（带 inputId 前缀 "test:"）
@@ -219,10 +221,151 @@ describe("useShinyRuntime — per-thread composer drafts", () => {
 
 
 
+describe("useShinyRuntime — globally bounded server thread windows", () => {
+  it("evicts inactive windows and orphan localStorage keys across session snapshots", async () => {
+    setup({ persistence: "client" });
+    const makeSessions = (prefix: string) => Array.from({ length: 20 }, (_, index) => ({
+      id: `${prefix}-${index}`,
+      title: `${prefix} ${index}`,
+    }));
+    const seed = (sessions: Array<{ id: string }>) => {
+      for (const session of sessions) {
+        localStorage.setItem(
+          `shinyAssistantUI:test:msgs:${session.id}`,
+          JSON.stringify([{
+            id: `message-${session.id}`,
+            role: "user",
+            content: [{ type: "text", text: session.id }],
+          }]),
+        );
+      }
+    };
+    const messageKeys = () => Object.keys(localStorage)
+      .filter((key) => key.startsWith("shinyAssistantUI:test:msgs:"));
+
+    const first = makeSessions("first");
+    seed(first);
+    await fireR("sessions", { sessions: first });
+    expect(messageKeys().length).toBeLessThanOrEqual(8);
+
+    const second = makeSessions("second");
+    seed(second);
+    await fireR("sessions", { sessions: second });
+    const retained = messageKeys();
+    expect(retained.length).toBeLessThanOrEqual(8);
+    expect(retained.some((key) => key.includes(":first-"))).toBe(false);
+  });
+});
+
+
+describe("useShinyRuntime — optional memory monitor addin", () => {
+  it("freezes one exact v2 snapshot per opening and cleans visibility", async () => {
+    const inputId = "memory-runtime";
+    const enabled = { addons: { memoryMonitor: { version: 2, ownerSeed: 10, lastRevision: 0 } } };
+    const rendered = renderHook(
+      ({ config }) => useShinyRuntime(inputId, config),
+      { initialProps: { config: enabled as Record<string, unknown> }, reactStrictMode: true },
+    );
+    expect(rendered.result.current.memoryMonitor?.state).toBe("waiting");
+    const dispatch = handlers.get(`${inputId}:memory-monitor-sample`);
+    expect(dispatch).toBeTypeOf("function");
+
+    act(() => rendered.result.current.memoryMonitor?.setVisible(true));
+    const opens = () => inputs.filter((item) => item.id === `${inputId}_memory_monitor_visible`);
+    const open1Envelope = opens().at(-1)?.value as { ownerId: number; openId: number };
+    const open1 = { ownerId: open1Envelope.ownerId, openId: open1Envelope.openId };
+    expect(open1.ownerId).toBeGreaterThanOrEqual(10);
+    expect(open1.openId).toBe(1);
+    const sample = { state: "normal", pssBytes: 80, rssBytes: 90,
+      cgroupCurrentBytes: 2465 * 1024 ** 2, cgroupMaxBytes: 29296 * 1024 ** 2,
+      cgroupLimited: true,
+      softPssBytes: 100, hardPssBytes: 200, softRssBytes: 125, hardRssBytes: 225 };
+    await act(async () => dispatch?.({ version: 2, ...open1, revision: 7, sample }));
+    await act(async () => dispatch?.({ version: 2, ...open1, revision: 8, sample: { ...sample, pssBytes: 99 } }));
+    expect(rendered.result.current.memoryMonitor?.sample?.pssBytes).toBe(80);
+    expect(rendered.result.current.memoryMonitor?.frame?.revision).toBe(7);
+
+    act(() => rendered.result.current.memoryMonitor?.setVisible(false));
+    expect(opens().at(-1)?.value).toMatchObject({ visible: false, revision: 7 });
+    act(() => rendered.result.current.memoryMonitor?.setVisible(true));
+    const open2Envelope = opens().at(-1)?.value as { ownerId: number; openId: number };
+    const open2 = { ownerId: open2Envelope.ownerId, openId: open2Envelope.openId };
+    expect(open2.openId).toBe(open1.openId + 1);
+    await act(async () => dispatch?.({ version: 2, ...open2, revision: 7, sample }));
+    expect(rendered.result.current.memoryMonitor?.sample?.pssBytes).toBe(80);
+
+    rendered.rerender({ config: {} });
+    expect(rendered.result.current.memoryMonitor).toBeUndefined();
+    expect(opens().at(-1)?.value).toMatchObject({ visible: false });
+    await act(async () => dispatch?.({ version: 2, ...open2, revision: 9, sample }));
+    expect(rendered.result.current.memoryMonitor).toBeUndefined();
+    rendered.unmount();
+  });
+});
+
+describe("useShinyRuntime — optional diagnostics settings addin", () => {
+  it("uses exact owner-ready/CAS ack, canonical visibility, and immutable launch state", async () => {
+    const inputId = "diagnostics-settings-runtime";
+    const config = { addons: { diagnosticsSettings: {
+      version: 2, kind: "settings_bind", ownerSeed: 41, ownerId: 41, fields: {
+      autoStartCopilotApi: { value: true, revision: 0 },
+      defaultPermissionMode: { value: "default", revision: 0 },
+      modeVisibility: { value: { showBypass: true, showYolo: true }, revision: 0 },
+      composerDensity: { value: "comfortable", revision: 0 },
+      assistantTextSize: { value: "medium", revision: 0 },
+      runREnabled: { value: true, revision: 0 },
+      showClaudeEditsInRStudio: { value: true, revision: 0 },
+      diagnosticsEnabled: { value: true, revision: 0 },
+      showPerformanceOrb: { value: true, revision: 0 },
+    },
+    }, diagnosticsLaunch: {
+      version: 2, launchEnabled: false, environmentOverride: "none",
+      launchKind: "job", writerStartup: "off",
+    } } };
+    const rendered = renderHook(() => useShinyRuntime(inputId, config));
+    const ready = inputs.find((item) => item.id === `${inputId}_diagnostics_settings_ready`);
+    expect(ready?.value).toEqual({ version: 2, kind: "settings_ready", ownerId: 41 });
+    expect(rendered.result.current.diagnosticsLogging).toMatchObject({
+      desired: true, launchEnabled: false, writerStartup: "off", saving: false,
+    });
+    expect(rendered.result.current.showPerformanceOrb).toBe(true);
+
+    act(() => rendered.result.current.diagnosticsLogging?.setEnabled(false));
+    const request = inputs.find((item) => item.id === `${inputId}_diagnostics_setting`);
+    expect(request?.value).toEqual({
+      version: 2, kind: "settings_request", field: "diagnosticsEnabled", ownerId: 41,
+      requestId: 1, expectedRevision: 0, value: false,
+    });
+    expect(rendered.result.current.diagnosticsLogging?.desired).toBe(true);
+    expect(rendered.result.current.diagnosticsLogging?.saving).toBe(true);
+
+    await act(async () => handlers.get(`${inputId}:diagnostics-settings-canonical`)?.({
+      version: 2, kind: "settings_canonical", field: "diagnosticsEnabled", revision: 1, value: false,
+    }));
+    expect(rendered.result.current.diagnosticsLogging).toMatchObject({
+      desired: false, launchEnabled: false, writerStartup: "off", saving: true,
+    });
+    await act(async () => handlers.get(`${inputId}:diagnostics-settings-result`)?.({
+      version: 2, kind: "settings_result", field: "diagnosticsEnabled", ownerId: 41,
+      requestId: 1, revision: 1, ok: true, category: "ok", value: false,
+    }));
+    expect(rendered.result.current.diagnosticsLogging?.saving).toBe(false);
+
+    act(() => rendered.result.current.setShowPerformanceOrb?.(false));
+    await act(async () => handlers.get(`${inputId}:diagnostics-settings-canonical`)?.({
+      version: 2, kind: "settings_canonical", field: "showPerformanceOrb", revision: 1, value: false,
+    }));
+    expect(rendered.result.current.showPerformanceOrb).toBe(false);
+    expect(rendered.result.current.diagnosticsLogging?.launchEnabled).toBe(false);
+    rendered.unmount();
+  });
+});
+
 describe("useShinyRuntime — optional copilot addin", () => {
   it("registers no copilot channels and applies no readiness barrier without the addon", async () => {
     const { result } = setup();
     expect(handlers.has("test:copilot-service-status")).toBe(false);
+
     expect(inputs.some((item) => item.id === "test_copilot_service_ready")).toBe(false);
 
     await act(async () => {
@@ -3613,5 +3756,140 @@ describe("useShinyRuntime — Claude edit marker preference", () => {
   it("is absent when the host does not advertise RStudio capability", () => {
     const { result } = setup();
     expect(result.current.showClaudeEditsInRStudio).toBeUndefined();
+  });
+});
+
+
+describe("useShinyRuntime — bounded browser repository", () => {
+  it("evicts missing history ids from assistant-ui's internal repository", async () => {
+    const { BROWSER_MESSAGE_WINDOW } = await import("./message-repository");
+    const { result } = setup({ persistence: "server" });
+    const threadId = "bounded-history-thread";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Bounded" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const request = [...inputs].reverse().find((item) =>
+      item.id === "test" && item.value.type === "load_session" &&
+      item.value.threadId === threadId,
+    );
+    const incoming = Array.from({ length: BROWSER_MESSAGE_WINDOW + 60 }, (_, index) => ({
+      id: `history-${index}`,
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: [{ type: "text" as const, text: `message ${index}` }],
+      ...(index % 2 === 1
+        ? { status: { type: "complete" as const, reason: "stop" as const } }
+        : {}),
+    }));
+    await fireR("load-thread", {
+      threadId,
+      requestId: request?.value.requestId,
+      messages: incoming,
+      cursor: "older-page",
+      hasMore: true,
+    });
+
+    const visible = messages(result);
+    expect(visible.length).toBeLessThanOrEqual(BROWSER_MESSAGE_WINDOW);
+    expect(visible[visible.length - 1]?.id).toBe(`history-${incoming.length - 1}`);
+    expect(visible.some((message) => message.id === "history-0")).toBe(false);
+    expect(() => result.current.runtime.thread.getMessageById("history-0")).toThrow();
+    expect(result.current.historyHasMore).toBe(false);
+  });
+
+  it("rewrites oversized client persistence with only the bounded window", async () => {
+    const { BROWSER_MESSAGE_WINDOW } = await import("./message-repository");
+    const threadId = "persisted-bounded-thread";
+    localStorage.setItem("shinyAssistantUI:test:threads", JSON.stringify([
+      { id: threadId, status: "regular", title: "Persisted" },
+    ]));
+    const stored = Array.from({ length: BROWSER_MESSAGE_WINDOW + 40 }, (_, index) => ({
+      id: `stored-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `stored ${index}` }],
+    }));
+    localStorage.setItem(
+      `shinyAssistantUI:test:msgs:${threadId}`,
+      JSON.stringify(stored),
+    );
+
+    const { result } = setup();
+    expect(messages(result).length).toBeLessThanOrEqual(BROWSER_MESSAGE_WINDOW);
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("new bounded turn");
+      await result.current.runtime.thread.composer.send();
+    });
+
+    const rewritten = JSON.parse(
+      localStorage.getItem(`shinyAssistantUI:test:msgs:${threadId}`) ?? "[]",
+    );
+    expect(rewritten.length).toBeLessThanOrEqual(BROWSER_MESSAGE_WINDOW);
+    expect(rewritten.some((message: { id?: string }) => message.id === "stored-0"))
+      .toBe(false);
+  });
+});
+
+
+describe("useShinyRuntime — diagnostics committed lifecycle", () => {
+  const diagnostics = (overrides: Record<string, unknown> = {}) => ({
+    version: 2,
+    enabled: true,
+    schema: 1,
+    batchMax: 100,
+    queueMax: 100,
+    batchMaxBytes: 65536,
+    eventMaxBytes: 8192,
+    ...overrides,
+  });
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <React.StrictMode>{children}</React.StrictMode>
+  );
+  const telemetry = () => inputs.filter((item) => item.id === "test_telemetry");
+
+  it("does not create timers/listeners or send when config is absent/malformed", () => {
+    vi.useFakeTimers();
+    const absent = renderHook(() => useShinyRuntime("test", {}), { wrapper });
+    absent.unmount();
+    const malformed = renderHook(
+      () => useShinyRuntime("test", { diagnostics: { ...diagnostics(), prompt: "secret" } }),
+      { wrapper },
+    );
+    malformed.unmount();
+    expect(telemetry()).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it("uses committed StrictMode effects and recreates only for relevant primitive changes", () => {
+    vi.useFakeTimers();
+    const initial = { diagnostics: diagnostics(), unrelated: { identity: 1 } };
+    const hook = renderHook(
+      ({ value }) => useShinyRuntime("test", value),
+      { initialProps: { value: initial }, wrapper, reactStrictMode: true },
+    );
+    // Development StrictMode performs setup -> cleanup -> setup. Neither the
+    // cleanup nor the active mount may serialize/send on the React callback stack.
+    expect(telemetry()).toHaveLength(0);
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(telemetry()).toHaveLength(2);
+
+    hook.rerender({ value: { diagnostics: { ...diagnostics() }, unrelated: { identity: 2 } } });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(telemetry()).toHaveLength(2);
+
+    hook.rerender({ value: { diagnostics: diagnostics({ batchMax: 50 }), unrelated: { identity: 3 } } });
+    expect(telemetry()).toHaveLength(2);
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(telemetry()).toHaveLength(4);
+
+    hook.unmount();
+    expect(telemetry()).toHaveLength(4);
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(telemetry()).toHaveLength(5);
+    const rows = telemetry().flatMap((item) => item.value.rows as Array<{ event: string }>);
+    expect(rows.filter((row) => row.event === "frontend_mount")).toHaveLength(3);
+    expect(rows.filter((row) => row.event === "frontend_unmount")).toHaveLength(3);
+    for (const item of telemetry()) {
+      const json = JSON.stringify(item.value);
+      expect(json).not.toMatch(/threadId|runId|prompt|response|toolCallId|path|stack/);
+    }
+    vi.useRealTimers();
   });
 });

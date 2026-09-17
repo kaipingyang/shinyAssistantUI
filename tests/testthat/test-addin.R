@@ -43,6 +43,7 @@ test_that(".claude_chat_app builds a shiny app (no connection at build time)", {
   skip_if_not_installed("ClaudeAgentSDK")
   skip_if_not_installed("coro")
   app <- .claude_chat_app(tempdir(), ctx = NULL, permission_mode = "default", prewarm = FALSE)
+  on.exit(attr(app, "shinyAssistantUI_cleanup")(), add = TRUE)
   expect_s3_class(app, "shiny.appobj")
 })
 
@@ -80,6 +81,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
   )
 
   app <- .claude_chat_app(project, options = list(), prewarm = FALSE)
+  on.exit(attr(app, "shinyAssistantUI_cleanup")(), add = TRUE)
   shiny::testServer(app$serverFuncSource(), {
     session$flushReact()
     expect_null(listed_directory)
@@ -104,13 +106,16 @@ test_that(".claude_chat_ui fills the page without Bootstrap", {
   ui <- .claude_chat_ui()
   dependencies <- htmltools::findDependencies(ui)
   dependency_names <- vapply(dependencies, `[[`, character(1), "name")
-  rendered <- htmltools::renderTags(ui)$html
+  rendered_tags <- htmltools::renderTags(ui)
+  rendered <- paste0(rendered_tags$head, rendered_tags$html)
 
   bootstrap <- Filter(function(x) identical(x$name, "bootstrap"), dependencies)
   expect_length(bootstrap, 1L)
   expect_identical(bootstrap[[1L]]$version, "9999")
   expect_true("htmltools-fill" %in% dependency_names)
   expect_match(rendered, 'id="chat"', fixed = TRUE)
+  expect_match(rendered, 'rel="icon"', fixed = TRUE)
+  expect_match(rendered, 'href="data:,"', fixed = TRUE)
   expect_match(rendered, "height:100%", fixed = TRUE)
   expect_false(grepl(".shiny-html-output", rendered, fixed = TRUE))
 })
@@ -172,6 +177,7 @@ test_that("Claude addin wires live IDE context and workspace providers", {
 
   app <- .claude_chat_app(tempdir(), ctx = list(rel = "stale.R", selection = "old"),
                           options = list(), prewarm = FALSE)
+  on.exit(attr(app, "shinyAssistantUI_cleanup")(), add = TRUE)
   shiny::testServer(app$serverFuncSource(), session$flushReact())
 
   expect_true(is.function(server_args$ide_context_provider))
@@ -183,4 +189,88 @@ test_that("Claude addin wires live IDE context and workspace providers", {
     is_reload = FALSE,
     register_cancel = function(...) NULL
   ))
+})
+
+
+test_that("Background Job memory guard exposes the addin monitor without diagnostics", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  server_args <- NULL
+  memory_observer <- NULL
+  sent <- list()
+  local_mocked_bindings(
+    make_claude_handler = function(options, cwd_provider = NULL, models = NULL,
+                                   session_map_path, memory_guard_config = NULL,
+                                   on_memory_observation = NULL) {
+      memory_observer <<- on_memory_observation
+      function(...) NULL
+    },
+    load_claude_skills = function(project_dir) list(),
+    make_claude_session_loader = function(session_map_path) function(...) NULL,
+    list_claude_sessions = function(...) list(),
+    assistantUIServer = function(...) {
+      server_args <<- list(...)
+      list(send_sessions = function(...) NULL)
+    }
+  )
+
+  app <- .claude_chat_app(
+    tempdir(), options = list(), prewarm = FALSE,
+    memory_guard_config = .memory_guard_default_config(),
+    diagnostics = NULL
+  )
+  on.exit(attr(app, "shinyAssistantUI_cleanup")(), add = TRUE)
+  shiny::testServer(app$serverFuncSource(), {
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
+    session$flushReact()
+    expect_true(is.function(memory_observer))
+    addon <- attr(server_args$handler, "ui_addons")$memoryMonitor
+    expect_identical(addon$version, 2L)
+    expect_named(addon, c("version", "ownerSeed", "lastRevision"))
+    expect_gt(addon$ownerSeed, 0)
+    expect_null(server_args$diagnostics)
+
+    memory_observer(
+      list(pss_bytes = 80, rss_bytes = 90, prompt = "PROMPT-SENTINEL"),
+      "normal", "normal"
+    )
+    expect_length(sent, 0L)
+    session$setInputs(chat_input_memory_monitor_visible = list(
+      version = 2L, ownerId = addon$ownerSeed, openId = 1,
+      visible = TRUE, revision = 0, sample = NULL
+    ))
+    session$flushReact()
+    expect_length(sent, 1L)
+    expect_identical(sent[[1L]]$type, "chat_input:memory-monitor-sample")
+    expect_named(sent[[1L]]$message, c(
+      "version", "ownerId", "openId", "revision", "sample"
+    ))
+
+    settings_addon <- attr(server_args$handler, "ui_addons")$diagnosticsSettings
+    expect_named(settings_addon, c("version", "kind", "ownerSeed", "ownerId", "fields"))
+    expect_identical(settings_addon$version, 2L)
+    expect_identical(settings_addon$kind, "settings_bind")
+    expect_identical(settings_addon$ownerSeed, settings_addon$ownerId)
+    expect_named(settings_addon$fields, shinyAssistantUI:::.addin_settings_fields())
+    expect_true(all(vapply(settings_addon$fields, function(field) {
+      identical(names(field), c("value", "revision"))
+    }, logical(1))))
+    launch_addon <- attr(server_args$handler, "ui_addons")$diagnosticsLaunch
+    expect_named(launch_addon, c(
+      "version", "launchEnabled", "environmentOverride", "launchKind", "writerStartup"
+    ))
+    expect_identical(launch_addon$version, 2L)
+    expect_true(is.logical(launch_addon$launchEnabled) && length(launch_addon$launchEnabled) == 1L)
+    expect_true(launch_addon$environmentOverride %in% c("none", "on", "off"))
+    expect_true(launch_addon$launchKind %in% c("job", "foreground"))
+    expect_true(launch_addon$writerStartup %in% c("pending", "started", "off", "failed"))
+    expect_null(attr(server_args$handler, "ui_addons")$settings)
+    expect_null(attr(server_args$handler, "ui_addons")$performanceOrb)
+    expect_named(sent[[1L]]$message$sample, c(
+      "state", "pssBytes", "rssBytes", "cgroupCurrentBytes", "cgroupMaxBytes",
+      "cgroupLimited", "softPssBytes", "hardPssBytes", "softRssBytes", "hardRssBytes"
+    ))
+    expect_false(grepl("PROMPT-SENTINEL", paste(capture.output(str(sent)), collapse = "")))
+  })
 })

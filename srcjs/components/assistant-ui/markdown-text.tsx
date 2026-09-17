@@ -27,9 +27,25 @@ import { useOpeningFile } from "@/hooks/use-opening-file";
 export const preprocessLatexMarkdown = (text: string): string =>
   escapeCurrencyDollars(normalizeMathDelimiters(text));
 
+export const timedOwnedMarkdownPreprocess = (
+  text: string,
+  preprocess: (value: string) => string,
+  reportDurationUs: (durationUs: number) => void,
+  now: () => number = () => performance.now(),
+): string => {
+  const started = now();
+  const result = preprocess(text);
+  const durationUs = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    Math.max(0, Math.round((now() - started) * 1000)),
+  );
+  try { reportDurationUs(durationUs); } catch { /* optional telemetry is fail-open */ }
+  return result;
+};
+
 const MarkdownTextImpl = () => {
   // LaTeX 数学(Plan 34,opt-in via assistantUIServer(latex=TRUE))。默认关。
-  const { latex } = useShinyConfig();
+  const { latex, recordOwnedMarkdownPreprocess } = useShinyConfig();
   const remarkPlugins = useMemo(
     () => (latex ? [remarkGfm, remarkMath] : [remarkGfm]),
     [latex],
@@ -38,9 +54,16 @@ const MarkdownTextImpl = () => {
     () => (latex ? [[rehypeKatex, { strict: false }]] : []),
     [latex],
   );
+  const preprocess = useMemo(() => {
+    if (!latex) return undefined;
+    if (!recordOwnedMarkdownPreprocess) return preprocessLatexMarkdown;
+    return (text: string) => timedOwnedMarkdownPreprocess(
+      text, preprocessLatexMarkdown, recordOwnedMarkdownPreprocess,
+    );
+  }, [latex, recordOwnedMarkdownPreprocess]);
   return (
     <MarkdownTextPrimitive
-      preprocess={latex ? preprocessLatexMarkdown : undefined}
+      preprocess={preprocess}
       remarkPlugins={remarkPlugins}
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rehypePlugins={rehypePlugins as any}

@@ -2,7 +2,7 @@
 // Module-level map: thread ID → formatted date string for sidebar display
 export const sessionDates = new Map<string, string>();
 
-import { useRef, useCallback, useState, useEffect, useMemo } from "react";
+import { useRef, useCallback, useState, useEffect, useMemo, type SetStateAction } from "react";
 import { flushSync } from "react-dom";
 import {
   useExternalStoreRuntime, WebSpeechDictationAdapter, WebSpeechSynthesisAdapter,
@@ -12,12 +12,19 @@ import { ResizingImageAttachmentAdapter } from "./image-attachment-adapter";
 import { FileAttachmentAdapter } from "./file-attachment-adapter";
 import type {
   ThreadMessageLike,
+  ThreadMessage,
   AppendMessage,
   ExternalStoreThreadData,
   StartRunConfig,
   FeedbackAdapter,
 } from "@assistant-ui/core";
 import { createShinyBridge } from "./bridge";
+import {
+  createDiagnosticsMonitor,
+  diagnosticsConfigKey,
+  parseDiagnosticsConfig,
+  type DiagnosticsMonitor,
+} from "./diagnostics";
 import type {
   ShinyBridge, SessionsPayload, ProactiveMessagesPayload, IdeContextMeta, WorkspaceMentionItem,
   AttachmentData, QuoteInfo, RunPhase, RunStage, AutoContinueKind,
@@ -30,6 +37,27 @@ import type {
   CopilotServiceBridge,
   CopilotServiceState,
 } from "./copilot-service-addon";
+import {
+  createMemoryMonitorBridge,
+  parseMemoryMonitorAddon,
+  type MemoryGuardState,
+  type MemoryMonitorBridge,
+  type MemoryMonitorFrame,
+  type MemoryMonitorSample,
+} from "./memory-monitor-addon";
+import {
+  createDiagnosticsSettingsBridge,
+  parseDiagnosticsSettingsAddon,
+  parseDiagnosticsLaunchConfig,
+  type DiagnosticsSettingsBridge,
+  type DiagnosticsSettingsSnapshot,
+  type DiagnosticsSettingField,
+  type DiagnosticsSettingValue,
+} from "./diagnostics-settings-addon";
+import {
+  createPerformanceOrbController,
+  type PerformanceOrbController,
+} from "./performance-orb";
 import { buildChecklistSnapshot } from "./checklist-reducer";
 import {
   createTaskMonitorState,
@@ -52,11 +80,18 @@ import {
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
 import { projectLabel, sessionsToWorkspaceThreads } from "./workspace-threads";
 import { createLazyToolResultClient, type LazyToolResultClient } from "./lazy-tool-result";
+import {
+  AppMessageRepository,
+  BROWSER_MESSAGE_WINDOW,
+  boundBrowserMessages,
+} from "./message-repository";
 
 const RUN_SCOPED_TRANSIENT_STATUSES = new Set([
   "thinking_tokens",
   "requesting",
 ]);
+
+const BROWSER_INACTIVE_THREAD_WINDOWS = 8;
 
 // ── 持久化 key ──────────────────────────────────────────────────────────────
 
@@ -108,7 +143,9 @@ function loadMessages(inputId: string, enabled: boolean, threadId: string): Thre
     if (!raw) return [];
     const msgs = JSON.parse(raw) as ThreadMessageLike[];
     // Any tool-call part without a result is stale (session ended mid-run) — mark as interrupted
-    return markStaleToolCalls(msgs, "Session ended").messages;
+    return boundBrowserMessages(
+      markStaleToolCalls(msgs, "Session ended").messages,
+    );
   } catch {
     return [];
   }
@@ -118,7 +155,7 @@ function loadMessages(inputId: string, enabled: boolean, threadId: string): Thre
 function saveMessages(inputId: string, enabled: boolean, threadId: string, msgs: ThreadMessageLike[]) {
   if (!enabled) return;
   try {
-    const slim = stripAttachmentData(msgs);
+    const slim = stripAttachmentData(boundBrowserMessages(msgs));
     localStorage.setItem(storageKey(inputId, `msgs:${threadId}`), JSON.stringify(slim));
   } catch (e) {
     // 配额超限等：不再完全静默，至少告警（数据仅当前会话内存可见，刷新丢失）
@@ -130,6 +167,20 @@ function deleteMessages(inputId: string, enabled: boolean, threadId: string) {
   if (!enabled) return;
   try {
     localStorage.removeItem(storageKey(inputId, `msgs:${threadId}`));
+  } catch {}
+}
+
+function pruneStoredMessages(inputId: string, enabled: boolean, retainedIds: ReadonlySet<string>) {
+  if (!enabled) return;
+  try {
+    const prefix = storageKey(inputId, "msgs:");
+    const victims: string[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      if (!retainedIds.has(key.slice(prefix.length))) victims.push(key);
+    }
+    for (const key of victims) localStorage.removeItem(key);
   } catch {}
 }
 
@@ -160,8 +211,11 @@ const isCompactPhase = (value: unknown): value is CompactPhase =>
 const AVAILABLE_PERMISSION_MODES = new Set([
   "default", "plan", "acceptEdits", "bypassPermissions", "askAll", "yolo",
 ]);
+const diagnosticsTextEncoder = new TextEncoder();
+const diagnosticsUtf8Bytes = (value: string) => diagnosticsTextEncoder.encode(value).byteLength;
 
 export function useShinyRuntime(inputId: string, config: Record<string, unknown>) {
+  const diagnosticsKey = diagnosticsConfigKey(config?.diagnostics);
   const usesRunStateProtocol = config?.run_state_protocol === 1;
   const configuredPersistence = config?.persistence;
   const persistence = configuredPersistence === "server" || configuredPersistence === "none"
@@ -239,6 +293,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   if (!bridge.current) {
     bridge.current = createShinyBridge(inputId);
   }
+  const diagnosticsMonitorRef = useRef<DiagnosticsMonitor | null>(null);
+  useEffect(() => {
+    const parsed = parseDiagnosticsConfig(config?.diagnostics);
+    if (!parsed || diagnosticsConfigKey(parsed) !== diagnosticsKey) {
+      diagnosticsMonitorRef.current = null;
+      return;
+    }
+    const monitor = createDiagnosticsMonitor(
+      parsed,
+      (batch) => bridge.current.sendDiagnostics(batch),
+    );
+    diagnosticsMonitorRef.current = monitor;
+    return () => {
+      if (diagnosticsMonitorRef.current === monitor) diagnosticsMonitorRef.current = null;
+      monitor.close();
+    };
+  }, [diagnosticsKey]); // config identity is intentionally excluded; key contains every validated primitive.
   const lazyToolResults = useRef<LazyToolResultClient>(null!);
   if (!lazyToolResults.current) {
     lazyToolResults.current = createLazyToolResultClient(
@@ -251,6 +322,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   if (copilotServiceConfig && !copilotBridge.current) {
     copilotBridge.current = createCopilotServiceBridge(inputId);
   }
+  const memoryMonitorConfig = useMemo(() => parseMemoryMonitorAddon(config), [config]);
+  const memoryMonitorKey = memoryMonitorConfig
+    ? [memoryMonitorConfig.ownerSeed, memoryMonitorConfig.lastRevision].join("|")
+    : "";
+  const memoryMonitorBridgeRef = useRef<MemoryMonitorBridge | null>(null);
+  const diagnosticsSettingsConfig = useMemo(() => parseDiagnosticsSettingsAddon(config), [config]);
+  const diagnosticsLaunchConfig = useMemo(() => parseDiagnosticsLaunchConfig(config), [config]);
+  const diagnosticsSettingsKey = diagnosticsSettingsConfig
+    ? JSON.stringify(diagnosticsSettingsConfig)
+    : "";
+  const diagnosticsSettingsBridgeRef = useRef<DiagnosticsSettingsBridge | null>(null);
 
   type HistoryPageState = {
     reading: boolean;
@@ -397,36 +479,139 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => (typeof config?.auto_run === "boolean" ? config.auto_run : undefined),
   );
   const [defaultPermissionMode, setDefaultPermissionModeState] = useState<string | undefined>(
-    () => (typeof config?.default_permission_mode === "string" ? config.default_permission_mode : undefined),
+    () => diagnosticsSettingsConfig?.fields.defaultPermissionMode.value ??
+      (typeof config?.default_permission_mode === "string" ? config.default_permission_mode : undefined),
   );
   const [modeVisibility, setModeVisibilityState] = useState<{ showBypass: boolean; showYolo: boolean } | undefined>(
     () => {
+      const canonical = diagnosticsSettingsConfig?.fields.modeVisibility.value;
+      if (canonical) return canonical;
       const mv = config?.mode_visibility as { showBypass?: boolean; showYolo?: boolean } | undefined;
       return mv ? { showBypass: mv.showBypass !== false, showYolo: mv.showYolo !== false } : undefined;
     },
   );
   const [composerDensity, setComposerDensityState] = useState<"comfortable" | "compact" | undefined>(
-    () => (config?.composer_density === "compact" || config?.composer_density === "comfortable"
-      ? config.composer_density : undefined),
+    () => diagnosticsSettingsConfig?.fields.composerDensity.value ??
+      (config?.composer_density === "compact" || config?.composer_density === "comfortable"
+        ? config.composer_density : undefined),
   );
   const [assistantTextSize, setAssistantTextSizeState] = useState<AssistantTextSize | undefined>(
-    () => normalizeAssistantTextSize(config?.assistant_text_size),
+    () => diagnosticsSettingsConfig?.fields.assistantTextSize.value ??
+      normalizeAssistantTextSize(config?.assistant_text_size),
   );
   const [runREnabled, setRunREnabledState] = useState<boolean | undefined>(
-    () => (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
+    () => diagnosticsSettingsConfig?.fields.runREnabled.value ??
+      (typeof config?.run_r_enabled === "boolean" ? config.run_r_enabled : undefined),
   );
   const [showClaudeEditsInRStudio, setShowClaudeEditsInRStudioState] = useState<boolean | undefined>(
-    () => (typeof config?.show_claude_edits_in_rstudio === "boolean"
-      ? config.show_claude_edits_in_rstudio
-      : undefined),
+    () => diagnosticsSettingsConfig?.fields.showClaudeEditsInRStudio.value ??
+      (typeof config?.show_claude_edits_in_rstudio === "boolean"
+        ? config.show_claude_edits_in_rstudio
+        : undefined),
   );
   const [autoStartCopilotApi, setAutoStartCopilotApiState] = useState<boolean | undefined>(
-    () => copilotServiceConfig?.state.autoStart,
+    () => diagnosticsSettingsConfig?.fields.autoStartCopilotApi.value ??
+      copilotServiceConfig?.state.autoStart,
   );
   const [serviceState, setServiceState] = useState<CopilotServiceState | undefined>(
     () => copilotServiceConfig?.state,
   );
   const serviceStateRef = useRef<CopilotServiceState | undefined>(serviceState);
+  type MemoryMonitorView = {
+    state: MemoryGuardState | "waiting";
+    sample: MemoryMonitorSample | null;
+    frame: MemoryMonitorFrame | null;
+  };
+  const [memoryMonitorView, setMemoryMonitorView] = useState<MemoryMonitorView | undefined>(
+    () => memoryMonitorConfig ? { state: "waiting", sample: null, frame: null } : undefined,
+  );
+  const [diagnosticsSettingsSnapshot, setDiagnosticsSettingsSnapshot] =
+    useState<DiagnosticsSettingsSnapshot | undefined>(undefined);
+  const [diagnosticsDesired, setDiagnosticsDesired] = useState<boolean | undefined>(
+    () => diagnosticsSettingsConfig?.fields.diagnosticsEnabled.value,
+  );
+  const [showPerformanceOrb, setShowPerformanceOrbState] = useState<boolean | undefined>(
+    () => diagnosticsSettingsConfig?.fields.showPerformanceOrb.value,
+  );
+  const setMemoryMonitorVisible = useCallback((visible: boolean) => {
+    memoryMonitorBridgeRef.current?.setVisible(visible === true);
+  }, []);
+  useEffect(() => {
+    const parsed = parseMemoryMonitorAddon(config);
+    if (!parsed || !memoryMonitorKey) {
+      memoryMonitorBridgeRef.current = null;
+      setMemoryMonitorView(undefined);
+      return;
+    }
+    const monitorBridge = createMemoryMonitorBridge(inputId, parsed);
+    memoryMonitorBridgeRef.current = monitorBridge;
+    setMemoryMonitorView({ state: "waiting", sample: null, frame: null });
+    monitorBridge.onSample((frame) => {
+      setMemoryMonitorView((previous) => {
+        if (!previous || memoryMonitorBridgeRef.current !== monitorBridge) return previous;
+        return { state: frame.sample.state, sample: frame.sample, frame };
+      });
+    });
+    return () => {
+      monitorBridge.setVisible(false);
+      if (memoryMonitorBridgeRef.current === monitorBridge) {
+        memoryMonitorBridgeRef.current = null;
+        setMemoryMonitorView(undefined);
+      }
+      monitorBridge.dispose();
+    };
+  }, [inputId, memoryMonitorKey]); // exact v2 primitives are included in the key.
+
+  useEffect(() => {
+    const parsed = parseDiagnosticsSettingsAddon(config);
+    if (!parsed || !diagnosticsSettingsKey) {
+      diagnosticsSettingsBridgeRef.current = null;
+      setDiagnosticsSettingsSnapshot(undefined);
+      setDiagnosticsDesired(undefined);
+      setShowPerformanceOrbState(undefined);
+      return;
+    }
+    const settingsBridge = createDiagnosticsSettingsBridge(inputId, parsed);
+    diagnosticsSettingsBridgeRef.current = settingsBridge;
+    const apply = (next: DiagnosticsSettingsSnapshot) => {
+      if (diagnosticsSettingsBridgeRef.current !== settingsBridge) return;
+      setDiagnosticsSettingsSnapshot(next);
+      setAutoStartCopilotApiState(next.fields.autoStartCopilotApi.value as boolean);
+      setDefaultPermissionModeState(next.fields.defaultPermissionMode.value as string);
+      setModeVisibilityState(next.fields.modeVisibility.value as { showBypass: boolean; showYolo: boolean });
+      setComposerDensityState(next.fields.composerDensity.value as "comfortable" | "compact");
+      setAssistantTextSizeState(next.fields.assistantTextSize.value as AssistantTextSize);
+      setRunREnabledState(next.fields.runREnabled.value as boolean);
+      setShowClaudeEditsInRStudioState(next.fields.showClaudeEditsInRStudio.value as boolean);
+      setDiagnosticsDesired(next.fields.diagnosticsEnabled.value as boolean);
+      setShowPerformanceOrbState(next.fields.showPerformanceOrb.value as boolean);
+    };
+    apply(settingsBridge.snapshot());
+    const unsubscribe = settingsBridge.subscribe(apply);
+    return () => {
+      unsubscribe();
+      if (diagnosticsSettingsBridgeRef.current === settingsBridge) diagnosticsSettingsBridgeRef.current = null;
+      settingsBridge.dispose();
+    };
+  }, [inputId, diagnosticsSettingsKey]);
+
+  const diagnosticsLaunchEnabled = diagnosticsLaunchConfig?.launchEnabled ?? diagnosticsKey.length > 0;
+  const performanceOrbController = useMemo<PerformanceOrbController | undefined>(() => {
+    if (!diagnosticsSettingsConfig) return undefined;
+    return createPerformanceOrbController({
+      diagnosticsEnabled: diagnosticsLaunchEnabled,
+      observeLongTasks: !diagnosticsLaunchEnabled,
+      onFrameSummary: (metrics) => diagnosticsMonitorRef.current?.record("frame_summary", metrics),
+      onLongTaskSummary: (metrics) => diagnosticsMonitorRef.current?.record("longtask_summary", metrics),
+      onPageHeap: () => diagnosticsMonitorRef.current?.samplePageHeap(),
+    });
+  }, [inputId, diagnosticsSettingsKey, diagnosticsLaunchEnabled]);
+  useEffect(() => () => performanceOrbController?.dispose(), [performanceOrbController]);
+  const requestSetting = useCallback((field: DiagnosticsSettingField, value: DiagnosticsSettingValue) =>
+    diagnosticsSettingsBridgeRef.current?.request(field, value) ?? null, []);
+  const recordOwnedMarkdownPreprocess = diagnosticsLaunchEnabled
+    ? (durationUs: number) => diagnosticsMonitorRef.current?.recordOwnedMarkdownPreprocess(durationUs)
+    : undefined;
   const [projects, setProjects] = useState<string[]>(
     () => (Array.isArray(config?.projects) ? (config.projects as string[]) : []),
   );
@@ -575,7 +760,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 消息 Map（threadId → messages）
-  const [messagesMap, setMessagesMap] = useState<Record<string, ThreadMessageLike[]>>(() => {
+  const [messagesMap, setMessagesMapState] = useState<Record<string, ThreadMessageLike[]>>(() => {
     const saved = loadThreads(inputId, usesClientPersistence);
     const map: Record<string, ThreadMessageLike[]> = {};
     const ids = saved.length > 0 ? saved.map((t) => t.id) : [currentThreadId];
@@ -584,6 +769,74 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     }
     return map;
   });
+  const messageRepositoriesRef = useRef(new Map<string, AppMessageRepository>());
+  const messageWindowTouchesRef = useRef(new Map<string, number>());
+  const messageWindowSequenceRef = useRef(0);
+  const messagesMapRef = useRef(messagesMap);
+  for (const [threadId, threadMessages] of Object.entries(messagesMap)) {
+    if (messageRepositoriesRef.current.has(threadId)) continue;
+    const repository = new AppMessageRepository();
+    repository.replaceVisiblePath(threadMessages);
+    messageRepositoriesRef.current.set(threadId, repository);
+  }
+  // One mutation gateway covers live chunks, tools, history, proactive replace,
+  // edits, action acknowledgements, cancellation and cross-thread updates. The
+  // graph is updated in the same functional transaction as the visible arrays.
+  const setMessagesMap = useCallback((
+    action: SetStateAction<Record<string, ThreadMessageLike[]>>,
+  ) => {
+    setMessagesMapState((previous) => {
+      const proposed = typeof action === "function" ? action(previous) : action;
+      let next = proposed;
+      for (const [threadId, candidate] of Object.entries(proposed)) {
+        const bounded = candidate.length > BROWSER_MESSAGE_WINDOW
+          ? boundBrowserMessages(candidate)
+          : candidate;
+        if (bounded !== candidate) {
+          if (next === proposed) next = { ...proposed };
+          next[threadId] = bounded;
+        }
+        let repository = messageRepositoriesRef.current.get(threadId);
+        if (!repository) {
+          repository = new AppMessageRepository();
+          messageRepositoriesRef.current.set(threadId, repository);
+        }
+        if (bounded !== previous[threadId] || !previous[threadId]) {
+          repository.replaceVisiblePath(bounded);
+          if (bounded.length > 0) {
+            messageWindowTouchesRef.current.set(
+              threadId, ++messageWindowSequenceRef.current,
+            );
+          }
+        }
+      }
+      const protectedIds = new Set<string>([
+        currentThreadIdRef.current,
+        ...activeRunsRef.current,
+        ...thisSessionThreadIds.current,
+      ]);
+      const inactive = Object.keys(next)
+        .filter((threadId) => (next[threadId]?.length ?? 0) > 0 && !protectedIds.has(threadId))
+        .sort((left, right) =>
+          (messageWindowTouchesRef.current.get(right) ?? 0) -
+          (messageWindowTouchesRef.current.get(left) ?? 0)
+        );
+      if (inactive.length > BROWSER_INACTIVE_THREAD_WINDOWS) {
+        if (next === proposed) next = { ...proposed };
+        for (const threadId of inactive.slice(BROWSER_INACTIVE_THREAD_WINDOWS)) {
+          delete next[threadId];
+        }
+      }
+      for (const threadId of [...messageRepositoriesRef.current.keys()]) {
+        if (threadId in next) continue;
+        messageRepositoriesRef.current.delete(threadId);
+        messageWindowTouchesRef.current.delete(threadId);
+        deleteMessages(inputId, usesClientPersistence, threadId);
+      }
+      messagesMapRef.current = next;
+      return next;
+    });
+  }, [inputId, usesClientPersistence]);
   // Keep one explicit registry independent of which thread is currently bound
   // by ExternalStoreRuntime. It includes restored/local and archived entries.
   for (const thread of threads) knownThreadIdsRef.current.add(thread.id);
@@ -814,6 +1067,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         [...incoming, ...pendingUsers],
         payload.revision,
       );
+      messageRepositoriesRef.current.get(threadId)?.resetVisiblePath(updated);
       if (usesClientPersistence) {
         saveMessages(inputId, usesClientPersistence, threadId, updated);
       }
@@ -931,6 +1185,15 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     () => messagesMap[currentThreadId] ?? [],
     [messagesMap, currentThreadId]
   );
+  const messageRepository = useMemo(() => {
+    let repository = messageRepositoriesRef.current.get(currentThreadId);
+    if (!repository) {
+      repository = new AppMessageRepository();
+      repository.replaceVisiblePath(messages);
+      messageRepositoriesRef.current.set(currentThreadId, repository);
+    }
+    return repository.export(isRunning);
+  }, [messagesMap, messages, currentThreadId, isRunning]);
 
   // 更新指定线程消息并持久化。分支操作必须显式传入其绑定的 threadId，
   // 避免线程切换与 ExternalStore adapter 重渲染之间的窗口写错线程。
@@ -1220,6 +1483,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (previousPhase === "complete" || previousPhase === "error" || previousPhase === "cancelled") return;
       if (previousPhase === "running" && (d.phase === "queued" || d.phase === "connecting")) return;
       if (previousStage === "finalizing" && d.stage === "streaming") return;
+      diagnosticsMonitorRef.current?.record("run_state", { phase: d.phase });
+      if (d.stage === "streaming" || d.stage === "finalizing") {
+        diagnosticsMonitorRef.current?.record("run_stage", { stage: d.stage });
+      }
       setThreadRunPhase(d.threadId, d.phase, d.stage, d.queuePosition);
       if (d.phase === "running") setThreadRunning(d.threadId, true);
       if (d.phase === "complete" || d.phase === "error" || d.phase === "cancelled") {
@@ -1450,6 +1717,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         !deletedThreadIdsRef.current.has(id)
       );
       knownThreadIdsRef.current = new Set([...retainedLocalIds, ...serverIds]);
+      pruneStoredMessages(inputId, usesClientPersistence, knownThreadIdsRef.current);
 
       setThreads((prev) => {
         // 保留本次 session 新建且尚未上传 server 的线程（例如用户正在输入）
@@ -1470,10 +1738,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       setMessagesMap((prev) => {
         const patch: Record<string, ThreadMessageLike[]> = {};
-        for (const s of sessions) {
-          patch[s.id] = prev[s.id] ?? loadMessages(inputId, usesClientPersistence, s.id);
+        for (const [threadId, threadMessages] of Object.entries(prev)) {
+          if (knownThreadIdsRef.current.has(threadId)) patch[threadId] = threadMessages;
         }
-        return { ...prev, ...patch };
+        for (const s of sessions) {
+          patch[s.id] = patch[s.id] ?? loadMessages(inputId, usesClientPersistence, s.id);
+        }
+        return patch;
       });
 
       for (const [threadId, buffered] of proactiveBeforeSessionsRef.current) {
@@ -1536,6 +1807,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return;
       }
 
+      const incomingForWindow = data.messages as ThreadMessageLike[];
+      const existingForWindow = messagesMapRef.current[threadId] ?? [];
+      const projectedForWindow = data.prepend === true
+        ? [...incomingForWindow, ...existingForWindow]
+        : incomingForWindow;
+      const browserWindowTruncated = projectedForWindow.length >
+        boundBrowserMessages(projectedForWindow).length;
+
       setMessagesMap((prev) => {
         const incoming = data.messages as ThreadMessageLike[];
         let updated: ThreadMessageLike[];
@@ -1550,6 +1829,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           updated = [...older, ...(prev[threadId] ?? [])];
         } else {
           updated = incoming;
+          messageRepositoriesRef.current.get(threadId)?.resetVisiblePath(updated);
         }
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
         return { ...prev, [threadId]: updated };
@@ -1557,8 +1837,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       updateHistoryPage(threadId, () => ({
         reading: false,
-        hasMore: data.hasMore === true,
-        cursor: data.cursor ?? null,
+        hasMore: data.hasMore === true && !browserWindowTruncated,
+        cursor: browserWindowTruncated ? null : (data.cursor ?? null),
         loadingOlder: false,
       }));
     });
@@ -1637,6 +1917,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onChunk: (chunkText) => {
+          diagnosticsMonitorRef.current?.record("chunk_summary", {
+            count: 1,
+            bytes: diagnosticsUtf8Bytes(chunkText),
+          });
           // 在调用 setMessagesMap 前先快照 ID——updater 是异步调度的，若
           // onDone 先于 updater 执行会把 streamingIdsRef.current[threadId] 清为 null，
           // 导致 updater 误判为新消息，产生"末尾碎片"分裂 bubble 的 bug。
@@ -1703,6 +1987,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onToolCallDelta: (toolCallId, delta) => {
+          diagnosticsMonitorRef.current?.record("tool_delta_summary", {
+            count: 1,
+            bytes: diagnosticsUtf8Bytes(delta),
+            toolCount: 0,
+          });
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const updated = threadMsgs.map((m): ThreadMessageLike => {
@@ -1731,6 +2020,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           });
         },
         onToolCall: (toolCall) => {
+          diagnosticsMonitorRef.current?.record("tool_delta_summary", { count: 0, bytes: 0, toolCount: 1 });
           const startedAt = Date.now();
           streamingIdsRef.current[threadId] = null;
           setMessagesMap((prev) => {
@@ -1941,6 +2231,19 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
         onDone: (doneSuggestions, incomingRunId, cancelled = false) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          diagnosticsMonitorRef.current?.record("run_state", {
+            phase: cancelled ? "cancelled" : "complete",
+          });
+          const ownedMessages = messagesMapRef.current[threadId] ?? [];
+          const ownedToolCount = ownedMessages.reduce((count, message) => count +
+            (Array.isArray(message.content)
+              ? message.content.filter((part) => part && typeof part === "object" && "type" in part && part.type === "tool-call").length
+              : 0), 0);
+          diagnosticsMonitorRef.current?.record("owned_commit_summary", {
+            messageCount: ownedMessages.length, toolCount: ownedToolCount,
+          });
+          performanceOrbController?.sampleSemanticTerminal();
+          diagnosticsMonitorRef.current?.flush();
           streamingIdsRef.current[threadId] = null;
           // 只有当前 thread 仍是发起此 run 的 thread 时才清 running 状态
           // 避免用户切换 thread 后旧 handler 的 onDone 把新 thread 的 running 错误清掉
@@ -1983,6 +2286,17 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
         onError: (errMsg, incomingRunId) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          diagnosticsMonitorRef.current?.record("run_state", { phase: "error" });
+          const ownedMessages = messagesMapRef.current[threadId] ?? [];
+          const ownedToolCount = ownedMessages.reduce((count, message) => count +
+            (Array.isArray(message.content)
+              ? message.content.filter((part) => part && typeof part === "object" && "type" in part && part.type === "tool-call").length
+              : 0), 0);
+          diagnosticsMonitorRef.current?.record("owned_commit_summary", {
+            messageCount: ownedMessages.length, toolCount: ownedToolCount,
+          });
+          performanceOrbController?.sampleSemanticTerminal();
+          diagnosticsMonitorRef.current?.flush();
           streamingIdsRef.current[threadId] = null;
           setStatusTextMap((previous) => ({ ...previous, [threadId]: null }));
           if (usesRunStateProtocol) setThreadRunPhase(threadId, "error");
@@ -3020,8 +3334,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     invokeAction({ id: `stoptask:${taskId}`, label: "Stop task" });
   }, [invokeAction]);
 
-  const runtime = useExternalStoreRuntime({
-    messages,
+  const runtime = useExternalStoreRuntime<ThreadMessage>({
+    messageRepository,
     isRunning,
     isSendDisabled: isRunWaiting,
     suggestions,
@@ -3029,7 +3343,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     onEdit,
     onReload,
     onCancel,
-    convertMessage: (m) => m,
     adapters: {
       threadList: threadListAdapter,
       attachments: attachmentAdapter.current,
@@ -3093,36 +3406,40 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     },
     defaultPermissionMode,
     setDefaultPermissionMode: (value: string) => {
-      setDefaultPermissionModeState(value);
-      bridge.current.sendDefaultPermissionMode(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("defaultPermissionMode", value);
+      else { setDefaultPermissionModeState(value); bridge.current.sendDefaultPermissionMode(value); }
     },
     modeVisibility,
     setModeVisibility: (value: { showBypass: boolean; showYolo: boolean }) => {
-      setModeVisibilityState(value);
-      bridge.current.sendModeVisibility(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("modeVisibility", value);
+      else { setModeVisibilityState(value); bridge.current.sendModeVisibility(value); }
     },
     composerDensity,
     setComposerDensity: (value: "comfortable" | "compact") => {
-      setComposerDensityState(value);
-      bridge.current.sendComposerDensity(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("composerDensity", value);
+      else { setComposerDensityState(value); bridge.current.sendComposerDensity(value); }
     },
     assistantTextSize,
     setAssistantTextSize: (value: AssistantTextSize) => {
-      setAssistantTextSizeState(value);
-      bridge.current.sendAssistantTextSize(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("assistantTextSize", value);
+      else { setAssistantTextSizeState(value); bridge.current.sendAssistantTextSize(value); }
     },
     runREnabled,
     setRunREnabled: (value: boolean) => {
-      setRunREnabledState(value);
-      bridge.current.sendRunREnabled(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("runREnabled", value);
+      else { setRunREnabledState(value); bridge.current.sendRunREnabled(value); }
     },
     showClaudeEditsInRStudio,
     setShowClaudeEditsInRStudio: (value: boolean) => {
-      setShowClaudeEditsInRStudioState(value);
-      bridge.current.sendShowClaudeEditsInRStudio(value);
+      if (diagnosticsSettingsBridgeRef.current) requestSetting("showClaudeEditsInRStudio", value);
+      else { setShowClaudeEditsInRStudioState(value); bridge.current.sendShowClaudeEditsInRStudio(value); }
     },
     autoStartCopilotApi,
     setAutoStartCopilotApi: (value: boolean) => {
+      if (diagnosticsSettingsBridgeRef.current) {
+        requestSetting("autoStartCopilotApi", value);
+        return;
+      }
       setAutoStartCopilotApiState(value);
       if (!value) {
         const disabled: CopilotServiceState = { status: "disabled", autoStart: false };
@@ -3142,6 +3459,28 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     pendingServiceSubmissions,
     retryService: copilotBridge.current ? () => copilotBridge.current?.retry() : undefined,
     cancelPendingSubmissions,
+    memoryMonitor: memoryMonitorView ? {
+      ...memoryMonitorView,
+      setVisible: setMemoryMonitorVisible,
+    } : undefined,
+    diagnosticsLogging: diagnosticsSettingsConfig ? {
+      desired: diagnosticsDesired === true,
+      launchEnabled: diagnosticsLaunchEnabled,
+      environmentOverride: diagnosticsLaunchConfig?.environmentOverride ?? "none",
+      launchKind: diagnosticsLaunchConfig?.launchKind ?? (config?.modal === true ? "foreground" : "job"),
+      writerStartup: diagnosticsLaunchConfig?.writerStartup ?? (diagnosticsLaunchEnabled ? "started" : "off"),
+      saving: diagnosticsSettingsSnapshot?.fields.diagnosticsEnabled.pending === true,
+      saveFailed: !!diagnosticsSettingsSnapshot?.fields.diagnosticsEnabled.category &&
+        diagnosticsSettingsSnapshot.fields.diagnosticsEnabled.category !== "ok",
+      category: diagnosticsSettingsSnapshot?.fields.diagnosticsEnabled.category,
+      setEnabled: (value: boolean) => { requestSetting("diagnosticsEnabled", value); },
+    } : undefined,
+    showPerformanceOrb,
+    setShowPerformanceOrb: diagnosticsSettingsConfig
+      ? (value: boolean) => { requestSetting("showPerformanceOrb", value); }
+      : undefined,
+    performanceOrbController,
+    recordOwnedMarkdownPreprocess,
     threadMaxWidth:
       typeof config?.thread_max_width === "string" ? config.thread_max_width : undefined,
     readingHistory: historyPageStates[currentThreadId]?.reading ?? false,

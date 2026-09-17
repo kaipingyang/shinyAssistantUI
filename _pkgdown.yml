@@ -37,6 +37,7 @@ articles:
 - title: Compatibility and roadmap
   contents:
   - upstream-alignment
+  - a2ui-shiny-contract
 
 reference:
 - title: UI and server

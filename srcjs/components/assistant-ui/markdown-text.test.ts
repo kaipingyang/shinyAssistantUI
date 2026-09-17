@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { preprocessLatexMarkdown } from "./markdown-text";
 
 describe("preprocessLatexMarkdown", () => {
@@ -19,5 +19,24 @@ describe("preprocessLatexMarkdown", () => {
       .toBe(String.raw`partial \(x`);
     expect(preprocessLatexMarkdown(String.raw`partial \(x\)`))
       .toBe("partial $x$");
+  });
+});
+
+
+describe("timedOwnedMarkdownPreprocess", () => {
+  it("reports only the owned preprocessing call in integer microseconds", async () => {
+    const { timedOwnedMarkdownPreprocess } = await import("./markdown-text");
+    const report = vi.fn();
+    const values = [10, 10.125];
+    const result = timedOwnedMarkdownPreprocess("hello", (value) => value.toUpperCase(), report, () => values.shift()!);
+    expect(result).toBe("HELLO");
+    expect(report).toHaveBeenCalledWith(125);
+  });
+
+  it("does not rename timing as markdown render/commit and keeps preprocessing fail-open", async () => {
+    const { timedOwnedMarkdownPreprocess } = await import("./markdown-text");
+    const report = vi.fn(() => { throw new Error("telemetry unavailable"); });
+    expect(timedOwnedMarkdownPreprocess("x", (value) => `${value}!`, report, () => 1)).toBe("x!");
+    expect(report.mock.calls.flat().join(" ")).not.toMatch(/render|commit/i);
   });
 });

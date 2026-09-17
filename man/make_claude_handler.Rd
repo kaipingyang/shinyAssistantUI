@@ -9,7 +9,10 @@ make_claude_handler(
   cwd_provider = NULL,
   thinking_provider = NULL,
   models = NULL,
-  session_map_path = ".claude_session_map.rds"
+  session_map_path = ".claude_session_map.rds",
+  memory_guard_config = NULL,
+  on_memory_observation = NULL,
+  memory_sampler = NULL
 )
 }
 \arguments{
@@ -30,6 +33,15 @@ selector (a "Default" option is always prepended).}
 \item{session_map_path}{Path to the \code{.rds} file used to persist
 \code{thread_id -> session_id} mappings. Defaults to
 \code{".claude_session_map.rds"} in the current working directory.}
+
+\item{memory_guard_config}{Optional internal memory-pressure guard configuration.
+\code{NULL} keeps the guard disabled for generic handlers.}
+
+\item{on_memory_observation}{Optional callback receiving the guard's exact
+sampled observation and state transition.}
+
+\item{memory_sampler}{Optional internal sampler injection used by deterministic
+verification; production callers should leave it \code{NULL}.}
 }
 \value{
 A \code{coro::async} handler function compatible with \code{\link[=assistantUIServer]{assistantUIServer()}}.

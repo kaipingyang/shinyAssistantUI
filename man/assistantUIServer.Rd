@@ -66,7 +66,8 @@ assistantUIServer(
   modal = FALSE,
   prewarm = FALSE,
   allow_warmup = TRUE,
-  max_concurrent_runs = 1L
+  max_concurrent_runs = 1L,
+  diagnostics = NULL
 )
 }
 \arguments{
@@ -430,6 +431,10 @@ when \code{handler} explicitly declares
 \code{attr(handler, "supports_concurrent_threads") <- TRUE}; all other handlers
 remain globally serial for backward compatibility. Invocations within one
 thread are always strict FIFO and never overlap.}
+
+\item{diagnostics}{Optional diagnostics configuration. \code{NULL} (the default)
+disables telemetry for generic widgets; \code{TRUE} or a validated named list
+enables bounded privacy-filtered diagnostics.}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

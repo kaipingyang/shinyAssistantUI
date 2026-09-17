@@ -231,6 +231,9 @@
   state$started <- FALSE
   state$bound <- FALSE
   state$disposed <- FALSE
+  persist_parameters <- tryCatch(names(formals(persist_auto_start)),
+                                 error = function(error) character())
+  deferred_persistence <- any(c("on_confirmed", "...") %in% persist_parameters)
 
   publish <- function(value) {
     if (state$disposed || !is.list(value)) return(invisible(NULL))
@@ -279,8 +282,22 @@
         msg <- session$input[[paste0(state$input_id, "_copilot_auto_start")]]
         value <- if (is.list(msg)) msg$value else msg
         value <- isTRUE(value)
-        tryCatch(persist_auto_start(value), error = function(e) NULL)
-        service$set_auto_start(value)
+        if (deferred_persistence) {
+          confirmed <- FALSE
+          on_confirmed <- function(confirmed_value = value) {
+            if (confirmed || state$disposed) return(invisible(FALSE))
+            confirmed <<- TRUE
+            service$set_auto_start(isTRUE(confirmed_value))
+            invisible(TRUE)
+          }
+          tryCatch(
+            persist_auto_start(value, on_confirmed = on_confirmed),
+            error = function(e) NULL
+          )
+        } else {
+          tryCatch(persist_auto_start(value), error = function(e) NULL)
+          service$set_auto_start(value)
+        }
       },
       ignoreNULL = TRUE,
       ignoreInit = TRUE
@@ -304,6 +321,11 @@
 
   list(
     config = function() list(version = 1L, state = state$latest),
-    bind = bind
+    bind = bind,
+    set_auto_start = function(value) {
+      if (state$disposed) return(invisible(FALSE))
+      service$set_auto_start(isTRUE(value))
+      invisible(TRUE)
+    }
   )
 }

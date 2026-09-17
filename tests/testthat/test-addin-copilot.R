@@ -373,3 +373,33 @@ test_that("copilot addin plugin starts only after its frontend channel is ready"
     expect_identical(calls$dispose, 1L)
   })
 })
+
+
+test_that("copilot addin plugin defers service side effect until persistence confirms", {
+  confirmed <- NULL
+  auto_calls <- logical()
+  plugin <- .new_copilot_addin_plugin(
+    auto_start = TRUE,
+    persist_auto_start = function(value, on_confirmed) {
+      confirmed <<- function() on_confirmed(value)
+      TRUE
+    },
+    service_factory = function(auto_start, publish) list(
+      start = function() NULL,
+      retry = function() NULL,
+      set_auto_start = function(value) auto_calls <<- c(auto_calls, isTRUE(value)),
+      dispose = function() NULL
+    )
+  )
+  shiny::testServer(function(input, output, session) {
+    plugin$bind(session, "chat_input")
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input_copilot_auto_start = list(value = FALSE, ts = 1))
+    session$flushReact()
+    expect_length(auto_calls, 0L)
+    expect_true(is.function(confirmed))
+    confirmed()
+    expect_identical(auto_calls, FALSE)
+  })
+})

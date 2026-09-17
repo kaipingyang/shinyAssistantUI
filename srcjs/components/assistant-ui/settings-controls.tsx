@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { SettingsIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, SettingsIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "../../shiny-config-context";
 import { ModelSelector } from "@/components/assistant-ui/model-selector";
 import type {
@@ -322,6 +322,108 @@ function CopilotAutoStartToggle() {
   );
 }
 
+function formatMemoryBytes(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "Unavailable";
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let amount = value;
+  let unit = -1;
+  do {
+    amount /= 1024;
+    unit += 1;
+  } while (amount >= 1024 && unit < units.length - 1);
+  const digits = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(digits)} ${units[unit]}`;
+}
+
+function DiagnosticsControls() {
+  const { diagnosticsLogging, showPerformanceOrb, setShowPerformanceOrb } = useShinyConfig();
+  if (!diagnosticsLogging && showPerformanceOrb === undefined) return null;
+  const startup = diagnosticsLogging?.writerStartup;
+  const restartNeeded = diagnosticsLogging && diagnosticsLogging.desired !== diagnosticsLogging.launchEnabled;
+  return (
+    <div className="aui-diagnostics-settings mt-3 border-t pt-3" data-slot="aui_diagnostics_settings">
+      {diagnosticsLogging && (
+        <label className="flex items-center gap-2 text-xs">
+          <input type="checkbox" aria-label="Save diagnostic logs"
+            checked={diagnosticsLogging.desired}
+            disabled={diagnosticsLogging.saving || diagnosticsLogging.environmentOverride !== "none"}
+            onChange={(event) => diagnosticsLogging.setEnabled(event.target.checked)} />
+          <span className="text-foreground font-medium">Save diagnostic logs</span>
+        </label>
+      )}
+      {diagnosticsLogging && (
+        <p className="text-muted-foreground mt-1 text-[10px] leading-4" role={diagnosticsLogging.saveFailed ? "alert" : undefined}>
+          {diagnosticsLogging.saving ? "Saving…" : diagnosticsLogging.saveFailed ? "Setting was not saved." :
+            startup === "failed" ? "Logging could not start for this browser session." :
+            restartNeeded && diagnosticsLogging.environmentOverride === "none" ? `Restart ${diagnosticsLogging.launchKind === "job" ? "Background Job" : "the addin"} to apply this change.` :
+            diagnosticsLogging.launchEnabled ? "Logging started for this process." : "Logging was not requested for this process."}
+        </p>
+      )}
+      {diagnosticsLogging && diagnosticsLogging.environmentOverride !== "none" && (
+        <p className="text-muted-foreground mt-1 text-[10px] leading-4">
+          SHINYASSISTANTUI_DIAGNOSTICS controls startup for this process.
+        </p>
+      )}
+      {showPerformanceOrb !== undefined && setShowPerformanceOrb && (
+        <label className="mt-2 flex items-center gap-2 text-xs">
+          <input type="checkbox" aria-label="Show Performance Orb" checked={showPerformanceOrb}
+            onChange={(event) => setShowPerformanceOrb(event.target.checked)} />
+          <span className="text-foreground font-medium">Show Performance Orb</span>
+        </label>
+      )}
+      <p className="text-muted-foreground mt-1 text-[10px] leading-4">
+        Aggregate performance only; no prompts, paths, IDs, or error text.
+      </p>
+    </div>
+  );
+}
+
+function MemoryMonitorControl() {
+  const { memoryMonitor } = useShinyConfig();
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
+  const setVisible = memoryMonitor?.setVisible;
+  useEffect(() => {
+    if (!expanded || !setVisible) return;
+    setVisible(true);
+    return () => setVisible(false);
+  }, [expanded, setVisible]);
+  if (!memoryMonitor) return null;
+  const latest = memoryMonitor.sample ?? undefined;
+  const state = latest?.state ?? memoryMonitor.state;
+  const stateLabel = {
+    waiting: "Waiting", normal: "Normal", soft: "Elevated", hard: "High",
+    recovering: "Recovering", disabled: "Disabled", unknown: "Unknown",
+  }[state];
+  return (
+    <div className="aui-memory-monitor mt-3 border-t pt-3" data-slot="aui_memory_monitor">
+      <button type="button" aria-label="Memory monitor" aria-expanded={expanded} aria-controls={contentId}
+        className="hover:bg-accent flex w-full items-center justify-between rounded px-1 py-1 text-left"
+        onClick={() => setExpanded((value) => !value)}>
+        <span><span className="text-foreground block text-xs font-medium">Memory monitor</span>
+          <span className="text-muted-foreground block text-[10px] leading-4">Frozen latest guard snapshot</span></span>
+        <ChevronDownIcon aria-hidden="true" className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      {expanded && (
+        <div id={contentId} data-slot="aui_memory_monitor_content" className="mt-2 space-y-2 px-1">
+          <div className="flex items-center justify-between text-[11px]"><span className="text-muted-foreground">Guard state</span>
+            <span className="text-foreground font-medium" data-memory-state={state}>{stateLabel}</span></div>
+          <div className="grid grid-cols-2 gap-2 text-[11px] tabular-nums">
+            <span className="bg-muted rounded px-2 py-1">PSS {formatMemoryBytes(latest?.pssBytes)}</span>
+            <span className="bg-muted rounded px-2 py-1">RSS {formatMemoryBytes(latest?.rssBytes)}</span>
+          </div>
+          {latest && <p className="text-muted-foreground text-[10px] leading-4 tabular-nums">
+            PSS soft {formatMemoryBytes(latest.softPssBytes)} · hard {formatMemoryBytes(latest.hardPssBytes)}<br />
+            RSS soft {formatMemoryBytes(latest.softRssBytes)} · hard {formatMemoryBytes(latest.hardRssBytes)}
+          </p>}
+          <p className="text-muted-foreground text-[10px] leading-4">One snapshot per opening. No history, prompts, paths, IDs, or error text.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SidebarSettings() {
   const {
     permissionMode,
@@ -330,6 +432,9 @@ export function SidebarSettings() {
     assistantTextSize,
     autoStartCopilotApi,
     showClaudeEditsInRStudio,
+    memoryMonitor,
+    diagnosticsLogging,
+    showPerformanceOrb,
   } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
@@ -342,7 +447,8 @@ export function SidebarSettings() {
 
   if (!permissionMode && !thinking && composerDensity === undefined &&
       assistantTextSize === undefined && autoStartCopilotApi === undefined &&
-      showClaudeEditsInRStudio === undefined) return null;
+      showClaudeEditsInRStudio === undefined && memoryMonitor === undefined &&
+      diagnosticsLogging === undefined && showPerformanceOrb === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -388,8 +494,10 @@ export function SidebarSettings() {
           <RunRToggle />
           <ShowClaudeEditsInRStudioToggle />
           <CopilotAutoStartToggle />
+          <DiagnosticsControls />
+          <MemoryMonitorControl />
           <p className="text-muted-foreground mt-3 text-[10px] leading-4">
-            Changes are submitted to the backend for this conversation.
+            Settings apply only after backend confirmation.
           </p>
         </div>
       )}

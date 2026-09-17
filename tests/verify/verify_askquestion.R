@@ -1,5 +1,25 @@
 suppressPackageStartupMessages({ library(callr); library(chromote); library(jsonlite) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
+owned_children <- function() {
+  path <- sprintf("/proc/%d/task/%d/children", Sys.getpid(), Sys.getpid())
+  if (!file.exists(path)) return(integer())
+  scan(path, what = integer(), quiet = TRUE)
+}
+cleanup_owned_supervisors <- function() {
+  pids <- owned_children()
+  pids <- pids[vapply(pids, function(pid) {
+    path <- sprintf("/proc/%d/comm", pid)
+    value <- if (file.exists(path)) tryCatch(readLines(path, n = 1L, warn = FALSE), error = function(e) "") else ""
+    length(value) && identical(value[[1L]], "supervisor")
+  }, logical(1))]
+  for (pid in pids) try(tools::pskill(pid, tools::SIGTERM), silent = TRUE)
+  deadline <- Sys.time() + 2
+  while (length(intersect(owned_children(), pids)) && Sys.time() < deadline) Sys.sleep(0.05)
+  for (pid in intersect(owned_children(), pids)) try(tools::pskill(pid, tools::SIGKILL), silent = TRUE)
+  deadline <- Sys.time() + 2
+  while (length(owned_children()) && Sys.time() < deadline) Sys.sleep(0.05)
+  length(owned_children())
+}
 project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
 home_library <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
 port <- 9633L
@@ -14,14 +34,23 @@ app <- callr::r_bg(function(project, port, home_library) {
   setwd(project); suppressPackageStartupMessages(library(shiny))
   cat("installed=", find.package("shinyAssistantUI"), "\n", sep = "")
   shiny::runApp("tests/verify/askquestion_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
-}, args = list(project = project, port = port, home_library = home_library), stdout = "/tmp/aui-ask.out", stderr = "/tmp/aui-ask.err")
-on.exit(try(app$kill(), silent = TRUE), add = TRUE)
+}, args = list(project = project, port = port, home_library = home_library), stdout = "/tmp/aui-ask.out", stderr = "/tmp/aui-ask.err", supervise = FALSE)
+on.exit({
+  try(if (app$is_alive()) app$kill_tree(), silent = TRUE)
+  try(app$wait(timeout = 5000L), silent = TRUE)
+}, add = TRUE)
 for (i in seq_len(100)) { if (!app$is_alive()) break; if (file.exists("/tmp/aui-ask.err") && any(grepl("Listening on", readLines("/tmp/aui-ask.err", warn = FALSE)))) break; Sys.sleep(0.25) }
 if (!app$is_alive()) { cat(tail(readLines("/tmp/aui-ask.err", warn = FALSE), 20), sep = "\n"); stop("boot failed") }
 
 chromote::set_chrome_args(unique(c(chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu")))
 browser <- ChromoteSession$new(width = 720, height = 900)
-on.exit({ try(browser$close(), silent = TRUE); try(browser$parent$get_browser()$get_process()$kill(), silent = TRUE) }, add = TRUE)
+chrome_process <- browser$parent$get_browser()$get_process()
+on.exit({
+  try(browser$close(), silent = TRUE)
+  try(browser$parent$close(), silent = TRUE)
+  try(if (chrome_process$is_alive()) chrome_process$kill_tree(), silent = TRUE)
+  try(chrome_process$wait(timeout = 10000L), silent = TRUE)
+}, add = TRUE)
 console_errors <- character()
 browser$Runtime$enable()
 browser$Runtime$consoleAPICalled(callback_ = function(m) if (identical(m$type, "error")) console_errors <<- c(console_errors, "err"))
@@ -68,6 +97,12 @@ click_thread <- function(label) {
 }
 chk("options rendered (Red/Blue/R/Python)",
     isTRUE(value("['Red','Blue','R','Python'].every(l => !!document.querySelector('[data-ask-option=\"'+l+'\"]'))")))
+if (!isTRUE(value("document.querySelector('[data-slot=tool-fallback-trigger]')?.getAttribute('aria-expanded') === 'true'"))) {
+  value("(function(){const e=document.querySelector('[data-slot=tool-fallback-trigger]');if(!e)return false;e.click();return true;})()")
+  wait_for("document.querySelector('[data-slot=tool-fallback-trigger]')?.getAttribute('aria-expanded') === 'true'", 4)
+}
+chk("option preview renders multiline text without creating an iframe",
+    isTRUE(value("(function(){const p=document.querySelector('[data-ask-option-preview=Red]');return !!p && p.innerText.includes('red swatch') && p.innerText.includes('<iframe src=/PRIVATE') && !p.querySelector('iframe');})()")))
 
 chk("tool args use readable questions view (not JSON)",
     isTRUE(value("!!document.querySelector('[data-arg-view=\"questions\"]') && !document.querySelector('[data-args-format=\"json\"]') && document.querySelector('[data-arg-view=\"questions\"]').innerText.includes('Single choice') && document.querySelector('[data-arg-view=\"questions\"]').innerText.includes('Multiple choice')")))
@@ -88,6 +123,10 @@ jclick("[data-ask-submit]")
 chk("answers round-trip: custom overrides single; multi includes custom",
     wait_for("(function(){var t=document.getElementById('decision')?.textContent||'';return t.includes('\\\"Fav color?\\\":\\\"Teal\\\"') && t.includes('\\\"Which langs?\\\":[\\\"R\\\",\\\"SQL\\\"]');})()", 12),
     value("document.getElementById('decision')?.textContent"))
+if (!isTRUE(value("document.querySelector('button[aria-label=\"Used tool: AskUserQuestion\"]')?.getAttribute('aria-expanded') === 'true'"))) {
+  jclick("button[aria-label='Used tool: AskUserQuestion']")
+  wait_for("document.querySelector('button[aria-label=\"Used tool: AskUserQuestion\"]')?.getAttribute('aria-expanded') === 'true'", 4)
+}
 
 chk("live tool record keeps submitted option selected", wait_for(
     "!!document.querySelector('[data-question-option=R][data-question-selected=true]') && !document.querySelector('[data-slot=ask-user-question]')", 8))
@@ -101,6 +140,10 @@ chk("long Ask result scrolls inside shared result viewport", wait_for(
 chk("clicked AskUserQuestion history thread", click_thread("Ask history"))
 chk("historical AskUserQuestion loaded", wait_for(
     "document.body.innerText.includes('Historical answers restored')", 8))
+if (!isTRUE(value("document.querySelector('[data-slot=tool-fallback-trigger]')?.getAttribute('aria-expanded') === 'true'"))) {
+  value("(function(){const e=document.querySelector('[data-slot=tool-fallback-trigger]');if(!e)return false;e.click();return true;})()")
+  wait_for("document.querySelector('[data-slot=tool-fallback-trigger]')?.getAttribute('aria-expanded') === 'true'", 4)
+}
 chk("history keeps structured questions and submitted answers",
     isTRUE(value("(function(){const v=document.querySelector('[data-arg-view=questions]');return !!v && !document.querySelector('[data-args-format=json]') && v.innerText.includes('Answer:') && v.innerText.includes('Teal') && v.innerText.includes('R, SQL');})()")))
 chk("history marks the corresponding option selected",
@@ -113,6 +156,13 @@ chk("history preserves approved completion state",
 chk("no invalid AskUserQuestion warning appeared through history restore",
     isTRUE(value("window.__askInvalidSeen===false && !document.querySelector('[data-ask-questions-invalid]')")))
 chk("no browser console errors", length(console_errors) == 0, if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
-try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
+try(browser$close(), silent = TRUE)
+try(browser$parent$close(), silent = TRUE)
+try(if (chrome_process$is_alive()) chrome_process$kill_tree(), silent = TRUE)
+try(chrome_process$wait(timeout = 10000L), silent = TRUE)
+try(if (app$is_alive()) app$kill_tree(), silent = TRUE)
+try(app$wait(timeout = 5000L), silent = TRUE)
+remaining_children <- cleanup_owned_supervisors()
+chk("owned browser/app descendants exit", identical(remaining_children, 0L), remaining_children)
 if (length(failures)) stop("verification failed: ", paste(failures, collapse = ", "))
 cat("ASKQUESTION_VERIFY_DONE\n")

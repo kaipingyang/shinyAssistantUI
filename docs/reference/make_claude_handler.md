@@ -12,7 +12,10 @@ make_claude_handler(
   cwd_provider = NULL,
   thinking_provider = NULL,
   models = NULL,
-  session_map_path = ".claude_session_map.rds"
+  session_map_path = ".claude_session_map.rds",
+  memory_guard_config = NULL,
+  on_memory_observation = NULL,
+  memory_sampler = NULL
 )
 ```
 
@@ -47,6 +50,21 @@ make_claude_handler(
     Path to the `.rds` file used to persist `thread_id -> session_id`
     mappings. Defaults to `".claude_session_map.rds"` in the current
     working directory.
+
+  - memory\_guard\_config:
+    
+    Optional internal memory-pressure guard configuration. `NULL` keeps
+    the guard disabled for generic handlers.
+
+  - on\_memory\_observation:
+    
+    Optional callback receiving the guard's exact sampled observation
+    and state transition.
+
+  - memory\_sampler:
+    
+    Optional internal sampler injection used by deterministic
+    verification; production callers should leave it `NULL`.
 
 ## Value
 

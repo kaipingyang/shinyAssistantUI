@@ -1,0 +1,29 @@
+{
+  "artifactVersion": 1,
+  "commonFields": ["schema", "event", "ts", "metrics"],
+  "events": {
+    "frontend_mount": {},
+    "frontend_unmount": {},
+    "shiny_connected": {},
+    "shiny_disconnected": {},
+    "run_state": {"phase": {"type": "enum", "values": ["queued", "connecting", "running", "complete", "error", "cancelled"]}},
+    "run_stage": {"stage": {"type": "enum", "values": ["streaming", "finalizing"]}},
+    "chunk_summary": {"count": {"type": "safe-int"}, "bytes": {"type": "safe-int"}},
+    "tool_delta_summary": {"count": {"type": "safe-int"}, "bytes": {"type": "safe-int"}, "toolCount": {"type": "safe-int"}},
+    "tool_summary": {"count": {"type": "safe-int"}, "durationUs": {"type": "safe-int"}, "outcome": {"type": "enum", "values": ["success", "error", "cancelled", "denied", "unknown"]}},
+    "ui_counts": {"messageCount": {"type": "safe-int"}, "toolCardCount": {"type": "safe-int"}, "domCardCount": {"type": "safe-int"}},
+    "owned_commit_summary": {"messageCount": {"type": "safe-int"}, "toolCount": {"type": "safe-int"}},
+    "owned_markdown_preprocess_summary": {"count": {"type": "safe-int"}, "durationUs": {"type": "safe-int"}, "maxUs": {"type": "safe-int"}},
+    "longtask_summary": {"count": {"type": "safe-int"}, "durationUs": {"type": "safe-int"}, "maxUs": {"type": "safe-int"}},
+    "frame_summary": {"count": {"type": "safe-int"}, "p95IntervalUs": {"type": "safe-int"}, "maxIntervalUs": {"type": "safe-int"}, "jankCount": {"type": "safe-int"}},
+    "page_js_heap_sample": {"pageJsHeapBytes": {"type": "safe-int"}},
+    "memory_guard_sample": {"state": {"type": "enum", "values": ["normal", "soft", "hard", "unknown", "unsupported"]}, "pssBytes": {"type": "safe-int"}, "rssBytes": {"type": "safe-int"}, "cgroupCurrentBytes": {"type": "safe-int"}, "cgroupMaxBytes": {"type": "safe-int"}, "cgroupLimit": {"type": "enum", "values": ["limited", "unlimited", "unknown"]}, "softPssBytes": {"type": "safe-int"}, "hardPssBytes": {"type": "safe-int"}, "softRssBytes": {"type": "safe-int"}, "hardRssBytes": {"type": "safe-int"}},
+    "window_error_category": {"category": {"type": "enum", "values": ["resource", "script", "network", "shiny", "unknown"]}},
+    "unhandled_rejection_category": {"category": {"type": "enum", "values": ["promise", "unknown"]}},
+    "telemetry_batch_drop": {"count": {"type": "safe-int"}, "reason": {"type": "enum", "values": ["invalid_config", "invalid_event", "invalid_metric", "oversize", "queue_full", "serialize", "write", "rotation", "payload", "permission", "random", "name_collision", "dependency", "closed", "unsupported"]}},
+    "storage_outcome": {"operation": {"type": "enum", "values": ["startup", "rotation", "close", "retention", "clear", "export"]}, "outcome": {"type": "enum", "values": ["ok", "busy", "unsupported", "io_error", "invalid", "partial"]}, "count": {"type": "safe-int"}, "bytes": {"type": "safe-int"}}
+  },
+  "forbiddenNames": ["content", "text", "message", "prompt", "response", "args", "argsText", "result", "filename", "path", "cwd", "home", "env", "model", "tool", "toolName", "threadId", "runId", "sessionId", "protocolId", "ownerId", "openId", "revision", "pid", "url", "error", "errorText", "condition", "stack", "source", "ordinal", "instance"],
+  "limits": {"rowBytes": 16384, "batchRows": 100, "queueRows": 1000, "fileBytes": 10485760, "retentionBytes": 52428800, "retentionSeconds": 604800},
+  "canonical": {"newline": "LF", "whitespace": false, "integer": "shortest-decimal", "utf8": true}
+}

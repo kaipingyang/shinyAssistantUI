@@ -17,23 +17,71 @@
   )
 }
 
-test_that("launch script embeds lifecycle identity, log path, and remains parseable", {
+test_that("launch script establishes libraries and exact package identity before loading", {
   s <- shinyAssistantUI:::.claude_bg_launch_script(
     "/tmp/spec.rds", 4321L, "127.0.0.1", c("/lib/a", "/lib/b"),
-    log_path = "/tmp/lifecycle.log", nonce = "nonce-123", mode = "chat"
+    log_path = "/tmp/lifecycle.log", nonce = "nonce-123", mode = "chat",
+    package_path = "/lib/a/shinyAssistantUI", package_version = "9.8.7",
+    startup_dir = "/tmp/neutral-startup"
   )
   txt <- paste(s, collapse = "\n")
-  expect_match(txt, "library(shinyAssistantUI)", fixed = TRUE)
-  expect_match(txt, ".libPaths(", fixed = TRUE)
+  lib_pos <- regexpr(".libPaths(", txt, fixed = TRUE)[[1L]]
+  identity_pos <- regexpr("find.package(\"shinyAssistantUI\")", txt, fixed = TRUE)[[1L]]
+  library_pos <- regexpr("library(shinyAssistantUI)", txt, fixed = TRUE)[[1L]]
+  expect_true(lib_pos > 0L && identity_pos > lib_pos && library_pos > identity_pos)
   expect_match(txt, '"/lib/a"', fixed = TRUE)
   expect_match(txt, '"/lib/b"', fixed = TRUE)
-  expect_match(txt, ".claude_run_in_job(", fixed = TRUE)
+  expect_match(txt, '"/lib/a/shinyAssistantUI"', fixed = TRUE)
+  expect_match(txt, '"9.8.7"', fixed = TRUE)
+  expect_match(txt, 'getFromNamespace(".claude_run_in_job", "shinyAssistantUI")(', fixed = TRUE)
   expect_match(txt, '"/tmp/spec.rds"', fixed = TRUE)
   expect_match(txt, "4321L", fixed = TRUE)
   expect_match(txt, 'log_path = "/tmp/lifecycle.log"', fixed = TRUE)
   expect_match(txt, 'nonce = "nonce-123"', fixed = TRUE)
   expect_match(txt, 'mode = "chat"', fixed = TRUE)
+  expect_match(txt, 'startup_dir = "/tmp/neutral-startup"', fixed = TRUE)
   expect_silent(parse(text = txt))
+})
+
+
+test_that("launch bootstrap cleans neutral directory before package entry", {
+  startup <- tempfile("pre-entry-job-startup-")
+  dir.create(startup)
+  on.exit(unlink(startup, recursive = TRUE, force = TRUE), add = TRUE)
+  script <- tempfile(fileext = ".R")
+  writeLines(shinyAssistantUI:::.claude_bg_launch_script(
+    "/tmp/spec-never-read.rds", 4321L, "127.0.0.1", .libPaths(),
+    package_path = file.path(startup, "missing-package"),
+    package_version = "9.8.7", startup_dir = startup
+  ), script)
+  text <- paste(readLines(script, warn = FALSE), collapse = "\n")
+  cleanup_pos <- regexpr("on.exit(unlink", text, fixed = TRUE)[[1L]]
+  identity_pos <- regexpr("find.package(\"shinyAssistantUI\")", text, fixed = TRUE)[[1L]]
+
+  expect_true(cleanup_pos > 0L && cleanup_pos < identity_pos)
+  expect_error(sys.source(script, envir = new.env(parent = globalenv())))
+  expect_false(dir.exists(startup))
+})
+
+test_that("background Job startup directory is neutral, private, and outside the project", {
+  root <- tempfile("job-startup-root-")
+  project <- tempfile("job-project-")
+  dir.create(project)
+  writeLines("stop('project profile must not run')", file.path(project, ".Rprofile"))
+  on.exit(unlink(c(root, project), recursive = TRUE, force = TRUE), add = TRUE)
+
+  startup <- shinyAssistantUI:::.claude_bg_startup_dir(
+    nonce = "safe-nonce", root = root, project = project
+  )
+
+  expect_true(dir.exists(startup))
+  expect_false(file.exists(file.path(startup, ".Rprofile")))
+  expect_false(startsWith(
+    normalizePath(startup, winslash = "/"),
+    paste0(normalizePath(project, winslash = "/"), "/")
+  ))
+  mode <- file.info(startup)$mode
+  if (.Platform$OS.type != "windows") expect_identical(as.octmode(mode), as.octmode("700"))
 })
 
 test_that("request keys and fingerprints isolate mode, project, order, and config", {
@@ -78,10 +126,13 @@ test_that("first launch captures Job ID, lifecycle record, and legacy return fie
   spec <- .bg_spec(FALSE, permission = "plan")
   seen <- new.env(parent = emptyenv())
   registry <- .bg_registry()
+  startup <- tempfile("neutral-job-")
   res <- shinyAssistantUI:::.run_claude_bg_job(
     spec, host = "127.0.0.1", port = 4321L, libpaths = c("/lib/x"),
     registry = registry,
     nonce_factory = function() "chat-nonce",
+    startup_dir_factory = function(...) { dir.create(startup, mode = "0700"); startup },
+    package_identity = list(path = "/lib/x/shinyAssistantUI", version = "9.8.7"),
     log_path = "/tmp/chat-lifecycle.log",
     job_run = function(path, name, workingDir) {
       seen$path <- path; seen$name <- name; seen$wd <- workingDir
@@ -101,19 +152,23 @@ test_that("first launch captures Job ID, lifecycle record, and legacy return fie
   expect_identical(res$nonce, "chat-nonce")
   expect_identical(res$mode, "chat")
   expect_identical(seen$name, "Claude Code Chat")
-  expect_identical(seen$wd, "/proj")
+  expect_identical(seen$wd, startup)
+  expect_false(identical(seen$wd, spec$project))
   expect_identical(seen$url, res$url)
   rt <- readRDS(res$spec_path)
   expect_identical(rt$permission_mode, "plan")
   expect_identical(rt$console_url, spec$console_url)
   expect_identical(rt$.claude_bg_nonce, "chat-nonce")
   expect_identical(rt$.claude_bg_mode, "chat")
+  expect_identical(rt$.claude_bg_package_path, "/lib/x/shinyAssistantUI")
+  expect_identical(rt$.claude_bg_package_version, "9.8.7")
 
   key <- shinyAssistantUI:::.claude_bg_registry_key(spec)
   record <- get(key, envir = registry, inherits = FALSE)
   expect_identical(record$job_id, "JOB-CHAT-1")
   expect_identical(record$status, "ready")
   expect_identical(record$generation, 1L)
+  expect_identical(record$startup_dir, startup)
 })
 
 test_that("healthy identical Chat and Workspace reopen without duplicate launch", {
@@ -257,6 +312,26 @@ test_that("incompatible request fingerprint starts a new tracked generation", {
   expect_false(identical(one$job_id, two$job_id))
 })
 
+test_that("submission failure removes only the unsubmitted neutral startup directory", {
+  registry <- .bg_registry()
+  startup <- tempfile("failed-neutral-job-")
+  expect_error(
+    shinyAssistantUI:::.run_claude_bg_job(
+      .bg_spec(FALSE), registry = registry, port = 4899L,
+      nonce_factory = function() "failed-neutral-nonce",
+      startup_dir_factory = function(...) { dir.create(startup, mode = "0700"); startup },
+      package_identity = list(path = "/lib/x/shinyAssistantUI", version = "9.8.7"),
+      log_path = tempfile(fileext = ".log"),
+      job_run = function(...) stop("submission exploded before ownership transfer"),
+      wait_ready = function(...) TRUE,
+      instance_probe = function(...) FALSE,
+      job_state = function(...) "running", show_viewer = function(...) NULL
+    ),
+    "submission exploded before ownership transfer"
+  )
+  expect_false(dir.exists(startup))
+})
+
 test_that("submission failure preserves the previously tracked record", {
   registry <- .bg_registry()
   good <- shinyAssistantUI:::.run_claude_bg_job(
@@ -329,11 +404,13 @@ test_that(".claude_run_in_job forwards lifecycle markers for Chat and Workspace"
     .claude_chat_app = function(project, options, permission_mode, prewarm, models,
                                 console_url = NULL, workspace = FALSE,
                                 workspace_projects = NULL,
-                                lifecycle_nonce = NULL, lifecycle_mode = NULL) {
+                                lifecycle_nonce = NULL, lifecycle_mode = NULL,
+                                memory_guard_config) {
       cap$args <- list(
         project = project, permission_mode = permission_mode,
         workspace = workspace, workspace_projects = workspace_projects,
-        lifecycle_nonce = lifecycle_nonce, lifecycle_mode = lifecycle_mode
+        lifecycle_nonce = lifecycle_nonce, lifecycle_mode = lifecycle_mode,
+        memory_guard_config = memory_guard_config
       )
       "APP_OBJ"
     }
@@ -344,16 +421,22 @@ test_that(".claude_run_in_job forwards lifecycle markers for Chat and Workspace"
     },
     .package = "shiny"
   )
+  startup <- tempfile("owned-job-startup-")
+  dir.create(startup)
   shinyAssistantUI:::.claude_run_in_job(
     spec_path, port = 6001L, host = "127.0.0.1",
-    log_path = tempfile(fileext = ".log"), nonce = "workspace-nonce", mode = "workspace"
+    log_path = tempfile(fileext = ".log"), nonce = "workspace-nonce", mode = "workspace",
+    startup_dir = startup
   )
   expect_true(cap$args$workspace)
   expect_identical(cap$args$workspace_projects, c("/proj", "/other"))
   expect_identical(cap$args$lifecycle_nonce, "workspace-nonce")
   expect_identical(cap$args$lifecycle_mode, "workspace")
+  expect_true(cap$args$memory_guard_config$enabled)
+  expect_identical(cap$args$memory_guard_config$hard_pss_bytes, 2 * 1024^3)
   expect_identical(cap$app, "APP_OBJ")
   expect_identical(cap$port, 6001L)
+  expect_false(dir.exists(startup))
 })
 
 
@@ -575,4 +658,72 @@ test_that("a changed run_r console URL prevents otherwise-compatible reuse", {
   expect_identical(launches, 2L)
   expect_false(two$reused)
   expect_false(identical(one$job_id, two$job_id))
+})
+
+
+test_that("Background Job alone resolves diagnostics env into a launch override", {
+  spec_path <- tempfile(fileext = ".rds")
+  saveRDS(.bg_spec(FALSE, "/diagnostics-project"), spec_path)
+  on.exit(unlink(spec_path, force = TRUE), add = TRUE)
+  diagnostics_dir <- tempfile("job-diagnostics-dir-")
+  withr::local_envvar(c(
+    SHINYASSISTANTUI_DIAGNOSTICS = "1",
+    SHINYASSISTANTUI_DIAGNOSTICS_DIR = diagnostics_dir
+  ))
+  captured <- NULL
+  testthat::local_mocked_bindings(
+    .claude_chat_app = function(project, diagnostics = NULL, ...) {
+      captured <<- diagnostics
+      "APP"
+    }
+  )
+  testthat::local_mocked_bindings(
+    runApp = function(...) "RAN",
+    .package = "shiny"
+  )
+
+  shinyAssistantUI:::.claude_run_in_job(
+    spec_path, port = 6011L, log_path = tempfile(fileext = ".log")
+  )
+
+  expect_identical(captured, list(enabled = TRUE, directory = diagnostics_dir))
+  expect_false(dir.exists(diagnostics_dir))
+})
+
+
+test_that("v2 Background Job child never re-reads changed diagnostics environment", {
+  spec <- .bg_spec(FALSE, "/captured-project")
+  settings <- shinyAssistantUI:::.addin_settings_defaults()
+  settings$diagnosticsEnabled <- FALSE
+  revisions <- setNames(as.list(rep(0, 9)), shinyAssistantUI:::.addin_settings_fields())
+  spec$launch_contract <- shinyAssistantUI:::.capture_addin_launch_contract(
+    settings, revisions, diagnostics_env = "", diagnostics_dir_env = "/PRIVATE/IGNORED"
+  )
+  spec_path <- tempfile(fileext = ".rds")
+  saveRDS(spec, spec_path)
+  on.exit(unlink(spec_path, force = TRUE), add = TRUE)
+  captured <- NULL
+  testthat::local_mocked_bindings(
+    .claude_chat_app = function(project, diagnostics = NULL, launch_contract = NULL, ...) {
+      captured <<- list(diagnostics = diagnostics, launch_contract = launch_contract)
+      "APP"
+    }
+  )
+  testthat::local_mocked_bindings(runApp = function(...) "RAN", .package = "shiny")
+  withr::local_envvar(c(
+    SHINYASSISTANTUI_DIAGNOSTICS = "on",
+    SHINYASSISTANTUI_DIAGNOSTICS_DIR = "/PRIVATE/CHANGED"
+  ))
+  shinyAssistantUI:::.claude_run_in_job(
+    spec_path, port = 6012L, log_path = tempfile(fileext = ".log")
+  )
+  expect_identical(captured$diagnostics, list(enabled = FALSE))
+  expect_identical(captured$launch_contract$launch_contract_version, 2L)
+
+  explicit <- list(enabled = TRUE, directory = tempfile("explicit-diagnostics-"))
+  shinyAssistantUI:::.claude_run_in_job(
+    spec_path, port = 6013L, log_path = tempfile(fileext = ".log"),
+    diagnostics = explicit
+  )
+  expect_identical(captured$diagnostics, explicit)
 })

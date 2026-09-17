@@ -270,11 +270,14 @@ test_that("background job preserves workspace spec and display name", {
     wait_ready = function(...) TRUE
   )
 
+  withr::defer(.claude_bg_remove_startup_dir(seen$working_dir))
   roundtrip <- readRDS(result$spec_path)
   expect_true(roundtrip$workspace)
+  expect_identical(roundtrip$project, spec$project)
   expect_identical(roundtrip$workspace_projects, spec$workspace_projects)
+  expect_identical(roundtrip$.claude_bg_startup_dir, seen$working_dir)
   expect_identical(seen$name, "Claude Workspace")
-  expect_identical(seen$working_dir, spec$project)
+  expect_false(.claude_bg_path_within(seen$working_dir, spec$project))
 })
 
 

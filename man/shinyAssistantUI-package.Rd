@@ -8,6 +8,15 @@
 \description{
 Wraps the '@assistant-ui/react' JavaScript library in a native Shiny output binding, providing a full-featured AI chat UI with streaming output, slash command menu, file attachments, and tool call display. Backend-agnostic: works with ClaudeAgentSDK, ellmer, or any R-based AI backend.
 }
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://kaipingyang.github.io/shinyAssistantUI/}
+  \item \url{https://github.com/kaipingyang/shinyAssistantUI}
+  \item Report bugs at \url{https://github.com/kaipingyang/shinyAssistantUI/issues}
+}
+
+}
 \author{
 \strong{Maintainer}: Kaiping Yang \email{1260146556@qq.com}
 
