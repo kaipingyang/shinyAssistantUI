@@ -164,7 +164,7 @@ npm run build   # outputs inst/www/shinyAssistantUI.js + style.css
 npm run dev     # watch mode
 ```
 
-Commit the compiled `inst/www/` files — end users must not need npm.
+Commit the compiled `inst/www/` files and generated `inst/htmlwidgets/assistantUI.yaml` cache version from `DESCRIPTION` — end users must not need npm or receive stale assets.
 
 ### ⚠️ 改完 R 或 JS 必须 `R CMD INSTALL .` 再测(否则测的是旧包)
 
