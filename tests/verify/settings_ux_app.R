@@ -39,6 +39,7 @@ attr(handler, "ui_capabilities") <- list(
 )
 # 需 action_handler attr 才会暴露 ui_capabilities(见 server.R .uses_handler_action)。
 attr(handler, "action_handler") <- function(id, thread_id, send_action_result = function(...) {}) {
+  message("FIXTURE_ACTION=", id)
   send_action_result(paste("ok", id), "ok", value = sub("^[a-z]+:", "", id))
 }
 

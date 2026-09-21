@@ -1,70 +1,270 @@
-# Plan 45 批1 无头验证:composer 内联按可见性隐藏 YOLO;Settings 有默认模式+可见性控件;
-# 切换可见性回调触发(stderr SET_VIS);0 console error。
-suppressMessages({library(chromote); library(callr)})
-`%||%` <- function(x, y) if (is.null(x)) y else x
-PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 9799L
-p <- callr::r_bg(function(proj, port){setwd(proj);suppressMessages(library(shiny));shiny::runApp("tests/verify/settings_ux_app.R",host="127.0.0.1",port=port,launch.browser=FALSE)}, args=list(proj=PROJ,port=PORT), stdout="/tmp/su.o", stderr="/tmp/su.e")
-on.exit(try(p$kill(),silent=TRUE),add=TRUE); Sys.sleep(10)
-if(!p$is_alive()){cat("BOOT FAIL\n");cat(tail(readLines("/tmp/su.e"),8),sep="\n");quit(status=1)}
-errs<-c(); b<-chromote::ChromoteSession$new(); b$Runtime$enable()
-b$Runtime$consoleAPICalled(callback_=function(m) if(identical(m$type,"error")) errs<<-c(errs,paste(sapply(m$args,function(a)a$value %||% a$description %||% ""),collapse=" ")))
-ev<-function(js) tryCatch(b$Runtime$evaluate(js)$result$value,error=function(e)NA)
-b$Page$navigate(sprintf("http://127.0.0.1:%d/",PORT)); b$Page$loadEventFired(); Sys.sleep(5)
+# Installed synthetic controls/settings gate; no provider or RStudio execution.
+suppressPackageStartupMessages({
+  library(chromote)
+  library(callr)
+})
+source("tests/verify/owned_process_cleanup.R")
 
-# composer 内联选择器:含 Bypass,不含 YOLO(showYolo=FALSE)
-vals <- ev("(function(){var s=document.querySelector('select[aria-label=\"Permission mode\"]');if(!s)return 'NONE';return [...s.options].map(o=>o.value).join(',')})()")
-cat("composer inline options:", vals, "\n")
-cat(sprintf("[%s] composer inline hides YOLO, keeps Bypass\n", if(!is.na(vals) && grepl("bypassPermissions",vals) && !grepl("yolo",vals)) "PASS" else "FAIL"))
+main <- function() {
+  project <- normalizePath(".")
+  port <- httpuv::randomPort()
+  stdout <- tempfile("settings-stdout-")
+  stderr <- tempfile("settings-stderr-")
+  app <- browser <- NULL
+  cleanup <- make_verification_cleanup(
+    function() browser, function() app, c(stdout, stderr)
+  )
+  on.exit(cleanup(), add = TRUE)
+  app <- callr::r_bg(function(project, port) {
+    setwd(project)
+    Sys.setenv(AUI_TEST_DENSITY = "comfortable")
+    library(shiny)
+    library(shinyAssistantUI)
+    package_path <- normalizePath(find.package("shinyAssistantUI"))
+    stopifnot(startsWith(package_path, paste0(normalizePath(path.expand("~")), "/")))
+    message("INSTALL=", package_path, " VERSION=", packageVersion("shinyAssistantUI"))
+    shiny::runApp("tests/verify/settings_ux_app.R",
+      host = "127.0.0.1", port = port, launch.browser = FALSE
+    )
+  }, args = list(project = project, port = port), stdout = stdout, stderr = stderr)
+  log_lines <- function() readLines(stderr, warn = FALSE)
+  for (i in seq_len(150L)) {
+    if (!app$is_alive() || any(grepl("Listening on", log_lines(), fixed = TRUE))) break
+    Sys.sleep(0.1)
+  }
+  if (!app$is_alive() || !any(grepl("Listening on", log_lines(), fixed = TRUE))) {
+    stop(paste(log_lines(), collapse = "\n"), call. = FALSE)
+  }
+  cat(grep("INSTALL=", log_lines(), value = TRUE), "\n")
 
-# 打开 Settings
-ev("(function(){var b=[...document.querySelectorAll('button')].find(x=>/Settings/.test(x.getAttribute('aria-label')||''));if(b)b.click();return !!b})()"); Sys.sleep(1)
-has_default <- ev("!!document.querySelector('[data-slot=aui_default_permission_mode]')")
-has_bypass_vis <- ev("!!document.querySelector('[data-mode-vis=showBypass]')")
-has_yolo_vis <- ev("!!document.querySelector('[data-mode-vis=showYolo]')")
-cat(sprintf("[%s] Settings has default-mode select\n", if(isTRUE(has_default))"PASS" else "FAIL"))
-cat(sprintf("[%s] Settings has Show Bypass + Show YOLO toggles\n", if(isTRUE(has_bypass_vis)&&isTRUE(has_yolo_vis))"PASS" else "FAIL"))
-# 默认模式 select 也应隐藏 YOLO
-dvals <- ev("(function(){var s=document.querySelector('[data-slot=aui_default_permission_mode]');if(!s)return 'NONE';return [...s.options].map(o=>o.value).join(',')})()")
-cat(sprintf("[%s] default-mode select hides YOLO\n", if(!is.na(dvals)&&!grepl("yolo",dvals))"PASS" else "FAIL"))
+  errors <- network_errors <- character()
+  browser <- ChromoteSession$new(width = 1000, height = 850)
+  browser$Runtime$enable()
+  browser$Network$enable()
+  browser$Runtime$consoleAPICalled(callback_ = function(event) {
+    if (identical(event$type, "error")) {
+      errors <<- c(errors, paste(vapply(event$args, function(arg) {
+        if (!is.null(arg$value)) as.character(arg$value) else as.character(arg$description)
+      }, character(1)), collapse = " "))
+    }
+  })
+  browser$Runtime$exceptionThrown(callback_ = function(event) {
+    errors <<- c(errors, event$exceptionDetails$text)
+  })
+  browser$Network$loadingFailed(callback_ = function(event) {
+    network_errors <<- c(network_errors, event$errorText)
+  })
+  browser$Network$responseReceived(callback_ = function(event) {
+    if (event$response$status >= 400) {
+      network_errors <<- c(network_errors, paste(event$response$status, event$response$url))
+    }
+  })
+  value <- function(js) {
+    result <- browser$Runtime$evaluate(js, returnByValue = TRUE)
+    if (!is.null(result$exceptionDetails)) stop(result$exceptionDetails$text, call. = FALSE)
+    result$result$value
+  }
+  checks <- 0L
+  check <- function(label, ok) {
+    cat(sprintf("[%s] %s\n", if (isTRUE(ok)) "PASS" else "FAIL", label))
+    if (!isTRUE(ok)) stop(label, call. = FALSE)
+    checks <<- checks + 1L
+  }
+  wait_for <- function(js, timeout = 8) {
+    deadline <- Sys.time() + timeout
+    repeat {
+      if (isTRUE(value(js))) {
+        return(TRUE)
+      }
+      if (Sys.time() >= deadline || !app$is_alive()) {
+        return(FALSE)
+      }
+      Sys.sleep(0.1)
+    }
+  }
+  quote_js <- function(text) as.character(jsonlite::toJSON(text, auto_unbox = TRUE))
+  click <- function(selector) {
+    target <- quote_js(selector)
+    stopifnot(isTRUE(value(sprintf(
+      "(() => {const e=document.querySelector(%s); if(!e)return false; e.scrollIntoView({block:'nearest'}); return true})()",
+      target
+    ))))
+    Sys.sleep(0.15)
+    point <- value(sprintf(
+      "(() => {const e=document.querySelector(%s),r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,h=document.elementFromPoint(x,y); return {x,y,hit:!!h&&(e===h||e.contains(h))}})()",
+      target
+    ))
+    stopifnot(isTRUE(point$hit))
+    browser$Input$dispatchMouseEvent(type = "mouseMoved", x = point$x, y = point$y)
+    browser$Input$dispatchMouseEvent(type = "mousePressed", x = point$x, y = point$y, button = "left", clickCount = 1L)
+    browser$Input$dispatchMouseEvent(type = "mouseReleased", x = point$x, y = point$y, button = "left", clickCount = 1L)
+  }
+  choose <- function(selector, selected) {
+    stopifnot(isTRUE(value(sprintf(
+      "(() => {const e=document.querySelector(%s);if(!e||![...e.options].some(o=>o.value===%s))return false;e.value=%s;e.dispatchEvent(new Event('change',{bubbles:true}));return true})()",
+      quote_js(selector), quote_js(selected), quote_js(selected)
+    ))))
+    Sys.sleep(0.2)
+  }
+  in_viewport <- function(selector) {
+    wait_for(sprintf(
+      "(() => {const e=document.querySelector(%s);if(!e)return false;const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.top>=0&&r.left>=0&&r.bottom<=innerHeight&&r.right<=innerWidth})()",
+      quote_js(selector)
+    ))
+  }
+  key <- function(name, code, key_code) {
+    browser$Input$dispatchKeyEvent(type = "keyDown", key = name, code = code, windowsVirtualKeyCode = key_code)
+    browser$Input$dispatchKeyEvent(type = "keyUp", key = name, code = code, windowsVirtualKeyCode = key_code)
+  }
+  has_log <- function(text, timeout = 3) {
+    deadline <- Sys.time() + timeout
+    repeat {
+      if (any(grepl(text, log_lines(), fixed = TRUE))) {
+        return(TRUE)
+      }
+      if (Sys.time() >= deadline) {
+        return(FALSE)
+      }
+      Sys.sleep(0.1)
+    }
+  }
+  font_size <- function() {
+    value(
+      "parseFloat(getComputedStyle(document.querySelector('[data-slot=aui_assistant-text]')).fontSize)"
+    )
+  }
+  settings <- "[data-slot=aui_settings_dialog]"
+  permission <- 'select[aria-label="Permission mode"]'
 
-# 勾选 Show YOLO → 回调 SET_VIS
-ev("(function(){var c=document.querySelector('[data-mode-vis=showYolo] input');if(c)c.click();return !!c})()"); Sys.sleep(1)
-sv <- any(grepl("SET_VIS", tryCatch(readLines("/tmp/su.e"), error=function(e) character())))
-cat(sprintf("[%s] toggling visibility fires persistence callback (SET_VIS)\n", if(sv)"PASS" else "FAIL"))
-# run_r 开关渲染 + 切换回调
-has_runr <- ev("!!document.querySelector('[data-slot=aui_run_r_toggle]')")
-cat(sprintf("[%s] Settings has run_r toggle\n", if(isTRUE(has_runr))"PASS" else "FAIL"))
-ev("(function(){var c=document.querySelector('[data-slot=aui_run_r_toggle] input');if(c)c.click();return !!c})()"); Sys.sleep(1)
-srr <- any(grepl("SET_RUNR", tryCatch(readLines("/tmp/su.e"), error=function(e) character())))
-cat(sprintf("[%s] toggling run_r fires callback (SET_RUNR)\n", if(srr)"PASS" else "FAIL"))
-# RStudio Claude edits 开关默认开启，关闭后回传 FALSE。
-has_marker <- ev("!!document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio]')")
-marker_checked <- ev("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked === true")
-cat(sprintf("[%s] Settings has enabled Claude edits marker toggle\n",
-            if(isTRUE(has_marker) && isTRUE(marker_checked))"PASS" else "FAIL"))
-ev("(function(){var c=document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input');if(c)c.click();return !!c})()")
-Sys.sleep(1)
-marker_off <- ev("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked === false")
-sce <- any(grepl("SET_CLAUDE_EDITS=FALSE", tryCatch(readLines("/tmp/su.e"), error=function(e) character()), fixed=TRUE))
-cat(sprintf("[%s] disabling Claude edits round-trips FALSE\n", if(isTRUE(marker_off) && sce)"PASS" else "FAIL"))
-# 关闭后触发真实 Write callback：聊天工具卡保留，但 markers 与自动 reveal 均不执行。
-ev("(function(){var e=document.querySelector('.aui-lexical-input[contenteditable=true]');if(!e)return false;e.focus();return true})()")
-b$Input$insertText(text="edit while RStudio presentation is disabled")
-b$Input$dispatchKeyEvent(type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
-b$Input$dispatchKeyEvent(type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
-for (i in seq_len(30L)) {
+  browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
+  browser$Page$loadEventFired()
+  check("installed composer is ready", wait_for("!!document.querySelector('.aui-lexical-input[contenteditable=true]')"))
+  check("unreported usage is unknown, not invented", isTRUE(value("!!document.querySelector('[aria-label=\"Context usage unavailable\"]')")))
+  check("current mode starts Manual with Bypass visible and YOLO hidden", isTRUE(value(
+    "(() => {const s=document.querySelector('select[aria-label=\"Permission mode\"]');return s.value==='default'&&[...s.options].some(o=>o.value==='bypassPermissions')&&![...s.options].some(o=>o.value==='yolo')})()"
+  )))
+
+  click("[data-slot=model-selector-trigger]")
+  check("model picker opens inside the viewport", wait_for("!!document.querySelector('[data-slot=model-selector-content]')") &&
+    in_viewport("[data-slot=model-selector-content]"))
+  click("[data-slot=model-selector-item][data-value=opus]")
+  check("model fixture ACK applies Opus and closes picker", wait_for(
+    "document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Opus') && !document.querySelector('[data-slot=model-selector-content]') && document.querySelector('[data-slot=aui_model_control]')?.dataset.pending==='false'"
+  ) && has_log("FIXTURE_ACTION=model:opus"))
+  choose(permission, "plan")
+  check("permission fixture ACK changes only the current mode", wait_for(
+    "document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='plan' && !document.querySelector('select[aria-label=\"Permission mode\"]')?.disabled && document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Opus')"
+  ) && has_log("FIXTURE_ACTION=permissions:plan"))
+
+  click('button[aria-label="Settings"]')
+  check("Settings dialog is visible and within viewport", wait_for("!!document.querySelector('[data-slot=aui_settings_dialog]')") && in_viewport(settings))
+  check("new-thread default is independent of current mode", isTRUE(value("document.querySelector('[data-slot=aui_default_permission_mode]')?.value==='default'")))
+  choose("[data-slot=aui_default_permission_mode]", "acceptEdits")
+  check("new-thread default callback leaves current Plan unchanged", has_log("SET_DEFAULT_MODE=acceptEdits") &&
+    isTRUE(value("document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='plan'")))
+  click("[data-mode-vis=showYolo] input")
+  check("Show YOLO ACK updates both selectors", wait_for(
+    "[document.querySelector('select[aria-label=\"Permission mode\"]'),document.querySelector('[data-slot=aui_default_permission_mode]')].every(s=>[...s.options].some(o=>o.value==='yolo'))"
+  ) && has_log("SET_VIS bypass=TRUE yolo=TRUE"))
+  click("[data-mode-vis=showBypass] input")
+  check("hidden unselected Bypass disappears from both selectors", wait_for(
+    "[document.querySelector('select[aria-label=\"Permission mode\"]'),document.querySelector('[data-slot=aui_default_permission_mode]')].every(s=>![...s.options].some(o=>o.value==='bypassPermissions'))"
+  ))
+  choose(permission, "yolo")
+  check("synthetic YOLO selection receives its own ACK", wait_for("document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='yolo'") &&
+    has_log("FIXTURE_ACTION=permissions:yolo"))
+  click("[data-mode-vis=showYolo] input")
+  check("hiding YOLO retains the current selection but filters the default", wait_for(
+    "document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='yolo' && ![...document.querySelector('[data-slot=aui_default_permission_mode]').options].some(o=>o.value==='yolo')"
+  ))
+  choose(permission, "plan")
+  check("leaving hidden YOLO removes it from the current selector", wait_for(
+    "document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='plan' && ![...document.querySelector('select[aria-label=\"Permission mode\"]').options].some(o=>o.value==='yolo')"
+  ))
+  click("[data-slot=aui_run_r_toggle] input")
+  check("run-R preference round-trips FALSE to the fixture", has_log("SET_RUNR=FALSE") &&
+    isTRUE(value("document.querySelector('[data-slot=aui_run_r_toggle] input')?.checked===false")))
+  check("edit presentation starts enabled", isTRUE(value("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked===true")))
+  click("[data-slot=aui_show_claude_edits_in_rstudio] input")
   Sys.sleep(0.2)
-  if (isTRUE(ev("document.body.innerText.includes('TYPOGRAPHY.md')"))) break
+  check("edit presentation preference round-trips FALSE", has_log("SET_CLAUDE_EDITS=FALSE") &&
+    isTRUE(value("document.querySelector('[data-slot=aui_show_claude_edits_in_rstudio] input')?.checked===false")))
+  choose("[data-slot=aui_composer_density]", "compact")
+  check("compact density is confirmed by the server", wait_for("!!document.querySelector('[data-slot=aui_composer-shell][data-density=compact]')") &&
+    has_log("SET_DENSITY=compact"))
+  choose("[data-slot=aui_assistant_text_size]", "small")
+  check("small text preference reaches the server", has_log("SET_TEXT_SIZE=small"))
+  value("document.querySelector('[data-slot=aui_settings_dialog]').focus()")
+  key("Escape", "Escape", 27L)
+  check("Escape closes Settings and restores trigger focus", wait_for(
+    "!document.querySelector('[data-slot=aui_settings_dialog]') && document.activeElement===document.querySelector('button[aria-label=\"Settings\"]')"
+  ))
+
+  click(".aui-lexical-input[contenteditable=true]")
+  browser$Input$insertText(text = "edit while RStudio presentation is disabled")
+  key("Enter", "Enter", 13L)
+  check("real composer produces the synthetic write and final answer", wait_for(
+    "document.body.innerText.includes('TYPOGRAPHY.md') && document.body.innerText.includes('ASSISTANT BODY') && !document.querySelector('.aui-composer-cancel')"
+  ))
+  check(
+    "disabled presentation keeps the tool without markers or auto-open",
+    !has_log("PUBLISH_EDIT_MARKERS", 0) && !has_log("OPEN_EDIT=", 0)
+  )
+  check("small assistant prose really computes to 12px", isTRUE(font_size() == 12))
+  check("reported usage replaces the unknown affordance", wait_for(
+    "!!document.querySelector('[aria-label=\"Context usage\"]') && !document.querySelector('[aria-label=\"Context usage unavailable\"]')"
+  ))
+  point <- value("(() => {const r=document.querySelector('[aria-label=\"Context usage\"]').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")
+  browser$Input$dispatchMouseEvent(type = "mouseMoved", x = point$x, y = point$y)
+  check("usage tooltip opens within the viewport", wait_for("!!document.querySelector('[data-slot=context-display-popover]')") &&
+    in_viewport("[data-slot=context-display-popover]"))
+  check("usage uses the reported 1200 / 200000 tokens and rounded percent", isTRUE(value(
+    "(() => {const t=document.querySelector('[data-slot=context-display-popover]').textContent;return t.includes('1.2k')&&t.includes('200.0k')&&t.includes('1%')})()"
+  )))
+  browser$Input$dispatchMouseEvent(type = "mouseMoved", x = 900, y = 10)
+  layout <- value(
+    "(() => {const s=document.querySelector('[data-slot=aui_composer-shell]'),i=s.querySelector('.aui-composer-input'),a=s.querySelector('.aui-composer-action-wrapper'),sr=s.getBoundingClientRect(),ir=i.getBoundingClientRect(),ar=a.getBoundingClientRect();return {height:sr.height,width:sr.width,inputWidth:ir.width,inputBottom:ir.bottom,actionTop:ar.top,controls:['[aria-label=\"Add Attachment\"]','select[aria-label=\"Permission mode\"]','[data-slot=model-selector-trigger]','[data-slot=context-display-trigger]','.aui-composer-send'].every(q=>!!a.querySelector(q))}})()"
+  )
+  cat("COMPACT_LAYOUT ", jsonlite::toJSON(layout, auto_unbox = TRUE), "\n", sep = "")
+  check(
+    "compact input retains full width and a non-overlapping action row",
+    layout$inputWidth >= layout$width - 12 && layout$actionTop >= layout$inputBottom - 1
+  )
+  check("compact shell retains the original <=76px limit", layout$height <= 76)
+  check("attachment, permission, model, usage and send remain in the action row", layout$controls)
+
+  click('button[aria-label="Settings"]')
+  choose("[data-slot=aui_assistant_text_size]", "compact")
+  check("Medium text really computes to 14px", wait_for(
+    "parseFloat(getComputedStyle(document.querySelector('[data-slot=aui_assistant-text]')).fontSize)===14"
+  ) && has_log("SET_TEXT_SIZE=compact"))
+  choose("[data-slot=aui_assistant_text_size]", "medium")
+  check("Default text really computes to 16px", wait_for(
+    "parseFloat(getComputedStyle(document.querySelector('[data-slot=aui_assistant-text]')).fontSize)===16"
+  ) && has_log("SET_TEXT_SIZE=medium"))
+  choose("[data-slot=aui_composer_density]", "comfortable")
+  check("Comfortable density restores the taller composer", wait_for(
+    "!!document.querySelector('[data-slot=aui_composer-shell][data-density=comfortable]')"
+  ) && value("document.querySelector('[data-slot=aui_composer-shell]').getBoundingClientRect().height") > layout$height)
+  click('button[aria-label="Close settings"]')
+  check("Close button dismisses Settings", wait_for("!document.querySelector('[data-slot=aui_settings_dialog]')"))
+  check("synthetic history can be selected", isTRUE(value(
+    "(() => {const e=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Settings history');if(!e)return false;e.click();return true})()"
+  )))
+  check("history uses the confirmed text-size setting", wait_for("document.body.innerText.includes('HISTORY BODY')") && isTRUE(font_size() == 16))
+
+  browser$Page$reload()
+  browser$Page$loadEventFired()
+  check("history remains available after a real browser reload", wait_for(
+    "[...document.querySelectorAll('button')].some(e=>e.textContent.trim()==='Settings history')"
+  ))
+  value("[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Settings history').click()")
+  check("reloaded history renders with working settings", wait_for("document.body.innerText.includes('HISTORY BODY')") && isTRUE(font_size() == 16))
+  click('button[aria-label="Settings"]')
+  check("reloaded Settings remains inside the viewport", in_viewport(settings))
+  check("zero console errors and uncaught exceptions", length(errors) == 0L)
+  check("zero network or HTTP errors", length(network_errors) == 0L)
+  cat("SETTINGS_UX_DONE checks=", checks, "\n", sep = "")
 }
-chat_diff_kept <- isTRUE(ev("document.body.innerText.includes('TYPOGRAPHY.md')"))
-edit_log <- tryCatch(readLines("/tmp/su.e"), error=function(e) character())
-no_marker_publish <- !any(grepl("PUBLISH_EDIT_MARKERS", edit_log, fixed=TRUE))
-no_auto_open <- !any(grepl("OPEN_EDIT=", edit_log, fixed=TRUE))
-cat(sprintf("[%s] disabled edit keeps chat card without markers or auto-open\n",
-            if(chat_diff_kept && no_marker_publish && no_auto_open)"PASS" else "FAIL"))
-cat(sprintf("[%s] no console errors (%d)\n", if(length(errs)==0)"PASS" else "FAIL", length(errs)))
-stopifnot(isTRUE(has_marker), isTRUE(marker_checked), isTRUE(marker_off), sce,
-          chat_diff_kept, no_marker_publish, no_auto_open, length(errs) == 0L)
-if(length(errs)) cat(head(unique(errs),3),sep="\n")
-b$close(); p$kill(); system("rm -f /tmp/su.*")
-cat("SETTINGS_UX_DONE\n")
+
+main()
