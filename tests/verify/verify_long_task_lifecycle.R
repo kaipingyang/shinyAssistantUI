@@ -9,7 +9,7 @@ run_long_task_lifecycle_verification <- function() {
     !identical(Sys.getenv("R_ENABLE_JIT"), "0")
   )
   mode <- Sys.getenv("AUI_LONG_TASK_MODE", "long")
-  stopifnot(mode %in% c("smoke", "long"))
+  stopifnot(mode %in% c("smoke", "long", "controls"))
   seconds <- if (identical(mode, "long")) 125 else 5
   output <- Sys.getenv("AUI_LONG_TASK_OUT", "")
   if (nzchar(output)) dir.create(output, recursive = TRUE, showWarnings = FALSE)
@@ -140,6 +140,9 @@ run_long_task_lifecycle_verification <- function() {
       api <- assistantUIServer(
         "chat", wrapped, persistence = "server", show_thread_list = TRUE,
         max_concurrent_runs = 2L,
+        action_items = if (identical(Sys.getenv("AUI_LONG_TASK_MODE"), "controls")) {
+          getFromNamespace(".claude_action_items", "shinyAssistantUI")(include_export = FALSE)
+        } else list(),
         on_session_load = function(session_id, thread_id, send_thread, cursor = NULL,
                                    limit = 50L, project = NULL) {
           if (!is.null(cursor)) {
@@ -238,11 +241,17 @@ run_long_task_lifecycle_verification <- function() {
     ))
     check(paste("restore canonical history", title), has(paste0("HISTORY_READY_", title)))
   }
-  send <- function(text) {
+  send <- function(text, literal_action = FALSE) {
     check("real composer ready", "!!document.querySelector('[contenteditable=true]')&&!!document.querySelector('.aui-composer-send')")
     js("document.querySelector('[contenteditable=true]').focus(); true")
     browser$Input$insertText(text)
     check("composer send enabled", "!!document.querySelector('.aui-composer-send:not([disabled])')")
+    if (literal_action) {
+      browser$Input$dispatchKeyEvent(type = "keyDown", key = "Escape", code = "Escape",
+                                    windowsVirtualKeyCode = 27L)
+      browser$Input$dispatchKeyEvent(type = "keyUp", key = "Escape", code = "Escape",
+                                    windowsVirtualKeyCode = 27L)
+    }
     browser$Input$dispatchKeyEvent(type = "keyDown", key = "Enter", code = "Enter",
                                   windowsVirtualKeyCode = 13L)
     browser$Input$dispatchKeyEvent(type = "keyUp", key = "Enter", code = "Enter",
@@ -271,6 +280,79 @@ run_long_task_lifecycle_verification <- function() {
   check("historical tool card exists", "!!document.querySelector('[data-slot=tool-fallback-trigger]')")
   js("document.querySelector('[data-slot=tool-fallback-trigger]').click(); true")
   check("historical file_path arguments and tool result render", has("HISTORY_TOOL_Alpha"))
+  if (identical(mode, "controls")) {
+    send("NORMAL")
+    check("SDK foreground establishes an active session", has("NORMAL_DONE"))
+    wait(function() identical(readRDS(file.path(root, "events.rds"))$done[[sessions[["Alpha"]]]], 1L))
+    pick_model <- function(model) {
+      js("document.querySelector('[data-slot=model-selector-trigger]').click(); true")
+      check("SDK-backed model picker stays within viewport",
+            "(()=>{const e=document.querySelector('[data-slot=model-selector-content]');if(!e)return false;const r=e.getBoundingClientRect();return r.width>0&&r.top>=0&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight})()")
+      js(sprintf("document.querySelector('[data-slot=model-selector-item][data-value=%s]').click(); true",
+                 model))
+    }
+    pick_model("opus")
+    check("model selection waits for the SDK ACK",
+          "document.querySelector('[data-slot=aui_model_control]')?.dataset.pending==='true'&&!document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Opus')")
+    check("model ACK applies Opus",
+          "document.querySelector('[data-slot=aui_model_control]')?.dataset.pending==='false'&&document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Opus')")
+    pick_model("haiku")
+    check("rejected SDK model keeps the last confirmed selection",
+          "document.querySelector('[data-slot=aui_model_error]')?.title.includes('Synthetic model rejection')&&document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Opus')")
+    pick_model("sonnet")
+    check("a later model ACK clears the error and applies Sonnet",
+          "!document.querySelector('[data-slot=aui_model_error]')&&document.querySelector('[data-slot=model-selector-value]')?.textContent.includes('Sonnet')")
+    js("(()=>{const e=document.querySelector('select[aria-label=\"Permission mode\"]');e.value='plan';e.dispatchEvent(new Event('change',{bubbles:true}));return true})()")
+    check("permission downgrade is acknowledged by the SDK",
+          "document.querySelector('select[aria-label=\"Permission mode\"]')?.value==='plan'&&!document.querySelector('select[aria-label=\"Permission mode\"]')?.disabled")
+    send("/context", literal_action = TRUE)
+    check("context action renders reported tokens and categories",
+          "document.body.innerText.includes('1.2k / 200k')&&[...document.querySelectorAll('table')].some(t=>t.innerText.includes('Synthetic instructions')&&t.innerText.includes('Synthetic messages'))")
+    js("window.__compactResults=[];$(document).on('shiny:message.compactProtocol',event=>{for(const [name,value] of Object.entries(event.message?.custom||{})){if(name.endsWith(':action-result')&&value.actionId==='compact')window.__compactResults.push(value)}});true")
+    send("/compact", literal_action = TRUE)
+    check("compact shows structured running progress",
+          "!!document.querySelector('[data-slot=action-progress][data-action-kind=compact][data-action-state=running]')")
+    check("compact reports elapsed time with an indeterminate bar",
+          "(()=>{const e=document.querySelector('[data-slot=action-progress][data-action-kind=compact]');return !!e.querySelector('[data-indeterminate=true]')&&/\\d+s elapsed/.test(e.innerText)&&!/\\d+%/.test(e.innerText)})()")
+    check("compact blocks only composer submission, not an AI Stop button",
+          "document.querySelector('[data-slot=aui_composer-shell]')?.dataset.blocked==='true'&&document.querySelector('.aui-lexical-input')?.getAttribute('contenteditable')==='false'&&!!document.querySelector('.aui-composer-compact-blocked')&&!document.querySelector('.aui-composer-cancel')")
+    check("compact success reaches the browser over the real bridge",
+          "window.__compactResults.some(value=>value.status==='ok'&&value.value?.phase==='complete')")
+    cat("COMPACT_ACTION_RESULTS ", js("JSON.stringify(window.__compactResults)"), "\n", sep = "")
+    check("compact receives a successful terminal ACK",
+          "!!document.querySelector('[data-slot=action-progress][data-action-state=complete]')&&document.body.innerText.includes('Conversation compacted')")
+    check("compact restores composer and stops progress animation",
+          "document.querySelector('.aui-lexical-input')?.getAttribute('contenteditable')==='true'&&!document.querySelector('[data-slot=action-progress] [data-indeterminate=true]')")
+    check("canonical compact summary renders as assistant, never user",
+          "[...document.querySelectorAll('[data-slot=aui_assistant-message-root]')].some(e=>e.innerText.includes('SYNTHETIC_COMPACT_SUMMARY'))&&![...document.querySelectorAll('.aui-user-message-content')].some(e=>e.innerText.includes('SYNTHETIC_COMPACT_SUMMARY'))")
+    send("NORMAL")
+    wait(function() identical(readRDS(file.path(root, "events.rds"))$done[[sessions[["Alpha"]]]], 2L),
+         label = "foreground after compact")
+    check("conversation remains usable after compaction", has("NORMAL_DONE"))
+    browser$Page$reload()
+    browser$Page$loadEventFired()
+    check("controls widget remounts", "!!document.querySelector('.aui-root')")
+    select("Alpha")
+    check("compact summary survives a real history reload",
+          "[...document.querySelectorAll('[data-slot=aui_assistant-message-root]')].some(e=>e.innerText.includes('SYNTHETIC_COMPACT_SUMMARY'))&&![...document.querySelectorAll('.aui-user-message-content')].some(e=>e.innerText.includes('SYNTHETIC_COMPACT_SUMMARY'))")
+    observations <- lapply(readLines(file.path(root, "peer-events.jsonl"), warn = FALSE),
+                           jsonlite::fromJSON)
+    kinds <- vapply(observations, `[[`, "", "kind")
+    stopifnot(
+      sum(kinds == "model_applied") == 2L, sum(kinds == "model_rejected") == 1L,
+      sum(kinds == "permission_applied") == 1L,
+      sum(kinds == "compact_started") == 1L, sum(kinds == "compact_completed") == 1L,
+      !any(kinds == "interrupt"),
+      length(readRDS(file.path(root, "events.rds"))$errors) == 0L,
+      console_errors == 0L, runtime_errors == 0L, network_errors == 0L
+    )
+    file.create(file.path(root, "stop"))
+    app$wait(5000)
+    stopifnot(!app$is_alive(), app$get_exit_status() == 0L)
+    cleanup()
+    cat("CLAUDE_CONTROLS_PROTOCOL_PASSED console=0 runtime=0 network=0 cleanup=true\n")
+    return(invisible(NULL))
+  }
   send("LONG_BACKGROUND")
   check("top-level background turn opens after foreground completion", has("BACKGROUND_LONG_STARTED"))
   check("background Task remains active", "!!document.querySelector('[data-task-active=true][data-task-id=background-long]')")

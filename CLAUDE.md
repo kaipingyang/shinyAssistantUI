@@ -374,7 +374,8 @@ parented Agent 消息不打开顶层 owner。取消/失败先 drain 已有 Resul
 的 cancel 只移除自己的 Shiny resolver，迟到决策不得操作新连接。
 审批的浏览器身份使用稳定 `ui_owner`，不能把同一浏览器的历史刷新
 （更新 `ui_generation`）当成换 owner。history/proactive 两个替换入口共用
-`mergePendingApprovals()` 保留未回答卡片；提交决策写 `approvalResult`，
+`mergePendingUiMessages()` 保留未回答审批与尚未结算的客户端动作回执；
+审批部分复用 `mergePendingApprovals()`；提交决策写 `approvalResult`，
 真实执行结果仍由 SDK 的 UserMessage ToolResult 回传，不能用批准代替完成。
 暴露 `attach_ui_owner` 的 handler 包装器即使只声明 `...`，server 也必须
 透传同一 `ui_owner`，否则前台 legacy owner 与历史 owner 会互相替换。
@@ -395,6 +396,13 @@ Task Stop 使用 SDK `stop_task_async()`：ACK 不是终态，失败/未确认�
 `verify_long_task_lifecycle.R` 是真实 SDK/JSONL/Chromium 长任务门禁，
 覆盖活跃审批时的历史分页，以及完整 browser reload 后才到达的新审批和结果；
 后者不能先发伪前台消息来注册回调。`smoke` 模式不能代替 125 秒验收。
+
+`/compact` 会先同步权威历史，再发送完成回执。history/proactive 替换前必须
+按 thread 快照尚未结算的 ack ID，并保留相应反馈卡；不能等 React state updater
+运行时才读 registry（同批终态可能已删请求）。只保留 ack，不保留本地动作 user
+气泡，避免重复 SDK 历史中的 `/compact`。终态后下一次权威替换正常清理临时反馈。
+`verify_long_task_lifecycle.R` 的 `AUI_LONG_TASK_MODE=controls` 用本地协议模拟端
+覆盖模型 ACK/拒绝、权限、context、compact 完成反馈及真实历史重载，不调用外部模型。
 
 ### 历史会话异步冷连接（Plan 143）
 

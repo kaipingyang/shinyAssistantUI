@@ -57,7 +57,7 @@ def tool_key(value):
     return value if value.startswith(SESSION) else f"{SESSION}-{value}"
 
 
-def persist(role, content, sidechain=False):
+def persist(role, content, sidechain=False, compact_summary=False):
     global PARENT
     with LOCK:
         record = {
@@ -73,6 +73,9 @@ def persist(role, content, sidechain=False):
             record["isSidechain"] = True
         else:
             PARENT = record["uuid"]
+        if compact_summary:
+            record["isCompactSummary"] = True
+            record["isVisibleInTranscriptOnly"] = True
         with TRANSCRIPT.open("a", encoding="utf-8") as output:
             output.write(json.dumps(record, separators=(",", ":")) + "\n")
             output.flush()
@@ -201,7 +204,7 @@ def user(request):
         content = "".join(part.get("text", "") for part in content)
     if content not in (
         "LONG_BACKGROUND", "LONG_APPROVAL", "IDLE_APPROVAL", "HISTORY_APPROVAL", "PARENTED_ONLY",
-        "ERROR_RECOVERY", "EXIT_RECOVERY", "NORMAL", "AFTER_BACKGROUND",
+        "ERROR_RECOVERY", "EXIT_RECOVERY", "NORMAL", "AFTER_BACKGROUND", "/compact",
     ):
         raise ValueError("Unexpected synthetic lifecycle prompt")
     TURN += 1
@@ -263,6 +266,20 @@ def user(request):
         value = "NORMAL_DONE" if content == "NORMAL" else "AFTER_BACKGROUND_DONE"
         assistant(value)
         result(value)
+    elif content == "/compact":
+        observe("compact_started")
+        emit({"type": "system", "subtype": "status", "status": "compacting",
+              "session_id": SESSION})
+
+        def compact():
+            if STOP.wait(1):
+                return
+            persist("user", "SYNTHETIC_COMPACT_SUMMARY", compact_summary=True)
+            emit({"type": "system", "subtype": "compact_boundary", "session_id": SESSION,
+                  "compact_metadata": {"trigger": "manual", "pre_tokens": 1234}})
+            result("SYNTHETIC_COMPACT_SUMMARY")
+            observe("compact_completed")
+        worker(compact)
 
 
 def decision(request):
@@ -297,6 +314,34 @@ def control(request):
         response = {"commands": [], "models": [], "output_styles": []}
     elif subtype == "get_context_usage":
         response = {"totalTokens": 1, "rawMaxTokens": 200000}
+        if os.environ.get("AUI_LONG_TASK_MODE") == "controls":
+            response = {
+                "totalTokens": 1234, "rawMaxTokens": 200000,
+                "categories": [
+                    {"name": "Synthetic instructions", "tokens": 1000},
+                    {"name": "Synthetic messages", "tokens": 234},
+                ],
+            }
+    elif subtype == "set_model":
+        model = request["request"]["model"]
+        if model not in ("opus", "haiku", "sonnet"):
+            raise ValueError("Unexpected synthetic model")
+        observe("model_requested", model=model)
+        if STOP.wait(0.65):
+            return
+        if model == "haiku":
+            emit({"type": "control_response", "response": {
+                "subtype": "error", "request_id": request["request_id"],
+                "error": "Synthetic model rejection",
+            }})
+            observe("model_rejected", model=model)
+            return
+        observe("model_applied", model=model)
+    elif subtype == "set_permission_mode":
+        mode = request["request"]["mode"]
+        if mode != "plan":
+            raise ValueError("Unexpected synthetic permission mode")
+        observe("permission_applied", mode=mode)
     elif subtype == "interrupt":
         observe("interrupt")
         STOP.set()

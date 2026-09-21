@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { ThreadMessageLike } from "@assistant-ui/core";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
-  mergePendingApprovals, markToolApprovalSubmitted,
+  mergePendingApprovals, mergePendingUiMessages, markToolApprovalSubmitted,
   extractAttachments, expandSlashCommands, safeUrl, parseFileRef,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
@@ -195,6 +195,54 @@ describe("pending approval history merge", () => {
     expect(mergePendingApprovals([], [{
       ...live, content: [{ ...part, result: "Actual result" }],
     }])).toEqual([]);
+  });
+});
+
+describe("pending UI history merge", () => {
+  const acknowledgement: ThreadMessageLike = {
+    id: "ack-active", role: "assistant",
+    content: [{ type: "data", name: "action-progress", data: { kind: "compact", phase: "starting" } }],
+    metadata: { custom: { shinyActionAck: true } },
+  };
+  const canonical: ThreadMessageLike = {
+    id: "canonical", role: "assistant", content: [{ type: "text", text: "Canonical summary" }],
+  };
+  const pendingIds = new Set(["ack-active"]);
+
+  it("retains only pending acknowledgement IDs without duplicating local action prompts", () => {
+    const command: ThreadMessageLike = {
+      id: "user-active", role: "user", content: [{ type: "text", text: "/compact" }],
+    };
+    const finished = { ...acknowledgement, id: "ack-finished" };
+    expect(mergePendingUiMessages(
+      [canonical], [command, acknowledgement, acknowledgement, finished], pendingIds,
+    )).toEqual([canonical, acknowledgement]);
+  });
+
+  it("uses an existing canonical acknowledgement instead of duplicating or overwriting it", () => {
+    const authoritative: ThreadMessageLike = {
+      ...acknowledgement, content: [{ type: "text", text: "Canonical acknowledgement" }],
+    };
+    const incoming = [canonical, authoritative];
+    expect(mergePendingUiMessages(incoming, [acknowledgement], pendingIds)).toBe(incoming);
+  });
+
+  it("does not retain unknown or already-settled acknowledgements", () => {
+    const incoming = [canonical];
+    expect(mergePendingUiMessages(incoming, [acknowledgement], new Set())).toBe(incoming);
+    expect(mergePendingUiMessages(incoming, [acknowledgement], new Set(["ack-other"]))).toBe(incoming);
+  });
+
+  it("preserves unanswered approvals alongside pending action acknowledgements", () => {
+    const approval: ThreadMessageLike = {
+      id: "live-permission", role: "assistant",
+      content: [{
+        type: "tool-call", toolCallId: "pending", toolName: "Bash",
+        args: {}, argsText: "{}", artifact: { requiresApproval: true },
+      }],
+    };
+    expect(mergePendingUiMessages([], [approval, acknowledgement], pendingIds))
+      .toEqual([approval, acknowledgement]);
   });
 });
 

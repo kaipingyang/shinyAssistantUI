@@ -1830,6 +1830,109 @@ describe("useShinyRuntime — ordinary action correlation", () => {
 });
 
 
+describe("useShinyRuntime — action acknowledgements across history replacement", () => {
+  it.each([
+    ["history", "progress", "compacting"],
+    ["history", "ok", "complete"],
+    ["history", "error", "error"],
+    ["proactive", "progress", "compacting"],
+    ["proactive", "ok", "complete"],
+    ["proactive", "error", "error"],
+  ] as const)("retains the pending card when %s is batched with %s", async (source, status, phase) => {
+    const { result } = setup({ persistence: "server" });
+    const original = currentThreadId(result);
+    const threadId = "compact-history";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Compact history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const initialLoads = inputs.filter((item) => item.value?.type === "load_session");
+    await fireR("load-thread", {
+      threadId, requestId: initialLoads[initialLoads.length - 1].value.requestId, messages: [],
+    });
+    await act(async () => result.current.invokeAction({ id: "compact", label: "Compact conversation" }));
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    const ackId = `ack-${request.requestId}`;
+    let loadRequestId: string | undefined;
+    if (source === "history") {
+      await act(async () => result.current.runtime.threads.switchToThread(original));
+      await act(async () => result.current.runtime.threads.switchToThread(threadId));
+      const refreshes = inputs.filter((item) => item.value?.type === "load_session");
+      loadRequestId = refreshes[refreshes.length - 1].value.requestId;
+    }
+    const canonical = [
+      { id: "canonical-command", role: "user", content: [{ type: "text", text: "/compact" }] },
+      { id: "canonical-summary", role: "assistant", content: [{ type: "text", text: "Compacted summary" }] },
+    ];
+    const progress = {
+      threadId, requestId: request.requestId, actionId: "compact",
+      status: "progress", message: "Compacting conversation",
+      value: { kind: "compact", phase: "compacting", startedAt: Date.now() },
+    };
+    await act(async () => {
+      handlers.get("test:action-result")?.(progress);
+      if (source === "history") {
+        handlers.get("test:load-thread")?.({ threadId, requestId: loadRequestId, messages: canonical });
+      } else {
+        handlers.get("test:proactive-messages")?.({
+          version: 1, operation: "replace", threadId, revision: 1, messages: canonical,
+        });
+      }
+      handlers.get("test:action-result")?.({
+        ...progress, status, value: { ...progress.value, phase },
+      });
+    });
+    expect(messages(result).map((message) => message.id))
+      .toEqual(["canonical-command", "canonical-summary", ackId]);
+    expect(messages(result).find((message) => message.id === ackId)?.content[0]).toMatchObject({
+      type: "data", name: "action-progress", data: { kind: "compact", phase },
+    });
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    if (status === "progress") {
+      expect(result.current.blockingAction).toMatchObject({ kind: "compact", phase });
+      await fireR("action-result", {
+        ...progress, status: "ok", value: { ...progress.value, phase: "complete" },
+      });
+    }
+    expect(result.current.blockingAction).toBeUndefined();
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId, revision: 2, messages: canonical,
+    });
+    expect(messages(result).map((message) => message.id))
+      .toEqual(["canonical-command", "canonical-summary"]);
+  });
+
+  it("retains an inactive thread's pending card without switching or mixing another action", async () => {
+    localStorage.setItem("shinyAssistantUI:test:threads", JSON.stringify([
+      { id: "owner", status: "regular", title: "Owner" },
+      { id: "other", status: "regular", title: "Other" },
+    ]));
+    const { result } = setup({ persistence: "client" });
+    await act(async () => result.current.invokeAction({ id: "compact", label: "Compact" }));
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await act(async () => result.current.runtime.threads.switchToThread("other"));
+    await act(async () => result.current.invokeAction({ id: "context", label: "Other context" }));
+    const otherMessages = messages(result).map((message) => message.id);
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId: "owner", revision: 1,
+      messages: [{ id: "owner-summary", role: "assistant", content: [{ type: "text", text: "Summary" }] }],
+    });
+    expect(currentThreadId(result)).toBe("other");
+    expect(messages(result).map((message) => message.id)).toEqual(otherMessages);
+    expect(result.current.blockingAction).toBeUndefined();
+    await act(async () => result.current.runtime.threads.switchToThread("owner"));
+    expect(messages(result).map((message) => message.id))
+      .toEqual(["owner-summary", `ack-${request.requestId}`]);
+    expect(result.current.blockingAction).toMatchObject({ kind: "compact" });
+    await fireR("action-result", {
+      threadId: "owner", requestId: request.requestId, actionId: "compact",
+      status: "ok", message: "Conversation compacted",
+      value: { kind: "compact", phase: "complete", startedAt: Date.now() },
+    });
+    expect(messages(result)[1]?.content[0]).toMatchObject({
+      type: "data", name: "action-progress", data: { phase: "complete" },
+    });
+  });
+});
+
 describe("useShinyRuntime — permission progress correlation", () => {
 
   it.each([

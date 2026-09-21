@@ -100,6 +100,23 @@ export function mergePendingApprovals(
   return merged;
 }
 
+export function mergePendingUiMessages(
+  incoming: ThreadMessageLike[],
+  current: ThreadMessageLike[],
+  pendingActionAckIds: ReadonlySet<string>,
+): ThreadMessageLike[] {
+  const merged = mergePendingApprovals(incoming, current);
+  if (!pendingActionAckIds.size) return merged;
+  const seen = new Set(merged.map((message) => message.id));
+  const acknowledgements = current.filter((message) => {
+    if (message.role !== "assistant" || !message.id ||
+        !pendingActionAckIds.has(message.id) || seen.has(message.id)) return false;
+    seen.add(message.id);
+    return true;
+  });
+  return acknowledgements.length ? [...merged, ...acknowledgements] : merged;
+}
+
 export function markToolApprovalSubmitted(
   messages: ThreadMessageLike[],
   toolCallId: string,

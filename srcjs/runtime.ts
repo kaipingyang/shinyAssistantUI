@@ -75,7 +75,7 @@ import {
 } from "./shiny-config-context";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
-  mergePendingApprovals, markToolApprovalSubmitted,
+  mergePendingUiMessages, markToolApprovalSubmitted,
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
   resolveToolFileReference,
 } from "./helpers";
@@ -1069,6 +1069,21 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       });
   }, []);
 
+  const actionAckRefs = useRef(new Map<string, {
+    threadId: string;
+    ackId: string;
+    actionId: string;
+    startedAt?: number;
+    timeoutId?: number;
+  }>());
+  const snapshotPendingActionAckIds = useCallback((threadId: string) => {
+    const ids = new Set<string>();
+    for (const target of actionAckRefs.current.values()) {
+      if (target.threadId === threadId) ids.add(target.ackId);
+    }
+    return ids;
+  }, []);
+
   const commitProactiveReplacement = useCallback((payload: ProactiveMessagesPayload) => {
     const threadId = payload.threadId;
     if (deletedThreadIdsRef.current.has(threadId) ||
@@ -1081,10 +1096,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       proactiveSkipNextHistoryRefreshRef.current.add(threadId);
     }
 
+    // A same-batch terminal ACK can clear the registry before React runs this updater.
+    const pendingActionAckIds = snapshotPendingActionAckIds(threadId);
     setMessagesMap((previous) => {
-      const incoming = mergePendingApprovals(
+      const incoming = mergePendingUiMessages(
         normalizeProactiveMessages(payload.messages, payload.revision),
         previous[threadId] ?? [],
+        pendingActionAckIds,
       );
       const incomingIds = new Set(
         incoming.map((message) => message.id)
@@ -1113,7 +1131,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
       return { ...previous, [threadId]: updated };
     });
-  }, [inputId, invalidateHistoryForProactive, normalizeProactiveMessages, usesClientPersistence]);
+  }, [inputId, invalidateHistoryForProactive, normalizeProactiveMessages, snapshotPendingActionAckIds, usesClientPersistence]);
 
   const handleProactiveReplacement = useCallback((payload: ProactiveMessagesPayload) => {
     if (payload?.version !== 1 || payload.operation !== "replace" ||
@@ -1150,13 +1168,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     commitProactiveReplacement(payload);
   }, [commitProactiveReplacement]);
 
-  const actionAckRefs = useRef(new Map<string, {
-    threadId: string;
-    ackId: string;
-    actionId: string;
-    startedAt?: number;
-    timeoutId?: number;
-  }>());
   const [blockingActions, setBlockingActions] = useState<Record<string, BlockingAction>>({});
   const blockingActionsRef = useRef<Record<string, BlockingAction>>({});
   const setBlockingActionForThread = useCallback((threadId: string, action?: BlockingAction) => {
@@ -1891,6 +1902,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         : incomingForWindow;
       const browserWindowTruncated = projectedForWindow.length >
         boundBrowserMessages(projectedForWindow).length;
+      const pendingActionAckIds = snapshotPendingActionAckIds(threadId);
 
       setMessagesMap((prev) => {
         const incoming = data.messages as ThreadMessageLike[];
@@ -1905,7 +1917,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           }
           updated = [...older, ...(prev[threadId] ?? [])];
         } else {
-          updated = mergePendingApprovals(incoming, prev[threadId] ?? []);
+          updated = mergePendingUiMessages(incoming, prev[threadId] ?? [], pendingActionAckIds);
           messageRepositoriesRef.current.get(threadId)?.resetVisiblePath(updated);
         }
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
