@@ -1,7 +1,9 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerApprovalHandler, _clearApprovalHandlers } from "@/approval-registry";
+import { useEffect, useState } from "react";
+import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { registerApprovalHandler, unregisterApprovalHandler, _clearApprovalHandlers } from "@/approval-registry";
 import { AskUserQuestionToolUI } from "./ask-user-question-tool";
 import { _clearToolCardStateForTests } from "./tool-card-frame";
 
@@ -136,6 +138,53 @@ describe("AskUserQuestionToolUI runtime validation", () => {
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it.each(["approve", "skip"])("persists settlement before a %s remount and still permits reopening", (action) => {
+    const inputId = `chat-remount-${action}`;
+    const args = {
+      questions: [{ question: "Continue?", options: [{ label: "Yes" }] }],
+    };
+    const props: ToolCallMessagePartProps = {
+      type: "tool-call",
+      toolName: "AskUserQuestion",
+      toolCallId: `ask-remount-${action}`,
+      args,
+      argsText: JSON.stringify(args),
+      status: { type: "requires-action", reason: "tool-calls" },
+      artifact: { requiresApproval: true, inputId },
+      addResult: vi.fn(),
+      resume: vi.fn(),
+      respondToApproval: vi.fn(),
+    };
+    const decide = vi.fn();
+    function Harness() {
+      const [revision, setRevision] = useState(0);
+      useEffect(() => {
+        registerApprovalHandler(inputId, (...decision) => {
+          decide(...decision);
+          setRevision((previous) => previous + 1);
+        });
+        return () => unregisterApprovalHandler(inputId);
+      }, []);
+      return <AskUserQuestionToolUI key={revision} {...props} />;
+    }
+    const view = render(<Harness />);
+    const trigger = view.container.querySelector('[data-slot="tool-fallback-trigger"]')!;
+    fireEvent.click(trigger);
+    if (action === "approve") fireEvent.click(view.getByLabelText("Yes"));
+    fireEvent.click(view.getByText(action === "approve" ? "Submit answer" : "Skip"));
+
+    expect(decide).toHaveBeenCalledOnce();
+    const remountedTrigger = view.container.querySelector('[data-slot="tool-fallback-trigger"]')!;
+    expect(remountedTrigger).not.toBe(trigger);
+    expect(remountedTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(view.container.querySelector('[data-slot="ask-user-question"]')).toBeNull();
+    expect(props.addResult).not.toHaveBeenCalled();
+
+    fireEvent.click(remountedTrigger);
+    view.rerender(<Harness />);
+    expect(remountedTrigger.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("keeps submitted options visibly selected in the tool record and across remount", () => {

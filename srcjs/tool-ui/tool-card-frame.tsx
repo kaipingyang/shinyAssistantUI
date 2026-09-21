@@ -148,6 +148,8 @@ export function useToolCard(props: ToolCallMessagePartProps, options: ToolCardOp
         : undefined;
 
   const decide = (approved: boolean, opts?: ToolDecideOpts) => {
+    // Persist before dispatch: the message update can remount this card.
+    if (options.collapseOnSettle) setOpen(false);
     resolveApprovalHandler(ann?.inputId as string | undefined)?.(toolCallId, approved, opts);
     _decisionRegistry.set(registryKey, approved ? "approved" : "denied");
     if (opts) _decisionOptsRegistry.set(registryKey, opts);
