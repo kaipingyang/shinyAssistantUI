@@ -4,7 +4,7 @@ import sys
 from playwright.async_api import async_playwright
 
 
-async def main(url: str) -> None:
+async def main(url: str, expected_version: str = "") -> None:
     failures: list[str] = []
     console_errors: list[str] = []
     runtime_errors: list[str] = []
@@ -56,7 +56,12 @@ async def main(url: str) -> None:
             marker = await page.locator(
                 'meta[name="shinyassistant-behavior-package"]'
             ).get_attribute("content")
-            check("installed Home package fixture loaded", marker == "installed-0.5.6", f"marker={marker}")
+            expected_marker = f"installed-{expected_version}" if expected_version else marker
+            check(
+                "installed Home package fixture loaded",
+                bool(marker) and marker.startswith("installed-") and marker == expected_marker,
+                f"marker={marker}",
+            )
 
             viewport = page.locator('[data-slot="aui_thread-viewport"]').first
             composer = page.locator(".aui-lexical-input[contenteditable='true']").first
@@ -75,6 +80,17 @@ async def main(url: str) -> None:
                     "client: el.clientHeight, bottom: el.scrollHeight-el.clientHeight-el.scrollTop})"
                 )
 
+            async def rendered(marker: str) -> None:
+                await page.wait_for_function(
+                    "marker => document.body.innerText.includes(marker)",
+                    arg=marker,
+                    timeout=15000,
+                )
+                await page.evaluate(
+                    "() => new Promise(resolve => requestAnimationFrame(() => "
+                    "requestAnimationFrame(() => requestAnimationFrame(resolve))))"
+                )
+
             async def append_chunk(turn: int, number: int) -> None:
                 await fake_chunk.dispatch_event("click")
                 await page.wait_for_function(
@@ -83,12 +99,7 @@ async def main(url: str) -> None:
                     arg=[turn, number],
                     timeout=10000,
                 )
-                await page.wait_for_function(
-                    "([turn, chunk]) => document.body.innerText.includes(`SYNTHETIC_LIVE_CHUNK_${turn}_${chunk}`)",
-                    arg=[turn, number],
-                    timeout=10000,
-                )
-                await page.wait_for_timeout(100)
+                await rendered(f"SYNTHETIC_CHUNK_END_{turn}_{number}")
             await page.wait_for_function(
                 "document.querySelector('#fixture_ready')?.textContent?.trim() === '0:0'",
                 timeout=10000,
@@ -106,11 +117,7 @@ async def main(url: str) -> None:
                 })"""
             )
             print(f"[INFO] first synthetic turn state {first_turn_state}")
-            await page.wait_for_function(
-                "document.body.innerText.includes('SYNTHETIC_TURN_1_SUMMARY')",
-                timeout=15000,
-            )
-            await page.wait_for_timeout(250)
+            await rendered("SYNTHETIC_TURN_1_CONTENT_END")
 
             agent_cards = page.locator(
                 '[data-slot="tool-fallback-trigger"][aria-label^="Used tool: Agent"]'
@@ -124,7 +131,7 @@ async def main(url: str) -> None:
                     oy: getComputedStyle(el).overflowY}))"""
             )
             print(f"[INFO] synthetic scroll containers {scroll_debug}")
-            check("two synthetic Agent cards remain visible", await agent_cards.count() == 2)
+            check("two synthetic Agent cards remain rendered", await agent_cards.count() == 2)
             order_ok = await page.evaluate(
                 """() => {
                   const agents = Array.from(document.querySelectorAll(
@@ -205,11 +212,7 @@ async def main(url: str) -> None:
             check("completed history can remain scrolled up", old_reading["bottom"] > 150)
 
             await send("synthetic-behavior-turn-2")
-            await page.wait_for_function(
-                "document.body.innerText.includes('SYNTHETIC_TURN_2_SUMMARY')",
-                timeout=15000,
-            )
-            await page.wait_for_timeout(250)
+            await rendered("SYNTHETIC_TURN_2_CONTENT_END")
             new_turn = await metrics()
             check(
                 "sending from old history jumps to the new turn",
@@ -224,7 +227,55 @@ async def main(url: str) -> None:
                 f"bottom={second_growth['bottom']:.1f}",
             )
             await fake_done.dispatch_event("click")
-            await page.wait_for_timeout(250)
+            await page.wait_for_function("!document.querySelector('.aui-composer-cancel')")
+
+            await send("synthetic-task-tools-turn")
+            await rendered("SYNTHETIC_TURN_3_CONTENT_END")
+            await checklist.wait_for(timeout=10000)
+
+            async def task_group() -> list[dict]:
+                return await checklist.locator("[data-checklist-status]").evaluate_all(
+                    "items => items.map(el => ({status:el.dataset.checklistStatus,text:el.textContent}))"
+                )
+
+            task_items = await task_group()
+            check(
+                "TaskCreate starts a new two-item group instead of mixing old TodoWrite",
+                len(task_items) == 2
+                and "Synthetic TaskCreate item 1" in task_items[0]["text"]
+                and "Synthetic task activity 2" in task_items[1]["text"],
+                str(task_items),
+            )
+            check(
+                "TaskUpdate applies completed and in-progress states",
+                [item["status"] for item in task_items] == ["completed", "in_progress"],
+            )
+            completed_task = checklist.locator('[data-checklist-status="completed"]')
+            check(
+                "TaskUpdate completion keeps the check mark and strike-through",
+                "✓" in await completed_task.inner_text()
+                and "line-through" in (await completed_task.locator("span").last.get_attribute("class") or ""),
+            )
+            check(
+                "task checklist is within the viewport",
+                await checklist.evaluate(
+                    "el => {const r=el.getBoundingClientRect();return r.width>0&&r.height>0"
+                    "&&r.top>=0&&r.left>=0&&r.bottom<=innerHeight&&r.right<=innerWidth}"
+                ),
+            )
+            await checklist.get_by_role("button", name="Collapse checklist", exact=True).click()
+            check(
+                "manual collapse hides task rows without removing the checklist",
+                await checklist.get_attribute("data-collapsed") == "true"
+                and await checklist.locator("[data-checklist-status]").count() == 0,
+            )
+            await checklist.get_by_role("button", name="Expand checklist", exact=True).click()
+            check("manual expand restores the same task state", await task_group() == task_items)
+            await fake_done.dispatch_event("click")
+            await page.wait_for_function("!document.querySelector('.aui-composer-cancel')")
+            await page.reload(wait_until="domcontentloaded")
+            await checklist.wait_for(timeout=15000)
+            check("TaskCreate/TaskUpdate history survives reload", await task_group() == task_items)
 
             websocket_open = await page.evaluate(
                 "Boolean(window.Shiny?.shinyapp?.$socket) && "
@@ -245,4 +296,7 @@ async def main(url: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9197/"))
+    asyncio.run(main(
+        sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9197/",
+        sys.argv[2] if len(sys.argv) > 2 else "",
+    ))

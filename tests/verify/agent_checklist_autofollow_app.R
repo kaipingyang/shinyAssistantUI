@@ -56,10 +56,14 @@ server <- function(input, output, session) {
         tool_call_id = "synthetic-checklist",
         tool_name = "TodoWrite",
         args = list(todos = list(
-          list(id = "synthetic-complete", content = "Synthetic completed item",
-               status = " Completed "),
-          list(id = "synthetic-active", content = "Synthetic active item",
-               activeForm = "Synthetic activity", status = "RUNNING")
+          list(
+            id = "synthetic-complete", content = "Synthetic completed item",
+            status = " Completed "
+          ),
+          list(
+            id = "synthetic-active", content = "Synthetic active item",
+            activeForm = "Synthetic activity", status = "RUNNING"
+          )
         )),
         annotations = list()
       )
@@ -69,6 +73,38 @@ server <- function(input, output, session) {
         is_error = FALSE
       )
     }
+    if (turn == 3L) {
+      for (index in 1:2) {
+        tool_id <- paste0("synthetic-create-", index)
+        on_tool_call(
+          tool_call_id = tool_id,
+          tool_name = "TaskCreate",
+          args = list(
+            subject = paste("Synthetic TaskCreate item", index),
+            activeForm = paste("Synthetic task activity", index)
+          )
+        )
+        on_tool_result(
+          tool_call_id = tool_id,
+          result = as.character(jsonlite::toJSON(
+            list(task = list(id = paste0("task-", index))),
+            auto_unbox = TRUE
+          ))
+        )
+      }
+      for (index in 1:2) {
+        tool_id <- paste0("synthetic-update-", index)
+        on_tool_call(
+          tool_call_id = tool_id,
+          tool_name = "TaskUpdate",
+          args = list(
+            taskId = paste0("task-", index),
+            status = c("completed", "in_progress")[[index]]
+          )
+        )
+        on_tool_result(tool_call_id = tool_id, result = "Task updated")
+      }
+    }
 
     lines <- paste0(
       "SYNTHETIC_TURN_", turn, "_LINE_", sprintf("%03d", 1:120),
@@ -77,6 +113,7 @@ server <- function(input, output, session) {
     on_chunk(paste(
       paste0("SYNTHETIC_TURN_", turn, "_SUMMARY"),
       paste(lines, collapse = "\n\n"),
+      paste0("SYNTHETIC_TURN_", turn, "_CONTENT_END"),
       sep = "\n\n"
     ))
 
@@ -85,32 +122,39 @@ server <- function(input, output, session) {
     })
   }
 
-  assistantUIServer("chat", handler = handler, persistence = "none")
+  assistantUIServer("chat", handler = handler, persistence = "client")
   output$fixture_ready <- renderText(fixture_ready())
 
-  observeEvent(input$fake_chunk, {
-    req(is.function(active$on_chunk))
-    next_chunk <- active$chunk + 1L
-    active$chunk <- next_chunk
-    fixture_ready(paste(active$turn, next_chunk, sep = ":"))
-    active$on_chunk(paste0(
-      "\n\nSYNTHETIC_LIVE_CHUNK_", active$turn, "_", next_chunk,
-      " — ", paste(rep("stream growth", 12), collapse = " ")
-    ))
-  }, ignoreInit = TRUE)
+  observeEvent(input$fake_chunk,
+    {
+      req(is.function(active$on_chunk))
+      next_chunk <- active$chunk + 1L
+      active$chunk <- next_chunk
+      fixture_ready(paste(active$turn, next_chunk, sep = ":"))
+      active$on_chunk(paste0(
+        "\n\nSYNTHETIC_LIVE_CHUNK_", active$turn, "_", next_chunk,
+        " — ", paste(rep("stream growth", 12), collapse = " "),
+        " SYNTHETIC_CHUNK_END_", active$turn, "_", next_chunk
+      ))
+    },
+    ignoreInit = TRUE
+  )
 
-  observeEvent(input$fake_done, {
-    req(is.function(active$on_done))
-    done <- active$on_done
-    resolve <- active$resolve
-    active$on_chunk <- NULL
-    active$on_done <- NULL
-    active$resolve <- NULL
-    done()
-    if (is.function(resolve)) {
-      session$onFlushed(function() resolve(NULL), once = TRUE)
-    }
-  }, ignoreInit = TRUE)
+  observeEvent(input$fake_done,
+    {
+      req(is.function(active$on_done))
+      done <- active$on_done
+      resolve <- active$resolve
+      active$on_chunk <- NULL
+      active$on_done <- NULL
+      active$resolve <- NULL
+      done()
+      if (is.function(resolve)) {
+        session$onFlushed(function() resolve(NULL), once = TRUE)
+      }
+    },
+    ignoreInit = TRUE
+  )
 }
 
 shinyApp(ui, server)
