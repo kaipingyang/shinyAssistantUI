@@ -258,6 +258,15 @@ devtools::build()      # build tarball
 
 ## Gotchas
 
+### bslib 与 Tailwind 主色类
+
+Bootstrap 的 `.bg-primary` / `.text-primary` 使用未分层的 `!important`，会盖过
+widget 的 `--primary`，使发送按钮和 Markdown 链接显示宿主主色。`globals.css`
+只在 `.aui-root` 内用 `revert-layer !important` 回退这些声明，让 Tailwind 原有
+普通、hover 和透明度样式继续生效；不要全局提高所有 utility 的优先级或硬编码主色。
+`verify_theme.R` 用已安装包验证三个实例的实际颜色、宿主隔离、媒体主题切换与历史重载。
+默认覆盖 bslib 页面；`AUI_THEME_HOST=standalone` 复核无 Bootstrap 的独立页面。
+
 ### useRef lazy initialization（关键）
 
 **不要** 写 `useRef(sideEffectFn())`——参数在**每次 render** 都会被求值，即使 `useRef` 只用第一次的值。凡是初始化有副作用（注册 handler、创建连接等）的 ref，必须用懒初始化模式：
