@@ -282,7 +282,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const activeQuestion =
     activeIdx >= 0 && activeIdx < questions.length
       ? questions[activeIdx]
-      : (questions[questions.length - 1] ?? "");
+      : (questions[0] ?? "");
 
   const requestOlder = () => {
     if (!historyHasMore || loadingOlder || !loadOlderHistory) return;

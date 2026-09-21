@@ -26,6 +26,7 @@ const threads = [
 ] as const;
 const AssistantMessage = () => <div>Assistant</div>;
 const components = { AssistantMessage };
+let listInset = 0;
 
 function Harness({ threadId = "a", messages = initial }: {
   threadId?: string;
@@ -53,6 +54,7 @@ function Harness({ threadId = "a", messages = initial }: {
 }
 
 beforeEach(() => {
+  listInset = 0;
   vi.stubGlobal("ResizeObserver", class {
     observe() {}
     unobserve() {}
@@ -63,7 +65,8 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(10000);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const viewport = this.closest<HTMLElement>('[data-slot="aui_thread-viewport"]');
-    const top = this.dataset.slot === "aui_virtualized-messages" ? -(viewport?.scrollTop ?? 0) : 0;
+    const top = this.dataset.slot === "aui_virtualized-messages"
+      ? listInset - (viewport?.scrollTop ?? 0) : 0;
     const height = this.dataset.slot === "aui_message-slot"
       ? 100 + Number.parseFloat(this.style.paddingBottom || "0") : 600;
     return new DOMRect(0, top, 800, height);
@@ -94,6 +97,26 @@ describe("thread selection resets follow intent independently of message IDs", (
       );
       view.rerender(<Harness threadId="b" messages={messages} />);
       await waitFor(() => expect(viewport.scrollTop).toBeGreaterThanOrEqual(9400));
+    },
+  );
+});
+
+describe("current question follows the visible turn", () => {
+  it.each([6, 90])(
+    "shows the first question above the first row in a %i-message thread",
+    async (count) => {
+      listInset = 80;
+      const view = render(<Harness messages={initial.slice(0, count)} />);
+      const viewport = view.container.querySelector<HTMLElement>('[data-slot="aui_thread-viewport"]')!;
+      const question = () => view.container.querySelector('[data-slot="aui_current_question"]')?.textContent;
+      await waitFor(() => expect(viewport.scrollTop).toBeGreaterThanOrEqual(9400));
+
+      fireEvent.wheel(viewport, { deltaY: -10000 });
+      fireEvent.scroll(viewport, { target: { scrollTop: 0 } });
+      await waitFor(() => expect(question()).toContain("Message 0"));
+
+      fireEvent.scroll(viewport, { target: { scrollTop: 300 } });
+      await waitFor(() => expect(question()).toContain("Message 2"));
     },
   );
 });
