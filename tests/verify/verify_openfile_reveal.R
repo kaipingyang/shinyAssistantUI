@@ -1,211 +1,262 @@
+#!/usr/bin/env Rscript
 suppressPackageStartupMessages({
   library(callr)
   library(chromote)
-  library(jsonlite)
 })
+source("tests/verify/owned_process_cleanup.R")
 
-`%||%` <- function(x, y) if (is.null(x)) y else x
-project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9245L
-failures <- character()
-unlink(c("/tmp/aui-openfile.out", "/tmp/aui-openfile.err"))
-
-check <- function(name, condition, detail = "") {
-  passed <- isTRUE(condition)
-  cat(sprintf("[%s] %-46s %s\n", if (passed) "PASS" else "FAIL", name, detail))
-  if (!passed) failures <<- c(failures, name)
-  invisible(passed)
-}
-
-app <- callr::r_bg(
-  function(project, port) {
+main <- function() {
+  project <- normalizePath(".")
+  port <- httpuv::randomPort()
+  root <- tempfile("host-callback-fixture-")
+  dir.create(file.path(root, "ERP"), recursive = TRUE, mode = "0700")
+  root <- normalizePath(root)
+  fixture_project <- file.path(root, "ERP")
+  live_name <- "\u4ea4\u63a5\u6587\u6863_xpt2sas\u5f02\u6b65\u5316.md"
+  history_name <- "\u5386\u53f2_\u4ea4\u63a5.md"
+  stopifnot(all(file.create(file.path(fixture_project, c(live_name, history_name)))))
+  stdout <- file.path(root, "app.out")
+  stderr <- file.path(root, "app.err")
+  app <- browser <- NULL
+  cleanup <- make_verification_cleanup(function() browser, function() app)
+  on.exit({
+    cleanup()
+    unlink(root, recursive = TRUE)
+  }, add = TRUE)
+  app <- callr::r_bg(function(project, port, root) {
     setwd(project)
-    suppressPackageStartupMessages(library(shiny))
-    shiny::runApp("tests/verify/openfile_reveal_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
-  },
-  args = list(project = project, port = port),
-  stdout = "/tmp/aui-openfile.out", stderr = "/tmp/aui-openfile.err"
-)
-on.exit(try(app$kill(), silent = TRUE), add = TRUE)
-
-for (i in seq_len(80)) {
-  if (!app$is_alive()) break
-  if (file.exists("/tmp/aui-openfile.err") &&
-      any(grepl("Listening on", readLines("/tmp/aui-openfile.err", warn = FALSE)))) break
-  Sys.sleep(0.25)
-}
-if (!app$is_alive()) {
-  cat(tail(readLines("/tmp/aui-openfile.err", warn = FALSE), 20), sep = "\n")
-  stop("Browser fixture failed to boot")
-}
-
-chromote::set_chrome_args(unique(c(
-  chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"
-)))
-browser <- ChromoteSession$new()
-on.exit({
-  try(browser$close(), silent = TRUE)
-  try(browser$parent$get_browser()$get_process()$kill(), silent = TRUE)
-}, add = TRUE)
-
-console_errors <- character()
-current_stage <- "boot"
-browser$Runtime$enable()
-browser$Runtime$consoleAPICalled(callback_ = function(message) {
-  if (identical(message$type, "error")) {
-    text <- paste(vapply(message$args, function(arg) as.character(arg$value %||% arg$description %||% ""), character(1)), collapse = " ")
-    console_errors <<- c(console_errors, paste(current_stage, "console:", text))
+    Sys.setenv(AUI_HOST_FIXTURE_ROOT = root)
+    library(shinyAssistantUI)
+    installed <- normalizePath(find.package("shinyAssistantUI"))
+    stopifnot(startsWith(installed, paste0(normalizePath(path.expand("~")), "/")))
+    message("INSTALL=", installed, " VERSION=", packageVersion("shinyAssistantUI"))
+    shiny::runApp(
+      "tests/verify/openfile_reveal_app.R",
+      host = "127.0.0.1", port = port, launch.browser = FALSE
+    )
+  }, args = list(project = project, port = port, root = root), stdout = stdout, stderr = stderr)
+  ready <- FALSE
+  for (i in seq_len(150L)) {
+    if (!app$is_alive()) break
+    ready <- any(grepl("Listening on", readLines(stderr, warn = FALSE), fixed = TRUE))
+    if (ready) break
+    Sys.sleep(0.1)
   }
-})
-browser$Runtime$exceptionThrown(callback_ = function(message) {
-  detail <- message$exceptionDetails
-  console_errors <<- c(console_errors, paste(current_stage, "exception:", detail$exception$description %||% detail$text %||% "unknown"))
-})
+  if (!ready) stop(paste(readLines(stderr, warn = FALSE), collapse = "\n"), call. = FALSE)
+  cat(grep("INSTALL=", readLines(stderr, warn = FALSE), value = TRUE), "\n")
 
-value <- function(script) {
-  response <- browser$Runtime$evaluate(script, returnByValue = TRUE)
-  if (!is.null(response$exceptionDetails)) stop(response$exceptionDetails$text)
-  response$result$value
-}
-wait_for <- function(script, timeout = 8, interval = 0.05) {
-  deadline <- Sys.time() + timeout
-  repeat {
-    answer <- tryCatch(value(script), error = function(e) FALSE)
-    if (isTRUE(answer)) return(TRUE)
-    if (Sys.time() >= deadline) return(FALSE)
-    Sys.sleep(interval)
+  chromote::set_chrome_args(unique(c(
+    chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu"
+  )))
+  browser <- ChromoteSession$new(width = 1440, height = 1050)
+  errors <- network_errors <- character()
+  browser$Runtime$enable()
+  browser$Network$enable()
+  browser$Runtime$consoleAPICalled(callback_ = function(event) {
+    if (identical(event$type, "error")) errors <<- c(errors, "console.error")
+  })
+  browser$Runtime$exceptionThrown(callback_ = function(event) {
+    errors <<- c(errors, event$exceptionDetails$text)
+  })
+  browser$Network$loadingFailed(callback_ = function(event) {
+    network_errors <<- c(network_errors, event$errorText)
+  })
+  browser$Network$responseReceived(callback_ = function(event) {
+    if (event$response$status >= 400) network_errors <<- c(network_errors, event$response$url)
+  })
+  value <- function(js) {
+    result <- browser$Runtime$evaluate(js, returnByValue = TRUE)
+    if (!is.null(result$exceptionDetails)) stop(result$exceptionDetails$text, call. = FALSE)
+    result$result$value
   }
-}
-key <- function(name, code, virtual_key, modifiers = 0L) {
-  browser$Input$dispatchKeyEvent(type = "keyDown", key = name, code = code,
-    windowsVirtualKeyCode = as.integer(virtual_key), modifiers = as.integer(modifiers))
-  browser$Input$dispatchKeyEvent(type = "keyUp", key = name, code = code,
-    windowsVirtualKeyCode = as.integer(virtual_key), modifiers = as.integer(modifiers))
-}
-focus_editor <- function() value("(function(){const e=document.querySelector('.aui-lexical-input[contenteditable=true]');if(e)e.focus();return !!e})()")
-type_text <- function(text) { focus_editor(); browser$Input$insertText(text = text) }
-click_sel <- function(sel) {
-  j <- value(sprintf("(function(){const e=document.querySelector(%s);if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()", jsonlite::toJSON(sel, auto_unbox = TRUE)))
-  if (is.null(j)) return(FALSE)
-  p <- fromJSON(j)
-  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  TRUE
-}
+  quote_js <- function(text) as.character(jsonlite::toJSON(text, auto_unbox = TRUE))
+  checks <- 0L
+  check <- function(label, ok) {
+    cat(sprintf("[%s] %s\n", if (isTRUE(ok)) "PASS" else "FAIL", label))
+    checks <<- checks + 1L
+    if (!isTRUE(ok)) {
+      cat("HOST_PROBE ", value("document.getElementById('host_probe')?.textContent"), "\n")
+      cat("DOM ", value("document.body.innerText.slice(-1800)"), "\n")
+      cat(c(errors, network_errors, tail(readLines(stderr, warn = FALSE), 15L)), sep = "\n")
+      stop("Host callback gate failed: ", label, call. = FALSE)
+    }
+  }
+  wait_for <- function(js, timeout = 10) {
+    deadline <- Sys.time() + timeout
+    repeat {
+      if (isTRUE(value(js))) return(TRUE)
+      if (!app$is_alive() || Sys.time() > deadline) return(FALSE)
+      Sys.sleep(0.05)
+    }
+  }
+  probe <- function(js) paste0(
+    "(()=>{const p=JSON.parse(document.getElementById('host_probe').textContent);return ",
+    js, "})()"
+  )
+  click <- function(selector) {
+    target <- quote_js(selector)
+    check(paste("visible target", selector), wait_for(sprintf(
+      "!!document.querySelector(%s)", target
+    )))
+    value(sprintf("document.querySelector(%s).scrollIntoView({block:'center',behavior:'instant'});true", target))
+    Sys.sleep(0.15)
+    point <- value(sprintf(
+      "(()=>{const e=document.querySelector(%s),r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;return {x,y,visible:r.width>0&&r.height>0&&x>=0&&x<innerWidth&&y>=0&&y<innerHeight&&e.contains(document.elementFromPoint(x,y))}})()",
+      target
+    ))
+    check(paste("pointer target in viewport", selector), point$visible)
+    browser$Input$dispatchMouseEvent(type = "mouseMoved", x = point$x, y = point$y)
+    browser$Input$dispatchMouseEvent(type = "mousePressed", x = point$x, y = point$y, button = "left", clickCount = 1L)
+    browser$Input$dispatchMouseEvent(type = "mouseReleased", x = point$x, y = point$y, button = "left", clickCount = 1L)
+  }
+  send <- function(id, text) {
+    selector <- paste0("#", id, " .aui-lexical-input[contenteditable=true]")
+    click(selector)
+    browser$Input$insertText(text = text)
+    check(paste(id, "send enabled"), wait_for(sprintf(
+      "!!document.querySelector('#%s .aui-composer-send:not([disabled])')", id
+    )))
+    browser$Input$dispatchKeyEvent(type = "keyDown", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L)
+    browser$Input$dispatchKeyEvent(type = "keyUp", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L)
+  }
+  history <- function(label) {
+    expression <- sprintf(
+      "[...document.querySelectorAll('#chat [data-slot=aui_thread-list-item]')].find(e=>e.innerText.includes(%s))",
+      quote_js(paste("Open history", label))
+    )
+    check(paste("history", label, "available"), wait_for(paste0("!!(", expression, ")")))
+    value(paste0("(", expression, ").setAttribute('data-host-history-target','true');true"))
+    click("#chat [data-host-history-target=true] button")
+    value("document.querySelector('[data-host-history-target]')?.removeAttribute('data-host-history-target');true")
+    check(paste("history", label, "restored"), wait_for(sprintf(
+      "document.getElementById('chat').innerText.includes('HISTORY_%s_COMPLETE')", label
+    )))
+  }
+  run_button <- function(code) {
+    expression <- sprintf(
+      "[...document.querySelectorAll('#chat .aui-code-header-root')].find(e=>e.nextElementSibling?.textContent.trim()===%s)?.querySelector('[data-run-in-console]')",
+      quote_js(code)
+    )
+    check(paste("R action for", code), wait_for(paste0("!!(", expression, ")")))
+    value(paste0("(", expression, ").setAttribute('data-host-run-target','true');true"))
+    click("#chat [data-host-run-target=true]")
+    value("document.querySelector('[data-host-run-target]')?.removeAttribute('data-host-run-target');true")
+  }
 
-browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
-browser$Page$loadEventFired()
-check("widget mounted", wait_for("!!document.querySelector('.aui-root')", 12))
-check("Lexical composer mounted", wait_for("!!document.querySelector('.aui-lexical-input[contenteditable=true]')"))
-
-# ── IDE 文件上下文：仅有文件(无选区)时，chip 与“眼睛”都出现且眼睛可切换隐藏 ──────
-current_stage <- "ide-context-eye"
-click_thread <- function(label) {
-  j <- value(sprintf(
-    "(function(){const e=Array.from(document.querySelectorAll('[data-slot=aui_thread-list-item]')).find(x=>(x.innerText||'').includes(%s));if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+20,y:r.top+r.height/2})})()",
-    jsonlite::toJSON(label, auto_unbox = TRUE)
+  browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
+  browser$Page$loadEventFired()
+  check("three installed widgets mount", wait_for(
+    "['chat','other','plain'].every(id=>!!document.querySelector(`#${id} .aui-thread-root`))"
   ))
-  if (is.null(j)) return(FALSE)
-  p <- fromJSON(j)
-  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  TRUE
+  check("active-file chip has no selection requirement", wait_for(
+    "document.querySelector('#chat [data-slot=aui_ide_context]')?.getAttribute('data-context-file')==='R/demo.R'&&!!document.querySelector('#chat [data-slot=aui_selection_visibility]')"
+  ))
+  click("#chat [data-slot=aui_selection_visibility]")
+  check("file context can be hidden", wait_for(
+    "document.querySelector('#chat [data-slot=aui_ide_context]')?.getAttribute('data-selection-visible')==='false'"
+  ))
+  click("#chat [data-slot=aui_selection_visibility]")
+  check("file context can be restored", wait_for(
+    "document.querySelector('#chat [data-slot=aui_ide_context]')?.getAttribute('data-selection-visible')==='true'"
+  ))
+  send("chat", "host edit fixture")
+  check("live reply fully rendered", wait_for(
+    "document.getElementById('chat').innerText.includes('HOST_REPLY_COMPLETE')&&!document.querySelector('#chat .aui-composer-cancel')"
+  ))
+  check("only last successful edit is automatically revealed once", wait_for(probe(
+    "p.chat.opened.length===1&&p.chat.opened[0].path==='R/addin.R'&&p.chat.opened[0].thread===p.chat.messages[0].thread"
+  )))
+  check("edit list excludes Read and failed Edit", isTRUE(value(probe(
+    "p.chat.edits.length===1&&JSON.stringify(p.chat.edits[0].paths)===JSON.stringify(['R/handlers.R','R/addin.R'])"
+  ))))
+  check("only R and Rscript expose console actions", isTRUE(value(
+    "document.querySelectorAll('#chat [data-run-in-console]').length===2&&[...document.querySelectorAll('#chat .aui-code-header-language')].some(e=>e.textContent==='markdown')"
+  )))
+  click("#chat [data-open-file='R/server.R']")
+  check("tool path reaches current-thread callback", wait_for(probe(
+    "p.chat.opened.length===2&&p.chat.opened[1].path==='R/server.R'&&p.chat.opened[1].thread===p.chat.messages[0].thread"
+  )))
+  click("#chat [data-file-ref='addin.R']")
+  check("bare name resolves to current-thread tool path", wait_for(probe(
+    "p.chat.opened.length===3&&p.chat.opened[2].path==='R/addin.R'"
+  )))
+  click("#chat [data-file-ref='R/app.R']")
+  check("explicit file line is preserved", wait_for(probe(
+    "p.chat.opened.length===4&&p.chat.opened[3].path==='R/app.R'&&p.chat.opened[3].line===12"
+  )))
+  click(paste0("#chat [data-file-ref='ERP/", live_name, "']"))
+  check("Unicode project prefix resolves without doubling directory", wait_for(probe(sprintf(
+    "p.chat.opened.length===5&&p.chat.opened[4].resolved===%s",
+    quote_js(file.path(fixture_project, live_name))
+  ))))
+  run_button("print(42L)")
+  check("successful console feedback is submitted once to the original thread", wait_for(probe(
+    "p.chat.console.length===1&&p.chat.console[0].code.trim()==='print(42L)'&&p.chat.messages.length===2&&p.chat.messages[1].text.includes('SYNTHETIC_CHAT_RESULT_42')&&p.chat.messages[1].thread===p.chat.console[0].thread"
+  )))
+  check("working directory reaches console callback", isTRUE(value(probe(sprintf(
+    "p.chat.console[0].project===%s", quote_js(fixture_project)
+  )))))
+  run_button('stop("SYNTHETIC_HOST_ERROR")')
+  check("callback exception becomes explicit error feedback, not success", wait_for(probe(
+    "p.chat.console.length===2&&p.chat.messages.length===3&&p.chat.messages[2].text.includes('It errored:')&&p.chat.messages[2].text.includes('Error: SYNTHETIC_HOST_ERROR')&&!p.chat.messages[2].text.includes('Output:')"
+  )))
+
+  send("other", "other host fixture")
+  check("second widget renders its R action", wait_for(
+    "document.getElementById('other').innerText.includes('OTHER_REPLY_COMPLETE')&&document.querySelectorAll('#other [data-run-in-console]').length===1"
+  ))
+  click("#other [data-run-in-console]")
+  check("second widget routes its own result without changing main callback count", wait_for(probe(
+    "p.other.console.length===1&&p.other.messages.length===2&&p.other.messages[1].text.includes('SYNTHETIC_OTHER_RESULT_42')&&p.other.messages[1].thread===p.other.console[0].thread&&p.other.console[0].project===null&&p.chat.console.length===2&&p.chat.messages.length===3"
+  )))
+  send("plain", "no host capability")
+  check("widget without console capability has no Run button", wait_for(
+    "document.getElementById('plain').innerText.includes('PLAIN_REPLY_COMPLETE')&&document.querySelectorAll('#plain [data-run-in-console]').length===0"
+  ))
+
+  for (label in c("A", "B")) {
+    history(label)
+    check(paste("history", label, "tool remains collapsed"), isTRUE(value(
+      "!document.getElementById('chat').innerText.includes('Historical read succeeded')"
+    )))
+    click("#chat [data-file-ref='dm.R']")
+    check(paste("history", label, "bare name and line stay isolated"), wait_for(probe(sprintf(
+      "p.chat.opened.at(-1).path==='/synthetic/history-%s/dm.R'&&p.chat.opened.at(-1).line===19&&p.chat.opened.at(-1).thread===p.chat.loads.at(-1).thread",
+      tolower(label)
+    ))))
+    click(paste0("#chat [data-file-ref='ERP/", history_name, "']"))
+    check(paste("history", label, "Unicode prefix resolves"), wait_for(probe(sprintf(
+      "p.chat.opened.at(-1).resolved===%s", quote_js(file.path(fixture_project, history_name))
+    ))))
+    run_button(paste0('print("HISTORY_', label, '")'))
+    check(paste("history", label, "console feedback retains restored thread"), wait_for(probe(sprintf(
+      "p.chat.console.at(-1).code.includes('HISTORY_%s')&&p.chat.console.at(-1).thread===p.chat.loads.at(-1).thread&&p.chat.messages.at(-1).thread===p.chat.loads.at(-1).thread&&p.chat.messages.at(-1).text.includes('SYNTHETIC_CHAT_RESULT_42')",
+      label
+    ))))
+  }
+  origin <- value("String(performance.timeOrigin)")
+  browser$Page$reload()
+  check("full reload creates a new document", wait_for(sprintf(
+    "String(performance.timeOrigin)!==%s&&document.readyState==='complete'&&!!document.querySelector('#chat .aui-thread-root')",
+    quote_js(origin)
+  )))
+  history("B")
+  check("history restore does not auto-open files or auto-run code", isTRUE(value(probe(
+    "p.chat.opened.length===0&&p.chat.console.length===0&&p.chat.edits.length===0&&p.chat.messages.length===0"
+  ))))
+  click("#chat [data-file-ref='dm.R']")
+  check("file routing survives full browser reload", wait_for(probe(
+    "p.chat.opened.length===1&&p.chat.opened[0].path==='/synthetic/history-b/dm.R'&&p.chat.opened[0].line===19"
+  )))
+  run_button('print("HISTORY_B")')
+  check("console-result routing survives full browser reload", wait_for(probe(
+    "p.chat.console.length===1&&p.chat.messages.length===1&&p.chat.messages[0].text.includes('SYNTHETIC_CHAT_RESULT_42')&&p.chat.messages[0].thread===p.chat.loads[0].thread"
+  )))
+  check("zero browser console errors and runtime exceptions", length(errors) == 0L)
+  check("zero network failures", length(network_errors) == 0L)
+  cleanup()
+  cat("HOST_CALLBACKS_VERIFIED checks=", checks,
+      " console=0 runtime=0 network=0 cleanup=true host=synthetic-callbacks\n", sep = "")
 }
-check("ide-context chip shows the active file", wait_for(
-  "document.querySelector('[data-slot=aui_ide_context]')?.getAttribute('data-context-file')==='R/demo.R'", 6))
-# 关键回归：没有选区时“眼睛”也要出现（旧代码只在 hasSelection 时才渲染 → bug）
-check("selection-visibility eye is present without a selection",
-      isTRUE(value("!!document.querySelector('[data-slot=aui_selection_visibility]')")))
-check("ide-context defaults to visible (file sent)",
-      isTRUE(value("document.querySelector('[data-slot=aui_ide_context]')?.getAttribute('data-selection-visible')==='true'")))
-# 点眼睛 → 隐藏（data-selection-visible=false，文件将不发送）
-value("document.querySelector('[data-slot=aui_selection_visibility]')?.click(); true")
-check("clicking the eye hides the file context", wait_for(
-  "document.querySelector('[data-slot=aui_ide_context]')?.getAttribute('data-selection-visible')==='false'", 4))
-value("document.querySelector('[data-slot=aui_selection_visibility]')?.click(); true")  # 还原
-wait_for("document.querySelector('[data-slot=aui_ide_context]')?.getAttribute('data-selection-visible')==='true'", 4)
 
-# ── 侧边栏折叠 ───────────────────────────────────────────────────────────────
-current_stage <- "sidebar-collapse"
-check("thread sidebar starts expanded", wait_for("document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'"))
-check("sidebar toggle present", isTRUE(value("!!document.querySelector('[data-slot=aui_sidebar_toggle]')")))
-click_sel("[data-slot=aui_sidebar_toggle]")
-# 折叠后侧栏元素整体消失（无残留窄轨）
-check("sidebar element removed when collapsed", wait_for("!document.querySelector('[data-slot=aui_thread_sidebar]')", 4))
-# 展开按钮改在主面板（thread viewport 内），仍可点开
-check("expand toggle moves into main panel", isTRUE(value(
-  "(function(){const b=document.querySelector('[data-slot=aui_sidebar_toggle]');if(!b)return false;return !!b.closest('[data-slot=aui_thread-viewport]') || !b.closest('[data-slot=aui_thread_sidebar]');})()"
-)))
-click_sel("[data-slot=aui_sidebar_toggle]")
-check("sidebar returns on expand", wait_for("document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'", 4))
-
-# ── Claude 编辑后揭示最近一次成功编辑（on_done flush）────────────────────────
-current_stage <- "edit-reveal"
-value("document.getElementById('opened-file-probe').textContent='';true")
-type_text("please do-edit now")
-key("Enter", "Enter", 13L)
-check("edit run completes", wait_for("document.body.innerText.includes('edited files')", 8))
-# 三个编辑工具卡出现（Read/Edit/Write），文件打开按钮可点击
-check("tool cards render file-open affordance", wait_for("!!document.querySelector('[data-open-file]')", 6))
-# 只揭示最近一次成功编辑 = 最后一个 Write(R/addin.R)
-check("reveal fires once for the most recent successful edit",
-      wait_for("document.getElementById('opened-file-probe').textContent === 'R/addin.R'", 6),
-      value("document.getElementById('opened-file-probe').textContent"))
-
-# ── 点击文件引用在编辑器打开（on_open_file 收到点击路径）─────────────────────
-current_stage <- "click-open-file"
-value("document.getElementById('opened-file-probe').textContent='';true")
-# 点击其中一个工具卡的打开按钮（Read → R/server.R）
-clicked <- click_sel("[data-open-file='R/server.R']")
-check("clicked a file-open button", clicked)
-check("tool-card shows English Opening feedback", wait_for(
-  "document.querySelector(\"[data-open-file='R/server.R']\")?.getAttribute('aria-busy')==='true' && document.querySelector(\"[data-open-file='R/server.R']\")?.innerText.includes('Opening…')", 1))
-check("clicking a file reference calls on_open_file",
-      wait_for("document.getElementById('opened-file-probe').textContent === 'R/server.R'", 6),
-      value("document.getElementById('opened-file-probe').textContent"))
-
-# prose 只有裸名 `addin.R`；runtime 应从最近 Write 工具调用解析到 R/addin.R，绝不扫描文件系统。
-current_stage <- "click-bare-file-ref"
-check("bare prose file chip is rendered", wait_for(
-  "!!document.querySelector(\"[data-file-ref='addin.R']\")", 4))
-value("document.getElementById('opened-file-probe').textContent='';true")
-clicked_bare <- click_sel("[data-file-ref='addin.R']")
-check("clicked a bare prose file chip", clicked_bare)
-check("prose chip shows English Opening feedback", wait_for(
-  "document.querySelector(\"[data-file-ref='addin.R']\")?.getAttribute('aria-busy')==='true' && document.querySelector(\"[data-file-ref='addin.R']\")?.innerText.includes('Opening…')", 1))
-check("bare filename resolves to recent tool full path",
-      wait_for("document.getElementById('opened-file-probe').textContent === 'R/addin.R'", 6),
-      value("document.getElementById('opened-file-probe').textContent"))
-
-# ── 历史 session-load：两个 thread 的同名 dm.R 必须严格按当前 thread 隔离 ──────
-current_stage <- "history-thread-a"
-check("clicked history thread A", click_thread("Open history A"))
-check("history A loaded from on_session_load", wait_for(
-  "document.body.innerText.includes('Historical A:') && !!document.querySelector(\"[data-file-ref='dm.R']\")", 6))
-check("history A does not render thread B", isTRUE(value(
-  "!document.body.innerText.includes('Historical B:')")))
-value("document.getElementById('opened-file-probe').textContent='';true")
-check("clicked history A bare dm.R", click_sel("[data-file-ref='dm.R']"))
-check("history A bare dm.R resolves within current thread",
-      wait_for("document.getElementById('opened-file-probe').textContent === '/project/history-a/dm.R'", 6),
-      value("document.getElementById('opened-file-probe').textContent"))
-
-current_stage <- "history-thread-b"
-check("clicked history thread B", click_thread("Open history B"))
-check("history B loaded from on_session_load", wait_for(
-  "document.body.innerText.includes('Historical B:') && !!document.querySelector(\"[data-file-ref='dm.R']\")", 6))
-check("history B does not render thread A", isTRUE(value(
-  "!document.body.innerText.includes('Historical A:')")))
-value("document.getElementById('opened-file-probe').textContent='';true")
-check("clicked history B bare dm.R", click_sel("[data-file-ref='dm.R']"))
-check("history B bare dm.R resolves within current thread",
-      wait_for("document.getElementById('opened-file-probe').textContent === '/project/history-b/dm.R'", 6),
-      value("document.getElementById('opened-file-probe').textContent"))
-
-check("no browser console errors or exceptions", length(console_errors) == 0,
-      if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
-
-try(browser$close(), silent = TRUE)
-try(app$kill(), silent = TRUE)
-if (length(failures)) stop("Chromium verification failed: ", paste(failures, collapse = ", "))
-cat("OPENFILE_REVEAL_CHROMIUM_DONE\n")
+main()

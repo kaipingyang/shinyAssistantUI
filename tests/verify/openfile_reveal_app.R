@@ -3,86 +3,148 @@ suppressPackageStartupMessages({
   library(shinyAssistantUI)
 })
 
-# 记录 on_open_file 被调用的路径（stub 代替 rstudioapi::navigateToFile），
-# 通过隐藏 DOM 元素回传给 Chromium 断言。
-opened <- reactiveVal("")
+fixture_root <- Sys.getenv("AUI_HOST_FIXTURE_ROOT")
+stopifnot(nzchar(fixture_root), dir.exists(fixture_root))
+fixture_project <- normalizePath(file.path(fixture_root, "ERP"))
+live_name <- "\u4ea4\u63a5\u6587\u6863_xpt2sas\u5f02\u6b65\u5316.md"
+history_name <- "\u5386\u53f2_\u4ea4\u63a5.md"
 
-# 处理器：普通消息回声；消息含 "do-edit" 时先发一个 Edit 工具调用+成功结果，
-# 再 on_done —— 用于验证"编辑后揭示最近一次成功编辑"。
-handler <- function(message, thread_id, on_chunk, on_done,
-                    on_tool_call = NULL, on_tool_result = NULL, ...) {
-  if (grepl("do-edit", message, fixed = TRUE)) {
-    if (!is.null(on_tool_call)) {
-      on_tool_call("tc-read", "Read", list(file_path = "R/server.R"))
-      on_tool_result("tc-read", "read ok", is_error = FALSE)
-      on_tool_call("tc-edit-1", "Edit", list(file_path = "R/handlers.R"))
-      on_tool_result("tc-edit-1", "edit ok", is_error = FALSE)
-      on_tool_call("tc-edit-2", "Write", list(file_path = "R/addin.R"))
-      on_tool_result("tc-edit-2", "write ok", is_error = FALSE)
-    }
-    on_chunk("edited files: `addin.R`")
-    on_done()
-    return(invisible(NULL))
-  }
-  on_chunk(sprintf("ECHO[%s]", message))
-  on_done()
-}
-
-ui <- fluidPage(
-  tags$style("html, body, .container-fluid { height: 100%; margin: 0; padding: 0; }"),
-  # 隐藏元素回传 on_open_file 记录的路径
-  tags$script(HTML(
-    "Shiny.addCustomMessageHandler('opened_file', function(p){",
-    "  var el=document.getElementById('opened-file-probe');",
-    "  if(el){el.textContent=p||'';}",
-    "});"
-  )),
-  tags$div(id = "opened-file-probe", style = "position:fixed;bottom:0;left:0;opacity:0;", ""),
-  assistantUIOutput("chat", height = "100vh")
+ui <- bslib::page_fluid(
+  tags$head(tags$link(rel = "icon", href = "data:,")),
+  bslib::layout_columns(
+    col_widths = c(8, 4),
+    assistantUIOutput("chat", height = "92vh"),
+    div(
+      assistantUIOutput("other", height = "44vh"),
+      assistantUIOutput("plain", height = "44vh")
+    )
+  ),
+  div(style = "display:none", textOutput("host_probe"))
 )
 
 server <- function(input, output, session) {
+  empty_probe <- function() list(
+    opened = list(), console = list(), edits = list(), messages = list(), loads = list()
+  )
+  probe <- reactiveVal(list(chat = empty_probe(), other = empty_probe(), plain = empty_probe()))
+  record <- function(id, field, value) {
+    state <- isolate(probe())
+    state[[id]][[field]] <- append(state[[id]][[field]], list(value))
+    probe(state)
+  }
+  output$host_probe <- renderText(as.character(jsonlite::toJSON(
+    probe(), auto_unbox = TRUE, null = "null"
+  )))
+  outputOptions(output, "host_probe", suspendWhenHidden = FALSE)
+
+  make_handler <- function(id) {
+    force(id)
+    function(message, thread_id, on_chunk, on_done,
+             on_tool_call = NULL, on_tool_result = NULL, ...) {
+      record(id, "messages", list(text = message, thread = thread_id))
+      if (startsWith(message, "I ran this in my R console:")) {
+        on_chunk(paste0("Console feedback received by ", id, "."))
+      } else if (id == "chat") {
+        for (tool in list(
+          list(id = "read", name = "Read", path = "R/server.R", error = FALSE),
+          list(id = "edit", name = "Edit", path = "R/handlers.R", error = FALSE),
+          list(id = "write", name = "Write", path = "R/addin.R", error = FALSE),
+          list(id = "failed", name = "Edit", path = "R/not-written.R", error = TRUE)
+        )) {
+          on_tool_call(paste0("host-", tool$id), tool$name, list(file_path = tool$path))
+          on_tool_result(
+            paste0("host-", tool$id),
+            if (tool$error) "Synthetic edit failed" else "Synthetic tool succeeded",
+            is_error = tool$error
+          )
+        }
+        on_chunk(paste0(
+          "Edited files: `addin.R`. Explicit line: `R/app.R:12`.\n\n",
+          "Unicode handoff: `ERP/", live_name, "`.\n\n",
+          "```r\nprint(42L)\n```\n\n",
+          "```Rscript\nstop(\"SYNTHETIC_HOST_ERROR\")\n```\n\n",
+          "```python\nprint(42)\n```\n\n",
+          "```\nplain unlabeled block\n```\n\nHOST_REPLY_COMPLETE"
+        ))
+      } else {
+        on_chunk(paste0(
+          id, " code:\n\n```r\nprint(21L)\n```\n\n",
+          "```python\nprint(21)\n```\n\n", toupper(id), "_REPLY_COMPLETE"
+        ))
+      }
+      on_done()
+    }
+  }
+  console_callback <- function(id) {
+    force(id)
+    function(code, thread_id = NULL, project = NULL) {
+      record(id, "console", list(code = code, thread = thread_id, project = project))
+      if (grepl("SYNTHETIC_HOST_ERROR", code, fixed = TRUE)) {
+        stop("SYNTHETIC_HOST_ERROR", call. = FALSE)
+      }
+      list(ok = TRUE, output = paste0("SYNTHETIC_", toupper(id), "_RESULT_42"), error = "")
+    }
+  }
+
   controls <- assistantUIServer(
-    "chat",
-    handler = handler,
-    show_thread_list = TRUE,
-    persistence = "server",
-    # 两个历史 thread 故意都写 `dm.R`，但 tool-call 完整路径不同：验证 session-load
-    # 恢复后只读取当前 thread 的 messages，不会串到另一个 thread。
-    on_session_load = function(session_id, thread_id, send_thread, ...) {
-      is_a <- identical(session_id, "open-hist-a")
-      full_path <- if (is_a) "/project/history-a/dm.R" else "/project/history-b/dm.R"
-      args <- if (is_a) list(file_path = full_path) else list(path = full_path)
-      label <- if (is_a) "Historical A" else "Historical B"
-      send_thread(messages = list(
-        list(id = paste0("hist-u-", if (is_a) "a" else "b"), role = "user",
-             content = list(list(type = "text", text = paste("open", label)))),
-        list(id = paste0("hist-a-", if (is_a) "a" else "b"), role = "assistant",
-             status = list(type = "complete", reason = "stop"),
-             content = list(
-               list(type = "tool-call", toolCallId = paste0("hist-tool-", if (is_a) "a" else "b"),
-                    toolName = "Read", args = args,
-                    argsText = as.character(jsonlite::toJSON(args, auto_unbox = TRUE)),
-                    result = "read ok", isError = FALSE, artifact = list()),
-               list(type = "text", text = paste0(label, ": `dm.R`"))
-             ))
-      ), has_more = FALSE)
+    "chat", handler = make_handler("chat"),
+    show_thread_list = TRUE, persistence = "server",
+    workspace_mode = TRUE, working_dir = fixture_project,
+    ide_context_provider = function() list(path = "/synthetic/demo.R", rel = "R/demo.R"),
+    on_open_file = function(path, line = NULL, thread_id = NULL, project = NULL) {
+      resolved <- path
+      if (startsWith(path, "ERP/")) {
+        resolved <- shinyAssistantUI:::.addin_resolve_file_path(path, fixture_project)
+      }
+      record("chat", "opened", list(
+        path = path, resolved = resolved, line = line, thread = thread_id, project = project
+      ))
     },
-    # 仅有活动文件、无选区（复现“文件 chip 显示但没有选中文本”的场景）
-    ide_context_provider = function() list(path = "/tmp/demo.R", rel = "R/demo.R"),
-    on_open_file = function(path, line = NULL) {
-      opened(path)
-      session$sendCustomMessage("opened_file", path)
+    on_edits = function(edits, thread_id = NULL, project = NULL) {
+      record("chat", "edits", list(
+        paths = lapply(edits, function(edit) edit$path), thread = thread_id, project = project
+      ))
+      invisible(NULL)
+    },
+    on_run_in_console = console_callback("chat"),
+    on_session_load = function(session_id, thread_id, send_thread, ...) {
+      record("chat", "loads", list(session = session_id, thread = thread_id))
+      label <- if (session_id == "open-hist-a") "A" else "B"
+      full_path <- paste0("/synthetic/history-", tolower(label), "/dm.R")
+      args <- if (label == "A") list(file_path = full_path) else list(path = full_path)
+      send_thread(messages = list(
+        list(id = paste0("hist-u-", label), role = "user",
+             content = list(list(type = "text", text = paste("Open historical", label)))),
+        list(
+          id = paste0("hist-a-", label), role = "assistant",
+          status = list(type = "complete", reason = "stop"),
+          content = list(
+            list(
+              type = "tool-call", toolCallId = paste0("hist-tool-", label),
+              toolName = "Read", args = args,
+              argsText = as.character(jsonlite::toJSON(args, auto_unbox = TRUE)),
+              result = "Historical read succeeded", isError = FALSE
+            ),
+            list(type = "text", text = paste0(
+              "Historical ", label, ": `dm.R:19`.\n\n",
+              "Historical handoff: `ERP/", history_name, "`.\n\n",
+              "```r\nprint(\"HISTORY_", label, "\")\n```\n\nHISTORY_", label, "_COMPLETE"
+            ))
+          )
+        )
+      ), has_more = FALSE)
     }
   )
-
+  assistantUIServer(
+    "other", make_handler("other"), persistence = "none",
+    working_dir = fixture_project, on_run_in_console = console_callback("other")
+  )
+  assistantUIServer("plain", make_handler("plain"), persistence = "none")
   session$onFlushed(function() {
-    controls$send_sessions(list(sessions = list(
-      list(id = "open-hist-a", title = "Open history A", preview = "Historical A",
-           createdAt = as.numeric(Sys.time()) * 1000),
-      list(id = "open-hist-b", title = "Open history B", preview = "Historical B",
-           createdAt = as.numeric(Sys.time()) * 1000 - 1)
-    )))
+    controls$send_sessions(list(sessions = lapply(c("a", "b"), function(id) list(
+      id = paste0("open-hist-", id), title = paste("Open history", toupper(id)),
+      project = fixture_project
+    ))))
   }, once = TRUE)
 }
 
