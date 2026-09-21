@@ -1,158 +1,216 @@
 suppressPackageStartupMessages({
-  library(callr); library(chromote); library(jsonlite)
+  library(callr)
+  library(chromote)
+  library(jsonlite)
 })
 
-`%||%` <- function(x, y) if (is.null(x)) y else x
-project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9809L
-failures <- character()
-unlink(c("/tmp/aui-da.out", "/tmp/aui-da.err"))
-
-check <- function(name, condition, detail = "") {
-  passed <- isTRUE(condition)
-  cat(sprintf("[%s] %-48s %s\n", if (passed) "PASS" else "FAIL", name, detail))
-  if (!passed) failures <<- c(failures, name)
-  invisible(passed)
-}
-
-app <- callr::r_bg(function(project, port) {
-  setwd(project); suppressPackageStartupMessages(library(shiny))
-  shiny::runApp("tests/verify/delete_archive_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
-}, args = list(project = project, port = port), stdout = "/tmp/aui-da.out", stderr = "/tmp/aui-da.err")
-on.exit(try(app$kill(), silent = TRUE), add = TRUE)
-
-for (i in seq_len(80)) {
-  if (!app$is_alive()) break
-  if (file.exists("/tmp/aui-da.err") && any(grepl("Listening on", readLines("/tmp/aui-da.err", warn = FALSE)))) break
-  Sys.sleep(0.25)
-}
-if (!app$is_alive()) { cat(tail(readLines("/tmp/aui-da.err", warn = FALSE), 20), sep = "\n"); stop("boot failed") }
-
-chromote::set_chrome_args(unique(c(chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu")))
-browser <- ChromoteSession$new()
-on.exit({ try(browser$close(), silent = TRUE); try(browser$parent$get_browser()$get_process()$kill(), silent = TRUE) }, add = TRUE)
-
-console_errors <- character(); current_stage <- "boot"
-browser$Runtime$enable()
-browser$Runtime$consoleAPICalled(callback_ = function(message) {
-  if (identical(message$type, "error")) {
-    text <- paste(vapply(message$args, function(a) as.character(a$value %||% a$description %||% ""), character(1)), collapse = " ")
-    console_errors <<- c(console_errors, paste(current_stage, text))
+main <- function() {
+  source("tests/verify/owned_process_cleanup.R", local = TRUE)
+  `%||%` <- function(x, y) if (is.null(x)) y else x
+  project <- normalizePath(".", winslash = "/", mustWork = TRUE)
+  port <- httpuv::randomPort()
+  logs <- c(tempfile("aui-lifecycle-out-"), tempfile("aui-lifecycle-err-"))
+  browser <- NULL
+  app <- callr::r_bg(function(project, port) {
+    setwd(project)
+    shiny::runApp("tests/verify/delete_archive_app.R",
+                 host = "127.0.0.1", port = port, launch.browser = FALSE)
+  }, args = list(project = project, port = port), stdout = logs[[1L]], stderr = logs[[2L]])
+  cleanup <- make_verification_cleanup(function() browser, function() app, logs)
+  on.exit(cleanup(), add = TRUE)
+  for (i in seq_len(100L)) {
+    if (!app$is_alive()) stop(paste(readLines(logs[[2L]], warn = FALSE), collapse = "\n"))
+    if (file.exists(logs[[2L]]) &&
+        any(grepl("Listening on", readLines(logs[[2L]], warn = FALSE)))) break
+    Sys.sleep(0.1)
   }
-})
-browser$Runtime$exceptionThrown(callback_ = function(message) {
-  d <- message$exceptionDetails
-  console_errors <<- c(console_errors, paste(current_stage, "exception:", d$exception$description %||% d$text %||% "?"))
-})
 
-value <- function(script) {
-  r <- browser$Runtime$evaluate(script, returnByValue = TRUE)
-  if (!is.null(r$exceptionDetails)) stop(r$exceptionDetails$text)
-  r$result$value
-}
-wait_for <- function(script, timeout = 8, interval = 0.05) {
-  deadline <- Sys.time() + timeout
-  repeat {
-    if (isTRUE(tryCatch(value(script), error = function(e) FALSE))) return(TRUE)
-    if (Sys.time() >= deadline) return(FALSE)
-    Sys.sleep(interval)
+  chromote::set_chrome_args(unique(c(
+    chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox",
+    "--disable-gpu", "--disable-breakpad", "--disable-crash-reporter", "--no-crash-upload"
+  )))
+  browser <- ChromoteSession$new(width = 1000, height = 800)
+  console_errors <- character()
+  current_stage <- "boot"
+  browser$Runtime$enable()
+  browser$Runtime$consoleAPICalled(callback_ = function(event) {
+    if (identical(event$type, "error")) {
+      console_errors <<- c(console_errors, paste(current_stage, paste(vapply(event$args, function(arg) {
+        as.character(arg$value %||% arg$description %||% "")
+      }, character(1)), collapse = " ")))
+    }
+  })
+  browser$Runtime$exceptionThrown(callback_ = function(event) {
+    console_errors <<- c(console_errors, paste(
+      current_stage, event$exceptionDetails$exception$description %||% event$exceptionDetails$text
+    ))
+  })
+  value <- function(script) {
+    result <- browser$Runtime$evaluate(script, returnByValue = TRUE)
+    if (!is.null(result$exceptionDetails)) stop(result$exceptionDetails$text)
+    result$result$value
   }
+  wait_for <- function(script, timeout = 8) {
+    deadline <- Sys.time() + timeout
+    repeat {
+      if (isTRUE(value(script))) return(TRUE)
+      if (Sys.time() >= deadline) return(FALSE)
+      Sys.sleep(0.05)
+    }
+  }
+  check <- function(name, condition) {
+    cat(sprintf("[%s] %s\n", if (isTRUE(condition)) "PASS" else "FAIL", name))
+    if (!isTRUE(condition)) {
+      stop(current_stage, ": ", name, "\n", paste(console_errors, collapse = "\n"))
+    }
+  }
+  js_string <- function(text) as.character(toJSON(text, auto_unbox = TRUE))
+  key <- function(name, code, vk, modifiers = 0L) {
+    for (type in c("keyDown", "keyUp")) {
+      browser$Input$dispatchKeyEvent(
+        type = type, key = name, code = code,
+        windowsVirtualKeyCode = as.integer(vk), modifiers = as.integer(modifiers)
+      )
+    }
+  }
+  in_view <- function(expression) {
+    paste0("(()=>{const e=", expression,
+           ";if(!e)return false;const r=e.getBoundingClientRect();",
+           "return r.width>0&&r.height>0&&r.left>=0&&r.top>=0&&",
+           "r.right<=innerWidth+1&&r.bottom<=innerHeight+1})()")
+  }
+  element <- function(selector) paste0("document.querySelector(", js_string(selector), ")")
+  click <- function(expression) {
+    check("click target is inside viewport", wait_for(in_view(expression)))
+    point <- fromJSON(value(paste0(
+      "(()=>{const r=(", expression, ").getBoundingClientRect();",
+      "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()"
+    )))
+    browser$Input$dispatchMouseEvent(type = "mouseMoved", x = point$x, y = point$y)
+    for (type in c("mousePressed", "mouseReleased")) {
+      browser$Input$dispatchMouseEvent(
+        type = type, x = point$x, y = point$y, button = "left", clickCount = 1L
+      )
+    }
+  }
+  item <- function(title) paste0(
+    "[...document.querySelectorAll('[data-slot=aui_thread-list-item]')].find(e=>",
+    "e.querySelector('[data-slot=aui_thread-list-item-title]')?.textContent.trim()===",
+    js_string(title), ")"
+  )
+  open_menu <- function(title) {
+    click(paste0("(", item(title), ")?.querySelector('[data-slot=aui_thread-list-item-more]')"))
+    check("session menu is inside viewport", wait_for(in_view(
+      element("[data-slot=aui_thread-list-item-more-content]")
+    )))
+  }
+  menu_action <- function(label) click(paste0(
+    "[...document.querySelectorAll('[data-slot=aui_thread-list-item-more-item]')]",
+    ".find(e=>e.textContent.trim()===", js_string(label), ")"
+  ))
+  open_history <- function(title, id) {
+    click(paste0("(", item(title), ")?.querySelector('[data-slot=aui_thread-list-item-trigger]')"))
+    check(paste("history restores", id), wait_for(paste0(
+      "document.body.innerText.includes(", js_string(paste0("RESTORED[", id, "]")), ")"
+    )))
+  }
+  navigate <- function() {
+    browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
+    browser$Page$loadEventFired()
+    check("installed widget mounted", wait_for("!!document.querySelector('.aui-root')", 12))
+  }
+
+  navigate()
+  check("synthetic sessions listed", wait_for(paste0("!!(", item("sess-del"), ")")))
+  current_stage <- "highlight"
+  click(element(".aui-lexical-input[contenteditable=true]"))
+  browser$Input$insertText(text = "show code")
+  key("Enter", "Enter", 13L)
+  check("assistant R code is syntax-highlighted", wait_for(
+    "!!document.querySelector('[data-syntax-highlighter=prism] code span')"
+  ))
+
+  current_stage <- "sidebar-reload"
+  click(element("[data-slot=aui_sidebar_toggle]"))
+  check("sidebar collapses", wait_for("!document.querySelector('[data-slot=aui_thread_sidebar]')"))
+  navigate()
+  check("sidebar defaults to expanded after reload", wait_for(
+    "document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'"
+  ))
+
+  current_stage <- "rename"
+  open_history("sess-keep", "sess-keep")
+  open_menu("sess-keep")
+  menu_action("Rename")
+  check("rename editor opens", wait_for("!!document.querySelector('.aui-thread-rename-input')"))
+  key("a", "KeyA", 65L, 2L)
+  browser$Input$insertText(text = "Discarded title")
+  key("Escape", "Escape", 27L)
+  check("Escape keeps the original title", wait_for(paste0(
+    "!document.querySelector('.aui-thread-rename-input')&&!!(", item("sess-keep"), ")"
+  )))
+  check("Escape does not invoke backend rename",
+        isTRUE(value("document.getElementById('renamed-probe').textContent===''")))
+  open_menu("sess-keep")
+  menu_action("Rename")
+  check("rename editor reopens", wait_for("!!document.querySelector('.aui-thread-rename-input')"))
+  key("a", "KeyA", 65L, 2L)
+  browser$Input$insertText(text = "Renamed keep")
+  key("Enter", "Enter", 13L)
+  check("Enter updates title and invokes backend rename", wait_for(paste0(
+    "!!(", item("Renamed keep"),
+    ")&&document.getElementById('renamed-probe').textContent==='sess-keep|Renamed keep'"
+  )))
+  navigate()
+  check("renamed title survives reload", wait_for(paste0("!!(", item("Renamed keep"), ")")))
+  open_history("Renamed keep", "sess-keep")
+
+  current_stage <- "archive"
+  open_menu("sess-arch")
+  menu_action("Archive")
+  archived <- "document.querySelector('[data-slot=aui_thread-list-archived]')?.textContent.includes('sess-arch')"
+  check("archive moves session out of the active list", wait_for(paste0(
+    archived, "&&!(", item("sess-arch"), ")"
+  )))
+  navigate()
+  check("archive survives reload", wait_for(paste0(archived, "&&!(", item("sess-arch"), ")")))
+  click(element("[data-slot=aui_thread-list-unarchive]"))
+  check("unarchive returns session to active list", wait_for(paste0("!!(", item("sess-arch"), ")")))
+  open_history("sess-arch", "sess-arch")
+
+  current_stage <- "delete"
+  open_history("sess-del", "sess-del")
+  open_menu("sess-del")
+  menu_action("Delete")
+  check("delete confirmation is inside viewport", wait_for(in_view(
+    element("[data-slot=aui_delete_confirm]")
+  )))
+  check("opening confirmation does not delete",
+        isTRUE(value("document.getElementById('deleted-probe').textContent===''")))
+  click(element("[data-cancel-delete]"))
+  check("Cancel dismisses dialog and keeps session", wait_for(paste0(
+    "!document.querySelector('[data-slot=aui_delete_confirm]')&&!!(", item("sess-del"), ")"
+  )))
+  check("Cancel does not invoke backend delete",
+        isTRUE(value("document.getElementById('deleted-probe').textContent===''")))
+  open_menu("sess-del")
+  menu_action("Delete")
+  click(element("[data-confirm-delete]"))
+  check("confirmed delete dismisses dialog", wait_for(
+    "!document.querySelector('[data-slot=aui_delete_confirm]')"
+  ))
+  check("confirmed delete invokes the correct backend callback", wait_for(
+    "document.getElementById('deleted-probe').textContent==='sess-del'"
+  ))
+  check("deleted session leaves active list", wait_for(paste0("!(", item("sess-del"), ")")))
+  navigate()
+  check("deleted session stays absent while other sessions survive", wait_for(paste0(
+    "!(", item("sess-del"), ")&&!!(", item("Renamed keep"), ")&&!!(", item("sess-arch"), ")"
+  )))
+  open_history("Renamed keep", "sess-keep")
+  check("no browser console errors or exceptions", length(console_errors) == 0L)
+  cleanup()
+  cat("DELETE_ARCHIVE_CHROMIUM_DONE\n")
 }
-key <- function(name, code, vk) {
-  browser$Input$dispatchKeyEvent(type = "keyDown", key = name, code = code, windowsVirtualKeyCode = as.integer(vk))
-  browser$Input$dispatchKeyEvent(type = "keyUp", key = name, code = code, windowsVirtualKeyCode = as.integer(vk))
-}
-type_text <- function(text) {
-  value("(function(){const e=document.querySelector('.aui-lexical-input[contenteditable=true]');if(e)e.focus();return !!e})()")
-  browser$Input$insertText(text = text)
-}
-click_sel <- function(sel) {
-  j <- value(sprintf("(function(){const e=document.querySelector(%s);if(!e)return null;const r=e.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()", toJSON(sel, auto_unbox = TRUE)))
-  if (is.null(j)) return(FALSE)
-  p <- fromJSON(j)
-  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  Sys.sleep(0.15); TRUE
-}
-# 点击某个会话项（按标题文字）的 More 菜单按钮
-click_item_more <- function(title) {
-  j <- value(sprintf(paste0(
-    "(function(){const items=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')];",
-    "const it=items.find(x=>x.innerText.includes(%s));if(!it)return null;",
-    "const b=it.querySelector('[data-slot=aui_thread-list-item-more]');if(!b)return null;",
-    "const r=b.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2})})()"), toJSON(title, auto_unbox = TRUE)))
-  if (is.null(j)) return(FALSE)
-  p <- fromJSON(j)
-  browser$Input$dispatchMouseEvent(type = "mouseMoved", x = p$x, y = p$y)
-  browser$Input$dispatchMouseEvent(type = "mousePressed", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  browser$Input$dispatchMouseEvent(type = "mouseReleased", x = p$x, y = p$y, button = "left", clickCount = 1L)
-  Sys.sleep(0.2); TRUE
-}
 
-browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
-browser$Page$loadEventFired()
-check("widget mounted", wait_for("!!document.querySelector('.aui-root')", 12))
-check("sessions listed", wait_for("document.body.innerText.includes('sess-keep') && document.body.innerText.includes('sess-del')", 8))
-
-# ── 代码高亮 ─────────────────────────────────────────────────────────────────
-current_stage <- "highlight"
-type_text("show code"); key("Enter", "Enter", 13L)
-check("assistant code block is syntax-highlighted",
-      wait_for("(function(){const el=document.querySelector('[data-syntax-highlighter=prism]');if(!el)return false;return el.querySelectorAll('code span, span.token').length>0})()", 8))
-
-# ── 侧栏折叠持久化（跨页面重载）────────────────────────────────────────────
-current_stage <- "sidebar-persist"
-check("sidebar starts expanded", wait_for("document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'"))
-click_sel("[data-slot=aui_sidebar_toggle]")
-check("sidebar collapsed", wait_for("!document.querySelector('[data-slot=aui_thread_sidebar]')", 4))
-browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
-browser$Page$loadEventFired()
-# 折叠改为“仅本会话、不持久化”（default 展开，方便选历史）→ 重载后回到展开态。
-check("sidebar reopens expanded after reload (collapse is session-only, not persisted)",
-      wait_for("!!document.querySelector('.aui-root') && document.querySelector('[data-slot=aui_thread_sidebar]')?.getAttribute('data-collapsed')==='false'", 10))
-check("sessions still listed after reload", wait_for("document.body.innerText.includes('sess-arch')", 8))
-
-# ── Archive 软隐藏（持久化，可恢复）─────────────────────────────────────────
-current_stage <- "archive"
-click_item_more("sess-arch")
-check("archive menu item present", wait_for("!!document.querySelector('[data-slot=aui_thread-list-item-more-content]')", 4))
-# 点击 Archive（菜单里第 3 项，用文字定位）
-value("(function(){const its=[...document.querySelectorAll('[data-slot=aui_thread-list-item-more-item]')];const a=its.find(x=>x.innerText.trim()==='Archive');if(a)a.click();return !!a})()")
-check("archived session appears in archived section",
-      wait_for("(function(){const s=document.querySelector('[data-slot=aui_thread-list-archived]');return !!s && s.innerText.includes('sess-arch')})()", 6))
-check("archived session left the active list",
-      wait_for("(function(){const items=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')];return !items.some(x=>x.innerText.includes('sess-arch'))})()", 4))
-
-# ── Unarchive 恢复 ───────────────────────────────────────────────────────────
-current_stage <- "unarchive"
-click_sel("[data-slot=aui_thread-list-unarchive]")
-check("unarchived session returns to active list",
-      wait_for("(function(){const items=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')];return items.some(x=>x.innerText.includes('sess-arch'))})()", 6))
-
-# ── Delete 二次确认 + 真删 ──────────────────────────────────────────────────
-current_stage <- "delete"
-value("document.getElementById('deleted-probe').textContent='';true")
-click_item_more("sess-del")
-value("(function(){const its=[...document.querySelectorAll('[data-slot=aui_thread-list-item-more-item]')];const d=its.find(x=>x.innerText.trim()==='Delete');if(d)d.click();return !!d})()")
-check("delete confirmation dialog appears", wait_for("!!document.querySelector('[data-slot=aui_delete_confirm]')", 4))
-# 先测试取消不删
-click_sel("[data-cancel-delete]")
-check("cancel keeps the session", wait_for("document.body.innerText.includes('sess-del') && document.getElementById('deleted-probe').textContent===''", 4))
-# 再确认删除
-click_item_more("sess-del")
-value("(function(){const its=[...document.querySelectorAll('[data-slot=aui_thread-list-item-more-item]')];const d=its.find(x=>x.innerText.trim()==='Delete');if(d)d.click();return !!d})()")
-check("delete confirmation dialog appears again", wait_for("!!document.querySelector('[data-slot=aui_delete_confirm]')", 4))
-click_sel("[data-confirm-delete]")
-check("confirm dialog dismisses immediately after clicking Delete (Bug: stayed open)",
-      wait_for("!document.querySelector('[data-slot=aui_delete_confirm]')", 4))
-check("confirm calls backend real delete", wait_for("document.getElementById('deleted-probe').textContent==='sess-del'", 6),
-      value("document.getElementById('deleted-probe').textContent"))
-check("deleted session removed from list and does not reappear",
-      wait_for("(function(){const items=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')];return !items.some(x=>x.innerText.includes('sess-del'))})()", 6))
-
-check("no browser console errors", length(console_errors) == 0,
-      if (length(console_errors)) paste(utils::head(console_errors, 3), collapse = " | ") else "0 errors")
-
-try(browser$close(), silent = TRUE); try(app$kill(), silent = TRUE)
-if (length(failures)) stop("Chromium verification failed: ", paste(failures, collapse = ", "))
-cat("DELETE_ARCHIVE_CHROMIUM_DONE\n")
+main()
