@@ -242,8 +242,8 @@
 .new_claude_options <- function(...) ClaudeAgentSDK::ClaudeAgentOptions(...)
 .new_claude_client <- function(options) {
   client <- ClaudeAgentSDK::ClaudeSDKClient$new(options)
-  if (!is.function(client$is_alive)) {
-    stop("Update ClaudeAgentSDK to a build with is_alive() and restart R before using long-running Claude tasks.",
+  if (!is.function(client$is_alive) || !is.function(client$connect_async)) {
+    stop("Update ClaudeAgentSDK to a build with is_alive() and connect_async(), then restart R before using concurrent Claude sessions.",
          call. = FALSE)
   }
   client
@@ -1281,8 +1281,36 @@ make_ellmer_session_loader <- function(store) {
 
 # Register before connect() starts so Viewer Stop during CLI initialization can
 # still find and reclaim the partially connected subprocess.
-.connect_registered_claude_client <- function(client, register, unregister) {
+.connect_registered_claude_client <- function(client, register, unregister, async = FALSE) {
   register(client)
+  if (isTRUE(async) && is.function(client$connect_async)) {
+    settled <- FALSE
+    abort <- NULL
+    result <- promises::promise(function(resolve, reject) {
+      failed <- function(error) {
+        if (settled) return(invisible(NULL))
+        settled <<- TRUE
+        unregister(client)
+        .disconnect_claude_client_safely(client)
+        reject(error)
+      }
+      tryCatch({
+        abort <<- client$connect_async(
+          on_fulfilled = function(value) {
+            if (settled) return(invisible(NULL))
+            settled <<- TRUE
+            resolve(client)
+          },
+          on_rejected = failed
+        )
+      }, error = failed)
+    })
+    attr(result, "cancel") <- function() {
+      if (settled || !is.function(abort)) return(invisible(FALSE))
+      abort()
+    }
+    return(result)
+  }
   tryCatch(
     {
       client$connect()
@@ -3066,17 +3094,43 @@ make_ellmer_session_loader <- function(store) {
 # A strict SID (set after /reload-skills reconnect failure) must never fall
 # through to a fresh session on a later turn. Normal historical resume keeps
 # the existing backward-compatible fresh fallback.
+.claude_cancelled_connection <- function() {
+  error <- simpleError("Claude connection initialization was cancelled.")
+  class(error) <- c("claude_connection_cancelled", class(error))
+  error
+}
+
 .claude_connect_with_resume_policy <- function(stored_sid = NULL, strict_sid = NULL,
                                                connect_resume, connect_fresh,
-                                               on_normal_resume_failure = function(error) NULL) {
+                                               on_normal_resume_failure = function(error) NULL,
+                                               is_cancelled = function() FALSE) {
+  if (isTRUE(is_cancelled())) stop(.claude_cancelled_connection())
   if (!is.null(strict_sid) && nzchar(strict_sid %||% ""))
     return(connect_resume(strict_sid))
   if (!is.null(stored_sid) && nzchar(stored_sid %||% "")) {
-    resumed <- tryCatch(connect_resume(stored_sid), error = function(error) {
+    recover <- function(error) {
+      if (isTRUE(is_cancelled())) stop(.claude_cancelled_connection())
+      if (inherits(error, "claude_connection_cancelled")) stop(error)
       on_normal_resume_failure(error)
-      NULL
-    })
-    if (!is.null(resumed)) return(resumed)
+      connect_fresh()
+    }
+    attempt <- tryCatch(
+      list(value = connect_resume(stored_sid)),
+      error = function(error) list(error = error)
+    )
+    if (!is.null(attempt$error)) return(recover(attempt$error))
+    if (inherits(attempt$value, "promise")) {
+      return(promises::then(
+        attempt$value,
+        onFulfilled = function(client) {
+          if (!is.null(client)) return(client)
+          if (isTRUE(is_cancelled())) stop(.claude_cancelled_connection())
+          connect_fresh()
+        },
+        onRejected = recover
+      ))
+    }
+    if (!is.null(attempt$value)) return(attempt$value)
   }
   connect_fresh()
 }
@@ -3530,6 +3584,8 @@ make_claude_handler <- function(options       = NULL,
   }
 
   clients <- list()
+  pending_connections <- list()
+  connection_generations <- list()
   # /reload-skills 已确认的 SID 若重连失败，后续 turn 只能继续恢复该
   # SID；不得落入通用历史会话的 fresh fallback。
   strict_resume_sids <- list()
@@ -4027,15 +4083,31 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
-  connect_new_client <- function(thread_id, client_options) {
+  connect_new_client <- function(thread_id, client_options, async = FALSE) {
     client <- .new_claude_client(client_options)
-    .connect_registered_claude_client(
+    result <- .connect_registered_claude_client(
       client,
       register = function(x) clients[[thread_id]] <<- x,
       unregister = function(x) {
         if (identical(clients[[thread_id]], x)) clients[[thread_id]] <<- NULL
-      }
+      },
+      async = async
     )
+    if (!inherits(result, "promise")) return(result)
+    pending <- new.env(parent = emptyenv())
+    pending$cancel <- attr(result, "cancel", exact = TRUE)
+    pending_connections[[thread_id]] <<- pending
+    clear <- function() {
+      if (identical(pending_connections[[thread_id]], pending)) {
+        pending_connections[[thread_id]] <<- NULL
+      }
+    }
+    pending$promise <- promises::then(
+      result,
+      function(client) { clear(); client },
+      function(error) { clear(); stop(error) }
+    )
+    pending$promise
   }
 
   retire_consumer <- function(thread_id, record, reason = NULL) {
@@ -4504,7 +4576,30 @@ make_claude_handler <- function(options       = NULL,
     record
   }
 
-  get_client <- function(thread_id, project = NULL) {
+  get_client <- function(thread_id, project = NULL, async = FALSE,
+                         is_cancelled = function() FALSE) {
+    generation <- connection_generations[[thread_id]] %||% 0L
+    connection_cancelled <- function() {
+      isTRUE(is_cancelled()) ||
+        !identical(connection_generations[[thread_id]] %||% 0L, generation)
+    }
+    if (connection_cancelled()) stop(.claude_cancelled_connection())
+    strict_sid <- strict_resume_sids[[thread_id]]
+    connected <- function(client) {
+      if (connection_cancelled() || !identical(clients[[thread_id]], client)) {
+        if (identical(clients[[thread_id]], client)) clients[[thread_id]] <<- NULL
+        .disconnect_claude_client_safely(client)
+        stop(.claude_cancelled_connection())
+      }
+      if (!is.null(strict_sid)) strict_resume_sids[[thread_id]] <<- NULL
+      coordinator_for(thread_id, client, project)
+      client
+    }
+    pending <- pending_connections[[thread_id]]
+    if (!is.null(pending)) {
+      if (isTRUE(async)) return(promises::then(pending$promise, connected))
+      stop("Claude connection is still initializing.", call. = FALSE)
+    }
     if (!is.null(clients[[thread_id]])) {
       client <- clients[[thread_id]]
       if (is.function(client$is_alive) && !isTRUE(client$is_alive())) {
@@ -4521,21 +4616,18 @@ make_claude_handler <- function(options       = NULL,
       }
     }
 
-    strict_sid <- strict_resume_sids[[thread_id]]
     stored_sid <- read_session_id(thread_id)
 
     client <- .claude_connect_with_resume_policy(
       stored_sid = stored_sid,
       strict_sid = strict_sid,
       connect_resume = function(sid) {
-        resumed <- connect_new_client(
-          thread_id, make_opts(thread_id, sid, project)
+        connect_new_client(
+          thread_id, make_opts(thread_id, sid, project), async = async
         )
-        if (!is.null(strict_sid)) strict_resume_sids[[thread_id]] <<- NULL
-        resumed
       },
       connect_fresh = function() {
-        connect_new_client(thread_id, make_opts(thread_id, project = project))
+        connect_new_client(thread_id, make_opts(thread_id, project = project), async = async)
       },
       on_normal_resume_failure = function(e) {
         message("[CLAUDE] resume failed, starting fresh: ", conditionMessage(e))
@@ -4543,11 +4635,11 @@ make_claude_handler <- function(options       = NULL,
           .update_claude_session_map(session_map_path, thread_id, NULL),
           error = function(map_error) session_map
         )
-      }
+      },
+      is_cancelled = connection_cancelled
     )
 
-    coordinator_for(thread_id, client, project)
-    client
+    if (inherits(client, "promise")) promises::then(client, connected) else connected(client)
   }
 
   retire_threads <- function(thread_ids, async = FALSE, force = FALSE) {
@@ -4555,10 +4647,16 @@ make_claude_handler <- function(options       = NULL,
     invisible(lapply(thread_ids, function(thread_id) {
       client <- clients[[thread_id]]
       record <- consumer_records[[thread_id]]
-      if (is.null(client) && is.null(record)) return(invisible(NULL))
+      pending <- pending_connections[[thread_id]]
+      if (is.null(client) && is.null(record) && is.null(pending)) return(invisible(NULL))
       retire_serial <<- retire_serial + 1L
       owner <- paste0("retire:", retire_serial)
       retire <- function() {
+        connection_generations[[thread_id]] <<-
+          (connection_generations[[thread_id]] %||% 0L) + 1L
+        if (!is.null(pending) && is.function(pending$cancel)) pending$cancel()
+        record_manages_client <- !is.null(record) && !isTRUE(record$retired) &&
+          identical(record$client, client)
         if (!is.null(record)) {
           record$closing <- TRUE
           record$async_close <- isTRUE(async)
@@ -4571,7 +4669,7 @@ make_claude_handler <- function(options       = NULL,
         if (identical(consumer_records[[thread_id]], record)) {
           consumer_records[[thread_id]] <<- NULL
         }
-        if (is.null(record)) {
+        if (!record_manages_client && !is.null(client)) {
           disconnect <- function() .disconnect_claude_client_safely(client)
           if (isTRUE(async)) later::later(disconnect, delay = 0) else disconnect()
         }
@@ -5011,7 +5109,10 @@ make_claude_handler <- function(options       = NULL,
   cleanup <- function() {
     memory_guard$dispose()
     usage_probe_manager$close()
-    retire_threads(unique(c(names(clients), names(consumer_records))), async = FALSE, force = TRUE)
+    retire_threads(
+      unique(c(names(clients), names(consumer_records), names(pending_connections))),
+      async = FALSE, force = TRUE
+    )
     for (route in persistent_routes) {
       if (is.null(route)) next
       route$ui_generation <- as.integer(route$ui_generation %||% 0L) + 1L
@@ -5208,6 +5309,8 @@ make_claude_handler <- function(options       = NULL,
     request_cancel <- function() {
       cancel_requested <<- TRUE
       if (is.function(cancel_wait)) cancel_wait()
+      connecting <- pending_connections[[thread_id]]
+      if (!is.null(connecting) && is.function(connecting$cancel)) connecting$cancel()
       if (sent_to_cli && foreground_acquired && !halted && !isTRUE(record$retired)) {
         begin_interrupt()
       }
@@ -5232,12 +5335,25 @@ make_claude_handler <- function(options       = NULL,
       FALSE
     }
     connect <- function() {
-      client <<- tryCatch(
-        get_client(thread_id, project),
-        error = function(e) { on_error(conditionMessage(e)); NULL }
-      )
-      if (cold && !is.null(on_warming)) on_warming(FALSE)
-      !is.null(client)
+      failed <- function(error) {
+        if (cold && !is.null(on_warming)) on_warming(FALSE)
+        if (!finish_cancelled_before_send()) on_error(conditionMessage(error))
+        FALSE
+      }
+      connected <- function(value) {
+        client <<- value
+        if (cold && !is.null(on_warming)) on_warming(FALSE)
+        !is.null(client)
+      }
+      result <- tryCatch(get_client(
+        thread_id, project, async = TRUE,
+        is_cancelled = function() cancel_requested || isTRUE(is_cancelled()) || closed
+      ), error = identity)
+      if (inherits(result, "error")) return(failed(result))
+      if (inherits(result, "promise")) {
+        return(promises::then(result, connected, failed))
+      }
+      connected(result)
     }
     acquire <- function() {
       if (is.null(record)) {
@@ -6344,7 +6460,9 @@ make_claude_handler <- function(options       = NULL,
       coro::await(switch)
     }
     if (turn$cancelled()) return(invisible(NULL))
-    if (!turn$connect()) return(invisible(NULL))
+    connected <- turn$connect()
+    if (inherits(connected, "promise")) connected <- coro::await(connected)
+    if (!isTRUE(connected)) return(invisible(NULL))
     if (turn$cancelled()) return(invisible(NULL))
     repeat {
       switch <- turn$model_switch()

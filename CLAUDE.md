@@ -385,7 +385,7 @@ NULL）；否则历史重开之后才到达的新后台审批会被误判为没�
 `makeToolCallbacks()`，不能创建伪 run。新 history owner 清旧浏览器 runId
 并失效旧同步 job，已确认的前台来源标记与浏览器因果 ID 分开保存。
 Task Stop 使用 SDK `stop_task_async()`：ACK 不是终态，失败/未确认可重试。
-必须配套 ClaudeAgentSDK `>= 0.2.5.9000`，升级后重启既有 Job。
+必须配套 ClaudeAgentSDK `>= 0.2.5.9001`，升级后重启既有 Job。
 
 终态转录的短等待与最多 30 秒补读分离；首个已变化的 user-only 快照
 不代表完整答复已落盘。`reconcile()` 先 force 跨 timer 参数，完成通知后
@@ -395,6 +395,18 @@ Task Stop 使用 SDK `stop_task_async()`：ACK 不是终态，失败/未确认�
 `verify_long_task_lifecycle.R` 是真实 SDK/JSONL/Chromium 长任务门禁，
 覆盖活跃审批时的历史分页，以及完整 browser reload 后才到达的新审批和结果；
 后者不能先发伪前台消息来注册回调。`smoke` 模式不能代替 125 秒验收。
+
+### 历史会话异步冷连接（Plan 143）
+
+前台通过 SDK `connect_async()` 等待一次初始化 promise；不要在已有会话流式输出时
+重新调用阻塞的 `client$connect()`，也不要用嵌套 `later::run_now()` 假装异步。
+初始化只有自己的单个 timer/reader，完成后才交给原 coordinator。
+`pending_connections` 按 thread 保存取消句柄；取消初始化不发送 prompt、不进入普通
+resume 失败的 fresh fallback。真实 SDK 的能力检查必须包含 `connect_async()`；
+内部同步 fake client 仅用于原有无网络测试 seam，不能给旧生产 SDK 静默降级。
+`verify_addin_session_independence.R` 用真实安装 addin、SDK、Chromium 和隔离历史，
+让第二 CLI 延迟 3 秒初始化，检查第一会话流和 host heartbeat 不出现同等暂停。
+`AUI_INDEPENDENCE_MODE=cancel` 还检查初始化中 Stop、无 prompt、无孤儿进程和再次恢复。
 
 ### ellmer / codeagent 的调度与清理（Plan 141）
 
