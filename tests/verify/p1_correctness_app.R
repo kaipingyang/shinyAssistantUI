@@ -12,10 +12,21 @@ suppressPackageStartupMessages(
 installed_path <- normalizePath(find.package("shinyAssistantUI"), winslash = "/")
 installed_version <- as.character(packageVersion("shinyAssistantUI"))
 
-make_handler <- function(prefix) {
+make_handler <- function(prefix, queue_gate = NULL) {
   run_count <- 0L
   function(message, on_chunk, on_done, attachments = list(), is_reload = FALSE, ...) {
     run_count <<- run_count + 1L
+    if (identical(message, "queue first")) {
+      if (is.null(queue_gate)) stop("Queue fixture is unavailable for this widget")
+      on_chunk(paste0(prefix, "QUEUE_FIRST_STARTED\n\n"))
+      return(promises::promise(function(resolve, reject) {
+        queue_gate$finish <- function() {
+          on_chunk(paste0(prefix, "QUEUE_FIRST_DONE"))
+          on_done()
+          resolve(NULL)
+        }
+      }))
+    }
     attachment <- if (length(attachments)) attachments[[1L]] else list()
     attachment_name <- as.character(
       attachment$name %||% attachment$fileName %||% attachment$filename %||% "none"
@@ -27,9 +38,14 @@ make_handler <- function(prefix) {
     } else {
       0L
     }
+    attachments_complete <- all(vapply(attachments, function(item) {
+      data <- item$data %||% item$content %||% ""
+      length(data) == 1L && is.character(data) && nzchar(data)
+    }, logical(1)))
     on_chunk(sprintf(
       paste0(
         "%sRUN=%d RELOAD=%s ATT_NAME=%s ATT_LEN=%d ATT_SUM=%d\n\n",
+        "ATT_COUNT=%d ATT_COMPLETE=%s\n\n",
         "MESSAGE_START\n\n%s\n\nMESSAGE_END\n\n",
         "Inline \\(x^2\\).\n\n\\[y^2\\]\n\nprices $5 through $10."
       ),
@@ -39,6 +55,8 @@ make_handler <- function(prefix) {
       attachment_name,
       nchar(attachment_data, type = "bytes"),
       attachment_sum,
+      length(attachments),
+      as.character(attachments_complete),
       message
     ))
     on_done()
@@ -52,6 +70,7 @@ ui <- assistantUIPage(
     `data-package-version` = installed_version
   ),
   tags$pre(id = "feedback-log", textOutput("feedback_log", inline = TRUE)),
+  actionButton("release_queue", "Finish synthetic queued turn"),
   tags$section(
     id = "enabled-fixture",
     tags$h3("Feedback enabled"),
@@ -66,13 +85,20 @@ ui <- assistantUIPage(
 )
 
 server <- function(input, output, session) {
+  queue_gate <- new.env(parent = emptyenv())
+  observeEvent(input$release_queue, {
+    finish <- queue_gate$finish
+    if (!is.function(finish)) stop("No synthetic turn is waiting for completion")
+    queue_gate$finish <- NULL
+    finish()
+  })
   feedback_events <- reactiveVal(character())
   output$feedback_log <- renderText(paste(feedback_events(), collapse = "|"))
   outputOptions(output, "feedback_log", suspendWhenHidden = FALSE)
 
   assistantUIServer(
     "chat_on",
-    handler = make_handler("ON_"),
+    handler = make_handler("ON_", queue_gate),
     on_feedback = function(message_id, type) {
       feedback_events(c(feedback_events(), as.character(type)[[1L]]))
     },
