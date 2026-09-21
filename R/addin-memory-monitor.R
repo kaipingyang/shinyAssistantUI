@@ -10,10 +10,17 @@
   if (is.null(safe)) as.numeric(fallback) else safe
 }
 
+.memory_monitor_time_ms <- function(value) {
+  if (inherits(value, "POSIXt")) value <- as.numeric(value)
+  if (!is.numeric(value) || length(value) != 1L ||
+      !is.finite(value) || value <= 0 || value > 8640000000000) return(0)
+  .memory_monitor_safe_number(floor(value * 1000))
+}
+
 .memory_monitor_exact_open <- function(value) {
   is.list(value) && identical(names(value), c(
     "version", "ownerId", "openId", "visible", "revision", "sample"
-  )) && identical(value$version, 2L) &&
+  )) && (identical(value$version, 2L) || identical(value$version, 3L)) &&
     !is.null(.settings_safe_integer(value$ownerId, positive = TRUE)) &&
     !is.null(.settings_safe_integer(value$openId, positive = TRUE)) &&
     .diagnostics_scalar_logical(value$visible) &&
@@ -49,13 +56,18 @@
       state = .memory_monitor_guard_state(next_state),
       pssBytes = .memory_monitor_safe_number(sample$pss_bytes),
       rssBytes = .memory_monitor_safe_number(sample$rss_bytes),
+      treeRssBytes = .memory_monitor_safe_number(sample$tree_rss_bytes),
+      treeProcessCount = .memory_monitor_safe_number(sample$tree_process_count),
       cgroupCurrentBytes = .memory_monitor_safe_number(sample$cgroup_current_bytes),
       cgroupMaxBytes = if (cgroup_limited) .memory_monitor_safe_number(cgroup_max) else 0,
       cgroupLimited = isTRUE(cgroup_limited),
       softPssBytes = thresholds$softPssBytes,
       hardPssBytes = thresholds$hardPssBytes,
       softRssBytes = thresholds$softRssBytes,
-      hardRssBytes = thresholds$hardRssBytes
+      hardRssBytes = thresholds$hardRssBytes,
+      sampledAt = .memory_monitor_time_ms(sample$captured_at),
+      treeSampledAt = .memory_monitor_time_ms(sample$tree_captured_at),
+      cgroupSampledAt = .memory_monitor_time_ms(sample$cgroup_captured_at)
     )
   }
 
@@ -63,9 +75,13 @@
     if (state$disposed || is.null(binding) || isTRUE(binding$disposed) ||
         !isTRUE(binding$expanded) || isTRUE(binding$sent_for_open) ||
         is.null(state$latest)) return(invisible(FALSE))
+    sample <- state$latest
+    if (identical(binding$version, 2L)) {
+      sample[c("sampledAt", "treeSampledAt", "cgroupSampledAt")] <- NULL
+    }
     frame <- list(
-      version = 2L, ownerId = binding$owner_id, openId = binding$open_id,
-      revision = state$revision, sample = state$latest
+      version = binding$version, ownerId = binding$owner_id, openId = binding$open_id,
+      revision = state$revision, sample = sample
     )
     ok <- tryCatch({
       binding$session$sendCustomMessage(
@@ -120,6 +136,7 @@
     binding <- new.env(parent = emptyenv())
     binding$session <- session; binding$input_id <- as.character(input_id)[[1L]]
     binding$owner_id <- state$owner_allocator; binding$open_id <- 0
+    binding$version <- 3L
     binding$expanded <- FALSE; binding$sent_for_open <- FALSE
     binding$sent_revision <- 0; binding$retry_used <- FALSE
     binding$disposed <- FALSE; binding$observer <- NULL
@@ -150,6 +167,7 @@
         }
         if (isTRUE(message$visible)) {
           if (message$openId <= binding$open_id) return()
+          binding$version <- message$version
           binding$open_id <- message$openId
           binding$expanded <- TRUE
           binding$sent_for_open <- FALSE
@@ -165,7 +183,7 @@
     )
     session$onSessionEnded(function() dispose_binding(key))
     list(
-      config = list(version = 2L, ownerSeed = binding$owner_id,
+      config = list(version = 3L, ownerSeed = binding$owner_id,
                     lastRevision = binding$sent_revision),
       unbind = function() dispose_binding(key)
     )
@@ -193,7 +211,7 @@
   }
 
   list(
-    config = function() list(version = 2L, protocol = "latest-snapshot"),
+    config = function() list(version = 3L, protocol = "latest-snapshot"),
     observe = observe, bind = bind, dispose = dispose, snapshot = snapshot
   )
 }

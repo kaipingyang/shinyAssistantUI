@@ -65,7 +65,7 @@ test_that("cwd_provider=NULL 时回退 options$cwd（非 addin 兼容）", {
 })
 
 
-test_that("reset_clients waits for every concurrent normal turn and runs once", {
+test_that("reset_clients waits for every concurrent confirmed turn and runs once", {
   skip_if_not_installed("ClaudeAgentSDK")
   cancelled <- list(a = FALSE, b = FALSE)
   finished <- list(a = FALSE, b = FALSE)
@@ -78,8 +78,19 @@ test_that("reset_clients waits for every concurrent normal turn and runs once", 
       invisible(NULL)
     }
     client$send <- function(...) invisible(NULL)
-    client$interrupt <- function(...) invisible(NULL)
-    client$poll_messages <- function() list()
+    client$queue <- list()
+    client$interrupt <- function(...) {
+      client$queue <- list(ClaudeAgentSDK::ResultMessage(
+        subtype = "error_during_execution", duration_ms = 1, duration_api_ms = 1,
+        is_error = TRUE, num_turns = 1, session_id = paste0("cancel-", id)
+      ))
+      invisible(NULL)
+    }
+    client$poll_messages <- function() {
+      batch <- client$queue
+      client$queue <- list()
+      batch
+    }
     client$get_server_info <- function() list()
     client
   })

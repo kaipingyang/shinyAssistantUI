@@ -1,8 +1,32 @@
+# shinyAssistantUI 0.5.7.9002
+
+- **冷历史与后来到达的审批**：只读历史绑定也建立当前浏览器的审批等待通道。全新浏览器尚未发起前台请求时，可接收已知线程的无 runId 后台工具事件；不创建伪前台 run，不猜测缺失 threadId，不接收旧浏览器的 run-scoped 帧。历史 owner 交接清除旧浏览器的 run 标记并失效旧同步作业，但保留已确认的后台任务来源。用户测试快照 `0.5.7.9001` 保持不变。
+
+# shinyAssistantUI 0.5.7.9001
+
+- **长任务不再被后台总时长误杀**：健康 CLI 的静默、长工具和审批没有两分钟硬截止；等待阈值只提示状态。子 Agent 的 parented 消息不会占住一个不存在的顶层 Result。审批期间由同一 owner 低频接收控制回包和 Task 状态，聊天/工具帧暂存，不新增竞争 stdout reader。
+- **取消和失败后的安全交接**：中断先消费旧 Result 再放行下一轮；有界 drain、进程退出或 compact 截止仍无终态时退役旧连接，不自动重放工具。关闭/删除会结算等待者和过期审批；配置重连则等待仍在运行的后台 Task。已确认终态后的回调失败不再触发第二次中断。
+- **错误回复与迟写历史恢复**：匹配轮次的权威历史在 error 后仍能恢复，错误提示保留；本地 Stop、旧轮次、新输入和删除保护不放宽。终态同步先释放短窗口等待，再最多追补 30 秒，覆盖先落盘用户消息、后落盘回复；通知后释放完成回调，不长期留住整个 turn。发送失败不会把旧历史标成未发送问题的回复。
+- **Task Stop 真实反馈**：控制拒绝或未收到终态时允许重试，ACK 只表示请求已确认；迟到回执不能覆盖新请求或真实终态。断连明确显示状态不可继续追踪，不伪造工具已停止。后台审批归属仅从结构化调用和活跃 Task 继承，完成后撤销。
+- **后台审批跨线程恢复**：历史刷新和主动快照保留仍待用户决策的审批卡，按准确 tool-call ID 合并而不重复工具；同一浏览器重新读取历史不再误使审批失效。真实 UI owner 更换仍会取消旧审批并进入安全 drain。后台 UserMessage 的真实工具结果现在也能回传；前端记录“用户已提交决策”，不把它冒充执行完成。
+- **配套 SDK**：需要 ClaudeAgentSDK `>= 0.2.5.9000` 的存活查询、EOF 尾帧和异步 Stop 支持。更新两包后须重启已有 addin Background Job；本开发版本不代表共享通道已发布。保留单完成 promise、单 timer、正常前台 32 条/8ms 批次、JIT、深栈与权限保护。
+
 # shinyAssistantUI 0.5.7.9000
 
+- **codeagent 首块延迟与后端清理**：本地适配器把同步状态和回调移出大协程，与上游 codeagent 的共享小流式驱动配合降低每轮编译开销；不关闭 JIT、深栈、Shield 或引用保护。ellmer/codeagent 在 stream 创建或终态回调抛错时也会释放本轮引用，并等待 iterator 异步关闭后才完成。Shiny session 关闭仅取消自己的注册请求，不清空其他会话复用的 ellmer 历史。remote 增加有界批次、完整 UTF-8/JSONL 分帧、审批 promise 和定时器清理；连接/回调错误明确结算，不再失败后又报告正常完成。worker 仅空闲时 sleep，不再逐回调固定等待。remote 的独立 `libpath` 仍由调用方选择，上游 codeagent 也需更新才能获得对应优化。高频流仍受 ellmer 内部逐片段协程成本影响，并非所有吞吐门禁都已通过。
+- **Claude 慢流与长等待内存**：前台改为每轮只 await 一个完成 promise，保留单 consumer 与 32 条/8ms 批次，用单个 `later` timer 调度空队列等待及批次让出；审批时暂停，结束时释放引用，迟到回调不再继续调度。保留 Shiny promise domain、默认深栈、JIT 与原审批/取消/历史协议。延迟的 context usage 发布器只保留已求值的用量快照，不再额外留住已结束的整个 turn。公共 timer 取消助手改为调用 `later` 返回的取消函数，真正移除 guard、usage deadline 等待执行回调，不再吞掉错误的内部取消调用。新增慢流、长静默及迟到/不回复 usage 的真实 SDK/Chromium 门禁。
+- **Claude SDK handler 内存与延迟**：保留统一 handler 和既有功能，将同步消息处理移出大型 `coro` 状态机，降低 Shiny 默认异步深栈捕获导致的分配与驻留高水位；不关闭深栈调试或 JIT。前台按最多 32 条/8ms 消费并让出事件循环，移除逐消息固定 10ms 等待，审批和 Result 边界立即暂停，继续逐条检查取消。普通完整文本快照不再重复构造流式过滤器，可能含协议标记或代码围栏的内容仍走原守卫。真实 SDK 的历史工具恢复、审批、停止、并发线程及内存/延迟门禁覆盖这条生产路径；安装后须重启已有 addin Background Job 才能加载新实现。
+- **Performance 快照与诊断修复**：修复 full GC settle 后周期采样停止的问题，忙碌、恢复和暂时无法采样的路径也会继续观测。面板分别显示 Refresh 回应时间、进程实际采样时间及年龄，并标注树/session 缓存的原采样时间；点击 Refresh 不会伪造新采样时间，也不会额外触发 GC。修复默认 R 16 KiB 事件上限被前端旧 8 KiB 校验拒绝，恢复真实前端日志；长任务由单一采集器共享给日志和浮球，未采集/不支持不再冒充零。帧统计限定最近 600 帧，全局内存日志仅按实际接收端去重。快速开关、重复刷新和发送失败重试保持同一未确认请求，失败后按钮仍可重试。时间字段使用内存 addon v3，新版客户端/服务端仍兼容 v2 无时间快照。
+- **长历史消息虚拟化**：超过 60 条消息时只挂载视口附近、最新尾部及正在编辑/聚焦的消息，减少打字时被唤醒的消息组件；已测高度与消息 ID 锚点共同保持翻页、变高和缩放时的阅读位置。输入不再订阅整份消息数组，顶部 Question 仍按完整消息顺序定位。修复 JS 挂载覆盖 `assistantUIOutput(height=...)` 导致视口被长历史撑高的问题。历史保留上限与 R↔JS 协议不变；浏览器 Ctrl+F 和跨消息拖选仅覆盖当前已挂载的内容。
+- **长历史输入状态隔离**：移除已过期的 tap 全局开发模式补丁，并在构建时定点稳定 store 的事件上下文，避免每次输入重算全部历史消息资源；消息自身更新与事件分发保持实时。兼容补丁对上游模块形状做严格校验，依赖升级后不匹配时显式中止构建。
 - **默认本地诊断与 Performance Orb**：Claude addin 默认显示可关闭的性能浮球，并默认将严格隐私白名单内的内存 guard、运行阶段和前端摘要写入 `~/.claude_addin/diagnostics`；日志全局限制为 50 MiB/7 天，支持安全导出，Settings 可关闭且重启 Background Job 后生效。普通 `assistantUIServer()` 继续默认不启用 diagnostics。
 - **Background Job 内存与生命周期保护**：复用同一次现有 sampler observation 显示 process PSS/RSS、session cgroup 和阈值；折叠时不向浏览器持续推样本。Background Job 从项目外中立目录启动，固定主 session 的 package/library identity，并增加 owner-scoped cleanup、bounded history 与大 tool result 按需加载。
 - **AskUserQuestion 与窄面板兼容**：支持 Claude Code 新增的 option `preview` 字段，以有界纯文本预览安全呈现；其他未知字段仍严格拒绝。Thread viewport 不再产生 RStudio Viewer 底部全局横向滚动条，代码块和表格仍保留各自局部横向滚动。
+- **内存留存诊断更可定位**：不增加 sampler、timer 或 GC，复用现有 `smaps_rollup`/cgroup sample 和 hard-guard full GC，记录 private dirty、anonymous、cgroup pressure events、post-GC R heap 以及 SDK client/queue/消息与 payload bytes 聚合计数；不记录聊天内容、路径或 ID。Streaming text 与 tool JSON delta 改为分块累积，避免每个 delta 重复制完整前缀造成 O(n²) 内存分配；transcript reconciler 不再长期保留完整历史 snapshot 和 raw serialization，只保存 64 字符 SHA-256；idle coordinator 也不再阻止 hard episode 的既有 GC。Orb 增加用户可操作的 session headroom 和按需 **Refresh** 按钮；每次点击只请求一个最新 backend sample，内部计数仅写入本地 diagnostics。
+- **Memory guard 不再在 cgroup 充足时锁死聊天**：process PSS/RSS 超过 soft/hard 阈值仍会触发 GC、Orb 警告并暂停 warmup/proactive/auto-continue；显式 foreground、compact、resume、reload 仅在 session cgroup 达到 90% 或剩余不超过 1 GiB（cgroup 不可用时保持保守）才拒绝。`hard_idle` 会继续采样并可按 hysteresis 自动恢复。
+- **Orb 新增 addin 进程树内存**：此前 `PSS · RSS` 只统计 Background Job R 进程自身，SDK 拉起的 Claude Code CLI 子进程不计入，用户只能在"几百 MB 的 RSS"和"几 GiB 的 session cgroup"之间猜测差额归属。现新增 `Process tree`（R 进程 + 其递归子进程的 RSS 之和及进程数），与 cgroup 同频节流采样并复用同一次 observation，不新增 sampler、timer 或轮询；任一 `/proc` 读取失败即回落为 `Unavailable`，绝不阻塞聊天。进程间共享页按进程各计一次，因此该值是上界。**guard 阈值仍只评估单进程**，守卫行为不变。
+- **修复 usage probe 永久挂起导致 full GC 从不执行**：callback 模式下 probe 以 `timeout_ms = Inf` 发出，若 SDK 两个回调都不触发（CLI 子进程无响应、传输中断、消息丢失），`in_flight` 会永久为 `TRUE`。现场诊断日志中该标志在 addin **完全空闲**（`activeTurnCount = 0`）时仍连续挂起 26 分钟，使 `busy_snapshot()` 恒为忙，`begin_settle()` 每次直接返回——1295 次采样中 full GC **一次都没执行**，guard 永久停在 `hard`。现在 `probe_loop` 上挂独立兜底定时器（默认 30 秒），逾期强制结算；交给 SDK 的 `timeout_ms` 保持 `Inf` 不变，慢而仍活的 probe 依旧能完成并发布。`settle()` 原有的 `sequence` 守卫使迟到的真回调无害，正常结算时定时器被取消。
+- **pending usage probe 不再有资格阻断 GC**：`busy` 此前一个标志同时决定采样节奏和能否 GC。usage probe 是等待 CLI 回应的 IPC 往返而非 R 计算，现仅影响采样节奏；真正的 R 工作（active turn、compact、model switch、coordinator）照旧推迟 full GC。未携带新字段的旧 snapshot 保持原语义，向后兼容。
 
 - **assistant-ui 核心依赖对齐**：`@assistant-ui/react` 升至 0.15.17，Lexical/Markdown
   适配包分别升至 0.2.11/0.14.13，Lexical 核心统一为 0.49.0；React 仍保持 19.2.7。

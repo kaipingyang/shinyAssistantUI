@@ -98,7 +98,7 @@ test_that("Claude handler memory guard is observable and blocks model-producing 
 
   error_message <- NULL
   done <- FALSE
-  handler(
+  handler_promise <- handler(
     message = "must be rejected", thread_id = "guard-thread", attachments = list(),
     on_chunk = function(...) NULL,
     on_done = function(...) done <<- TRUE,
@@ -109,10 +109,22 @@ test_that("Claude handler memory guard is observable and blocks model-producing 
     is_cancelled = function() FALSE,
     wait_for_approval = function(...) promises::promise_resolve(list(approved = TRUE))
   )
-  for (index in seq_len(50L)) {
+  settled <- FALSE
+  rejection <- NULL
+  promises::then(handler_promise, function(value) {
+    settled <<- TRUE
+    NULL
+  }, function(reason) {
+    rejection <<- reason
+    settled <<- TRUE
+    NULL
+  })
+  for (index in seq_len(100L)) {
     later::run_now(0.01)
-    if (!is.null(error_message)) break
+    if (settled) break
   }
+  expect_true(settled)
+  expect_null(rejection)
   expect_match(error_message, "close and reopen", ignore.case = TRUE)
   expect_false(done)
   expect_identical(client_creations, 0L)

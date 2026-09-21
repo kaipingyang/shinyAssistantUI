@@ -1,3 +1,47 @@
+test_that("ordinary complete snapshots avoid rebuilding the streaming text guard", {
+  local_mocked_bindings(
+    .new_claude_text_guard = function(...) stop("Unexpected streaming guard for plain snapshot"),
+    .package = "shinyAssistantUI"
+  )
+  texts <- c(
+    "", "Plain answer", "Please call the helper; x < 5.",
+    "First line\nSecond line\n",
+    "\u4f60\u597d \U0001f600\n  trailing spaces  ",
+    paste0(sprintf("MEMORY_%06d_%s\n", seq_len(1200L), strrep("x", 48L)), collapse = "")
+  )
+  for (text in texts) {
+    expect_identical(
+      shinyAssistantUI:::.claude_filter_complete_text(text),
+      list(text = text, malformed = FALSE)
+    )
+  }
+})
+
+test_that("complete snapshot filtering preserves the streaming guard's protocol decisions", {
+  texts <- c(
+    "Before\ncourse_status\nAfter",
+    "Before\ncall \t<invoke \tname =\"Read\">\nignored",
+    "Before\n<invoke name=\"Read\">\nignored",
+    "```text\ncourse_status\ncall <invoke name=\"Read\">\n```\nAfter",
+    "~~~text\n<invoke name=\"Read\">\n~~~\nAfter",
+    "A prose mention of <invoke name= and course_status is not a tool.",
+    "course_status report\ncourse_status",
+    paste0(strrep(" ", 100L), "course_status", strrep("\t", 100L), "\nAfter")
+  )
+  for (text in texts) {
+    output <- character()
+    guard <- shinyAssistantUI:::.new_claude_text_guard(
+      function(value) output <<- c(output, value)
+    )
+    guard$push(text)
+    guard$finish()
+    expect_identical(
+      shinyAssistantUI:::.claude_filter_complete_text(text),
+      list(text = paste0(output, collapse = ""), malformed = guard$malformed_seen())
+    )
+  }
+})
+
 test_that("Claude text guard removes only standalone course_status lines", {
   emitted <- character()
   guard <- shinyAssistantUI:::.new_claude_text_guard(

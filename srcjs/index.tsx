@@ -60,8 +60,6 @@ const mount = (el: HTMLElement, data: RenderData) => {
     _mounts.set(el, st);
   }
   if (!st.root) {
-    el.style.height = "100%";
-    el.style.minHeight = "400px";
     st.root = ReactDOM.createRoot(el);
     st.disconnect = createRemovalWatcher(el, () => teardown(el));
   }

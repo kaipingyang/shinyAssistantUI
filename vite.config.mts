@@ -9,6 +9,22 @@ const description = readFileSync(resolve(import.meta.dirname, "DESCRIPTION"), "u
 const widgetVersion = description.match(/^Version:\s*(\S+)\s*$/m)?.[1];
 if (!widgetVersion) throw new Error("DESCRIPTION has no Version field");
 
+export function stabilizeAssistantStoreContext(code: string, id: string) {
+  if (!id.endsWith("/@assistant-ui/store/dist/useAui.js")) return null;
+  // A fresh event-context envelope invalidates every historical ComposerClient.
+  // Keep the mutable building-client context untouched; only stabilize its event inputs.
+  const context = /useAssistantTapContextProvider\(\{\s*clientRef,\s*emit:\s*notifications\.emit,\s*destroySignal\s*\},\s*function WithTapContext\(\)/g;
+  const memoImport = /import \{[^}]*\buseMemo\b[^}]*\} from "@assistant-ui\/tap\/react-shim"/;
+  if ([...code.matchAll(context)].length !== 1 || !memoImport.test(code)) {
+    throw new Error("assistant-ui store context changed; re-evaluate the stable event-context compatibility transform");
+  }
+  return {
+    code: code.replace(context,
+      "useAssistantTapContextProvider(useMemo(() => ({ clientRef, emit: notifications.emit, destroySignal }), [clientRef, notifications.emit, destroySignal]), function WithTapContext()"),
+    map: null,
+  };
+}
+
 export default defineConfig({
   resolve: {
     alias: { "@": resolve(import.meta.dirname, "srcjs") },
@@ -16,10 +32,10 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    // @assistant-ui/tap 生产模式下 tapEffectEvent 直接返回 callbackRef.current（陈旧回调），
-    // 导致 handleKeyDown 内 open 捕获的是上一帧的 false，键盘导航完全失效。
-    // 开发模式返回稳定包装函数（每次调用最新 callback），行为正确。
-    // 此插件强制 tap 库走开发模式路径，不影响 React 自身的 production build。
+    {
+      name: "stabilize-assistant-store-context",
+      transform: stabilizeAssistantStoreContext,
+    },
     {
       name: "bump-widget-version",
       closeBundle() {
@@ -37,14 +53,6 @@ export default defineConfig({
           if (f.endsWith(".woff2")) {
             copyFileSync(`${katexSrc}/fonts/${f}`, `inst/www/katex/fonts/${f}`);
           }
-        }
-      },
-    },
-    {
-      name: "patch-tap-is-development",
-      transform(code: string, id: string) {
-        if (id.includes("@assistant-ui/tap") && id.endsWith("/env.js")) {
-          return { code: "export const isDevelopment = true;\n", map: null };
         }
       },
     },

@@ -80,22 +80,33 @@ test_that("make_claude_handler never finishes a terminal Claude result silently"
       handler_args$continuation_kind <- continuation_kind
     }
     turn_loop <- later::create_loop()
-    later::with_loop(turn_loop, do.call(handler, handler_args))
+    settled <- FALSE
+    rejected <- NULL
+    turn <- later::with_loop(turn_loop, do.call(handler, handler_args))
+    promises::then(turn, function(value) {
+      settled <<- TRUE
+      value
+    }, function(error) {
+      rejected <<- error
+      settled <<- TRUE
+      NULL
+    })
 
     for (i in seq_len(500)) {
       tryCatch({
         setTimeLimit(elapsed = 1, transient = TRUE)
-        later::run_now(timeoutSecs = 0, all = FALSE, loop = turn_loop)
+        later::run_now(timeoutSecs = 0, all = FALSE)
       }, error = function(error) {
         stop(
           "mock Claude later callback did not return: ", conditionMessage(error),
           call. = FALSE
         )
       }, finally = setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE))
-      if (isTRUE(captured$done) || !is.null(captured$error)) break
+      if (settled) break
       Sys.sleep(0.002)
     }
-    if (!isTRUE(captured$done) && is.null(captured$error)) {
+    if (!is.null(rejected)) stop(rejected)
+    if (!settled || (!isTRUE(captured$done) && is.null(captured$error))) {
       stop(
         "mock Claude turn did not settle within 1 second; continuation_kind=",
         continuation_kind %||% "<none>",

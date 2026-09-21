@@ -19,6 +19,7 @@ import {
 } from "@/components/assistant-ui/reasoning";
 import { ShinyComposerInput } from "@/components/assistant-ui/composer-input";
 import { ShinyCurrentQuestion, useAllUserQuestions } from "@/components/assistant-ui/current-question";
+import { VirtualizedMessages, scrollViewportInstant } from "@/components/assistant-ui/virtualized-messages";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
 import { renderDataPart } from "@/generative/data-ui";
@@ -164,11 +165,23 @@ const readViewportMetrics = (viewport: HTMLDivElement): StreamingViewportMetrics
   clientHeight: viewport.clientHeight,
 });
 
+/**
+ * scroll-spy 的选择逻辑:给定每条用户提问是否已越过顶部阈值线,选出"当前这一轮"。
+ *
+ * 与原实现语义一致 —— 原实现在 forEach 里不断覆盖 idx,取的是最后一个越线的。
+ * 抽成纯函数是为了让 IntersectionObserver 版本能只依赖最终状态,
+ * 不依赖回调到达顺序(观察者回调可能乱序/批量到达)。
+ */
+export const selectActiveQuestionIndex = (
+  crossed: readonly boolean[],
+): number => {
+  let index = -1;
+  for (let i = 0; i < crossed.length; i++) if (crossed[i]) index = i;
+  return index;
+};
+
 const scrollViewportToBottomInstant = (viewport: HTMLDivElement): void => {
-  const previousBehavior = viewport.style.scrollBehavior;
-  viewport.style.scrollBehavior = "auto";
-  viewport.scrollTop = viewport.scrollHeight;
-  viewport.style.scrollBehavior = previousBehavior;
+  scrollViewportInstant(viewport, viewport.scrollHeight);
 };
 const EMPTY_COMPONENTS: ThreadComponents = {};
 
@@ -192,6 +205,7 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
 };
 
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
+  const aui = useAui();
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
   const {
     historyHasMore,
@@ -203,9 +217,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const olderAnchorRef = useRef<{ height: number; top: number } | null>(null);
-  const previousLoadingOlderRef = useRef(Boolean(loadingOlder));
-  const followMessages = useAuiState((state) => state.thread.messages);
+  const activeThreadId = useAuiState((state) => state.threads.mainThreadId);
   const followMessageRevision = useAuiState((state) => {
     const messages = state.thread.messages;
     const userCount = messages.reduce(
@@ -221,6 +233,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   });
   const followRunning = useAuiState((state) => state.thread.isRunning);
   const followingRef = useRef(true);
+  const previousThreadIdRef = useRef(activeThreadId);
   const previousMetricsRef = useRef<StreamingViewportMetrics | null>(null);
   const previousTailIdRef = useRef<string | null>(null);
   const previousUserIdsRef = useRef<Set<string>>(new Set());
@@ -239,16 +252,18 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     [questionsJoined],
   );
   const [activeIdx, setActiveIdx] = useState(-1);
-  const computeActiveQuestion = useCallback(() => {
-    const vp = viewportRef.current;
-    if (!vp) return;
-    const threshold = vp.getBoundingClientRect().top + 40; // 避让 sticky 条高度
-    const users = vp.querySelectorAll('[data-role="user"]');
-    let idx = -1;
-    users.forEach((el, i) => {
-      if (el.getBoundingClientRect().top <= threshold) idx = i;
-    });
-    setActiveIdx(idx);
+  const updateActiveQuestion = useCallback((visibleIndex: number) => {
+    const messages = aui.thread().getState().messages;
+    setActiveIdx(
+      selectActiveQuestionIndex(
+        messages.flatMap((message, index) =>
+          message.role === "user" ? [index <= visibleIndex] : []),
+      ),
+    );
+  }, [aui]);
+
+  const updateCorrectedMetrics = useCallback(() => {
+    if (viewportRef.current) previousMetricsRef.current = readViewportMetrics(viewportRef.current);
   }, []);
 
   useEffect(() => {
@@ -256,28 +271,13 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     if (!viewport || typeof ResizeObserver === "undefined") return;
     const measure = () => {
       setOverflowing(viewport.scrollHeight > viewport.clientHeight + 24);
-      computeActiveQuestion();
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(viewport);
     if (contentRef.current) observer.observe(contentRef.current);
     return () => observer.disconnect();
-  }, [computeActiveQuestion]);
-
-  // 消息数/溢出态变化(新提问、翻页加载、流式)时重算当前轮。
-  useEffect(() => {
-    computeActiveQuestion();
-  }, [questionsJoined, overflowing, computeActiveQuestion]);
-
-  // 原生 scroll 监听:任何滚动(用户滚轮/拖动、程序化 scrollTop、内容 settle)都重算当前轮
-  // —— 比 React onScroll 更可靠(程序化滚动也触发)。
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    viewport.addEventListener("scroll", computeActiveQuestion, { passive: true });
-    return () => viewport.removeEventListener("scroll", computeActiveQuestion);
-  }, [computeActiveQuestion]);
+  }, []);
 
   const activeQuestion =
     activeIdx >= 0 && activeIdx < questions.length
@@ -286,13 +286,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
 
   const requestOlder = () => {
     if (!historyHasMore || loadingOlder || !loadOlderHistory) return;
-    const viewport = viewportRef.current;
-    if (viewport) {
-      olderAnchorRef.current = {
-        height: viewport.scrollHeight,
-        top: viewport.scrollTop,
-      };
-    }
+    followingRef.current = false;
     loadOlderHistory();
   };
 
@@ -316,20 +310,23 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     followSubmittedTurn();
   }, [submissionRevision, followSubmittedTurn]);
 
+  // Read the message graph only after a content revision, never on composer input.
   useLayoutEffect(() => {
-    const wasLoading = previousLoadingOlderRef.current;
-    previousLoadingOlderRef.current = Boolean(loadingOlder);
-    if (!wasLoading || loadingOlder || !olderAnchorRef.current) return;
-    const viewport = viewportRef.current;
-    if (viewport) {
-      const anchor = olderAnchorRef.current;
-      viewport.scrollTop = anchor.top + (viewport.scrollHeight - anchor.height);
+    const switchedThread = activeThreadId !== previousThreadIdRef.current;
+    if (switchedThread) {
+      previousThreadIdRef.current = activeThreadId;
+      followingRef.current = true;
+      previousMetricsRef.current = null;
+      previousTailIdRef.current = null;
+      previousUserIdsRef.current = new Set();
+      previousUserCountRef.current = 0;
+      previousRunningRef.current = false;
+      pointerActiveRef.current = false;
+      upwardWheelRef.current = false;
     }
-    olderAnchorRef.current = null;
-  }, [loadingOlder]);
-
-  useLayoutEffect(() => {
+    const followMessages = aui.thread().getState().messages;
     const currentTailId = followMessages[followMessages.length - 1]?.id ?? null;
+    const sameTail = currentTailId === previousTailIdRef.current;
     const submitted = hasAppendedUserMessage(
       previousTailIdRef.current,
       followMessages,
@@ -352,10 +349,10 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     previousUserIdsRef.current = currentUserIds;
     previousUserCountRef.current = currentUserCount;
     previousRunningRef.current = followRunning;
-    const explicitNewTurn = !loadingOlder && (newUserMessage || userCountIncreased);
-    const forceLatest = submitted || explicitNewTurn || runStarted;
+    const explicitNewTurn = !loadingOlder && !sameTail && (newUserMessage || userCountIncreased);
+    const forceLatest = switchedThread || submitted || explicitNewTurn || runStarted;
     if (forceLatest) followingRef.current = true;
-    if (loadingOlder && !submitted && !runStarted) return undefined;
+    if (loadingOlder && !switchedThread && !submitted && !runStarted) return undefined;
     if (!followingRef.current || (followMessages.length === 0 && !followRunning)) {
       return undefined;
     }
@@ -372,7 +369,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       previousMetricsRef.current = readViewportMetrics(current);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [followMessageRevision, followMessages, followRunning, loadingOlder]);
+  }, [aui, activeThreadId, followMessageRevision, followRunning, loadingOlder]);
 
   return (
     <ThreadPrimitive.Root
@@ -390,9 +387,17 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     >
       <ThreadPrimitive.Viewport
         ref={viewportRef}
+        autoScroll={false}
+        scrollToBottomOnInitialize={false}
+        scrollToBottomOnRunStart={false}
+        scrollToBottomOnThreadSwitch={false}
+        style={{ overflowAnchor: "none" }}
         data-slot="aui_thread-viewport"
         onWheelCapture={(event) => {
-          if (event.deltaY < 0) upwardWheelRef.current = true;
+          if (event.deltaY < 0) {
+            upwardWheelRef.current = true;
+            followingRef.current = false;
+          }
         }}
         onPointerDownCapture={() => {
           pointerActiveRef.current = true;
@@ -437,9 +442,14 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
             <ShinyHistoryControls onLoadOlder={requestOlder} />
-            <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
-            </ThreadPrimitive.Messages>
+            <VirtualizedMessages
+              viewportRef={viewportRef}
+              followingRef={followingRef}
+              onScrollCorrection={updateCorrectedMetrics}
+              onVisibleMessageChange={updateActiveQuestion}
+            >
+              {ThreadMessage}
+            </VirtualizedMessages>
             <ShinyWarmingIndicator />
           </div>
 
@@ -929,6 +939,11 @@ export const ShinyStatusPanels: FC = () => {
             {task.toolName ? <span className="text-muted-foreground"> · {task.toolName}</span> : null}
             {task.status ? <span className="text-muted-foreground"> · {task.stopping ? "stopping" : task.status}</span> : null}
             <span className="text-muted-foreground"> · {Math.max(0, Math.floor((taskNow - task.startedAt) / 1000))}s</span>
+            {task.stopError && (
+              <span className="block text-xs text-destructive" data-task-stop-error>
+                {task.stopError}
+              </span>
+            )}
           </span>
           {stopTask && (
             <button
@@ -939,7 +954,7 @@ export const ShinyStatusPanels: FC = () => {
               onClick={() => stopTask(task.taskId)}
               className="rounded px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10 disabled:cursor-wait disabled:opacity-60"
             >
-              {task.stopping ? "Stopping…" : "Stop"}
+              {task.stopping ? "Stopping…" : task.stopError ? "Retry Stop" : "Stop"}
             </button>
           )}
         </div>

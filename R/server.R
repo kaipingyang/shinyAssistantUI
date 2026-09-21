@@ -761,12 +761,17 @@ assistantUIServer <- function(id, handler,
       settled <<- TRUE
       invisible(accepted)
     }
+    on_diagnostics <- function(event, metrics = list()) {
+      diagnostics_emit(event, metrics, thread_id = thread_id, run_id = run_id)
+    }
+    # Global observations use the sink identity, not the per-run wrapper identity.
+    attr(on_diagnostics, "diagnostics_sink") <- if (!diagnostics_owned) {
+      diagnostics_service$emit
+    } else {
+      diagnostics_writer$write_event
+    }
     list(
-      on_diagnostics = function(event, metrics = list()) {
-        diagnostics_emit(
-          event, metrics, thread_id = thread_id, run_id = run_id
-        )
-      },
+      on_diagnostics = on_diagnostics,
       on_run_phase = function(stage) {
         if (settled) return(invisible(FALSE))
         phase <- if (stage %in% c("streaming", "finalizing")) "running" else "connecting"
@@ -1278,11 +1283,25 @@ assistantUIServer <- function(id, handler,
 
   # 工厂：绑定 thread_id + run_id，返回该 run 专用的 wait_for_approval。
   make_wait_for_approval <- function(thread_id, run_id) {
+    force(thread_id)
+    force(run_id)
     function(tool_call_id) {
-      promises::promise(function(resolve, reject) {
-        assign(tool_call_id, list(fn = resolve, thread = thread_id, run = run_id),
-               envir = approval_resolvers)
+      entry <- NULL
+      pending <- promises::promise(function(resolve, reject) {
+        previous <- get0(tool_call_id, approval_resolvers, inherits = FALSE)
+        if (!is.null(previous)) previous$fn(list(approved = FALSE, expired = TRUE))
+        entry <<- list(fn = resolve, thread = thread_id, run = run_id)
+        assign(tool_call_id, entry, envir = approval_resolvers)
       })
+      attr(pending, "cancel") <- function() {
+        if (!identical(get0(tool_call_id, approval_resolvers, inherits = FALSE), entry)) {
+          return(invisible(FALSE))
+        }
+        rm(list = tool_call_id, envir = approval_resolvers)
+        entry$fn(list(approved = FALSE, expired = TRUE, toolCallId = tool_call_id))
+        invisible(TRUE)
+      }
+      pending
     }
   }
 
@@ -1529,7 +1548,10 @@ assistantUIServer <- function(id, handler,
       continuation_kind = continuation_kind
     )
     handler_params <- names(formals(handler))
-    if ("ui_owner" %in% handler_params) all_args$ui_owner <- ui_owner
+    if ("ui_owner" %in% handler_params ||
+        ("..." %in% handler_params && is.function(handler_attach_ui_owner))) {
+      all_args$ui_owner <- ui_owner
+    }
     call_args <- if ("..." %in% handler_params) all_args
                  else all_args[names(all_args) %in% handler_params]
 
@@ -1769,6 +1791,7 @@ assistantUIServer <- function(id, handler,
     if (is_history_request && !is.null(on_session_load)) {
       if (is.function(handler_attach_ui_owner)) {
         history_callbacks <- make_callbacks(msg$threadId, NULL, msg$project)
+        history_callbacks$wait_for_approval <- make_wait_for_approval(msg$threadId, NULL)
         tryCatch(
           handler_attach_ui_owner(
             msg$threadId, ui_owner, history_callbacks,
@@ -1935,6 +1958,22 @@ assistantUIServer <- function(id, handler,
     }
     warmup_timer <<- NULL
     warmup_yield_timer <<- NULL
+    for (thread_id in ls(active_run_ids, all.names = TRUE)) {
+      assign(thread_id, TRUE, envir = cancel_flags)
+    }
+    cancellations <- as.list(cancel_fns, all.names = TRUE)
+    if (length(cancellations)) rm(list = names(cancellations), envir = cancel_fns)
+    for (cancel in cancellations) {
+      tryCatch(
+        suspendInterrupts(cancel()),
+        interrupt = function(error) message(
+          "[shinyAssistantUI] Session cancellation interrupted: ", conditionMessage(error)
+        ),
+        error = function(error) message(
+          "[shinyAssistantUI] Session cancellation failed: ", conditionMessage(error)
+        )
+      )
+    }
     if (is.function(.teardown_fn)) {
       tryCatch(.teardown_fn(), error = function(error) NULL)
     }

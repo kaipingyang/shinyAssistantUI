@@ -105,13 +105,29 @@
   }
 
   send(list(ev = "ready"))
+  command_buffer <- raw()
   repeat {
-    later::run_now(timeout = 0.02)
-    ins <- tryCatch(readLines(con, warn = FALSE), error = function(e) character(0))  # complete lines
-    for (l in ins) {
-      if (!nzchar(l)) next
-      cmd <- tryCatch(jsonlite::fromJSON(l), error = function(e) NULL)
-      if (is.null(cmd$cmd)) next
+    worked <- isTRUE(later::run_now(timeout = 0.02))
+    if (socketSelect(list(con), timeout = 0)[[1L]]) {
+      bytes <- readBin(con, what = "raw", n = 65536L)
+      if (!length(bytes)) stop("codeagent host connection closed", call. = FALSE)
+      command_buffer <- c(command_buffer, bytes)
+      worked <- TRUE
+    }
+    for (index in seq_len(32L)) {
+      newline <- match(as.raw(10L), command_buffer, nomatch = 0L)
+      if (!newline) break
+      line <- rawToChar(command_buffer[seq_len(newline - 1L)])
+      command_buffer <- command_buffer[-seq_len(newline)]
+      worked <- TRUE
+      if (!nzchar(trimws(line))) next
+      cmd <- tryCatch(jsonlite::fromJSON(line), error = function(error) {
+        stop("Invalid codeagent host JSON frame", call. = FALSE)
+      })
+      if (!is.list(cmd) || !is.character(cmd$cmd) || length(cmd$cmd) != 1L ||
+          is.na(cmd$cmd) || !nzchar(cmd$cmd)) {
+        stop("Invalid codeagent host command", call. = FALSE)
+      }
       if (identical(cmd$cmd, "run") && !running) start_run(cmd$prompt %||% "")
       else if (identical(cmd$cmd, "approve")) {
         r <- get0(cmd$id %||% "", envir = pend, ifnotfound = NULL)
@@ -120,7 +136,8 @@
       else if (identical(cmd$cmd, "stop")) stop_now <- TRUE
     }
     if (stop_now && !running) break
-    Sys.sleep(0.01)
+    # Yield on idle, not between every link in a runnable promise chain.
+    if (!worked) Sys.sleep(0.01)
   }
   send(list(ev = "closed")); Sys.sleep(0.2)
 }
@@ -146,36 +163,164 @@
 }
 
 .ca_worker_send <- function(h, obj) {
-  tryCatch({ writeLines(as.character(jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null")), h$con); flush(h$con) },
-           error = function(e) NULL)
+  if (isTRUE(h$closed)) stop("codeagent worker is closed", call. = FALSE)
+  writeLines(as.character(jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null")), h$con)
+  flush(h$con)
+  invisible(NULL)
 }
 
-# Drive one turn: send `run`, then later-poll the socket, calling on_event(ev)
-# for each decoded event. Returns a promise resolving on the `done` event (or
-# rejecting if the worker dies). Approval is handled by the caller inside on_event.
 .ca_worker_run <- function(h, prompt, on_event) {
+  if (!is.null(h$active_run)) stop("codeagent worker already has an active turn", call. = FALSE)
+  loop <- later::current_loop()
+  domain <- .capture_handler_promise_domain()
+  buffer <- h$read_buffer %||% raw()
+  owner <- new.env(parent = emptyenv())
   promises::promise(function(resolve, reject) {
-    .ca_worker_send(h, list(cmd = "run", prompt = prompt))
     settled <- FALSE
-    poll <- function() {
-      if (settled) return(invisible())
-      if (!h$proc$is_alive()) { settled <<- TRUE; reject(simpleError("codeagent worker process died")); return(invisible()) }
-      lines <- tryCatch(readLines(h$con, warn = FALSE), error = function(e) character(0))  # complete frames
-      for (l in lines) {
-        if (!nzchar(l)) next
-        ev <- tryCatch(jsonlite::fromJSON(l, simplifyVector = FALSE), error = function(e) NULL)
-        if (is.null(ev$ev)) next
-        tryCatch(on_event(ev), error = function(e) NULL)
-        if (identical(ev$ev, "done")) { settled <<- TRUE; resolve(ev); return(invisible()) }
-      }
-      later::later(poll, 0.04)
+    waiting <- FALSE
+    cancel_pending <- NULL
+    sequence <- 0L
+    cancel_tick <- function() {
+      sequence <<- sequence + 1L
+      cancel <- cancel_pending
+      cancel_pending <<- NULL
+      if (is.function(cancel)) cancel()
+      invisible(NULL)
     }
-    poll()
+    finish <- function(succeeded, value) {
+      if (settled) return(invisible(NULL))
+      settled <<- TRUE
+      cancellation_error <- tryCatch({
+        cancel_tick()
+        NULL
+      }, error = identity)
+      if (!is.null(cancellation_error)) {
+        succeeded <- FALSE
+        value <- cancellation_error
+      }
+      if (identical(h$active_run, owner)) h$active_run <- NULL
+      h$read_buffer <- if (succeeded) buffer else raw()
+      buffer <<- raw()
+      on_event <<- NULL
+      domain <<- NULL
+      if (succeeded) {
+        resolve(value)
+      } else {
+        reject(value)
+        tryCatch(.ca_worker_stop(h), error = function(error) {
+          h$closed <- TRUE
+          message("[codeagent] Worker cleanup failed: ", conditionMessage(error))
+        })
+      }
+      invisible(NULL)
+    }
+    fail <- function(error) finish(FALSE, error)
+    owner$stop <- function() fail(simpleError("codeagent worker was stopped"))
+    h$active_run <- owner
+    poll <- NULL
+    schedule_poll <- function(delay) {
+      if (settled) return(invisible(NULL))
+      if (!is.null(cancel_pending)) stop("codeagent worker already has a pending timer")
+      sequence <<- sequence + 1L
+      token <- sequence
+      cancel_pending <<- later::later(function() {
+        if (settled || !identical(token, sequence)) return(invisible(NULL))
+        cancel_pending <<- NULL
+        poll()
+      }, delay, loop = loop)
+      invisible(NULL)
+    }
+    poll <- function() {
+      if (settled) return(invisible(NULL))
+      tryCatch(promises::with_promise_domain(domain, {
+        if (!h$proc$is_alive()) stop("codeagent worker process died", call. = FALSE)
+        if (waiting) {
+          schedule_poll(0.04)
+          return(invisible(NULL))
+        }
+        started <- proc.time()[["elapsed"]]
+        read_once <- FALSE
+        for (index in seq_len(32L)) {
+          newline <- match(as.raw(10L), buffer, nomatch = 0L)
+          if (!newline) {
+            if (read_once || !socketSelect(list(h$con), timeout = 0)[[1L]]) {
+              schedule_poll(0.04)
+              return(invisible(NULL))
+            }
+            bytes <- readBin(h$con, what = "raw", n = 65536L)
+            if (!length(bytes)) stop("codeagent worker connection closed", call. = FALSE)
+            buffer <<- c(buffer, bytes)
+            read_once <- TRUE
+            newline <- match(as.raw(10L), buffer, nomatch = 0L)
+            if (!newline) {
+              schedule_poll(0)
+              return(invisible(NULL))
+            }
+          }
+          line <- rawToChar(buffer[seq_len(newline - 1L)])
+          buffer <<- buffer[-seq_len(newline)]
+          if (nzchar(trimws(line))) {
+            event <- tryCatch(
+              jsonlite::fromJSON(line, simplifyVector = FALSE),
+              error = function(error) stop("Invalid codeagent worker JSON frame", call. = FALSE)
+            )
+            if (!is.list(event) || !is.character(event$ev) ||
+                length(event$ev) != 1L || is.na(event$ev) || !nzchar(event$ev)) {
+              stop("Invalid codeagent worker event", call. = FALSE)
+            }
+            value <- on_event(event)
+            if (inherits(value, "promise")) {
+              waiting <<- TRUE
+              promises::then(value, function(value) {
+                if (settled) return(invisible(NULL))
+                tryCatch(promises::with_promise_domain(domain, {
+                  waiting <<- FALSE
+                  cancel_tick()
+                  if (identical(event$ev, "done")) {
+                    finish(TRUE, event)
+                  } else {
+                    schedule_poll(0)
+                  }
+                }, replace = TRUE), error = fail)
+                NULL
+              }, function(error) {
+                fail(error)
+                NULL
+              })
+              schedule_poll(0.04)
+              return(invisible(NULL))
+            }
+            if (identical(event$ev, "done")) {
+              finish(TRUE, event)
+              return(invisible(NULL))
+            }
+          }
+          if (proc.time()[["elapsed"]] - started >= 0.008) break
+        }
+        schedule_poll(0)
+      }, replace = TRUE), error = fail)
+      invisible(NULL)
+    }
+    tryCatch({
+      .ca_worker_send(h, list(cmd = "run", prompt = prompt))
+      schedule_poll(0)
+    }, error = fail)
   })
 }
 
 .ca_worker_cancel <- function(h) .ca_worker_send(h, list(cmd = "cancel"))
 .ca_worker_stop   <- function(h) {
-  .ca_worker_send(h, list(cmd = "stop"))
-  later::later(function() { try(close(h$con), silent = TRUE); try(h$proc$kill(), silent = TRUE) }, 0.5)
+  if (isTRUE(h$closed)) return(invisible(NULL))
+  tryCatch(.ca_worker_send(h, list(cmd = "stop")), error = function(error) {
+    message("[codeagent] Worker stop request failed: ", conditionMessage(error))
+  })
+  h$closed <- TRUE
+  active <- h$active_run
+  if (!is.null(active) && is.function(active$stop)) active$stop()
+  later::later(function() {
+    if (isTRUE(tryCatch(isOpen(h$con), error = function(error) FALSE))) close(h$con)
+    if (h$proc$is_alive()) h$proc$kill_tree()
+    invisible(NULL)
+  }, 0.5)
+  invisible(NULL)
 }

@@ -1,4 +1,5 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { LongTaskObservation } from "./diagnostics";
 import type { MemoryGuardState, MemoryMonitorSample } from "./memory-monitor-addon";
 
 export type PerformanceOrbSnapshot = {
@@ -9,12 +10,16 @@ export type PerformanceOrbSnapshot = {
   maxIntervalMs: number | null;
   jankCount: number;
   longTaskCount: number;
+  longTaskState: LongTaskObservation["state"] | "unknown";
   heapState: "unknown" | "supported" | "unsupported";
   pageJsHeapBytes: number | null;
 };
 type EntryList = { getEntries(): ArrayLike<{ duration?: number; startTime?: number }> };
 type Observer = { observe(options: unknown): void; disconnect(): void };
-type ObserverConstructor = new (callback: (entries: EntryList) => void) => Observer;
+type ObserverConstructor = {
+  new (callback: (entries: EntryList) => void): Observer;
+  readonly supportedEntryTypes?: readonly string[];
+};
 type Environment = {
   document?: Document;
   performance?: { memory?: { usedJSHeapSize?: number } };
@@ -33,9 +38,11 @@ export type PerformanceOrbController = {
   subscribe(handler: (snapshot: PerformanceOrbSnapshot) => void): () => void;
   setExpanded(expanded: boolean): void;
   sampleSemanticTerminal(): void;
+  acceptLongTasks(observation: LongTaskObservation): void;
   dispose(): void;
 };
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+const MAX_FRAME_SAMPLES = 600;
 const p95 = (values: readonly number[]) => values.length
   ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1]
   : null;
@@ -48,23 +55,26 @@ export function createPerformanceOrbController(environment: Environment = {}): P
   const Observer = environment.PerformanceObserver ?? (typeof PerformanceObserver === "undefined" ? undefined : PerformanceObserver as unknown as ObserverConstructor);
   const listeners = new Set<(snapshot: PerformanceOrbSnapshot) => void>();
   const intervals: number[] = [];
+  let intervalCursor = 0;
   const longtaskKeys = new Set<string>();
   const longtaskOrder: string[] = [];
   let expanded = false; let disposed = false; let frameId: number | undefined; let generation = 0;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let previousFrame: number | undefined; let observer: Observer | undefined;
   let longTaskCount = 0; let longTaskDurationUs = 0; let longTaskMaxUs = 0;
+  let longTaskState: PerformanceOrbSnapshot["longTaskState"] = "unknown";
   let heapState: PerformanceOrbSnapshot["heapState"] = "unknown"; let pageJsHeapBytes: number | null = null;
   const visible = () => !doc || doc.visibilityState !== "hidden";
   const snapshot = (): PerformanceOrbSnapshot => {
     const percentile = p95(intervals);
     const maximum = intervals.length ? Math.max(...intervals) : null;
-    const requiredSupported = percentile !== null && heapState === "supported";
-    const warning = (maximum ?? 0) > 50 || intervals.filter((value) => value > 50).length > 0 || longTaskCount > 0;
+    const requiredSupported = percentile !== null && heapState === "supported" && longTaskState === "supported";
+    const jankCount = intervals.filter((value) => value > 50).length;
+    const warning = jankCount > 0 || longTaskCount > 0;
     return {
-      expanded, severity: requiredSupported ? (warning ? "warning" : "healthy") : "unknown",
+      expanded, severity: warning ? "warning" : requiredSupported ? "healthy" : "unknown",
       frameCount: intervals.length, p95IntervalMs: percentile, maxIntervalMs: maximum,
-      jankCount: intervals.filter((value) => value > 50).length, longTaskCount, heapState, pageJsHeapBytes,
+      jankCount, longTaskCount, longTaskState, heapState, pageJsHeapBytes,
     };
   };
   const notify = () => { const value = snapshot(); for (const listener of listeners) listener(value); };
@@ -93,7 +103,10 @@ export function createPerformanceOrbController(environment: Environment = {}): P
     const frame = (timestamp: number) => {
       frameId = undefined;
       if (disposed || !expanded || !visible() || ownGeneration !== generation) return;
-      if (previousFrame !== undefined) intervals.push(Math.max(0, timestamp - previousFrame));
+      if (previousFrame !== undefined) {
+        intervals[intervalCursor] = Math.max(0, timestamp - previousFrame);
+        intervalCursor = (intervalCursor + 1) % MAX_FRAME_SAMPLES;
+      }
       previousFrame = timestamp;
       markDirty();
       frameId = raf(frame);
@@ -105,11 +118,27 @@ export function createPerformanceOrbController(environment: Environment = {}): P
     try { observer?.disconnect(); } catch { /* fail open */ }
     observer = undefined;
   };
+  const acceptLongTasks = (observation: LongTaskObservation) => {
+    if (disposed) return;
+    longTaskState = observation.state;
+    if (expanded && observation.state === "supported") {
+      longTaskCount = Math.min(MAX_SAFE, longTaskCount + observation.count);
+      longTaskDurationUs = Math.min(MAX_SAFE, longTaskDurationUs + observation.durationUs);
+      longTaskMaxUs = Math.max(longTaskMaxUs, observation.maxUs);
+    }
+    markDirty();
+  };
   const startObserver = () => {
-    if (observer || !Observer || environment.observeLongTasks === false ||
+    if (observer || environment.observeLongTasks === false ||
         (!environment.diagnosticsEnabled && !expanded)) return;
+    if (!Observer || (Observer.supportedEntryTypes && !Observer.supportedEntryTypes.includes("longtask"))) {
+      longTaskState = "unsupported";
+      return;
+    }
     try {
       observer = new Observer((entries) => {
+        if (disposed) return;
+        const delta: LongTaskObservation = { state: "supported", count: 0, durationUs: 0, maxUs: 0 };
         for (const entry of Array.from(entries.getEntries())) {
           if (typeof entry.duration !== "number" || !Number.isFinite(entry.duration) || entry.duration < 0) continue;
           const key = `${entry.startTime ?? "x"}:${entry.duration}`;
@@ -117,14 +146,19 @@ export function createPerformanceOrbController(environment: Environment = {}): P
           longtaskKeys.add(key); longtaskOrder.push(key);
           if (longtaskOrder.length > 256) longtaskKeys.delete(longtaskOrder.shift()!);
           const durationUs = Math.min(MAX_SAFE, Math.round(entry.duration * 1000));
-          longTaskCount = Math.min(MAX_SAFE, longTaskCount + 1);
-          longTaskDurationUs = Math.min(MAX_SAFE, longTaskDurationUs + durationUs);
-          longTaskMaxUs = Math.max(longTaskMaxUs, durationUs);
+          delta.count = Math.min(MAX_SAFE, delta.count + 1);
+          delta.durationUs = Math.min(MAX_SAFE, delta.durationUs + durationUs);
+          delta.maxUs = Math.max(delta.maxUs, durationUs);
         }
-        markDirty();
+        acceptLongTasks(delta);
       });
-      observer.observe({ type: "longtask", buffered: true });
-    } catch { try { observer?.disconnect(); } catch { /* fail open */ } observer = undefined; }
+      observer.observe({ type: "longtask", buffered: false });
+      longTaskState = "supported";
+    } catch {
+      try { observer?.disconnect(); } catch { /* fail open */ }
+      observer = undefined;
+      longTaskState = "unsupported";
+    }
   };
   const onVisibility = () => { if (visible()) startFrames(); else stopFrames(); };
   if (typeof doc?.addEventListener === "function") doc.addEventListener("visibilitychange", onVisibility);
@@ -136,7 +170,8 @@ export function createPerformanceOrbController(environment: Environment = {}): P
       if (disposed || expanded === next) return;
       expanded = next;
       if (expanded) {
-        intervals.length = 0; longTaskCount = 0; longTaskDurationUs = 0; longTaskMaxUs = 0;
+        intervals.length = 0; intervalCursor = 0;
+        longTaskCount = 0; longTaskDurationUs = 0; longTaskMaxUs = 0;
         sampleHeap(); startObserver(); startFrames();
       } else {
         stopFrames();
@@ -152,6 +187,7 @@ export function createPerformanceOrbController(environment: Environment = {}): P
       notify();
     },
     sampleSemanticTerminal() { if (!disposed) { sampleHeap(); if (expanded) notify(); } },
+    acceptLongTasks,
     dispose() {
       if (disposed) return;
       disposed = true; expanded = false; stopFrames(); cancelRefresh();
@@ -166,8 +202,37 @@ export function createPerformanceOrbController(environment: Environment = {}): P
 type PerformanceOrbMemory = {
   state: MemoryGuardState | "waiting";
   sample: MemoryMonitorSample | null;
+  receivedAt?: number | null;
+  refreshing?: boolean;
   setVisible(visible: boolean): void;
+  refresh?: () => void;
 };
+const timeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+const formatAge = (timestamp: number) => {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < -1) return "clock ahead";
+  if (seconds < 60) return `${Math.max(0, seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+};
+function SnapshotTime({ label, timestamp, slot, age = true }: {
+  label: string; timestamp?: number | null; slot: string; age?: boolean;
+}) {
+  const date = typeof timestamp === "number" && timestamp > 0 ? new Date(timestamp) : null;
+  const valid = date !== null && Number.isFinite(date.getTime());
+  return (
+    <p className="text-muted-foreground text-[10px]" data-slot={slot}
+      data-timestamp={valid ? timestamp : undefined}>
+      {label} {valid
+        ? <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+            {timeFormatter.format(date)}{age ? ` (${formatAge(date.getTime())})` : ""}
+          </time>
+        : "Unavailable"}
+    </p>
+  );
+}
 const formatBytes = (value: number | null | undefined): string => {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "Unavailable";
   const mib = value / 1024 ** 2;
@@ -175,6 +240,17 @@ const formatBytes = (value: number | null | undefined): string => {
 };
 const titleState = (value: string) => value === "waiting"
   ? "Waiting" : value.charAt(0).toUpperCase() + value.slice(1);
+const guardLabel = (
+  state: MemoryGuardState | "waiting" | undefined,
+  sample: MemoryMonitorSample | null | undefined,
+) => {
+  if (state !== "hard") return titleState(state ?? "waiting");
+  if (!sample?.cgroupLimited || sample.cgroupMaxBytes <= 0) return "Hard";
+  const headroom = sample.cgroupMaxBytes - sample.cgroupCurrentBytes;
+  const critical = sample.cgroupCurrentBytes / sample.cgroupMaxBytes >= 0.9 ||
+    headroom <= 1024 ** 3;
+  return critical ? "Critical (session limit)" : "Process high · chat available";
+};
 
 export function PerformanceOrb({
   controller,
@@ -186,9 +262,37 @@ export function PerformanceOrb({
   activity?: string;
 }) {
   const [state, setState] = useState(controller.snapshot);
+  const orbRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelLimits, setPanelLimits] = useState<{ maxHeight: number; maxWidth: number }>();
   const contentId = useId();
+  useLayoutEffect(() => {
+    const orb = orbRef.current;
+    const panel = panelRef.current;
+    if (!state.expanded || !orb || !panel) return;
+    const host = orb.offsetParent;
+    const measure = () => {
+      const rect = panel.getBoundingClientRect();
+      const bounds = host instanceof Element ? host.getBoundingClientRect() : null;
+      const next = {
+        maxHeight: Math.max(0, rect.bottom - Math.max(8, (bounds?.top ?? 0) + 8)),
+        maxWidth: Math.max(0, rect.right - Math.max(8, (bounds?.left ?? 0) + 8)),
+      };
+      setPanelLimits((previous) => previous?.maxHeight === next.maxHeight &&
+        previous.maxWidth === next.maxWidth ? previous : next);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    if (host instanceof Element) observer?.observe(host);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [state.expanded]);
   useEffect(() => {
     const unsubscribe = controller.subscribe(setState);
+    setState(controller.snapshot());
     return () => {
       unsubscribe();
       memoryMonitor?.setVisible(false);
@@ -196,7 +300,7 @@ export function PerformanceOrb({
     };
   }, [controller, memoryMonitor?.setVisible]);
   return (
-    <div className="aui-performance-orb absolute bottom-3 end-3 z-30" data-slot="aui_performance_orb" data-severity={state.severity}>
+    <div ref={orbRef} className="aui-performance-orb absolute bottom-3 end-3 z-30" data-slot="aui_performance_orb" data-severity={state.severity}>
       <button type="button" aria-label="Performance diagnostics" aria-expanded={state.expanded}
         aria-controls={contentId} onClick={() => {
           const next = !state.expanded;
@@ -211,20 +315,52 @@ export function PerformanceOrb({
         const cgroupPercent = memory?.cgroupLimited && memory.cgroupMaxBytes > 0
           ? Math.round(memory.cgroupCurrentBytes / memory.cgroupMaxBytes * 100)
           : null;
+        const cgroupHeadroom = memory?.cgroupLimited && memory.cgroupMaxBytes > 0
+          ? Math.max(0, memory.cgroupMaxBytes - memory.cgroupCurrentBytes)
+          : null;
         return (
-        <div id={contentId} role="status" aria-live="polite" className="bg-popover text-popover-foreground absolute end-0 bottom-11 w-64 rounded-lg border p-3 text-xs shadow-lg">
+        <div ref={panelRef} id={contentId} role="status" aria-live="polite" style={panelLimits}
+          className="bg-popover text-popover-foreground absolute end-0 bottom-11 w-64 overflow-y-auto rounded-lg border p-3 text-xs shadow-lg">
           <p className="font-medium">Performance</p>
           <p data-slot="aui_performance_activity">Chat {activity}</p>
           <div className="border-border/60 mt-2 border-t pt-2" data-slot="aui_backend_memory">
-            <p className="font-medium">Backend memory</p>
-            <p>Guard {titleState(memoryMonitor?.state ?? "waiting")}</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-medium">Backend memory</p>
+              <button type="button" aria-label="Refresh backend memory"
+                onClick={() => memoryMonitor?.refresh?.()}
+                disabled={!memoryMonitor?.refresh || memoryMonitor.refreshing}
+                className="border-border text-muted-foreground hover:text-foreground rounded border px-1.5 py-0.5 text-[10px] disabled:opacity-50">
+                {memoryMonitor?.refreshing ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+            <p className="text-muted-foreground text-[10px]">Refresh reads the latest background sample.</p>
+            <SnapshotTime label="Refreshed" timestamp={memoryMonitor?.receivedAt}
+              slot="aui_memory_refresh_time" age={false} />
+            <SnapshotTime label="Process sampled" timestamp={memory?.sampledAt}
+              slot="aui_memory_sample_time" />
+            <p>Guard {guardLabel(memoryMonitor?.state, memory)}</p>
             <p>PSS {formatBytes(memory?.pssBytes)} · RSS {formatBytes(memory?.rssBytes)}</p>
+            <p title="Addin R process plus the Claude CLI it spawned. Shared pages are counted once per process, so this is an upper bound.">
+              Process tree {formatBytes(memory?.treeRssBytes)}
+              {typeof memory?.treeProcessCount === "number" && memory.treeProcessCount > 0
+                ? ` · ${memory.treeProcessCount} procs` : ""}
+            </p>
+            <SnapshotTime label="Tree sampled" timestamp={memory?.treeSampledAt}
+              slot="aui_memory_tree_time" />
             <p>Session {formatBytes(memory?.cgroupCurrentBytes)} / {memory?.cgroupLimited ? formatBytes(memory.cgroupMaxBytes) : "Unlimited"}{cgroupPercent == null ? "" : ` (${cgroupPercent}%)`}</p>
+            <SnapshotTime label="Session sampled" timestamp={memory?.cgroupSampledAt}
+              slot="aui_memory_cgroup_time" />
+            <p>Headroom {memory == null ? "Unavailable" : memory.cgroupLimited ? formatBytes(cgroupHeadroom) : "Unlimited"}</p>
           </div>
           <div className="border-border/60 mt-2 border-t pt-2" data-slot="aui_browser_performance">
             <p className="font-medium">Browser UI</p>
             <p>Frame p95 {state.p95IntervalMs == null ? "Waiting" : `${state.p95IntervalMs.toFixed(1)} ms`}</p>
-            <p>Jank {state.jankCount} · Long tasks {state.longTaskCount}</p>
+            <p>Jank {state.jankCount} · Long tasks <span data-slot="aui_long_tasks"
+              data-state={state.longTaskState}
+              data-count={state.longTaskState === "supported" ? state.longTaskCount : undefined}>
+              {state.longTaskState === "supported" ? state.longTaskCount : titleState(state.longTaskState)}
+            </span></p>
+            <p className="text-muted-foreground text-[10px]">Latest {MAX_FRAME_SAMPLES} frames · long tasks while open.</p>
             <p>Page JS heap {state.heapState === "supported" ? formatBytes(state.pageJsHeapBytes) : state.heapState}</p>
           </div>
           <p className="text-muted-foreground mt-2 text-[10px]">Privacy-filtered metrics only. No prompts, paths, IDs, or error text.</p>

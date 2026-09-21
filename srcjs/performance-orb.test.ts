@@ -7,6 +7,29 @@ afterEach(() => {
 });
 
 describe("Performance Orb scheduler", () => {
+  it("bounds the frame window and expires old jank while left expanded", () => {
+    let nextFrame: FrameRequestCallback | undefined;
+    const controller = createPerformanceOrbController({
+      requestAnimationFrame: (callback) => { nextFrame = callback; return 1; },
+      cancelAnimationFrame: vi.fn(),
+    });
+    controller.setExpanded(true);
+    nextFrame?.(0);
+    nextFrame?.(80);
+    for (let index = 1; index <= 2000; index += 1) nextFrame?.(80 + index * 16);
+    expect(controller.snapshot()).toMatchObject({
+      frameCount: 600, p95IntervalMs: 16, maxIntervalMs: 16, jankCount: 0,
+    });
+    controller.dispose();
+  });
+
+  it("does not report an unobserved long-task stream as a measured zero", () => {
+    const controller = createPerformanceOrbController({ observeLongTasks: false });
+    controller.setExpanded(true);
+    expect(controller.snapshot()).toMatchObject({ longTaskState: "unknown" });
+    controller.dispose();
+  });
+
   it("is default-collapsed with zero product rAF, fixed interval, or DOM polling", () => {
     vi.useFakeTimers();
     const raf = vi.fn(() => 1);

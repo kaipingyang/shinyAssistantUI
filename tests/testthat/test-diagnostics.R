@@ -5,6 +5,31 @@ diagnostics_test_config <- function(directory, ...) {
   )
 }
 
+test_that("later cancellation removes the callback from its owning loop", {
+  loop <- later::create_loop(parent = NULL)
+  withr::defer(later::destroy_loop(loop))
+  fired <- FALSE
+  timer <- later::later(function() fired <<- TRUE, delay = 100, loop = loop)
+  expect_false(later::loop_empty(loop))
+  expect_true(shinyAssistantUI:::.cancel_later_timer(timer))
+  expect_true(later::loop_empty(loop))
+  expect_false(shinyAssistantUI:::.cancel_later_timer(timer))
+  later::run_now(0, loop = loop)
+  expect_false(fired)
+})
+
+test_that("later cancellation accepts missing handles but surfaces invalid handles and errors", {
+  expect_false(shinyAssistantUI:::.cancel_later_timer(NULL))
+  expect_error(
+    shinyAssistantUI:::.cancel_later_timer(1),
+    "cancellation function"
+  )
+  expect_error(
+    shinyAssistantUI:::.cancel_later_timer(function() stop("Synthetic cancellation error")),
+    "Synthetic cancellation error"
+  )
+})
+
 test_that("generic diagnostics remains default-off and config is bounded", {
   expect_false(shinyAssistantUI:::.normalize_diagnostics_config(NULL)$enabled)
   expect_false(shinyAssistantUI:::.normalize_diagnostics_config(FALSE)$enabled)
@@ -15,6 +40,93 @@ test_that("generic diagnostics remains default-off and config is bounded", {
   expect_lte(enabled$frontend_batch_max, enabled$frontend_queue_max)
   expect_identical(enabled$retention_max_bytes, 50 * 1024^2)
   expect_identical(enabled$retention_seconds, 7 * 24 * 60 * 60)
+})
+
+test_that("frontend transport limits are generated from the canonical R artifact", {
+  limits <- shinyAssistantUI:::.diagnostics_schema()$limits[
+    c("batchRows", "queueRows", "rowBytes")
+  ]
+  declaration <- paste0(
+    "export const DIAGNOSTICS_LIMITS = ",
+    as.character(jsonlite::toJSON(limits, auto_unbox = TRUE)),
+    " as const;"
+  )
+  generated <- readLines(
+    testthat::test_path("..", "..", "srcjs", "diagnostics-schema.generated.ts"),
+    warn = FALSE
+  )
+  expect_true(declaration %in% generated)
+})
+
+test_that("global memory observations deduplicate sinks without merging independent callbacks", {
+  counts <- c(shared = 0L, other = 0L, custom = 0L)
+  sink_for <- function(name) {
+    force(name)
+    function(event, metrics) {
+      if (identical(event, "memory_sample")) counts[[name]] <<- counts[[name]] + 1L
+    }
+  }
+  callback_for <- function(sink) {
+    force(sink)
+    callback <- function(event, metrics) sink(event, metrics)
+    attr(callback, "diagnostics_sink") <- sink
+    callback
+  }
+  shared <- sink_for("shared")
+  other <- sink_for("other")
+  custom <- sink_for("custom")
+  handler <- make_claude_handler(
+    options = list(permission_mode = "default"),
+    session_map_path = tempfile("diag-sink-map-"),
+    memory_guard_config = list(enabled = TRUE),
+    memory_sampler = function() list(pss_bytes = 1, rss_bytes = 2)
+  )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  attach <- attr(handler, "attach_ui_owner")
+  expect_true(attach("a", "one", list(on_diagnostics = callback_for(shared))))
+  expect_true(attach("b", "one", list(on_diagnostics = callback_for(shared))))
+  expect_true(attach("c", "two", list(on_diagnostics = callback_for(other))))
+  expect_true(attach("d", "three", list(on_diagnostics = custom)))
+  expect_true(attach("e", "four", list(on_diagnostics = custom)))
+  attr(handler, ".memory_guard_observe")()
+  expect_identical(counts, c(shared = 1L, other = 1L, custom = 2L))
+  attr(handler, "detach_ui_owner")("one")
+  attr(handler, ".memory_guard_observe")()
+  expect_identical(counts, c(shared = 1L, other = 2L, custom = 4L))
+})
+
+test_that("server callbacks identify their actual shared service across widgets", {
+  root <- tempfile("diag-server-sinks-")
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  service <- shinyAssistantUI:::.new_diagnostics_service(
+    list(enabled = TRUE, directory = root),
+    writer_factory = shinyAssistantUI:::.new_diagnostics_writer
+  )
+  on.exit(service$close(), add = TRUE)
+  captured <- list()
+  handler <- function(message, on_done, on_diagnostics, ...) {
+    captured[[length(captured) + 1L]] <<- on_diagnostics
+    on_done()
+  }
+  attr(handler, "diagnostics_service") <- service
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("a", handler = handler)
+    assistantUIServer("b", handler = handler)
+  }, {
+    session$flushReact()
+    session$setInputs(a_input = list(text = "fixture one", threadId = "one", runId = "run-one", ts = 1000))
+    session$flushReact()
+    session$setInputs(b_input = list(text = "fixture two", threadId = "two", runId = "run-two", ts = 2000))
+    session$flushReact()
+    for (index in seq_len(5L)) {
+      later::run_now(0.01)
+      session$flushReact()
+    }
+  })
+  expect_length(captured, 2L)
+  expect_true(all(vapply(captured, function(callback) {
+    identical(attr(callback, "diagnostics_sink", exact = TRUE), service$emit)
+  }, logical(1))))
 })
 
 test_that("diagnostics env parser is exact and never canonicalizes a disabled path", {
@@ -34,7 +146,15 @@ test_that("canonical schema and rows have exact privacy-safe shape", {
   row <- shinyAssistantUI:::.diagnostics_canonical_row(
     "memory_guard_sample",
     list(state = "hard", pssBytes = 1, rssBytes = 2,
+         privateDirtyBytes = 1, anonymousBytes = 1,
          cgroupCurrentBytes = 7, cgroupMaxBytes = 8, cgroupLimit = "limited",
+         cgroupHighEvents = 3, cgroupMaxEvents = 2,
+         cgroupOomEvents = 1, cgroupOomKillEvents = 0,
+         rHeapAfterGcBytes = 9, guardGcCount = 1,
+         sdkClientCount = 1, sdkConsumerCount = 1, sdkRouteCount = 2,
+         sdkMessagesSeen = 4, sdkMessageBytesSeen = 400,
+         sdkMaxBatchBytes = 100, sdkBufferedMessageCount = 0,
+         sdkWaiterCount = 0, sdkUsageProbePendingCount = 0, activeTurnCount = 1,
          softPssBytes = 3, hardPssBytes = 4, softRssBytes = 5, hardRssBytes = 6),
     now = function() 10
   )
@@ -206,6 +326,12 @@ test_that("Claude diagnostics wrapper never adds a poll and hides content", {
   expect_length(summary, 1L)
   expect_equal(summary[[1L]]$metrics$bytes, nchar(secret, type = "bytes"))
   expect_false(grepl(secret, paste(capture.output(str(events)), collapse = ""), fixed = TRUE))
+  poll_summary <- Filter(function(x) identical(x$event, "poll_batch"), events)
+  expect_length(poll_summary, 1L)
+  expect_identical(
+    poll_summary[[1L]]$metrics$bytes,
+    shinyAssistantUI:::.claude_message_batch_size_bytes(list(stream))
+  )
 
   polls <- 0L
   messages <- list(structure(list(is_error = FALSE), class = "ResultMessage"))

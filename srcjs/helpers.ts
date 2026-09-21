@@ -42,6 +42,85 @@ export function markStaleToolCalls(
   return { messages, changed };
 }
 
+type MessagePartLike = Exclude<ThreadMessageLike["content"], string | undefined>[number];
+type ToolCallPartLike = Extract<MessagePartLike, { type: "tool-call" }> & { toolCallId: string };
+
+function isPendingApproval(part: MessagePartLike): part is ToolCallPartLike {
+  if (part.type !== "tool-call" || typeof part.toolCallId !== "string" ||
+      !part.toolCallId || part.result !== undefined) return false;
+  const artifact = part.artifact;
+  return artifact !== null && typeof artifact === "object" &&
+    "requiresApproval" in artifact && artifact.requiresApproval === true &&
+    !("approvalResult" in artifact && artifact.approvalResult);
+}
+
+export function mergePendingApprovals(
+  incoming: ThreadMessageLike[],
+  current: ThreadMessageLike[],
+): ThreadMessageLike[] {
+  const pending = new Map<string, ToolCallPartLike>();
+  for (const message of current) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (isPendingApproval(part)) pending.set(part.toolCallId, part);
+    }
+  }
+  if (!pending.size) return incoming;
+  const merged = incoming.map((message): ThreadMessageLike => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "tool-call" || typeof part.toolCallId !== "string") return part;
+      const approval = pending.get(part.toolCallId);
+      if (!approval) return part;
+      pending.delete(part.toolCallId);
+      changed = true;
+      return approval;
+    });
+    return changed ? { ...message, content } : message;
+  });
+  for (const message of current) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const content = message.content.filter((part): part is ToolCallPartLike =>
+      part.type === "tool-call" && typeof part.toolCallId === "string" && pending.has(part.toolCallId));
+    if (!content.length) continue;
+    for (const part of content) pending.delete(part.toolCallId);
+    const index = message.id
+      ? merged.findIndex((item) => item.id === message.id && item.role === "assistant")
+      : -1;
+    if (index >= 0) {
+      const target = merged[index];
+      const previous = typeof target.content === "string"
+        ? [{ type: "text" as const, text: target.content }] : target.content;
+      merged[index] = { ...target, role: "assistant", content: [...previous, ...content] };
+    } else {
+      merged.push({ ...message, id: message.id ?? `tool-${content[0].toolCallId}`, content });
+    }
+  }
+  return merged;
+}
+
+export function markToolApprovalSubmitted(
+  messages: ThreadMessageLike[],
+  toolCallId: string,
+  approved: boolean,
+): ThreadMessageLike[] {
+  let changed = false;
+  const updated = messages.map((message): ThreadMessageLike => {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+    let touched = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "tool-call" || part.toolCallId !== toolCallId ||
+          !isPendingApproval(part)) return part;
+      touched = changed = true;
+      const artifact = part.artifact && typeof part.artifact === "object" ? part.artifact : {};
+      return { ...part, artifact: { ...artifact, approvalResult: approved ? "approved" : "denied" } };
+    });
+    return touched ? { ...message, content } : message;
+  });
+  return changed ? updated : messages;
+}
+
 // 落盘前剥离附件里的大体积 base64 data（image/file），只保留元信息。
 // 原因：一张几 MB 的图片 base64 会撑爆 localStorage 配额（通常 5-10MB），
 // 触发 QuotaExceededError → 整个 thread 历史无法落盘 → 刷新丢失。

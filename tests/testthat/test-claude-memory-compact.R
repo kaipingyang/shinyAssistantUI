@@ -245,3 +245,14 @@ test_that("oversized advisor result clears StreamEvent bindings before full GC",
   expect_match(captured, "UI preview omitted", fixed = TRUE)
   expect_true(gc_bindings_cleared)
 })
+
+
+test_that("Claude text accumulator preserves exact order across incremental materialization", {
+  accumulator <- shinyAssistantUI:::.new_claude_text_accumulator()
+  expect_identical(accumulator$value(), "")
+  for (chunk in c("alpha", "-", "beta")) accumulator$append(chunk)
+  expect_identical(accumulator$value(), "alpha-beta")
+  accumulator$append("-gamma")
+  expect_identical(accumulator$value(), "alpha-beta-gamma")
+  expect_identical(accumulator$value(), "alpha-beta-gamma")
+})

@@ -83,10 +83,12 @@ app <- callr::r_bg(
       captured_at = Sys.time(),
       rss_bytes = 4096,
       pss_bytes = NULL,
+      tree_rss_bytes = 4096 + 2048,
+      tree_process_count = 2L,
       private_dirty_bytes = NULL,
       anonymous_bytes = NULL,
-      cgroup_current_bytes = NULL,
-      cgroup_max_bytes = NULL,
+      cgroup_current_bytes = 2 * 1024^3,
+      cgroup_max_bytes = 10 * 1024^3,
       cgroup_events = list()
     )
     original_make_claude_handler <- get(
@@ -119,6 +121,9 @@ app <- callr::r_bg(
             settled <- attr(handler, ".memory_guard_snapshot")()
             cat("GUARD_SETTLED_STATE=", settled$state, "\n", sep = "")
             cat("GUARD_SETTLED_IDLE=", identical(settled$state, "hard_idle"), "\n", sep = "")
+            allows <- attr(handler, ".memory_guard_allows")
+            cat("GUARD_FOREGROUND_ALLOWED=", is.function(allows) && allows("foreground"), "\n", sep = "")
+            cat("GUARD_WARMUP_ALLOWED=", is.function(allows) && allows("warmup"), "\n", sep = "")
             flush.console()
           }, delay = 0.20)
           invisible(NULL)
@@ -271,6 +276,35 @@ check(
   settled,
   paste(grep("GUARD_", read_log(stdout_path), value = TRUE), collapse = " | ")
 )
+check("Performance Orb expands for backend refresh", click_selector("button[aria-label='Performance diagnostics']"))
+check("Performance Orb refresh control appears", wait_js(
+  "!!document.querySelector(\"button[aria-label='Refresh backend memory']\")", 8
+))
+check("initial Orb opening reaches R as openId 1", wait_js(
+  "((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible']?.openId === 1", 8
+))
+check("backend panel separates process from process tree", wait_js(
+  paste0("(function(){const t=document.querySelector('[data-slot=aui_backend_memory]')?.innerText||'';",
+         "return /RSS /.test(t)&&/Process tree /.test(t)&&/Session /.test(t);})()"), 8
+))
+check("first frame reports a process tree covering at least the R process", wait_js(
+  paste0("(function(){const t=document.querySelector('[data-slot=aui_backend_memory]')?.innerText||'';",
+         "const m=t.match(/Process tree ([^\\n]*)/);return !!m&&!/Unavailable/.test(m[1])&&/procs/.test(m[1]);})()"), 10
+), paste("panel=", value(
+  "(document.querySelector('[data-slot=aui_backend_memory]')?.innerText||'').replace(/\\n/g,' | ')"
+)))
+check("backend refresh uses a real pointer click", click_selector(
+  "button[aria-label='Refresh backend memory']"
+))
+check("refresh advances exact memory opening to openId 2", wait_js(
+  "(function(){const v=((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible'];return v?.version===3&&v?.visible===true&&v?.openId===2&&v?.sample===null&&Object.keys(v).length===6;})()", 8
+))
+check("refreshed backend panel remains rendered", wait_js(
+  "(document.querySelector('[data-slot=aui_backend_memory]')?.innerText||'').includes('Backend memory')", 8
+))
+check("Performance Orb collapses after refresh proof", click_selector(
+  "button[aria-label='Performance diagnostics']"
+))
 check("no SDK client before submission", !file.exists(sentinel_path))
 
 submit_composer <- function(text) {
@@ -281,24 +315,21 @@ submit_composer <- function(text) {
   press_enter()
   TRUE
 }
-guidance_count <- function() as.integer(value(paste0(
-  "((document.querySelector('.aui-root')?.innerText||'').match(",
-  "/Close and reopen the addin/g)||[]).length"
-)))
+guard_log <- read_log(stdout_path)
+check("hard process pressure allows explicit foreground with cgroup headroom",
+      any(grepl("GUARD_FOREGROUND_ALLOWED=TRUE", guard_log, fixed = TRUE)),
+      paste(grep("GUARD_", guard_log, value = TRUE), collapse = " | "))
+check("hard process pressure pauses background warmup",
+      any(grepl("GUARD_WARMUP_ALLOWED=FALSE", guard_log, fixed = TRUE)))
 
 message_text <- "memory guard browser foreground probe"
 check(
   "composer focused through real CDP pointer input",
   submit_composer(message_text)
 )
-
-honest_error_script <- paste0(
-  "(function(){const t=document.querySelector('.aui-root')?.innerText||'';",
-  "return /close and reopen/i.test(t)&&/Background Job R/i.test(t);})()"
-)
 check(
-  "foreground submission shows honest recycle guidance",
-  wait_js(honest_error_script, 15)
+  "cgroup-safe foreground reaches SDK construction instead of guard rejection",
+  wait_until(function() file.exists(sentinel_path), timeout = 15)
 )
 check(
   "submitted foreground message is represented in DOM",
@@ -307,38 +338,14 @@ check(
     jsonlite::toJSON(message_text, auto_unbox = TRUE)
   )))
 )
-check("SDK client sentinel remains absent (not connected)", !file.exists(sentinel_path))
+check("no recycle guidance is shown while cgroup has headroom", isTRUE(value(
+  "!(document.querySelector('.aui-root')?.innerText||'').includes('Close and reopen the addin')"
+)))
 
-first_guidance_count <- guidance_count()
-second_message <- "memory guard browser repeated probe"
-check("second foreground uses the real composer", submit_composer(second_message))
-check(
-  "hard_idle repeatedly rejects later foreground submissions",
-  wait_until(function() guidance_count() > first_guidance_count, timeout = 15)
-)
-check(
-  "second rejected message is represented in DOM",
-  isTRUE(value(sprintf(
-    "(document.querySelector('.aui-root')?.innerText||'').includes(%s)",
-    jsonlite::toJSON(second_message, auto_unbox = TRUE)
-  )))
-)
-check("repeated rejection still does not create SDK client", !file.exists(sentinel_path))
-
-before_compact_guidance <- guidance_count()
-check("compact command uses the real composer", submit_composer("/compact"))
-Sys.sleep(0.25)
-press_enter()
-check(
-  "hard_idle rejects a new compact action",
-  wait_until(function() guidance_count() > before_compact_guidance, timeout = 15)
-)
-check("compact rejection does not create SDK client", !file.exists(sentinel_path))
-
-check("widget remains mounted after rejection", isTRUE(value(
+check("widget remains mounted after allowed foreground attempt", isTRUE(value(
   "!!document.querySelector('.aui-root') && !!document.querySelector(\".aui-lexical-input[contenteditable='true']\")"
 )))
-check("callr app remains alive after rejection", app$is_alive())
+check("callr app remains alive after allowed attempt", app$is_alive())
 
 # Record compact DOM/data-* truth rather than relying on a screenshot.
 dom_evidence <- value(paste0(

@@ -247,8 +247,12 @@ check("newest history page loads after click", wait_for("document.body.innerText
 check("oldest history is not in initial page", !isTRUE(value("document.body.innerText.includes('OLDER_FIXTURE_001')")))
 check("history tool card restores collapsed", wait_for("document.body.innerText.includes('Read') && !document.body.innerText.includes('fixture tool result')", 6))
 check("load older control appears", wait_for("!!document.querySelector('[data-slot=aui_load_older]')", 4))
-value("document.querySelector('[data-slot=aui_load_older]').click(); true")
-check("older history prepends on demand", wait_for("document.body.innerText.includes('OLDER_FIXTURE_001')", 6))
+value("window.__historyCount=Number(document.querySelector('[data-slot=aui_virtualized-messages]').dataset.messageCount);document.querySelector('[data-slot=aui_load_older]').click(); true")
+check("older history prepends on demand", wait_for(
+  "Number(document.querySelector('[data-slot=aui_virtualized-messages]').dataset.messageCount)>window.__historyCount", 6
+))
+value("(()=>{const v=document.querySelector('[data-slot=aui_thread-viewport]');v.style.scrollBehavior='auto';v.scrollTop=0;return true})()")
+check("oldest history mounts when scrolled into view", wait_for("document.body.innerText.includes('OLDER_FIXTURE_001')", 6))
 value("document.querySelector('[data-slot=tool-fallback-trigger]').click(); true")
 check("tool result renders only after expand", wait_for("document.body.innerText.includes('fixture tool result')", 4))
 timeline <- fromJSON(value("JSON.stringify(window.__historyTimeline)"))

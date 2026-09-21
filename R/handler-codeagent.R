@@ -149,7 +149,7 @@ make_codeagent_handler <- function(client_factory,
     obj
   }
 
-  coro_handler <- coro::async(function(
+  new_turn <- function(
     message, thread_id, attachments,
     on_chunk, on_done, on_error,
     on_tool_call, on_tool_result, on_thinking,
@@ -161,6 +161,11 @@ make_codeagent_handler <- function(client_factory,
     current <- obj$current
     shield <- .codeagent_client_shield(client)
     shield_active <- !is.null(shield)
+    closed <- FALSE
+    handed_off <- FALSE
+    early_result <- NULL
+    stream_input <- NULL
+    controller <- NULL
 
     current$on_tool_call <- on_tool_call
     current$on_tool_result <- on_tool_result
@@ -192,6 +197,8 @@ make_codeagent_handler <- function(client_factory,
     current$project_tool_name <- project_tool_name
 
     detach_current <- function() {
+      if (closed) return(invisible(NULL))
+      closed <<- TRUE
       current$on_tool_call <- NULL
       current$on_tool_result <- NULL
       current$wait_for_approval <- NULL
@@ -201,76 +208,76 @@ make_codeagent_handler <- function(client_factory,
       current$shield_tool_ids <- list()
       invisible(NULL)
     }
+    on.exit({
+      if (!handed_off) detach_current()
+    }, add = TRUE)
 
-    atts <- attachments %||% list()
-    image_atts <- Filter(function(att) identical(att$type, "image"), atts)
-    text_sections <- .attachment_text_sections(atts)
-    full_message <- message %||% ""
-    if (nzchar(text_sections)) {
-      full_message <- paste0(text_sections, "\n\n", full_message)
-    }
-
-    if (shield_active) {
-      safe_prompt <- .codeagent_scan_prompt(shield, full_message, client)
-      if (!isTRUE(safe_prompt$released)) {
-        if (is.function(on_status)) {
-          on_status("data_shield", "Prompt blocked by Data Shield")
+    prepare <- function() {
+      atts <- attachments %||% list()
+      image_atts <- Filter(function(att) identical(att$type, "image"), atts)
+      text_sections <- .attachment_text_sections(atts)
+      full_message <- message %||% ""
+      if (nzchar(text_sections)) {
+        full_message <- paste0(text_sections, "\n\n", full_message)
+      }
+      if (shield_active) {
+        safe_prompt <- .codeagent_scan_prompt(shield, full_message, client)
+        if (!isTRUE(safe_prompt$released)) {
+          if (is.function(on_status)) {
+            on_status("data_shield", "Prompt blocked by Data Shield")
+          }
+          if (is.function(on_chunk)) on_chunk(safe_prompt$text)
+          if (is.function(on_done)) on_done()
+          early_result <<- list(
+            text = safe_prompt$text, usage = NULL, stop_reason = "shield_blocked"
+          )
+          return(FALSE)
         }
-        if (is.function(on_chunk)) on_chunk(safe_prompt$text)
+        full_message <- safe_prompt$text
+      }
+
+      # Optional upstream OCR is not fail-closed when its scanner is unavailable.
+      if (shield_active && length(image_atts)) {
+        if (is.function(on_status)) {
+          on_status("data_shield", "Image blocked by Data Shield")
+        }
+        if (is.function(on_chunk)) {
+          on_chunk("[Data Shield] Image attachments are disabled in protected mode.")
+        }
         if (is.function(on_done)) on_done()
-        detach_current()
-        return(invisible(list(
-          text = safe_prompt$text,
+        early_result <<- list(
+          text = "[Data Shield] Image attachments are disabled in protected mode.",
           usage = NULL,
           stop_reason = "shield_blocked"
-        )))
+        )
+        return(FALSE)
       }
-      full_message <- safe_prompt$text
-    }
 
-    # OCR scanning is optional upstream and currently passes when tesseract is
-    # unavailable. Refuse image input under Shield rather than claiming a safety
-    # guarantee we cannot enforce.
-    if (shield_active && length(image_atts)) {
-      if (is.function(on_status)) {
-        on_status("data_shield", "Image blocked by Data Shield")
-      }
-      if (is.function(on_chunk)) {
-        on_chunk("[Data Shield] Image attachments are disabled in protected mode.")
-      }
-      if (is.function(on_done)) on_done()
-      detach_current()
-      return(invisible(list(
-        text = "[Data Shield] Image attachments are disabled in protected mode.",
-        usage = NULL,
-        stop_reason = "shield_blocked"
-      )))
-    }
-
-    stream_input <- full_message
-    if (length(image_atts)) {
-      if (!requireNamespace("ellmer", quietly = TRUE)) {
-        if (is.function(on_error)) {
-          on_error("Image attachments require the 'ellmer' package.")
+      stream_input <<- full_message
+      if (length(image_atts)) {
+        if (!requireNamespace("ellmer", quietly = TRUE)) {
+          if (is.function(on_error)) {
+            on_error("Image attachments require the 'ellmer' package.")
+          }
+          return(FALSE)
         }
-        detach_current()
-        return(invisible(NULL))
+        image_parts <- lapply(image_atts, function(att) {
+          ellmer::content_image_url(att$data)
+        })
+        stream_input <<- c(list(full_message), image_parts)
       }
-      image_parts <- lapply(image_atts, function(att) {
-        ellmer::content_image_url(att$data)
-      })
-      stream_input <- c(list(full_message), image_parts)
+
+      controller <<- tryCatch(ellmer::stream_controller(), error = function(e) NULL)
+      current$controller <- controller
+      if (!is.null(controller) && is.function(register_cancel)) {
+        register_cancel(function() {
+          tryCatch(controller$cancel("User interrupted"), error = function(e) NULL)
+        })
+      }
+      TRUE
     }
 
-    controller <- tryCatch(ellmer::stream_controller(), error = function(e) NULL)
-    current$controller <- controller
-    if (!is.null(controller) && is.function(register_cancel)) {
-      register_cancel(function() {
-        tryCatch(controller$cancel("User interrupted"), error = function(e) NULL)
-      })
-    }
-
-    streamed_text <- ""
+    streamed_text <- .new_claude_text_accumulator()
     terminal_error <- FALSE
     error_reported <- FALSE
 
@@ -278,7 +285,7 @@ make_codeagent_handler <- function(client_factory,
       scalar <- .codeagent_scalar_text(text)
       if (!nzchar(scalar)) return(invisible(NULL))
       if (shield_active) {
-        streamed_text <<- paste0(streamed_text, scalar)
+        streamed_text$append(scalar)
       } else if (is.function(on_chunk)) {
         on_chunk(scalar)
       }
@@ -366,12 +373,11 @@ make_codeagent_handler <- function(client_factory,
       invisible(NULL)
     }
 
-    if (shield_active && is.function(on_status)) {
-      on_status("data_shield", "Scanning protected output\u2026")
-    }
-
-    result <- tryCatch(
-      coro::await(stream_fn(
+    stream <- function() {
+      if (shield_active && is.function(on_status)) {
+        on_status("data_shield", "Scanning protected output\u2026")
+      }
+      stream_fn(
         client,
         stream_input,
         on_delta = handle_delta,
@@ -382,57 +388,85 @@ make_codeagent_handler <- function(client_factory,
         on_usage = handle_usage,
         controller = controller,
         session_id = thread_id
-      )),
-      error = function(e) {
-        cancelled_now <- isTRUE(tryCatch(is_cancelled(), error = function(e2) FALSE))
-        if (!cancelled_now) handle_error(conditionMessage(e), FALSE)
-        NULL
-      }
-    )
-
-    cancelled <- isTRUE(tryCatch(is_cancelled(), error = function(e) FALSE))
-    stop_reason <- "completed"
-    if (is.list(result) && !is.null(result$stop_reason)) {
-      stop_reason <- .codeagent_scalar_text(result$stop_reason)
-      if (!nzchar(stop_reason)) stop_reason <- "completed"
-    }
-    if (identical(stop_reason, "error")) terminal_error <- TRUE
-
-    terminal_text <- streamed_text
-    if (is.list(result)) {
-      result_text <- .codeagent_scalar_text(result$text)
-      if (nzchar(result_text)) terminal_text <- result_text
-    }
-
-    if (shield_active && !cancelled && !terminal_error) {
-      safe_response <- .codeagent_scan_response(shield, terminal_text, client)
-      if (is.function(on_chunk) && nzchar(safe_response$text)) {
-        on_chunk(safe_response$text)
-      }
-    }
-
-    if (shield_active && is.function(on_status)) on_status("idle", NULL)
-
-    successful <- !cancelled && !terminal_error &&
-      stop_reason %in% c("completed", "shield_blocked")
-    if (successful && !is.null(store) && !shield_active) {
-      title <- substr(message %||% "", 1, 40)
-      first_msg <- substr(message %||% "", 1, 200)
-      chat_to_save <- tryCatch(client$chat, error = function(e) NULL)
-      if (is.null(chat_to_save)) chat_to_save <- client
-      tryCatch(
-        store$save(thread_id, chat_to_save, title = title, first_msg = first_msg),
-        error = function(e) NULL
       )
     }
-
-    if (successful && is.function(on_done)) on_done()
-    if (terminal_error && !error_reported && !cancelled && is.function(on_error)) {
-      on_error("codeagent turn failed.")
+    fail <- function(e) {
+      cancelled_now <- isTRUE(tryCatch(is_cancelled(), error = function(e2) FALSE))
+      if (!cancelled_now) handle_error(conditionMessage(e), FALSE)
+      NULL
     }
 
-    detach_current()
-    invisible(result)
+    complete <- function(result) {
+      cancelled <- isTRUE(tryCatch(is_cancelled(), error = function(e) FALSE))
+      stop_reason <- "completed"
+      if (is.list(result) && !is.null(result$stop_reason)) {
+        stop_reason <- .codeagent_scalar_text(result$stop_reason)
+        if (!nzchar(stop_reason)) stop_reason <- "completed"
+      }
+      if (identical(stop_reason, "error")) terminal_error <<- TRUE
+
+      terminal_text <- streamed_text$value()
+      if (is.list(result)) {
+        result_text <- .codeagent_scalar_text(result$text)
+        if (nzchar(result_text)) terminal_text <- result_text
+      }
+
+      if (shield_active && !cancelled && !terminal_error) {
+        safe_response <- .codeagent_scan_response(shield, terminal_text, client)
+        if (is.function(on_chunk) && nzchar(safe_response$text)) {
+          on_chunk(safe_response$text)
+        }
+      }
+
+      if (shield_active && is.function(on_status)) on_status("idle", NULL)
+
+      successful <- !cancelled && !terminal_error &&
+        stop_reason %in% c("completed", "shield_blocked")
+      if (successful && !is.null(store) && !shield_active) {
+        title <- substr(message %||% "", 1, 40)
+        first_msg <- substr(message %||% "", 1, 200)
+        chat_to_save <- tryCatch(client$chat, error = function(e) NULL)
+        if (is.null(chat_to_save)) chat_to_save <- client
+        tryCatch(
+          store$save(thread_id, chat_to_save, title = title, first_msg = first_msg),
+          error = function(e) NULL
+        )
+      }
+
+      if (successful && is.function(on_done)) on_done()
+      if (terminal_error && !error_reported && !cancelled && is.function(on_error)) {
+        on_error("codeagent turn failed.")
+      }
+      invisible(result)
+    }
+
+    turn <- list(
+      prepare = prepare, stream = stream, fail = fail, complete = complete,
+      result = function() early_result, close = detach_current
+    )
+    handed_off <- TRUE
+    turn
+  }
+
+  coro_handler <- coro::async(function(
+    message, thread_id, attachments,
+    on_chunk, on_done, on_error,
+    on_tool_call, on_tool_result, on_thinking,
+    on_image, on_artifact, on_usage = NULL, on_status = NULL,
+    is_cancelled, wait_for_approval, register_cancel
+  ) {
+    turn <- new_turn(
+      message = message, thread_id = thread_id, attachments = attachments,
+      on_chunk = on_chunk, on_done = on_done, on_error = on_error,
+      on_tool_call = on_tool_call, on_tool_result = on_tool_result,
+      on_thinking = on_thinking, on_image = on_image, on_artifact = on_artifact,
+      on_usage = on_usage, on_status = on_status, is_cancelled = is_cancelled,
+      wait_for_approval = wait_for_approval, register_cancel = register_cancel
+    )
+    on.exit(turn$close(), add = TRUE)
+    if (!turn$prepare()) return(invisible(turn$result()))
+    result <- tryCatch(coro::await(turn$stream()), error = function(error) turn$fail(error))
+    turn$complete(result)
   })
 
   attr(coro_handler, "warmup") <- function(thread_id) {

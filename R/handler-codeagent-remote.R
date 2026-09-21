@@ -55,7 +55,8 @@ make_codeagent_remote_handler <- function(config          = list(),
   workers <- list()  # thread_id -> worker handle
   get_worker <- function(thread_id) {
     ex <- workers[[thread_id]]
-    if (!is.null(ex) && isTRUE(tryCatch(ex$proc$is_alive(), error = function(e) FALSE))) return(ex)
+    if (!is.null(ex) && !isTRUE(ex$closed) &&
+        isTRUE(tryCatch(ex$proc$is_alive(), error = function(e) FALSE))) return(ex)
     h <- .ca_worker_start(libpath = libpath, renviron = renviron, config = cfg)
     workers[[thread_id]] <<- h
     h
@@ -67,6 +68,9 @@ make_codeagent_remote_handler <- function(config          = list(),
                        on_image, on_artifact,
                        is_cancelled, wait_for_approval, register_cancel) {
     h <- get_worker(thread_id)
+    active <- TRUE
+    failed <- FALSE
+    on.exit(active <- FALSE, add = TRUE)
     if (is.function(register_cancel)) register_cancel(function() .ca_worker_cancel(h))
 
     atts <- attachments %||% list()
@@ -96,16 +100,20 @@ make_codeagent_remote_handler <- function(config          = list(),
           on_tool_call(tool_call_id = tuid, tool_name = ev$name %||% "",
                        args = ev$args %||% list(), annotations = list(requiresApproval = TRUE))
         if (is.function(wait_for_approval)) {
-          promises::then(
+          return(promises::then(
             wait_for_approval(tuid),
-            function(d) .ca_worker_send(h, list(cmd = "approve", id = tuid,
-                          ok = isTRUE(if (is.list(d)) d$approved else d)))
-          )
+            function(d) {
+              if (!active) return(invisible(NULL))
+              .ca_worker_send(h, list(cmd = "approve", id = tuid,
+                             ok = isTRUE(if (is.list(d)) d$approved else d)))
+            }
+          ))
         } else {
           .ca_worker_send(h, list(cmd = "approve", id = tuid, ok = FALSE))
         }
       } else if (identical(typ, "error")) {
-        if (is.function(on_error)) on_error(ev$m %||% "error")
+        failed <<- TRUE
+        if (!isTRUE(is_cancelled()) && is.function(on_error)) on_error(ev$m %||% "error")
       }
       invisible()
     }
@@ -113,11 +121,12 @@ make_codeagent_remote_handler <- function(config          = list(),
     tryCatch(
       coro::await(.ca_worker_run(h, full_message, on_event)),
       error = function(e) {
+        failed <<- TRUE
         if (!isTRUE(tryCatch(is_cancelled(), error = function(e2) FALSE)) && is.function(on_error))
           on_error(conditionMessage(e))
       }
     )
-    if (is.function(on_done)) on_done()
+    if (!failed && !isTRUE(is_cancelled()) && is.function(on_done)) on_done()
     invisible(NULL)
   })
 

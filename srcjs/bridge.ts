@@ -146,7 +146,7 @@ export type ProactiveMessagesPayload = {
   threadId: string;
   revision: number;
   messages: unknown[];
-  afterRunId?: string;
+  afterRunId?: string | null;
 };
 
 export interface ShinyBridge {
@@ -185,6 +185,8 @@ export interface ShinyBridge {
   requestToolResultChunk: (request: LazyToolResultRequest) => void;
   onToolResultChunk: (handler: (chunk: LazyToolResultChunk) => void) => void;
   setRunCallbacks: (threadId: string, callbacks: RunCallbacks | null) => void;
+  setBackgroundToolCallbacks: (factory: ((threadId: string) =>
+    Pick<RunCallbacks, "onToolCall" | "onToolResult"> | undefined) | null) => void;
   /** Retain only tool approval callbacks after a foreground run settles. */
   retireRunCallbacks: (threadId: string) => void;
   onClear: (handler: () => void) => void;
@@ -213,6 +215,8 @@ export interface ShinyBridge {
 export function createShinyBridge(inputId: string): ShinyBridge {
   // 按 threadId 存储 callbacks，支持多 thread 并发（切 thread 不丢失旧 handler 回调）
   const callbacksMap = new Map<string, RunCallbacks>();
+  let backgroundToolCallbacks: ((threadId: string) =>
+    Pick<RunCallbacks, "onToolCall" | "onToolResult"> | undefined) | null = null;
   let sessionsHandler: ((data: SessionsPayload) => void) | null = null;
   let proactiveMessagesHandler: ((data: ProactiveMessagesPayload) => void) | null = null;
   const bufferedProactiveMessages: ProactiveMessagesPayload[] = [];
@@ -239,6 +243,14 @@ export function createShinyBridge(inputId: string): ShinyBridge {
     if (callbacksMap.size === 1) return callbacksMap.values().next().value;
     if (callbacksMap.size > 1) {
       console.warn("[shinyAssistantUI] message without threadId dropped (multiple active threads)");
+    }
+    return undefined;
+  };
+  const routeToolCallback = (data: { threadId?: string; runId?: string | null }) => {
+    const existing = routeCallback(data.threadId);
+    if (existing) return existing;
+    if (typeof data.threadId === "string" && data.threadId.length > 0 && data.runId == null) {
+      return backgroundToolCallbacks?.(data.threadId);
     }
     return undefined;
   };
@@ -298,8 +310,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:tool-call`, (data) => {
-    const d = data as ToolCallPayload & { threadId?: string };
-    routeCallback(d.threadId)?.onToolCall(d);
+    const d = data as ToolCallPayload & { threadId?: string; runId?: string };
+    routeToolCallback(d)?.onToolCall(d);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:tool-call-start`, (data) => {
@@ -313,8 +325,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:tool-result`, (data) => {
-    const d = data as { toolCallId: string; result: unknown; isError?: boolean; threadId?: string };
-    routeCallback(d.threadId)?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
+    const d = data as { toolCallId: string; result: unknown; isError?: boolean; threadId?: string; runId?: string };
+    routeToolCallback(d)?.onToolResult(d.toolCallId, d.result, d.isError ?? false);
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:tool-result-chunk`, (data) => {
@@ -555,6 +567,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       } else {
         callbacksMap.set(threadId, callbacks);
       }
+    },
+    setBackgroundToolCallbacks(factory) {
+      backgroundToolCallbacks = factory;
     },
 
     retireRunCallbacks(threadId) {

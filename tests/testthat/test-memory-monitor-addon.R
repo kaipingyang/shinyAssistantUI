@@ -26,15 +26,15 @@ memory_open <- function(binding, open_id, visible, revision = 0) list(
   visible = visible, revision = revision, sample = NULL
 )
 
-test_that("memory monitor advertises v2 latest-snapshot capability", {
+test_that("memory monitor advertises v3 latest-snapshot capability", {
   plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
   on.exit(plugin$dispose(), add = TRUE)
   expect_identical(plugin$config(), list(
-    version = 2L, protocol = "latest-snapshot"
+    version = 3L, protocol = "latest-snapshot"
   ))
   bound <- bind_memory_v2(plugin, "chat_input")
   expect_named(bound$binding$config, c("version", "ownerSeed", "lastRevision"))
-  expect_identical(bound$binding$config$version, 2L)
+  expect_identical(bound$binding$config$version, 3L)
   expect_gt(bound$binding$config$ownerSeed, 0)
 })
 
@@ -44,6 +44,7 @@ test_that("memory v2 sends one exact frozen snapshot per opening", {
   bound <- bind_memory_v2(plugin, "chat_input")
   plugin$observe(list(
     pss_bytes = 80, rss_bytes = 90,
+    tree_rss_bytes = 260, tree_process_count = 3L,
     cgroup_current_bytes = 2465 * 1024^2,
     cgroup_max_bytes = 29296 * 1024^2,
     prompt = "SECRET", path = "/PRIVATE", pid = 123
@@ -53,11 +54,14 @@ test_that("memory v2 sends one exact frozen snapshot per opening", {
   frame <- bound$sent()[[1L]]$message
   expect_named(frame, c("version", "ownerId", "openId", "revision", "sample"))
   expect_named(frame$sample, c(
-    "state", "pssBytes", "rssBytes", "cgroupCurrentBytes", "cgroupMaxBytes",
+    "state", "pssBytes", "rssBytes", "treeRssBytes", "treeProcessCount",
+    "cgroupCurrentBytes", "cgroupMaxBytes",
     "cgroupLimited", "softPssBytes", "hardPssBytes", "softRssBytes", "hardRssBytes"
   ))
   expect_identical(frame$sample$state, "normal")
   expect_identical(frame$sample$pssBytes, 80)
+  expect_identical(frame$sample$treeRssBytes, 260)
+  expect_identical(frame$sample$treeProcessCount, 3)
   expect_identical(frame$sample$cgroupCurrentBytes, 2465 * 1024^2)
   expect_identical(frame$sample$cgroupMaxBytes, 29296 * 1024^2)
   expect_true(frame$sample$cgroupLimited)
@@ -176,4 +180,34 @@ test_that("memory binding adopts a higher remount owner and rejects the old owne
   bound$input(stale)
   expect_length(bound$sent(), 1L)
   expect_identical(plugin$snapshot()$last_owner, initial_owner + 1)
+})
+
+test_that("memory v3 exposes real sample times and keeps cached refreshes honest", {
+  plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
+  on.exit(plugin$dispose(), add = TRUE)
+  bound <- bind_memory_v2(plugin, "timed_input")
+  expect_identical(bound$binding$config$version, 3L)
+  captured <- as.POSIXct("2026-09-18 09:17:43", tz = "UTC")
+  plugin$observe(list(
+    pss_bytes = 80, rss_bytes = 90,
+    captured_at = captured,
+    tree_captured_at = captured - 10,
+    cgroup_captured_at = captured - 10
+  ), "normal", "normal")
+  request <- memory_open(bound$binding, 1, TRUE)
+  request$version <- 3L
+  bound$input(request)
+  expect_length(bound$sent(), 1L)
+  if (!length(bound$sent())) return(invisible(NULL))
+  frame <- bound$sent()[[1L]]$message
+  expect_identical(frame$version, 3L)
+  expect_identical(frame$sample$sampledAt, as.numeric(captured) * 1000)
+  expect_identical(frame$sample$treeSampledAt, as.numeric(captured - 10) * 1000)
+  expect_identical(frame$sample$cgroupSampledAt, as.numeric(captured - 10) * 1000)
+  request$openId <- 2
+  request$revision <- frame$revision
+  bound$input(request)
+  expect_length(bound$sent(), 2L)
+  expect_identical(bound$sent()[[2L]]$message$sample, frame$sample)
+  expect_identical(bound$sent()[[2L]]$message$revision, frame$revision)
 })

@@ -13,6 +13,7 @@ assistant-ui-src/
 .ellmer_sessions/
 .claude_session_map_custom.rds
 .sessions/
+/diagnose/
 test.txt
 test.text
 

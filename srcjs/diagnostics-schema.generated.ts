@@ -1,4 +1,5 @@
 // Generated table for diagnostics-v1. The R-side canonical artifact must generate this file byte-for-byte.
+export const DIAGNOSTICS_LIMITS = {"batchRows":100,"queueRows":1000,"rowBytes":16384} as const;
 export const DIAGNOSTICS_EVENT_SPEC = {
   frontend_mount: {}, frontend_unmount: {}, shiny_connected: {}, shiny_disconnected: {},
   run_state: { phase: ["queued", "connecting", "running", "complete", "error", "cancelled"] },
@@ -14,8 +15,17 @@ export const DIAGNOSTICS_EVENT_SPEC = {
   page_js_heap_sample: { pageJsHeapBytes: "safe-int" },
   memory_guard_sample: {
     state: ["normal", "soft", "hard", "unknown", "unsupported"],
-    pssBytes: "safe-int", rssBytes: "safe-int", cgroupCurrentBytes: "safe-int", cgroupMaxBytes: "safe-int",
+    pssBytes: "safe-int", rssBytes: "safe-int",
+    privateDirtyBytes: "safe-int", anonymousBytes: "safe-int",
+    cgroupCurrentBytes: "safe-int", cgroupMaxBytes: "safe-int",
     cgroupLimit: ["limited", "unlimited", "unknown"],
+    cgroupHighEvents: "safe-int", cgroupMaxEvents: "safe-int",
+    cgroupOomEvents: "safe-int", cgroupOomKillEvents: "safe-int",
+    rHeapAfterGcBytes: "safe-int", guardGcCount: "safe-int",
+    sdkClientCount: "safe-int", sdkConsumerCount: "safe-int", sdkRouteCount: "safe-int",
+    sdkMessagesSeen: "safe-int", sdkMessageBytesSeen: "safe-int", sdkMaxBatchBytes: "safe-int",
+    sdkBufferedMessageCount: "safe-int",
+    sdkWaiterCount: "safe-int", sdkUsageProbePendingCount: "safe-int", activeTurnCount: "safe-int",
     softPssBytes: "safe-int", hardPssBytes: "safe-int",
     softRssBytes: "safe-int", hardRssBytes: "safe-int",
   },

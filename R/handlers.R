@@ -240,7 +240,14 @@
 
 # Small SDK seams keep handler behavior unit-testable without network or CLI.
 .new_claude_options <- function(...) ClaudeAgentSDK::ClaudeAgentOptions(...)
-.new_claude_client <- function(options) ClaudeAgentSDK::ClaudeSDKClient$new(options)
+.new_claude_client <- function(options) {
+  client <- ClaudeAgentSDK::ClaudeSDKClient$new(options)
+  if (!is.function(client$is_alive)) {
+    stop("Update ClaudeAgentSDK to a build with is_alive() and restart R before using long-running Claude tasks.",
+         call. = FALSE)
+  }
+  client
+}
 
 .claude_sdk_identity <- function(
     namespace = tryCatch(asNamespace("ClaudeAgentSDK"), error = function(error) NULL),
@@ -673,6 +680,37 @@
   text
 }
 
+
+.new_claude_text_accumulator <- function() {
+  state <- new.env(parent = emptyenv())
+  state$prefix <- ""
+  state$pending <- new.env(hash = FALSE, parent = emptyenv())
+  state$count <- 0L
+
+  append <- function(value) {
+    if (!is.character(value) || !length(value)) return(invisible(FALSE))
+    value <- value[!is.na(value)]
+    if (!length(value)) return(invisible(FALSE))
+    text <- paste0(value, collapse = "")
+    if (!nzchar(text)) return(invisible(FALSE))
+    state$count <- state$count + 1L
+    assign(as.character(state$count), text, envir = state$pending)
+    invisible(TRUE)
+  }
+  value <- function() {
+    if (state$count > 0L) {
+      keys <- as.character(seq_len(state$count))
+      chunks <- unname(unlist(mget(
+        keys, envir = state$pending, inherits = FALSE
+      ), use.names = FALSE))
+      state$prefix <- paste0(state$prefix, paste0(chunks, collapse = ""))
+      rm(list = keys, envir = state$pending)
+      state$count <- 0L
+    }
+    state$prefix
+  }
+  list(append = append, value = value)
+}
 # Return only the terminal text not already represented by streamed text. This
 # handles full snapshots (terminal starts with stream), exact duplicates, and
 # separate assistant rounds whose boundary overlaps.
@@ -730,6 +768,195 @@
 }
 
 .claude_drain_timeout_seconds <- function() 10
+
+.claude_foreground_batch <- function(step, now = function() proc.time()[["elapsed"]]) {
+  started <- now()
+  for (index in seq_len(32L)) {
+    status <- step()
+    if (!identical(status, "continue")) {
+      if (is.character(status) && length(status) == 1L &&
+          status %in% c("idle", "approval", "done")) {
+        return(status)
+      }
+      stop("Unexpected foreground step status", call. = FALSE)
+    }
+    if (now() - started >= 0.008) break
+  }
+  "yield"
+}
+
+.capture_handler_promise_domain <- function() {
+  # promises exposes domain restoration, but not a public capture API.
+  current_domain <- get0(
+    "current_promise_domain", envir = asNamespace("promises"), inherits = FALSE
+  )
+  if (!is.function(current_domain) || length(formals(current_domain)) != 0L) {
+    stop("Cannot capture the handler promise domain with this version of promises",
+         call. = FALSE)
+  }
+  domain <- current_domain()
+  if (!is.null(domain) &&
+      (!(is.environment(domain) || is.list(domain)) ||
+       !all(vapply(c("wrapSync", "wrapOnFulfilled", "wrapOnRejected", "onError"),
+                   function(name) is.function(domain[[name]]), logical(1))))) {
+    stop("Unsupported handler promise domain", call. = FALSE)
+  }
+  domain
+}
+
+.claude_foreground_pump <- function(turn, schedule = NULL) {
+  loop <- later::current_loop()
+  domain <- .capture_handler_promise_domain()
+  if (is.null(schedule)) {
+    schedule <- function(callback, delay) later::later(callback, delay, loop = loop)
+  }
+  if (!is.function(schedule)) stop("Foreground scheduler must be a function", call. = FALSE)
+
+  promises::promise(function(resolve, reject) {
+    settled <- FALSE
+    sequence <- 0L
+    cancel_pending <- NULL
+    waiting_approval <- FALSE
+    approval_sequence <- 0L
+
+    cancel_tick <- function() {
+      sequence <<- sequence + 1L
+      cancel <- cancel_pending
+      cancel_pending <<- NULL
+      if (!is.null(cancel)) cancel()
+      invisible(NULL)
+    }
+
+    finish <- function(succeeded, reason = NULL) {
+      if (settled) return(invisible(NULL))
+      settled <<- TRUE
+      waiting_approval <<- FALSE
+      approval_sequence <<- approval_sequence + 1L
+      cancel_error <- NULL
+      tryCatch(cancel_tick(), error = function(error) cancel_error <<- error)
+      if (!is.null(cancel_error)) {
+        succeeded <- FALSE
+        reason <- cancel_error
+      }
+      turn <<- NULL
+      domain <<- NULL
+      if (succeeded) resolve(NULL) else reject(reason)
+      invisible(NULL)
+    }
+    fail <- function(reason) finish(FALSE, reason)
+    tick <- NULL
+    schedule_tick <- function(delay) {
+      if (settled) return(invisible(NULL))
+      if (!is.null(cancel_pending)) stop("Foreground pump already has a pending timer")
+      sequence <<- sequence + 1L
+      token <- sequence
+      cancel_pending <<- schedule(function() {
+        if (settled || !identical(token, sequence)) return(invisible(NULL))
+        cancel_pending <<- NULL
+        tick()
+      }, delay)
+      if (!is.function(cancel_pending)) {
+        cancel_pending <<- NULL
+        stop("Foreground scheduler must return a cancellation function")
+      }
+      invisible(NULL)
+    }
+    tick <- function() {
+      if (settled) return(invisible(NULL))
+      tryCatch(promises::with_promise_domain(domain, {
+        if (waiting_approval) {
+          pending <- turn$poll_approval()
+          if (!is.logical(pending) || length(pending) != 1L || is.na(pending)) {
+            stop("Invalid foreground approval state", call. = FALSE)
+          }
+          if (pending) {
+            schedule_tick(1)
+          } else {
+            waiting_approval <<- FALSE
+            approval_sequence <<- approval_sequence + 1L
+            schedule_tick(0)
+          }
+          return(invisible(NULL))
+        }
+        status <- turn$pump()
+        if (identical(status, "done")) {
+          finish(TRUE)
+        } else if (identical(status, "approval")) {
+          waiting_approval <<- TRUE
+          approval_sequence <<- approval_sequence + 1L
+          approval_token <- approval_sequence
+          promises::then(
+            turn$approval(),
+            onFulfilled = function(decision) {
+              if (settled || !waiting_approval ||
+                  !identical(approval_token, approval_sequence)) return(invisible(NULL))
+              tryCatch(promises::with_promise_domain(domain, {
+                waiting_approval <<- FALSE
+                cancel_tick()
+                turn$decide(decision)
+                schedule_tick(0)
+              }, replace = TRUE), error = fail)
+              invisible(NULL)
+            },
+            onRejected = function(reason) {
+              if (!settled && waiting_approval &&
+                  identical(approval_token, approval_sequence)) fail(reason)
+              NULL
+            }
+          )
+          if (is.function(turn$poll_approval)) schedule_tick(1)
+        } else if (identical(status, "idle") || identical(status, "yield")) {
+          delay <- 0
+          if (identical(status, "idle")) delay <- 0.05
+          schedule_tick(delay)
+        } else {
+          stop("Unexpected foreground pump status", call. = FALSE)
+        }
+      }, replace = TRUE), error = fail)
+      invisible(NULL)
+    }
+    tryCatch(schedule_tick(0), error = fail)
+  })
+}
+
+.consume_handler_stream <- function(stream, on_chunk, is_cancelled) {
+  iterator <- coro::as_iterator(stream)
+  completion <- promises::promise(function(resolve, reject) {
+    settled <- FALSE
+    fail <- function(error) {
+      if (!settled) {
+        settled <<- TRUE
+        reject(error)
+      }
+      invisible(NULL)
+    }
+    advance <- function() {
+      tryCatch({
+        value <- iterator()
+        if (!promises::is.promise(value)) value <- promises::promise_resolve(value)
+        promises::then(value, receive, fail)
+      }, error = fail)
+      invisible(NULL)
+    }
+    receive <- function(chunk) {
+      if (settled) return(invisible(NULL))
+      tryCatch({
+        if (coro::is_exhausted(chunk) || is_cancelled()) {
+          settled <<- TRUE
+          resolve(NULL)
+        } else {
+          on_chunk(chunk)
+          advance()
+        }
+      }, error = fail)
+      invisible(NULL)
+    }
+    advance()
+  })
+  promises::finally(completion, function() {
+    if ("close" %in% names(formals(iterator))) iterator(close = TRUE)
+  })
+}
 
 #' Create an ellmer streaming handler for assistantUIServer
 #'
@@ -842,6 +1069,11 @@ make_ellmer_handler <- function(chat,
     current$on_tool_call      <- on_tool_call
     current$on_tool_result    <- on_tool_result
     current$wait_for_approval <- wait_for_approval
+    on.exit({
+      current$on_tool_call <- NULL
+      current$on_tool_result <- NULL
+      current$wait_for_approval <- NULL
+    }, add = TRUE)
 
     atts <- attachments %||% list()
 
@@ -860,10 +1092,7 @@ make_ellmer_handler <- function(chat,
                       c(list(full_message), img_parts, list(controller = ctrl)))
     had_error <- FALSE
     tryCatch(
-      for (chunk in coro::await_each(stream)) {
-        if (is_cancelled()) break
-        on_chunk(chunk)
-      },
+      coro::await(.consume_handler_stream(stream, on_chunk, is_cancelled)),
       error = function(e) {
         had_error <<- TRUE
         if (!is_cancelled()) on_error(conditionMessage(e))
@@ -883,9 +1112,6 @@ make_ellmer_handler <- function(chat,
       })
     }
 
-    current$on_tool_call      <- NULL
-    current$on_tool_result    <- NULL
-    current$wait_for_approval <- NULL
   })
 }
 
@@ -1003,7 +1229,7 @@ make_ellmer_session_loader <- function(store) {
 # abort the rest of the cleanup. A second attempt handles an interrupt that
 # landed before the SDK could clear its transport reference.
 .disconnect_claude_client_safely <- function(client, attempts = 2L) {
-  if (is.null(client)) return(invisible(NULL))
+  if (is.null(client)) return(invisible(TRUE))
   attempts <- max(1L, as.integer(attempts))
   for (attempt in seq_len(attempts)) {
     completed <- FALSE
@@ -1017,7 +1243,7 @@ make_ellmer_session_loader <- function(store) {
     )
     if (completed) break
   }
-  invisible(NULL)
+  invisible(completed)
 }
 
 # Snapshot and clear the registry before touching subprocesses. This makes
@@ -1338,6 +1564,10 @@ make_ellmer_session_loader <- function(store) {
 }
 
 .claude_filter_complete_text <- function(text) {
+  if (is.character(text) && length(text) == 1L && !is.na(text) &&
+      !grepl("course_status|<invoke|```|~~~", text, perl = TRUE)) {
+    return(list(text = text, malformed = FALSE))
+  }
   output <- character(0)
   guard <- .new_claude_text_guard(function(value) output <<- c(output, value))
   guard$push(text %||% "")
@@ -1363,6 +1593,14 @@ make_ellmer_session_loader <- function(store) {
 }
 
 .claude_idle_opener <- function(message) {
+  parent <- message$parent_tool_use_id
+  if (!is.null(parent) && length(parent) && !is.na(parent[[1L]]) &&
+      nzchar(as.character(parent[[1L]]))) return(FALSE)
+  if (inherits(message, "PermissionRequestMessage")) {
+    agent <- message$agent_id
+    if (!is.null(agent) && length(agent) && !is.na(agent[[1L]]) &&
+        nzchar(as.character(agent[[1L]]))) return(FALSE)
+  }
   inherits(message, "StreamEvent") ||
     (inherits(message, "UserMessage") && !isTRUE(message$is_replay)) ||
     inherits(message, "AssistantMessage") ||
@@ -1371,29 +1609,172 @@ make_ellmer_session_loader <- function(store) {
 
 # Coordinate every consumer of one Claude SDK message queue. Only the named
 
+.claude_task_is_terminal <- function(message) {
+  if (inherits(message, "TaskNotificationMessage")) return(TRUE)
+  if (!inherits(message, "TaskUpdatedMessage")) return(FALSE)
+  status <- message$status %||% (message$patch %||% list())$status
+  is.character(status) && length(status) == 1L && !is.na(status) &&
+    tolower(status) %in% c("completed", "done", "failed", "killed", "stopped",
+                          "cancelled", "canceled", "errored", "disconnected")
+}
+
+.claude_passive_message <- function(message) {
+  any(vapply(c(
+    "TaskStartedMessage", "TaskProgressMessage", "TaskNotificationMessage",
+    "TaskUpdatedMessage", "RateLimitEvent", "HookEventMessage", "SystemMessage"
+  ), function(kind) inherits(message, kind), logical(1)))
+}
+
+.cancel_claude_approval <- function(promise) {
+  cancel <- attr(promise, "cancel", exact = TRUE)
+  if (is.function(cancel)) cancel()
+  invisible(NULL)
+}
+
+.claude_history_message_id <- function(message) {
+  id <- message$uuid
+  if (!is.character(id) || length(id) != 1L || is.na(id) || !nzchar(id)) return(NULL)
+  has_text <- function(value) {
+    is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
+  }
+  content <- message$content
+  visible <- has_text(content)
+  if (is.list(content)) {
+    visible <- any(vapply(content, function(block) {
+      is.list(block) && (
+        ((inherits(block, "TextBlock") || identical(block$type, "text")) && has_text(block$text)) ||
+          inherits(block, "ToolUseBlock") || identical(block$type, "tool_use")
+      )
+    }, logical(1)))
+  }
+  if (visible) paste0("h-", id) else NULL
+}
+
 .new_claude_background_task_ownership <- function() {
   tasks <- new.env(parent = emptyenv())
+  calls <- new.env(parent = emptyenv())
+  finished_tasks <- new.env(parent = emptyenv())
+  serial <- 0L
   scalar <- function(value) {
     if (is.null(value) || !length(value) || is.na(value[[1L]]) ||
         !nzchar(as.character(value[[1L]]))) NULL else as.character(value[[1L]])
   }
-  terminal <- function(message) {
-    if (inherits(message, "TaskNotificationMessage")) return(TRUE)
-    if (!inherits(message, "TaskUpdatedMessage")) return(FALSE)
-    status <- scalar(message$status %||% (message$patch %||% list())$status)
-    !is.null(status) && status %in% c("completed", "failed", "killed", "stopped")
+  has_active_ancestor <- function(id) {
+    active_calls <- Filter(Negate(is.null), lapply(as.list(tasks), function(task) {
+      if (isTRUE(task$authorized)) task$tool_use_id else NULL
+    }))
+    seen <- character()
+    while (!is.null(id) && !id %in% seen) {
+      if (id %in% active_calls) return(TRUE)
+      seen <- c(seen, id)
+      id <- get0(id, calls, inherits = FALSE)$parent
+    }
+    FALSE
   }
-  observe <- function(message, foreground = FALSE) {
+  known_call <- function(id, include_closed = FALSE) {
+    if (is.null(id)) return(FALSE)
+    call <- get0(id, calls, inherits = FALSE)
+    if (is.null(call)) return(FALSE)
+    if (has_active_ancestor(id)) return(TRUE)
+    !isTRUE(call$revoked) && (include_closed || !isTRUE(call$closed))
+  }
+  revoke_call <- function(id) {
+    if (is.null(id)) return(invisible(NULL))
+    revoked <- id
+    for (key in ls(calls, all.names = TRUE)) {
+      current <- key
+      seen <- character()
+      while (!is.null(current) && !current %in% seen) {
+        if (current %in% revoked) {
+          calls[[key]]$closed <- TRUE
+          calls[[key]]$revoked <- TRUE
+          revoked <- unique(c(revoked, key))
+          break
+        }
+        seen <- c(seen, current)
+        current <- get0(current, calls, inherits = FALSE)$parent
+      }
+    }
+    invisible(NULL)
+  }
+  prune_calls <- function() {
+    ids <- ls(calls, all.names = TRUE)
+    if (length(ids) <= 512L) return(invisible(NULL))
+    records <- as.list(tasks)
+    protected <- unique(Filter(Negate(is.null), lapply(records, `[[`, "tool_use_id")))
+    ancestors <- protected
+    repeat {
+      parents <- unique(Filter(Negate(is.null), lapply(ancestors, function(id) {
+        record <- get0(id, calls, inherits = FALSE)
+        record$parent
+      })))
+      ancestors <- setdiff(parents, protected)
+      if (!length(ancestors)) break
+      protected <- c(protected, ancestors)
+    }
+    candidates <- setdiff(ids, protected)
+    if (length(candidates)) {
+      order <- order(vapply(candidates, function(id) get(id, calls)$serial, integer(1)))
+      remove <- utils::head(candidates[order], max(0L, length(ids) - max(512L, length(protected))))
+      if (length(remove)) rm(list = remove, envir = calls)
+    }
+    invisible(NULL)
+  }
+  observe <- function(message, foreground = FALSE, continuation = FALSE) {
+    parent <- scalar(message$parent_tool_use_id)
+    trusted <- if (is.null(parent)) isTRUE(foreground) || isTRUE(continuation) else known_call(parent)
+    remember_call <- function(block) {
+      if (!trusted || !is.list(block)) return(invisible(NULL))
+      is_tool <- inherits(block, "ToolUseBlock") || inherits(block, "ServerToolUseBlock") ||
+        block$type %in% c("tool_use", "server_tool_use")
+      id <- scalar(block$id)
+      if (!isTRUE(is_tool) || is.null(id)) return(invisible(NULL))
+      if (exists(id, calls, inherits = FALSE)) return(invisible(NULL))
+      serial <<- serial + 1L
+      assign(id, list(parent = parent, serial = serial, closed = FALSE, revoked = FALSE),
+             envir = calls)
+      prune_calls()
+      invisible(NULL)
+    }
+    if (inherits(message, "StreamEvent") &&
+        identical(message$event$type, "content_block_start")) {
+      remember_call(message$event$content_block)
+    } else if (inherits(message, "AssistantMessage")) {
+      for (block in message$content %||% list()) remember_call(block)
+    } else if (inherits(message, "UserMessage")) {
+      for (block in message$content %||% list()) {
+        if (!is.list(block) ||
+            !(inherits(block, "ToolResultBlock") || identical(block$type, "tool_result"))) next
+        id <- scalar(block$tool_use_id)
+        if (!is.null(id) && exists(id, calls, inherits = FALSE)) calls[[id]]$closed <- TRUE
+      }
+    } else if (inherits(message, "ResultMessage")) {
+      for (id in ls(calls, all.names = TRUE)) calls[[id]]$closed <- TRUE
+    }
     task_id <- scalar(message$task_id)
     if (is.null(task_id)) return(invisible(FALSE))
-    if (terminal(message)) {
+    if (.claude_task_is_terminal(message)) {
+      record <- get0(task_id, tasks, inherits = FALSE)
       if (exists(task_id, envir = tasks, inherits = FALSE)) rm(list = task_id, envir = tasks)
+      revoke_call(record$tool_use_id)
+      serial <<- serial + 1L
+      assign(task_id, serial, finished_tasks)
+      finished <- as.list(finished_tasks)
+      if (length(finished) > 512L) {
+        rm(list = names(sort(unlist(finished)))[seq_len(length(finished) - 512L)],
+           envir = finished_tasks)
+      }
       return(invisible(TRUE))
     }
-    if (isTRUE(foreground) && inherits(message, "TaskStartedMessage")) {
+    if (inherits(message, "TaskStartedMessage")) {
+      if (exists(task_id, finished_tasks, inherits = FALSE)) return(invisible(FALSE))
+      previous <- get0(task_id, tasks, inherits = FALSE)
+      tool_id <- scalar(message$tool_use_id) %||% previous$tool_use_id
       assign(task_id, list(
         task_id = task_id,
-        tool_use_id = scalar(message$tool_use_id)
+        tool_use_id = tool_id,
+        authorized = isTRUE(previous$authorized) || isTRUE(foreground) ||
+          known_call(tool_id, include_closed = TRUE)
       ), envir = tasks)
       return(invisible(TRUE))
     }
@@ -1402,14 +1783,17 @@ make_ellmer_session_loader <- function(store) {
   owns <- function(message) {
     if (!inherits(message, "PermissionRequestMessage")) return(FALSE)
     ids <- ls(tasks, all.names = TRUE)
-    if (!length(ids)) return(FALSE)
     agent_id <- scalar(message$agent_id)
     tool_use_id <- scalar(message$tool_use_id)
+    if (!is.null(agent_id) && exists(agent_id, finished_tasks, inherits = FALSE)) return(FALSE)
+    if (known_call(tool_use_id)) return(TRUE)
     records <- lapply(ids, function(id) get(id, envir = tasks, inherits = FALSE))
     direct <- any(vapply(records, function(record) {
-      (!is.null(agent_id) && identical(agent_id, record$task_id)) ||
-        (!is.null(tool_use_id) && !is.null(record$tool_use_id) &&
-           identical(tool_use_id, record$tool_use_id))
+      isTRUE(record$authorized) && (
+        (!is.null(agent_id) && identical(agent_id, record$task_id)) ||
+          (!is.null(tool_use_id) && !is.null(record$tool_use_id) &&
+             identical(tool_use_id, record$tool_use_id))
+      )
     }, logical(1)))
     direct
   }
@@ -1420,10 +1804,34 @@ make_ellmer_session_loader <- function(store) {
     clear = function() {
       ids <- ls(tasks, all.names = TRUE)
       if (length(ids)) rm(list = ids, envir = tasks)
+      ids <- ls(calls, all.names = TRUE)
+      if (length(ids)) rm(list = ids, envir = calls)
+      ids <- ls(finished_tasks, all.names = TRUE)
+      if (length(ids)) rm(list = ids, envir = finished_tasks)
       invisible(NULL)
     }
   )
 }
+
+.claude_message_batch_size_bytes <- function(messages) {
+  if (!is.list(messages) || !length(messages)) return(0)
+  value <- suppressWarnings(as.numeric(utils::object.size(messages)))
+  if (length(value) != 1L || !is.finite(value) || value < 0) return(0)
+  min(2^53 - 1, value)
+}
+
+.memory_guard_coordinator_blocks_gc <- function(metrics) {
+  if (!is.list(metrics)) return(FALSE)
+  owner <- as.character(metrics$owner %||% "none")[[1L]]
+  waiters <- suppressWarnings(as.numeric(metrics$waiters %||% 0))
+  waiter_count <- if (length(waiters) == 1L && is.finite(waiters) && waiters > 0) {
+    waiters
+  } else {
+    0
+  }
+  (!owner %in% c("none", "idle")) || waiter_count > 0
+}
+
 .notify_memory_observation <- function(callback, sample, previous_state, next_state) {
   if (!is.function(callback)) return(FALSE)
   tryCatch({
@@ -1442,7 +1850,10 @@ make_ellmer_session_loader <- function(store) {
   if (length(messages)) {
     events[[1L]] <- list(
       event = "poll_batch",
-      metrics = list(batch_count = length(messages))
+      metrics = list(
+        batch_count = length(messages),
+        bytes = .claude_message_batch_size_bytes(messages)
+      )
     )
   }
   known_classes <- .diagnostics_enum_metrics$message_class
@@ -1549,13 +1960,26 @@ make_ellmer_session_loader <- function(store) {
     can_open_idle = function() TRUE,
     poll_interval = 0.1,
     max_idle_poll_interval = 0.5,
-    idle_timeout = 120) {
+    idle_timeout = 120,
+    drain_timeout = .claude_drain_timeout_seconds(),
+    is_alive = NULL,
+    retire = NULL,
+    on_idle_wait = NULL,
+    on_idle_released = NULL) {
   owner <- NULL
   waiters <- list()
   buffered <- list()
   generation <- 0L
   idle_enabled <- FALSE
   idle_opened_at <- NULL
+  idle_activity_at <- NULL
+  idle_wait_notified <- FALSE
+  permission_pending <- FALSE
+  permission_handle <- NULL
+  permission_serial <- 0L
+  failure_reason <- NULL
+  drain_started_at <- NULL
+  retired <- FALSE
   idle_poll_scheduled <- FALSE
   idle_poll_cancel <- NULL
   idle_schedule_serial <- 0L
@@ -1564,8 +1988,25 @@ make_ellmer_session_loader <- function(store) {
   empty_idle_polls <- 0L
   foreground_polls <- 0L
   messages_seen <- 0L
+  message_bytes_seen <- 0
+  max_batch_bytes <- 0
+  observe_batch <- function(batch) {
+    messages_seen <<- messages_seen + length(batch)
+    bytes <- .claude_message_batch_size_bytes(batch)
+    message_bytes_seen <<- min(2^53 - 1, message_bytes_seen + bytes)
+    max_batch_bytes <<- max(max_batch_bytes, bytes)
+    invisible(bytes)
+  }
   denied_idle_permissions <- new.env(parent = emptyenv())
   idle_failure_pending <- FALSE
+  deny_once <- function(message) {
+    request_id <- as.character(message$request_id %||% "")[[1L]]
+    key <- paste0(generation, "\034", request_id)
+    if (exists(key, denied_idle_permissions, inherits = FALSE)) return(invisible(NULL))
+    assign(key, TRUE, denied_idle_permissions)
+    .call_compatible_callback(deny_idle_permission, list(message = message, interrupt = FALSE))
+    invisible(NULL)
+  }
 
   elapsed <- function(started) {
     value <- now() - started
@@ -1579,31 +2020,58 @@ make_ellmer_session_loader <- function(store) {
     idle_poll_delay <<- min(max_idle_poll_interval, idle_poll_delay * 2)
     invisible(NULL)
   }
+  notify_waiter_error <- function(waiter, reason) {
+    tryCatch(waiter$on_error(reason), error = function(error) {
+      message("[CLAUDE] queued consumer failed: ", conditionMessage(error))
+    })
+    invisible(NULL)
+  }
   grant_next <- function() {
-    if (!is.null(owner) || !length(waiters)) return(invisible(FALSE))
-    waiter <- waiters[[1L]]
-    waiters <<- waiters[-1L]
-    owner <<- waiter$name
-    waiter$on_acquired()
-    invisible(TRUE)
+    if (!is.null(owner) || length(buffered)) return(invisible(FALSE))
+    while (length(waiters)) {
+      waiter <- waiters[[1L]]
+      waiters <<- waiters[-1L]
+      if (!isTRUE(waiter$active)) next
+      waiter$active <- FALSE
+      if (retired) {
+        notify_waiter_error(waiter, simpleError(
+          "The previous Claude connection was retired before it could safely accept another turn. Please retry."
+        ))
+      } else {
+        owner <<- waiter$name
+        waiter$on_acquired()
+        return(invisible(TRUE))
+      }
+    }
+    invisible(FALSE)
   }
   release_owner <- function(expected) {
     if (!identical(owner, expected)) return(invisible(FALSE))
     owner <<- NULL
     idle_opened_at <<- NULL
+    idle_activity_at <<- NULL
+    idle_wait_notified <<- FALSE
     grant_next()
+    if (identical(expected, "idle") && !retired && is.null(owner) &&
+        !length(buffered) && is.function(on_idle_released)) {
+      tryCatch(on_idle_released(), error = function(error) {
+        message("[CLAUDE] idle release callback failed: ", conditionMessage(error))
+      })
+    }
     invisible(TRUE)
   }
-  fail_idle <- function(reason) {
+  finish_idle_failure <- function(terminal_result = NULL) {
     if (isTRUE(idle_failure_pending)) return(invisible(NULL))
     idle_failure_pending <<- TRUE
-    tryCatch(interrupt(), error = function(error) invisible(NULL))
     completed <- FALSE
     complete <- function() {
       if (completed) return(invisible(FALSE))
       completed <<- TRUE
       idle_failure_pending <<- FALSE
+      failure_reason <<- NULL
+      drain_started_at <<- NULL
       release_owner("idle")
+      if (!retired) schedule_idle(if (length(buffered)) 0 else poll_interval)
       invisible(TRUE)
     }
     supports_completion <- FALSE
@@ -1612,7 +2080,8 @@ make_ellmer_session_loader <- function(store) {
       supports_completion <- "on_complete" %in% callback_formals || "..." %in% callback_formals
       tryCatch(
         .call_compatible_callback(on_idle_failure, list(
-          reason = reason, on_complete = complete
+          reason = failure_reason, on_complete = complete,
+          terminal_result = terminal_result, retired = retired
         )),
         error = function(error) complete()
       )
@@ -1625,6 +2094,93 @@ make_ellmer_session_loader <- function(store) {
 
   schedule_idle <- NULL
   poll_idle <- NULL
+  retire_connection <- function(reason) {
+    if (retired) return(invisible(FALSE))
+    was_idle <- identical(owner, "idle")
+    retired <<- TRUE
+    idle_enabled <<- FALSE
+    cancel_permission(reason, terminal = TRUE)
+    cancel_scheduled_idle()
+    buffered <<- list()
+    if (is.function(retire)) {
+      tryCatch(retire(reason), error = function(error) {
+        message("[CLAUDE] connection retirement failed: ", conditionMessage(error))
+      })
+    }
+    if (was_idle) {
+      failure_reason <<- failure_reason %||% reason
+      finish_idle_failure()
+    } else {
+      owner <<- NULL
+      grant_next()
+    }
+    invisible(TRUE)
+  }
+  alive <- function() {
+    if (!is.function(is_alive)) return(TRUE)
+    isTRUE(is_alive())
+  }
+  cancel_permission <- function(reason = NULL, terminal = FALSE) {
+    handle <- permission_handle
+    permission_handle <<- NULL
+    permission_pending <<- FALSE
+    permission_serial <<- permission_serial + 1L
+    if (is.function(handle$cancel)) {
+      tryCatch(.call_compatible_callback(
+        handle$cancel, list(reason = reason, terminal = terminal)
+      ), error = function(error) {
+        message("[CLAUDE] approval cleanup failed: ", conditionMessage(error))
+      })
+    }
+    invisible(NULL)
+  }
+  poll_control <- function(name, on_event) {
+    if (retired) stop("Claude connection was retired.", call. = FALSE)
+    if (!identical(owner, name)) stop("Only the current consumer owner may poll", call. = FALSE)
+    terminal <- any(vapply(buffered, inherits, logical(1), "ResultMessage"))
+    if (!terminal) {
+      batch <- poll_messages() %||% list()
+      observe_batch(batch)
+      buffered <<- c(buffered, batch)
+    }
+    pending <- buffered
+    buffered <<- list()
+    keep <- rep(TRUE, length(pending))
+    for (index in seq_along(pending)) {
+      message <- pending[[index]]
+      if (.claude_passive_message(message)) {
+        on_event(message)
+        keep[[index]] <- FALSE
+      } else if (inherits(message, "ResultMessage")) {
+        terminal <- TRUE
+      }
+    }
+    buffered <<- pending[keep]
+    if (!terminal && !alive()) {
+      stop("Claude connection closed while waiting for approval.", call. = FALSE)
+    }
+    terminal
+  }
+  fail_idle <- function(reason) {
+    if (retired || !is.null(failure_reason) || idle_failure_pending) {
+      return(invisible(NULL))
+    }
+    failure_reason <<- reason
+    cancel_permission(reason)
+    drain_started_at <<- now()
+    cancel_scheduled_idle()
+    failure <- tryCatch({
+      if (!alive()) return(retire_connection(reason))
+      interrupt()
+      NULL
+    }, error = function(error) error)
+    if (inherits(failure, "error")) {
+      retire_connection(failure)
+    } else {
+      schedule_idle(0)
+    }
+    invisible(NULL)
+  }
   cancel_scheduled_idle <- function() {
     idle_schedule_serial <<- idle_schedule_serial + 1L
     if (is.function(idle_poll_cancel)) {
@@ -1635,7 +2191,8 @@ make_ellmer_session_loader <- function(store) {
     invisible(NULL)
   }
   schedule_idle <- function(delay = idle_poll_delay) {
-    if (!idle_enabled || idle_poll_scheduled) return(invisible(FALSE))
+    if (retired || !idle_enabled || idle_poll_scheduled ||
+        (!is.null(owner) && !identical(owner, "idle"))) return(invisible(FALSE))
     token <- generation
     idle_schedule_serial <<- idle_schedule_serial + 1L
     schedule_serial <- idle_schedule_serial
@@ -1650,145 +2207,246 @@ make_ellmer_session_loader <- function(store) {
     invisible(TRUE)
   }
   poll_idle <- function(token) {
-    if (!identical(token, generation) || !idle_enabled) return(invisible(NULL))
-    if (is.null(idle_opened_at)) {
-      admitted <- tryCatch(isTRUE(can_open_idle()), error = function(error) TRUE)
-      if (!admitted) {
-        if (identical(owner, "idle")) release_owner("idle")
-        schedule_idle()
-        return(invisible(NULL))
-      }
-    }
+    if (!identical(token, generation) || !idle_enabled || retired) return(invisible(NULL))
     if (!is.null(owner) && !identical(owner, "idle")) {
       return(invisible(NULL))
     }
     if (is.null(owner)) owner <<- "idle"
 
-    if (!is.null(idle_opened_at) && elapsed(idle_opened_at) >= idle_timeout) {
-      fail_idle(simpleError("Idle Claude turn timed out"))
+    if (permission_pending) {
+      terminal <- tryCatch(poll_control("idle", on_idle_event), error = function(error) error)
+      valid <- TRUE
+      if (!inherits(terminal, "error") && !isTRUE(terminal) &&
+          is.function(permission_handle$is_pending)) {
+        valid <- tryCatch(isTRUE(permission_handle$is_pending()), error = function(error) error)
+      }
+      if (inherits(terminal, "error")) {
+        retire_connection(terminal)
+      } else if (inherits(valid, "error")) {
+        fail_idle(valid)
+      } else if (isTRUE(terminal) || !valid) {
+        cancel_permission(simpleError("Approval expired because its task or Claude turn ended."),
+                          terminal = isTRUE(terminal))
+        schedule_idle(0)
+      } else {
+        schedule_idle(1)
+      }
       return(invisible(NULL))
     }
 
     idle_polls <<- idle_polls + 1L
-    batch <- tryCatch(poll_messages() %||% list(), error = function(error) error)
-    if (inherits(batch, "error")) {
-      fail_idle(batch)
-      return(invisible(NULL))
-    }
-    messages_seen <<- messages_seen + length(batch)
-    batch <- c(buffered, batch)
+    batch <- buffered
     buffered <<- list()
     if (!length(batch)) {
+      batch <- tryCatch(poll_messages() %||% list(), error = function(error) error)
+      if (!inherits(batch, "error")) observe_batch(batch)
+    }
+    if (inherits(batch, "error")) {
+      retire_connection(batch)
+      return(invisible(NULL))
+    }
+    if (!length(batch)) {
       empty_idle_polls <<- empty_idle_polls + 1L
-      if (is.null(idle_opened_at)) {
+      health <- tryCatch(alive(), error = function(error) error)
+      if (inherits(health, "error") || !isTRUE(health)) {
+        retire_connection(if (inherits(health, "error")) health else
+          simpleError("Claude Code process exited while waiting for messages."))
+        return(invisible(NULL))
+      }
+      if (!is.null(failure_reason)) {
+        if (elapsed(drain_started_at) >= drain_timeout) {
+          retire_connection(simpleError("Claude interrupt did not produce a terminal result."))
+          return(invisible(NULL))
+        }
+      } else if (is.null(idle_opened_at)) {
         release_owner("idle")
         advance_idle_backoff()
+      } else if (!idle_wait_notified &&
+                 elapsed(idle_activity_at %||% idle_opened_at) >= idle_timeout) {
+        idle_wait_notified <<- TRUE
+        if (is.function(on_idle_wait)) on_idle_wait(TRUE)
       }
       schedule_idle()
       return(invisible(NULL))
     }
     reset_idle_backoff()
+    idle_activity_at <<- now()
+    if (idle_wait_notified) {
+      idle_wait_notified <<- FALSE
+      if (is.function(on_idle_wait)) on_idle_wait(FALSE)
+    }
 
+    batch_started <- proc.time()[["elapsed"]]
     for (index in seq_along(batch)) {
+      if (index > 32L || (index > 1L && proc.time()[["elapsed"]] - batch_started >= 0.008)) {
+        buffered <<- batch[index:length(batch)]
+        if (!is.null(failure_reason) && elapsed(drain_started_at) >= drain_timeout &&
+            !any(vapply(buffered, inherits, logical(1), "ResultMessage"))) {
+          retire_connection(simpleError("Claude interrupt did not produce a terminal result."))
+        } else {
+          schedule_idle(0)
+        }
+        return(invisible(NULL))
+      }
       message <- batch[[index]]
+      if (!is.null(failure_reason)) {
+        if (inherits(message, "ResultMessage")) {
+          buffered <<- if (index < length(batch)) batch[(index + 1L):length(batch)] else list()
+          finish_idle_failure(message)
+          return(invisible(NULL))
+        }
+        drain_error <- tryCatch({
+          if (inherits(message, "PermissionRequestMessage")) {
+            deny_once(message)
+          } else {
+            on_idle_event(message)
+          }
+          NULL
+        }, error = function(error) error)
+        if (inherits(drain_error, "error")) {
+          retire_connection(drain_error)
+          return(invisible(NULL))
+        }
+        next
+      }
       opener <- .claude_idle_opener(message)
       if (opener && is.null(idle_opened_at)) idle_opened_at <<- now()
       if (inherits(message, "PermissionRequestMessage")) {
         if (is.function(handle_idle_permission)) {
-          if (index < length(batch)) buffered <<- batch[(index + 1L):length(batch)]
+          buffered <<- if (index < length(batch)) batch[(index + 1L):length(batch)] else list()
+          permission_pending <<- TRUE
           permission_token <- generation
+          permission_serial <<- permission_serial + 1L
+          request_token <- permission_serial
           resume_idle <- function() {
-            if (!identical(permission_token, generation) || !identical(owner, "idle")) {
+            if (!identical(permission_token, generation) || retired ||
+                !identical(request_token, permission_serial) ||
+                !permission_pending || !identical(owner, "idle")) {
               return(invisible(FALSE))
             }
+            permission_pending <<- FALSE
+            permission_handle <<- NULL
+            idle_activity_at <<- now()
+            cancel_scheduled_idle()
             schedule_idle(0)
             invisible(TRUE)
           }
-          handled <- tryCatch(
-            isTRUE(handle_idle_permission(
-              message, on_complete = resume_idle, on_failure = fail_idle
-            )),
+          handle <- tryCatch(
+            handle_idle_permission(
+              message, on_complete = resume_idle,
+              on_failure = function(reason) {
+                if (identical(request_token, permission_serial) && permission_pending) fail_idle(reason)
+              }
+            ),
             error = function(error) {
               fail_idle(error)
               TRUE
             }
           )
-          if (handled) return(invisible(NULL))
-          if (index < length(batch)) buffered <<- list()
+          if (isTRUE(handle) || (is.list(handle) && is.function(handle$cancel))) {
+            if (permission_pending) {
+              if (is.list(handle)) permission_handle <<- handle
+              schedule_idle(1)
+            }
+            return(invisible(NULL))
+          }
+          permission_pending <<- FALSE
         }
-        request_id <- tryCatch(
-          as.character(message$request_id %||% "")[[1L]],
-          error = function(error) ""
-        )
-        permission_key <- paste0(generation, "\034", request_id)
-        already_denied <- exists(
-          permission_key, envir = denied_idle_permissions, inherits = FALSE
-        )
         reason <- simpleError(
           "A background task requested approval and was stopped because no interactive run was available."
         )
-        if (!already_denied) {
-          assign(permission_key, TRUE, envir = denied_idle_permissions)
-          reason <- tryCatch({
-            deny_idle_permission(message)
-            reason
-          }, error = function(error) error)
-        }
+        reason <- tryCatch({ deny_once(message); reason }, error = function(error) error)
+        buffered <<- if (index < length(batch)) batch[(index + 1L):length(batch)] else list()
         fail_idle(reason)
         return(invisible(NULL))
       }
 
       if (inherits(message, "ResultMessage")) {
-        if (index < length(batch)) buffered <<- batch[(index + 1L):length(batch)]
+        buffered <<- if (index < length(batch)) batch[(index + 1L):length(batch)] else list()
         result_token <- generation
+        result_completed <- FALSE
         completion <- function() {
-          if (!identical(result_token, generation) || !identical(owner, "idle")) {
+          if (result_completed || !identical(result_token, generation) ||
+              !identical(owner, "idle")) {
             return(invisible(FALSE))
           }
+          result_completed <<- TRUE
           release_owner("idle")
-          schedule_idle()
+          schedule_idle(if (length(buffered)) 0 else poll_interval)
           invisible(TRUE)
         }
         tryCatch(
           on_idle_result(message, completion),
-          error = function(error) fail_idle(error)
+          error = function(error) {
+            if (result_completed) {
+              message("[CLAUDE] idle completion callback failed: ", conditionMessage(error))
+            } else {
+              failure_reason <<- error
+              finish_idle_failure(message)
+            }
+          }
         )
         return(invisible(NULL))
       }
 
-      tryCatch(on_idle_event(message), error = function(error) {
-        fail_idle(error)
-      })
+      event_error <- tryCatch({ on_idle_event(message); NULL }, error = function(error) error)
+      if (inherits(event_error, "error")) {
+        buffered <<- if (index < length(batch)) batch[(index + 1L):length(batch)] else list()
+        fail_idle(event_error)
+        return(invisible(NULL))
+      }
       if (!identical(owner, "idle")) return(invisible(NULL))
     }
 
-    if (is.null(idle_opened_at)) release_owner("idle")
+    if (!is.null(failure_reason) && elapsed(drain_started_at) >= drain_timeout) {
+      retire_connection(simpleError("Claude interrupt did not produce a terminal result."))
+      return(invisible(NULL))
+    }
+    if (is.null(idle_opened_at) && is.null(failure_reason)) release_owner("idle")
     schedule_idle()
     invisible(NULL)
   }
 
   list(
     start_idle = function(delay = 0) {
+      if (retired) return(invisible(FALSE))
       idle_enabled <<- TRUE
       cancel_scheduled_idle()
       reset_idle_backoff()
       schedule_idle(delay)
       invisible(NULL)
     },
-    acquire = function(name, on_acquired) {
-      if (is.null(owner)) {
+    acquire = function(name, on_acquired, on_error = function(reason) stop(reason)) {
+      waiter <- new.env(parent = emptyenv())
+      waiter$name <- name
+      waiter$on_acquired <- on_acquired
+      waiter$on_error <- on_error
+      waiter$active <- TRUE
+      if (retired) {
+        waiter$active <- FALSE
+        notify_waiter_error(waiter, simpleError("Claude connection was retired. Please retry."))
+      } else if (is.null(owner) && !length(buffered)) {
         cancel_scheduled_idle()
         reset_idle_backoff()
+        waiter$active <- FALSE
         owner <<- name
         on_acquired()
       } else {
-        waiters[[length(waiters) + 1L]] <<- list(
-          name = name, on_acquired = on_acquired
-        )
+        waiters <<- c(waiters, list(waiter))
+        if (is.null(owner)) schedule_idle(0)
       }
-      invisible(NULL)
+      invisible(function() {
+        if (!isTRUE(waiter$active)) return(invisible(FALSE))
+        waiter$active <- FALSE
+        waiters <<- Filter(function(value) !identical(value, waiter), waiters)
+        reason <- structure(simpleError("Claude consumer wait was cancelled."),
+                            class = c("claude_consumer_cancelled", "simpleError", "error", "condition"))
+        notify_waiter_error(waiter, reason)
+        invisible(TRUE)
+      })
     },
     poll_one = function(name) {
+      if (retired) stop("Claude connection was retired.", call. = FALSE)
       if (!identical(owner, name)) stop("Only the current consumer owner may poll", call. = FALSE)
       if (length(buffered)) {
         message <- buffered[[1L]]
@@ -1797,10 +2455,18 @@ make_ellmer_session_loader <- function(store) {
       }
       foreground_polls <<- foreground_polls + 1L
       batch <- poll_messages() %||% list()
-      messages_seen <<- messages_seen + length(batch)
+      observe_batch(batch)
       if (!length(batch)) return(NULL)
       if (length(batch) > 1L) buffered <<- batch[-1L]
       batch[[1L]]
+    },
+    poll_control = poll_control,
+    interrupt_idle = function() {
+      if (retired || (!is.null(owner) && !identical(owner, "idle"))) return(FALSE)
+      idle_enabled <<- TRUE
+      if (is.null(owner)) owner <<- "idle"
+      fail_idle(simpleError("Background work was interrupted by the user."))
+      TRUE
     },
     release = function(name) {
       if (!identical(owner, name)) return(invisible(FALSE))
@@ -1810,14 +2476,24 @@ make_ellmer_session_loader <- function(store) {
       schedule_idle()
       invisible(released)
     },
+    retire = retire_connection,
     invalidate = function() {
       generation <<- generation + 1L
       idle_enabled <<- FALSE
       cancel_scheduled_idle()
       idle_opened_at <<- NULL
+      idle_activity_at <<- NULL
+      cancel_permission(simpleError("Claude consumer was invalidated."))
+      failure_reason <<- NULL
       reset_idle_backoff()
       owner <<- NULL
+      pending <- waiters
       waiters <<- list()
+      for (waiter in pending) {
+        if (!isTRUE(waiter$active)) next
+        waiter$active <- FALSE
+        notify_waiter_error(waiter, simpleError("Claude consumer was invalidated."))
+      }
       buffered <<- list()
       invisible(NULL)
     },
@@ -1835,15 +2511,37 @@ make_ellmer_session_loader <- function(store) {
         empty_idle_polls = empty_idle_polls,
         foreground_polls = foreground_polls,
         messages_seen = messages_seen,
+        message_bytes_seen = message_bytes_seen,
+        max_batch_bytes = max_batch_bytes,
         idle_poll_ms = as.numeric(idle_poll_delay * 1000),
         owner = owner_kind,
         waiters = length(waiters),
         buffered_messages = length(buffered),
         idle_enabled = isTRUE(idle_enabled),
-        idle_open = !is.null(idle_opened_at)
+        idle_open = !is.null(idle_opened_at),
+        draining = !is.null(failure_reason),
+        waiting_permission = permission_pending,
+        retired = retired
       )
     }
   )
+}
+
+.claude_transcript_fingerprint <- function(value) {
+  bytes <- serialize(value, NULL, ascii = FALSE, version = 2)
+  fingerprint <- .native_sha256(bytes)
+  if (is.null(fingerprint)) {
+    stop("Native transcript fingerprint is unavailable", call. = FALSE)
+  }
+  fingerprint
+}
+
+.claude_transcript_state <- function(fingerprint, revision = 0L) {
+  if (!is.character(fingerprint) || length(fingerprint) != 1L ||
+      is.na(fingerprint) || !grepl("^[0-9a-f]{64}$", fingerprint)) {
+    stop("Invalid transcript fingerprint", call. = FALSE)
+  }
+  list(fingerprint = fingerprint, revision = as.integer(revision))
 }
 
 # Re-read the complete authoritative transcript until one full snapshot is
@@ -1855,8 +2553,11 @@ make_ellmer_session_loader <- function(store) {
     schedule,
     now,
     quiet_delay = 0.1,
-    deadline = 2) {
+    deadline = 2,
+    retry_timeout = 30,
+    on_deferred = NULL) {
   states <- new.env(parent = emptyenv())
+  jobs <- new.env(parent = emptyenv())
   generation <- 0L
   published_any <- FALSE
 
@@ -1868,7 +2569,6 @@ make_ellmer_session_loader <- function(store) {
       sep = "\034"
     )
   }
-  fingerprint <- function(value) serialize(value, NULL, ascii = FALSE, version = 2)
   elapsed <- function(started) {
     value <- now() - started
     if (inherits(value, "difftime")) as.numeric(value, units = "secs") else as.numeric(value)
@@ -1881,41 +2581,120 @@ make_ellmer_session_loader <- function(store) {
     snapshot <- read_snapshot(thread_id, session_id, project) %||% list()
     key <- key_for(thread_id, session_id, project)
     previous <- state_for(key)
-    assign(key, list(
-      snapshot = snapshot,
-      fingerprint = fingerprint(snapshot),
-      revision = previous$revision %||% 0L
-    ), envir = states)
+    assign(
+      key,
+      .claude_transcript_state(
+        .claude_transcript_fingerprint(snapshot),
+        previous$revision %||% 0L
+      ),
+      envir = states
+    )
     invisible(snapshot)
   }
 
   reconcile <- function(thread_id, session_id, project, after_run_id,
                         must_advance = FALSE, is_current = function() TRUE,
-                        on_complete = function(ok, reason = NULL) invisible(NULL)) {
+                        on_complete = function(ok, reason = NULL) invisible(NULL),
+                        watch_updates = FALSE, observed_message_id = NULL) {
+    force(thread_id)
+    force(session_id)
+    force(project)
+    force(after_run_id)
+    force(must_advance)
+    force(is_current)
+    force(on_complete)
+    force(watch_updates)
+    force(observed_message_id)
     key <- key_for(thread_id, session_id, project)
-    if (is.null(state_for(key))) baseline(thread_id, session_id, project)
+    previous_job <- get0(key, jobs, inherits = FALSE)
+    if (is.function(previous_job)) previous_job()
+    if (is.null(state_for(key))) {
+      assign(key, .claude_transcript_state(.claude_transcript_fingerprint(list())),
+             envir = states)
+    }
     token <- generation
     started <- now()
     candidate_fingerprint <- NULL
-    candidate_snapshot <- NULL
     settled <- FALSE
-
-    finish <- function(ok, reason = NULL) {
-      if (settled) return(invisible(FALSE))
-      settled <<- TRUE
-      on_complete(ok, reason)
+    notified <- FALSE
+    synchronized <- FALSE
+    pending_timer <- NULL
+    retry_delay <- quiet_delay
+    deferred <- function(status, reason = NULL) {
+      if (is.function(on_deferred)) {
+        on_deferred(thread_id, after_run_id, status, reason)
+      }
+      invisible(NULL)
+    }
+    notify <- function(ok, reason = NULL) {
+      if (notified) return(invisible(FALSE))
+      notified <<- TRUE
+      callback <- on_complete
+      on_complete <<- NULL
+      callback(ok, reason)
       invisible(TRUE)
     }
+
+    finish <- function(ok, reason = NULL, notify_deferred = TRUE) {
+      if (settled) return(invisible(FALSE))
+      settled <<- TRUE
+      candidate_fingerprint <<- NULL
+      if (is.function(pending_timer)) pending_timer()
+      pending_timer <<- NULL
+      if (exists(key, jobs, inherits = FALSE) &&
+          identical(get(key, jobs), cancel)) rm(list = key, envir = jobs)
+      was_notified <- notified
+      notify(ok, reason)
+      if (notify_deferred && was_notified && identical(token, generation) && isTRUE(is_current())) {
+        deferred(if (ok) "complete" else "error", reason)
+      }
+      invisible(TRUE)
+    }
+    cancel <- function() finish(FALSE, simpleError("Transcript reconciliation is stale"),
+                                notify_deferred = FALSE)
+    assign(key, cancel, envir = jobs)
     tick <- NULL
+    schedule_tick <- function(delay) {
+      if (settled) return(invisible(FALSE))
+      pending_timer <<- schedule(function() {
+        pending_timer <<- NULL
+        tick()
+      }, delay)
+      invisible(TRUE)
+    }
+    synchronize <- function() {
+      if (!isTRUE(watch_updates)) return(finish(TRUE))
+      was_synchronized <- synchronized
+      synchronized <<- TRUE
+      if (!notified) notify(TRUE)
+      else if (!was_synchronized) deferred("complete")
+      retry_delay <<- 1
+      schedule_tick(retry_delay)
+      invisible(TRUE)
+    }
     tick <- function() {
       if (settled) return(invisible(NULL))
       if (!identical(token, generation) || !isTRUE(is_current())) {
         finish(FALSE, simpleError("Transcript reconciliation is stale"))
         return(invisible(NULL))
       }
-      if (elapsed(started) >= deadline) {
-        finish(FALSE, simpleError("Transcript reconciliation timed out"))
+      if (elapsed(started) >= retry_timeout) {
+        if (synchronized) {
+          finish(TRUE, notify_deferred = FALSE)
+          return(invisible(NULL))
+        }
+        finish(FALSE, simpleError(
+          "History synchronization is still unavailable. Reopen the conversation history to retry."
+        ))
         return(invisible(NULL))
+      }
+      if (!notified && elapsed(started) >= deadline) {
+        reason <- structure(
+          simpleError("Transcript synchronization is pending; retrying in the background."),
+          class = c("claude_history_pending", "simpleError", "error", "condition")
+        )
+        notify(FALSE, reason)
+        deferred("pending", reason)
       }
 
       snapshot <- tryCatch(
@@ -1923,51 +2702,62 @@ make_ellmer_session_loader <- function(store) {
         error = function(error) error
       )
       if (inherits(snapshot, "error")) {
-        finish(FALSE, snapshot)
+        candidate_fingerprint <<- NULL
+        if (!notified) {
+          reason <- structure(snapshot, class = unique(c("claude_history_pending", class(snapshot))))
+          notify(FALSE, reason)
+          deferred("pending", snapshot)
+        }
+        retry_delay <<- min(1, max(quiet_delay, retry_delay * 2))
+        schedule_tick(retry_delay)
         return(invisible(NULL))
       }
-      current_fingerprint <- fingerprint(snapshot)
+      current_fingerprint <- .claude_transcript_fingerprint(snapshot)
       stable <- !is.null(candidate_fingerprint) &&
         identical(current_fingerprint, candidate_fingerprint)
       candidate_fingerprint <<- current_fingerprint
-      candidate_snapshot <<- snapshot
+      observed <- is.null(observed_message_id) || any(vapply(snapshot, function(message) {
+        is.list(message) && identical(message$id, observed_message_id)
+      }, logical(1)))
 
-      if (stable) {
+      if (stable && observed) {
         state <- state_for(key)
         advanced <- !identical(current_fingerprint, state$fingerprint)
-        if (advanced) {
+        if (advanced || (!synchronized && !is.null(observed_message_id))) {
           if (!identical(token, generation) || !isTRUE(is_current())) {
             finish(FALSE, simpleError("Transcript reconciliation is stale"))
             return(invisible(NULL))
           }
           revision <- as.integer(state$revision %||% 0L) + 1L
           publish_error <- tryCatch({
-            publish(thread_id, candidate_snapshot, revision, after_run_id)
+            publish(thread_id, snapshot, revision, after_run_id)
             NULL
           }, error = function(error) error)
           if (inherits(publish_error, "error")) {
             finish(FALSE, publish_error)
             return(invisible(NULL))
           }
-          assign(key, list(
-            snapshot = candidate_snapshot,
-            fingerprint = current_fingerprint,
-            revision = revision
-          ), envir = states)
+          assign(
+            key,
+            .claude_transcript_state(current_fingerprint, revision),
+            envir = states
+          )
           published_any <<- TRUE
-          finish(TRUE)
+          synchronize()
           return(invisible(NULL))
         }
-        if (!isTRUE(must_advance)) {
-          finish(TRUE)
+        if (!isTRUE(must_advance) || synchronized) {
+          synchronize()
           return(invisible(NULL))
         }
       }
-      schedule(tick, quiet_delay)
+      if (notified && stable) retry_delay <<- min(1, max(quiet_delay, retry_delay * 2))
+      else retry_delay <<- quiet_delay
+      schedule_tick(retry_delay)
       invisible(NULL)
     }
 
-    schedule(tick, quiet_delay)
+    schedule_tick(quiet_delay)
     invisible(NULL)
   }
 
@@ -1976,6 +2766,10 @@ make_ellmer_session_loader <- function(store) {
     reconcile = reconcile,
     invalidate = function() {
       generation <<- generation + 1L
+      for (key in ls(jobs, all.names = TRUE)) {
+        cancel <- get0(key, jobs, inherits = FALSE)
+        if (is.function(cancel)) cancel()
+      }
       invisible(NULL)
     },
     has_published = function() published_any
@@ -2209,8 +3003,7 @@ make_ellmer_session_loader <- function(store) {
 }
 
 .claude_full_gc <- function() {
-  gc(full = TRUE)
-  invisible(NULL)
+  invisible(gc(full = TRUE))
 }
 
 .claude_user_tool_results <- function(message) {
@@ -2331,10 +3124,33 @@ make_ellmer_session_loader <- function(store) {
   NULL
 }
 
-.new_claude_usage_probe_manager <- function(is_current) {
+.claude_usage_publisher <- function(on_usage, cost_usd, tokens, turns, duration_ms, model) {
+  force(on_usage)
+  usage <- list(
+    cost_usd = cost_usd, tokens = tokens, turns = turns,
+    duration_ms = duration_ms, model = model
+  )
+  function(context_tokens, context_window) {
+    tryCatch(
+      on_usage(
+        cost_usd = usage$cost_usd, tokens = usage$tokens,
+        context_tokens = context_tokens, turns = usage$turns,
+        duration_ms = usage$duration_ms, model = usage$model,
+        context_window = context_window
+      ),
+      error = function(error) NULL
+    )
+  }
+}
+
+.new_claude_usage_probe_manager <- function(is_current, probe_timeout_secs = 30) {
   states <- new.env(parent = emptyenv())
   probe_loop <- later::create_loop(parent = later::global_loop())
   closed <- FALSE
+  probe_timeout_secs <- suppressWarnings(as.numeric(probe_timeout_secs)[[1L]])
+  if (!is.finite(probe_timeout_secs) || probe_timeout_secs <= 0) {
+    probe_timeout_secs <- 30
+  }
 
   state_for <- function(thread_id) {
     key <- as.character(thread_id)[[1L]]
@@ -2345,6 +3161,7 @@ make_ellmer_session_loader <- function(store) {
     state$dirty <- FALSE
     state$sequence <- 0L
     state$latest <- NULL
+    state$cancel_deadline <- NULL
     assign(key, state, envir = states)
     state
   }
@@ -2378,10 +3195,18 @@ make_ellmer_session_loader <- function(store) {
     state$sequence <- state$sequence + 1L
     sequence <- state$sequence
 
+    clear_deadline <- function() {
+      if (is.function(state$cancel_deadline)) {
+        tryCatch(state$cancel_deadline(), error = function(error) NULL)
+      }
+      state$cancel_deadline <- NULL
+    }
+
     settle <- function(value = NULL, succeeded = FALSE) {
       if (!identical(state$sequence, sequence) || !isTRUE(state$in_flight)) {
         return(invisible(FALSE))
       }
+      clear_deadline()
       state$in_flight <- FALSE
 
       current <- isTRUE(tryCatch(
@@ -2415,6 +3240,21 @@ make_ellmer_session_loader <- function(store) {
       invisible(TRUE)
     }
 
+    # The SDK may never invoke either callback (unresponsive CLI child, dropped
+    # transport, lost message). Without a deadline `in_flight` would stay TRUE
+    # forever, which pins memory_guard_busy_snapshot() busy and starves full GC.
+    # The deadline is ours alone — the timeout handed to the SDK is left as it
+    # was, so a slow-but-alive probe still gets to finish and publish.
+    arm_deadline <- function() {
+      timer <- later::later(
+        function() settle(succeeded = FALSE),
+        delay = probe_timeout_secs,
+        loop = probe_loop
+      )
+      state$cancel_deadline <- function() .cancel_later_timer(timer)
+      invisible(NULL)
+    }
+
     method_args <- tryCatch(names(formals(method)), error = function(error) NULL)
     callback_mode <- all(c("on_fulfilled", "on_rejected") %in% method_args)
     if (callback_mode) {
@@ -2433,8 +3273,13 @@ make_ellmer_session_loader <- function(store) {
           replace = TRUE
         )
       )
-      if (!started) state$in_flight <- FALSE
-      return(invisible(started))
+      if (!started) {
+        clear_deadline()
+        state$in_flight <- FALSE
+        return(invisible(FALSE))
+      }
+      arm_deadline()
+      return(invisible(TRUE))
     }
 
     request <- later::with_loop(
@@ -2442,6 +3287,7 @@ make_ellmer_session_loader <- function(store) {
       tryCatch(method(timeout_ms = 5000L), error = function(error) error)
     )
     if (inherits(request, "error")) {
+      clear_deadline()
       state$in_flight <- FALSE
       return(invisible(FALSE))
     }
@@ -2459,7 +3305,12 @@ make_ellmer_session_loader <- function(store) {
       )
       TRUE
     }, error = function(error) FALSE))
-    if (!attached) state$in_flight <- FALSE
+    if (!attached) {
+      clear_deadline()
+      state$in_flight <- FALSE
+    } else {
+      arm_deadline()
+    }
     invisible(attached)
   }
 
@@ -2684,6 +3535,7 @@ make_claude_handler <- function(options       = NULL,
   strict_resume_sids <- list()
   commands_discovered <- list()  # #5:每线程 get_server_info 只发一次
   active_turns <- list()
+  foreground_cancels <- list()
   active_turn_owners <- list()
   compact_in_progress <- list()
   reset_clients_pending <- FALSE
@@ -2701,23 +3553,63 @@ make_claude_handler <- function(options       = NULL,
   owner_serial <- 0L
   retire_serial <- 0L
 
+  memory_gc_tracker <- .new_memory_guard_gc_tracker(.claude_full_gc)
+  memory_runtime_metrics <- function() {
+    records <- Filter(Negate(is.null), consumer_records)
+    coordinator_metrics <- lapply(records, function(record) {
+      tryCatch(record$coordinator$metrics(), error = function(error) list())
+    })
+    total <- function(name) {
+      values <- vapply(coordinator_metrics, function(metrics) {
+        value <- suppressWarnings(as.numeric(metrics[[name]] %||% 0)[[1L]])
+        if (!is.finite(value) || value < 0) 0 else value
+      }, numeric(1))
+      min(2^53 - 1, sum(values))
+    }
+    maximum <- function(name) {
+      values <- vapply(coordinator_metrics, function(metrics) {
+        value <- suppressWarnings(as.numeric(metrics[[name]] %||% 0)[[1L]])
+        if (!is.finite(value) || value < 0) 0 else value
+      }, numeric(1))
+      max(c(0, values))
+    }
+    pending <- tryCatch(
+      as.numeric(usage_probe_manager$pending_count()),
+      error = function(error) 0
+    )
+    if (!is.finite(pending) || pending < 0) pending <- 0
+    list(
+      sdk_client_count = as.numeric(length(Filter(Negate(is.null), clients))),
+      sdk_consumer_count = as.numeric(length(records)),
+      sdk_route_count = as.numeric(length(Filter(Negate(is.null), persistent_routes))),
+      sdk_messages_seen = total("messages_seen"),
+      sdk_message_bytes_seen = total("message_bytes_seen"),
+      sdk_max_batch_bytes = maximum("max_batch_bytes"),
+      sdk_buffered_message_count = total("buffered_messages"),
+      sdk_waiter_count = total("waiters"),
+      sdk_usage_probe_pending_count = min(2^53 - 1, pending),
+      active_turn_count = as.numeric(sum(vapply(active_turns, isTRUE, logical(1))))
+    )
+  }
   memory_guard_busy_snapshot <- function() {
     coordinator_busy <- any(vapply(consumer_records, function(record) {
       metrics <- tryCatch(record$coordinator$metrics(), error = function(error) NULL)
-      is.list(metrics) && (
-        !identical(metrics$owner %||% "none", "none") ||
-          as.integer(metrics$waiters %||% 0L) > 0L ||
-          as.integer(metrics$buffered_messages %||% 0L) > 0L ||
-          isTRUE(metrics$idle_open)
-      )
+      .memory_guard_coordinator_blocks_gc(metrics)
     }, logical(1)))
+    # Real R work: these legitimately defer a stop-the-world collection.
+    r_work_busy <- any(vapply(active_turns, isTRUE, logical(1))) ||
+      any(vapply(compact_in_progress, isTRUE, logical(1))) ||
+      any(vapply(model_switches, function(state) {
+        !is.null(state) && !isTRUE(state$settled)
+      }, logical(1))) || coordinator_busy
+    # A pending usage probe is an IPC round-trip waiting on the CLI child. It
+    # keeps the sampler on its active cadence, but it must never be able to
+    # defer GC — a probe that never answers would otherwise starve the guard
+    # indefinitely (observed: 0 collections across 1295 consecutive samples).
+    probe_pending <- usage_probe_manager$pending_count() > 0L
     list(
-      busy = any(vapply(active_turns, isTRUE, logical(1))) ||
-        any(vapply(compact_in_progress, isTRUE, logical(1))) ||
-        any(vapply(model_switches, function(state) {
-          !is.null(state) && !isTRUE(state$settled)
-        }, logical(1))) ||
-        usage_probe_manager$pending_count() > 0L || coordinator_busy
+      busy = r_work_busy || probe_pending,
+      gc_blocked = r_work_busy
     )
   }
   emit_memory_diagnostics <- function(sample, previous_state, next_state) {
@@ -2725,14 +3617,32 @@ make_claude_handler <- function(options       = NULL,
       on_memory_observation, sample, previous_state, next_state
     )
     callbacks <- lapply(persistent_routes, function(route) route$on_diagnostics)
-    callbacks <- Filter(is.function, callbacks)
+    callbacks <- .diagnostics_unique_callbacks(callbacks)
     if (!length(callbacks)) return(invisible(NULL))
-    metrics <- list(
-      guard_state = next_state,
-      soft_pss_bytes = effective_memory_guard_config$soft_pss_bytes,
-      hard_pss_bytes = effective_memory_guard_config$hard_pss_bytes,
-      soft_rss_bytes = effective_memory_guard_config$soft_rss_bytes,
-      hard_rss_bytes = effective_memory_guard_config$hard_rss_bytes
+    safe_metric <- function(value) {
+      value <- suppressWarnings(as.numeric(value))
+      if (length(value) != 1L || !is.finite(value) || value < 0) 0 else
+        min(2^53 - 1, value)
+    }
+    events <- if (is.list(sample$cgroup_events)) sample$cgroup_events else list()
+    metrics <- c(
+      list(
+        guard_state = next_state,
+        private_dirty_bytes = safe_metric(sample$private_dirty_bytes),
+        anonymous_bytes = safe_metric(sample$anonymous_bytes),
+        cgroup_high_events = safe_metric(events$high),
+        cgroup_max_events = safe_metric(events$max),
+        cgroup_oom_events = safe_metric(events$oom),
+        cgroup_oom_kill_events = safe_metric(events$oom_kill)
+      ),
+      memory_gc_tracker$snapshot(),
+      memory_runtime_metrics(),
+      list(
+        soft_pss_bytes = effective_memory_guard_config$soft_pss_bytes,
+        hard_pss_bytes = effective_memory_guard_config$hard_pss_bytes,
+        soft_rss_bytes = effective_memory_guard_config$soft_rss_bytes,
+        hard_rss_bytes = effective_memory_guard_config$hard_rss_bytes
+      )
     )
     if (is.numeric(sample$pss_bytes) && length(sample$pss_bytes) == 1L &&
         is.finite(sample$pss_bytes)) metrics$pss_bytes <- as.numeric(sample$pss_bytes)
@@ -2788,7 +3698,7 @@ make_claude_handler <- function(options       = NULL,
   memory_guard <- .new_memory_pressure_guard(
     sample = production_memory_sample,
     busy_snapshot = memory_guard_busy_snapshot,
-    gc_full = .claude_full_gc,
+    gc_full = memory_gc_tracker$collect,
     schedule = function(callback, delay) {
       timer <- later::later(callback, delay = delay)
       function() .cancel_later_timer(timer)
@@ -2797,10 +3707,23 @@ make_claude_handler <- function(options       = NULL,
     on_observation = emit_memory_diagnostics
   )
   memory_pressure_message <- paste(
-    "Memory pressure is above the safe limit.",
+    "Session memory is near its safety limit.",
     "Close and reopen the addin to recycle its Background Job R process",
     "before starting more model work."
   )
+  memory_guard_block_message <- function(operation) {
+    snapshot <- memory_guard$snapshot()
+    pressure <- snapshot$cgroup_pressure %||% list(known = FALSE, critical = FALSE)
+    if (operation %in% .memory_guard_background_operations &&
+        isTRUE(pressure$known) && !isTRUE(pressure$critical)) {
+      return(paste(
+        "Background warmup or automatic continuation was paused because",
+        "the addin process is using substantial memory.",
+        "Explicit chat remains available."
+      ))
+    }
+    memory_pressure_message
+  }
   memory_guard_admits <- function(operation, observe = TRUE) {
     memory_guard$start()
     if (isTRUE(observe)) memory_guard$observe()
@@ -2823,6 +3746,7 @@ make_claude_handler <- function(options       = NULL,
     route <- new.env(parent = emptyenv())
     route$project <- NULL
     route$last_run_id <- NULL
+    route$has_foreground_context <- FALSE
     route$proactive_published <- FALSE
     route$pending_messages <- NULL
     route$ui_owner <- NULL
@@ -2877,8 +3801,15 @@ make_claude_handler <- function(options       = NULL,
     active_owner <- active_turn_owners[[thread_id]]
     if (!is.null(active_owner) && !identical(active_owner, ui_owner)) return(FALSE)
     route <- route_for(thread_id)
+    if (isTRUE(history_only) && !is.null(active_owner) &&
+        identical(route$ui_owner, ui_owner)) return(TRUE)
     if (!isTRUE(allow_handoff) && !is.null(route$ui_owner) &&
         !identical(route$ui_owner, ui_owner)) return(FALSE)
+    if (isTRUE(history_only) && !identical(route$ui_owner, ui_owner)) {
+      previous_record <- consumer_records[[thread_id]]
+      if (!is.null(previous_record)) previous_record$reconciler$invalidate()
+      route$last_run_id <- NULL
+    }
 
     normalized <- callbacks
     for (target in names(persistent_callback_aliases)) {
@@ -2894,7 +3825,11 @@ make_claude_handler <- function(options       = NULL,
     for (target in names(persistent_callback_aliases)) {
       callback <- normalized[[target]]
       route[[target]] <- if (is.function(callback)) {
-        owner_dispatch(thread_id, ui_owner, generation, target)
+        dispatch <- owner_dispatch(thread_id, ui_owner, generation, target)
+        if (identical(target, "on_diagnostics")) {
+          attr(dispatch, "diagnostics_sink") <- attr(callback, "diagnostics_sink", exact = TRUE)
+        }
+        dispatch
       } else {
         NULL
       }
@@ -2985,7 +3920,24 @@ make_claude_handler <- function(options       = NULL,
       },
       publish = publish_persistent_messages,
       schedule = function(callback, delay) later::later(callback, delay = delay),
-      now = Sys.time
+      now = Sys.time,
+      on_deferred = function(thread_id, after_run_id, status, reason = NULL) {
+        route <- route_for(thread_id)
+        if (!identical(route$last_run_id, after_run_id) ||
+            isTRUE(active_turns[[thread_id]]) || !is.function(route$on_status)) {
+          return(invisible(NULL))
+        }
+        text <- if (identical(status, "complete")) NULL else if (identical(status, "pending")) {
+          "Synchronizing completed Claude history..."
+        } else {
+          conditionMessage(reason %||% simpleError("History synchronization failed."))
+        }
+        route$on_status(
+          if (identical(status, "complete")) "idle" else if (identical(status, "error")) "proactive-error" else "history-sync",
+          text = text
+        )
+        invisible(NULL)
+      }
     )
     transcript_reconcilers[[thread_id]] <<- reconciler
     reconciler
@@ -2993,12 +3945,20 @@ make_claude_handler <- function(options       = NULL,
 
   dispatch_idle_event <- function(thread_id, message) {
     route <- route_for(thread_id)
-    route$background_tasks$observe(message, foreground = FALSE)
+    route$background_tasks$observe(
+      message, foreground = FALSE,
+      continuation = isTRUE(route$has_foreground_context)
+    )
     safely <- function(callback, ...) {
       if (is.function(callback)) tryCatch(callback(...), error = function(error) NULL)
       invisible(NULL)
     }
-    if (inherits(message, "TaskStartedMessage")) {
+    if (inherits(message, "UserMessage")) {
+      for (result in .claude_user_tool_results(message)) {
+        safely(route$on_tool_result, result$tool_use_id,
+               .claude_ui_tool_result(result$result), is_error = result$is_error)
+      }
+    } else if (inherits(message, "TaskStartedMessage")) {
       safely(route$on_task, message$task_id, "started",
              description = message$description, tool_name = message$task_type)
     } else if (inherits(message, "TaskProgressMessage")) {
@@ -3078,6 +4038,40 @@ make_claude_handler <- function(options       = NULL,
     )
   }
 
+  retire_consumer <- function(thread_id, record, reason = NULL) {
+    if (isTRUE(record$retired)) return(invisible(FALSE))
+    record$retired <- TRUE
+    if (identical(clients[[thread_id]], record$client)) clients[[thread_id]] <<- NULL
+    commands_discovered[[thread_id]] <<- NULL
+    route <- route_for(thread_id)
+    task_ids <- route$background_tasks$active_ids()
+    route$background_tasks$clear()
+    if (is.function(route$on_task)) {
+      for (task_id in task_ids) {
+        tryCatch(route$on_task(
+          task_id, "updated", status = "disconnected",
+          summary = "Claude connection closed; task status is no longer available."
+        ), error = function(error) {
+          message("[CLAUDE] task disconnect notification failed: ", conditionMessage(error))
+        })
+      }
+    }
+    disconnect <- function() {
+      if (!isTRUE(.disconnect_claude_client_safely(record$client))) {
+        stop("Claude connection could not be fully closed.", call. = FALSE)
+      }
+      invisible(NULL)
+    }
+    if (isTRUE(record$async_close)) later::later(disconnect, delay = 0) else disconnect()
+    invisible(TRUE)
+  }
+
+  consumer_guard <- function(thread_id, record) {
+    force(thread_id)
+    force(record)
+    function() identical(consumer_records[[thread_id]], record) && !isTRUE(record$closing)
+  }
+
   coordinator_for <- function(thread_id, client, project = NULL) {
     current <- consumer_records[[thread_id]]
     if (!is.null(current) && identical(current$client, client)) {
@@ -3087,6 +4081,10 @@ make_claude_handler <- function(options       = NULL,
       current$coordinator$start_idle(.claude_idle_start_delay_seconds())
       return(current)
     }
+    if (!is.null(current)) {
+      current$coordinator$invalidate()
+      current$reconciler$invalidate()
+    }
 
     route <- route_for(thread_id)
     owning_project <- canonical_project(project %||% route$project)
@@ -3094,21 +4092,36 @@ make_claude_handler <- function(options       = NULL,
     reconciler <- transcript_reconciler_for(thread_id)
     record <- new.env(parent = emptyenv())
     record$client <- client
+    record$retired <- FALSE
+    record$closing <- FALSE
+    record$session_id <- read_session_id(thread_id)
     record$project <- owning_project
     record$idle_must_advance <- FALSE
     record$idle_preview_requested <- FALSE
     record$idle_preview_running <- FALSE
     record$idle_preview_published <- FALSE
     record$idle_preview_sid <- NULL
+    record$idle_preview_message_id <- NULL
     record$idle_finalizer <- NULL
     record$reconciler <- reconciler
     record$coordinator <- NULL
 
     raw_poll <- function() {
       poller <- tryCatch(client$poll_messages, error = function(error) NULL)
-      .claude_poll_with_diagnostics(
+      messages <- .claude_poll_with_diagnostics(
         poller, route_for(thread_id)$on_diagnostics
       )
+      if (is.null(record$session_id)) {
+        for (message in messages) {
+          sid <- message$session_id %||% message$sessionId
+          if (is.character(sid) && length(sid) == 1L && !is.na(sid) && nzchar(sid)) {
+            record$session_id <- sid
+            persist_session(thread_id, sid)
+            break
+          }
+        }
+      }
+      messages
     }
 
     valid_idle_sid <- function(value) {
@@ -3135,7 +4148,8 @@ make_claude_handler <- function(options       = NULL,
         project = record$project %||% preview_route$project,
         after_run_id = preview_route$last_run_id,
         must_advance = require_advance,
-        is_current = function() identical(consumer_records[[thread_id]], record),
+        observed_message_id = record$idle_preview_message_id,
+        is_current = consumer_guard(thread_id, record),
         on_complete = function(ok, reason = NULL) {
           record$idle_preview_running <- FALSE
           if (isTRUE(ok) && isTRUE(require_advance)) {
@@ -3160,6 +4174,7 @@ make_claude_handler <- function(options       = NULL,
       sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
       if (valid_idle_sid(sid)) record$idle_preview_sid <- as.character(sid[[1L]])
       if (!valid_idle_sid(record$idle_preview_sid)) return(invisible(NULL))
+      record$idle_preview_message_id <- .claude_history_message_id(message)
       record$idle_preview_requested <- TRUE
       run_idle_preview()
       invisible(NULL)
@@ -3172,6 +4187,33 @@ make_claude_handler <- function(options       = NULL,
           !is.function(permission_route$wait_for_approval)) return(FALSE)
       tool_id <- message$tool_use_id %||% message$request_id
       tool_input <- message$tool_input %||% list()
+      approval_owner <- permission_route$ui_owner
+      pending <- TRUE
+      decision_promise <- NULL
+      expire <- function(reason, terminal = FALSE) {
+        if (!pending) return(invisible(FALSE))
+        pending <<- FALSE
+        .cancel_claude_approval(decision_promise)
+        if (!terminal && !isTRUE(record$retired) &&
+            identical(consumer_records[[thread_id]], record) &&
+            permission_route$background_tasks$owns(message)) {
+          client$deny_tool(message$request_id, "Approval expired", interrupt = FALSE)
+        }
+        if (is.function(permission_route$on_tool_result)) {
+          permission_route$on_tool_result(
+            tool_id, conditionMessage(reason %||% simpleError("Approval expired.")), is_error = TRUE
+          )
+        }
+        invisible(TRUE)
+      }
+      is_pending <- function() {
+        if (pending && !identical(permission_route$ui_owner, approval_owner)) {
+          stop("Approval expired because its browser owner disconnected or changed.", call. = FALSE)
+        }
+        pending && !isTRUE(record$retired) &&
+          identical(consumer_records[[thread_id]], record) &&
+          isTRUE(permission_route$background_tasks$owns(message))
+      }
       card_published <- tryCatch({
         permission_route$on_tool_call(
           tool_call_id = tool_id,
@@ -3202,6 +4244,20 @@ make_claude_handler <- function(options       = NULL,
       promises::then(
         decision_promise,
         onFulfilled = function(decision) {
+          if (!pending) return(invisible(NULL))
+          valid <- tryCatch(is_pending(), error = function(error) error)
+          if (inherits(valid, "error") || isTRUE(decision$expired)) {
+            reason <- if (inherits(valid, "error")) valid else simpleError("Approval request expired.")
+            on_failure(reason)
+            return(invisible(NULL))
+          }
+          if (!valid) {
+            expire(simpleError("Approval expired because its task or Claude connection changed."),
+                   terminal = TRUE)
+            on_complete()
+            return(invisible(NULL))
+          }
+          pending <<- FALSE
           tryCatch({
             if (isTRUE(decision$approved)) {
               decision_record <- "approved"
@@ -3235,9 +4291,18 @@ make_claude_handler <- function(options       = NULL,
               client$deny_tool(
                 message$request_id,
                 if (has_custom) custom else "Denied by user",
-                interrupt = !has_custom
+                interrupt = FALSE
               )
               .record_tool_decision(decisions_path, tool_id, "denied")
+              if (is.function(permission_route$on_tool_result)) {
+                permission_route$on_tool_result(
+                  tool_id, if (has_custom) custom else "Denied by user", is_error = TRUE
+                )
+              }
+              if (!has_custom) {
+                on_failure(simpleError("Background tool approval was denied by the user."))
+                return(invisible(NULL))
+              }
             }
             # The provider may emit terminal Result before its transcript write
             # becomes visible. Hold the idle owner until reconciliation observes
@@ -3249,11 +4314,11 @@ make_claude_handler <- function(options       = NULL,
           invisible(NULL)
         },
         onRejected = function(error) {
-          on_failure(error)
+          if (pending) on_failure(error)
           invisible(NULL)
         }
       )
-      TRUE
+      list(cancel = expire, is_pending = is_pending)
     }
 
     record$coordinator <- .new_claude_consumer_coordinator(
@@ -3270,10 +4335,24 @@ make_claude_handler <- function(options       = NULL,
         # Complete top-level Assistant snapshots are already authoritative in
         # Claude's transcript. Reconcile them while the idle turn is still open
         # so background-task follow-up does not appear only at terminal Result.
-        if (inherits(message, "AssistantMessage")) request_idle_preview(message)
+        if (inherits(message, "AssistantMessage") && .claude_idle_opener(message)) {
+          request_idle_preview(message)
+        }
         dispatch_idle_event(thread_id, message)
       },
       on_idle_result = function(message, on_complete) {
+        route_for(thread_id)$background_tasks$observe(message)
+        if (isTRUE(message$is_error)) {
+          error_text <- .claude_result_error_message(message)
+          complete <- on_complete
+          on_complete <- function() {
+            route <- route_for(thread_id)
+            if (is.function(route$on_status)) {
+              route$on_status("proactive-error", text = error_text)
+            }
+            complete()
+          }
+        }
         finalize_idle_result <- function(preview_satisfied = FALSE) {
           sid <- message$session_id %||% message$sessionId %||% read_session_id(thread_id)
           if (!valid_idle_sid(sid)) {
@@ -3299,6 +4378,10 @@ make_claude_handler <- function(options       = NULL,
             record$idle_must_advance <- FALSE
             record$idle_preview_requested <- FALSE
             record$idle_preview_published <- FALSE
+            record$reconciler$reconcile(
+              thread_id, sid, record$project %||% route$project, route$last_run_id,
+              is_current = consumer_guard(thread_id, record), watch_updates = TRUE
+            )
             on_complete()
             later::later(function() flush_pending_client_reset(), delay = 0)
             return(invisible(NULL))
@@ -3311,12 +4394,14 @@ make_claude_handler <- function(options       = NULL,
             project = record$project %||% route$project,
             after_run_id = route$last_run_id,
             must_advance = must_advance,
-            is_current = function() identical(consumer_records[[thread_id]], record),
+            watch_updates = TRUE,
+            is_current = consumer_guard(thread_id, record),
             on_complete = function(ok, reason = NULL) {
               record$idle_must_advance <- FALSE
               record$idle_preview_requested <- FALSE
               record$idle_preview_published <- FALSE
-              if (!isTRUE(ok) && is.function(route$on_status)) {
+              if (!isTRUE(ok) && !inherits(reason, "claude_history_pending") &&
+                  is.function(route$on_status)) {
                 tryCatch(route$on_status(
                   "proactive-error",
                   text = conditionMessage(reason %||% simpleError("Transcript reconciliation failed"))
@@ -3335,8 +4420,15 @@ make_claude_handler <- function(options       = NULL,
         }
         invisible(NULL)
       },
-      on_idle_failure = function(reason, on_complete) {
+      on_idle_failure = function(reason, on_complete, terminal_result = NULL, retired = FALSE) {
+        if (isTRUE(record$closing)) {
+          on_complete()
+          return(invisible(NULL))
+        }
+        terminal_sid <- terminal_result$session_id %||% terminal_result$sessionId
+        if (valid_idle_sid(terminal_sid)) persist_session(thread_id, terminal_sid)
         failure_route <- route_for(thread_id)
+        if (!is.null(terminal_result)) failure_route$background_tasks$observe(terminal_result)
         finish_failure <- function() {
           record$idle_must_advance <- FALSE
           record$idle_preview_requested <- FALSE
@@ -3363,7 +4455,8 @@ make_claude_handler <- function(options       = NULL,
             after_run_id = failure_route$last_run_id,
             must_advance = isTRUE(record$idle_must_advance) &&
               !isTRUE(record$idle_preview_published),
-            is_current = function() identical(consumer_records[[thread_id]], record),
+            watch_updates = TRUE,
+            is_current = consumer_guard(thread_id, record),
             on_complete = function(ok, reconcile_reason = NULL) finish_failure()
           )
           invisible(NULL)
@@ -3376,16 +4469,27 @@ make_claude_handler <- function(options       = NULL,
         invisible(NULL)
       },
       handle_idle_permission = handle_associated_permission,
-      deny_idle_permission = function(message) {
+      deny_idle_permission = function(message, interrupt = FALSE) {
         record$idle_must_advance <- TRUE
         client$deny_tool(
           message$request_id,
           "Denied because no interactive foreground run owns this request",
-          interrupt = TRUE
+          interrupt = interrupt
         )
       },
       interrupt = function() client$interrupt(),
-      can_open_idle = function() memory_guard_admits("proactive", observe = FALSE)
+      is_alive = if (is.function(client$is_alive)) client$is_alive else NULL,
+      retire = function(reason) retire_consumer(thread_id, record, reason),
+      on_idle_wait = function(waiting) {
+        route <- route_for(thread_id)
+        if (is.function(route$on_status)) {
+          route$on_status(
+            if (waiting) "background-waiting" else "idle",
+            if (waiting) "Claude is connected; waiting for background work." else NULL
+          )
+        }
+      },
+      on_idle_released = function() flush_pending_client_reset()
     )
     consumer_records[[thread_id]] <<- record
 
@@ -3402,8 +4506,19 @@ make_claude_handler <- function(options       = NULL,
 
   get_client <- function(thread_id, project = NULL) {
     if (!is.null(clients[[thread_id]])) {
-      coordinator_for(thread_id, clients[[thread_id]], project)
-      return(clients[[thread_id]])
+      client <- clients[[thread_id]]
+      if (is.function(client$is_alive) && !isTRUE(client$is_alive())) {
+        record <- consumer_records[[thread_id]]
+        if (!is.null(record)) {
+          record$coordinator$retire(simpleError("Claude Code process exited."))
+        } else {
+          .disconnect_claude_client_safely(client)
+          clients[[thread_id]] <<- NULL
+        }
+      } else {
+        coordinator_for(thread_id, client, project)
+        return(client)
+      }
     }
 
     strict_sid <- strict_resume_sids[[thread_id]]
@@ -3435,16 +4550,19 @@ make_claude_handler <- function(options       = NULL,
     client
   }
 
-  retire_threads <- function(thread_ids, async = FALSE) {
+  retire_threads <- function(thread_ids, async = FALSE, force = FALSE) {
     thread_ids <- unique(as.character(thread_ids %||% character(0)))
     invisible(lapply(thread_ids, function(thread_id) {
       client <- clients[[thread_id]]
-      if (is.null(client)) return(invisible(NULL))
       record <- consumer_records[[thread_id]]
+      if (is.null(client) && is.null(record)) return(invisible(NULL))
       retire_serial <<- retire_serial + 1L
       owner <- paste0("retire:", retire_serial)
       retire <- function() {
         if (!is.null(record)) {
+          record$closing <- TRUE
+          record$async_close <- isTRUE(async)
+          record$coordinator$retire(simpleError("Claude connection was closed."))
           record$coordinator$invalidate()
           record$reconciler$invalidate()
           route_for(thread_id)$background_tasks$clear()
@@ -3453,21 +4571,22 @@ make_claude_handler <- function(options       = NULL,
         if (identical(consumer_records[[thread_id]], record)) {
           consumer_records[[thread_id]] <<- NULL
         }
-        disconnect <- function() .disconnect_claude_client_safely(client)
-        if (isTRUE(async) && requireNamespace("later", quietly = TRUE)) {
-          later::later(disconnect, delay = 0)
-        } else {
-          disconnect()
+        if (is.null(record)) {
+          disconnect <- function() .disconnect_claude_client_safely(client)
+          if (isTRUE(async)) later::later(disconnect, delay = 0) else disconnect()
         }
         invisible(NULL)
       }
-      if (is.null(record)) retire() else record$coordinator$acquire(owner, retire)
+      if (is.null(record) || isTRUE(force) || isTRUE(record$retired)) {
+        retire()
+      } else {
+        record$coordinator$acquire(owner, retire, on_error = function(reason) retire())
+      }
       invisible(NULL)
     }))
   }
 
-  # Session deletion and option resets retire a client only after its current
-  # queue owner (including transcript reconciliation) has released ownership.
+  # Deletion/close explicitly retire live work; option resets wait for it.
   release_session <- function(session_id) {
     if (is.null(session_id) || !nzchar(session_id %||% "")) return(invisible(character(0)))
     matches <- function(m) {
@@ -3476,13 +4595,19 @@ make_claude_handler <- function(options       = NULL,
     }
     disk <- tryCatch(.read_claude_session_map(session_map_path), error = function(e) list())
     tids <- unique(c(matches(disk), matches(session_map)))
-    retire_threads(tids, async = FALSE)
+    retire_threads(tids, async = FALSE, force = TRUE)
     invisible(tids)
   }
 
   has_active_consumers <- function() {
     any(vapply(active_turns, isTRUE, logical(1))) ||
-      any(vapply(compact_in_progress, isTRUE, logical(1)))
+      any(vapply(compact_in_progress, isTRUE, logical(1))) ||
+      any(vapply(consumer_records, function(record) {
+        !is.null(record) && !isTRUE(record$retired) && record$coordinator$is_busy()
+      }, logical(1))) ||
+      any(vapply(persistent_routes, function(route) {
+        !is.null(route) && length(route$background_tasks$active_ids()) > 0L
+      }, logical(1)))
   }
   perform_reset_clients <- function(async = TRUE) {
     retire_threads(names(clients), async = async)
@@ -3528,7 +4653,7 @@ make_claude_handler <- function(options       = NULL,
     ok <- function(msg, value = NULL) send_action_result(msg, "ok", value = value)
     err <- function(msg) send_action_result(msg, "error")
     if (id %in% c("compact", "resume") && !memory_guard_admits(id)) {
-      err(memory_pressure_message)
+      err(memory_guard_block_message(id))
       return(invisible(NULL))
     }
     tryCatch({
@@ -3543,7 +4668,7 @@ make_claude_handler <- function(options       = NULL,
         }
         if (!memory_guard_admits("foreground")) {
           assign(thread_id, model, envir = model_states)
-          ok(paste("Model preference saved.", memory_pressure_message), value = model)
+          ok(paste("Model preference saved.", memory_guard_block_message("foreground")), value = model)
           return(invisible(NULL))
         }
         if (is.null(cl)) cl <- get_client(thread_id)
@@ -3684,8 +4809,25 @@ make_claude_handler <- function(options       = NULL,
         )
         invisible(NULL)
       } else if (identical(id, "interrupt")) {
-        if (!is.null(cl)) cl$interrupt()
-        ok("Interrupted")
+        cancel <- foreground_cancels[[thread_id]]
+        record <- consumer_records[[thread_id]]
+        if (is.function(cancel)) {
+          cancel()
+          ok("Interruption requested; waiting for the current turn to stop.")
+        } else if (!is.null(record) && !isTRUE(record$retired)) {
+          if (isTRUE(compact_in_progress[[thread_id]])) {
+            record$coordinator$retire(simpleError("Compaction was interrupted by the user."))
+          } else if (record$coordinator$is_busy() ||
+                     length(route_for(thread_id)$background_tasks$active_ids())) {
+            record$coordinator$interrupt_idle()
+          } else {
+            ok("No running response to interrupt")
+            return(invisible(NULL))
+          }
+          ok("Interruption requested; waiting for the current turn to stop.")
+        } else {
+          ok("No running response to interrupt")
+        }
       } else if (identical(id, "clear")) {
         # 与 Claude Code /clear 一致：保留旧会话可恢复，并在后端成功确认后
         # 请求前端创建一个全新的空线程。新线程首次发言时才会创建 client。
@@ -3725,6 +4867,8 @@ make_claude_handler <- function(options       = NULL,
         owner_serial <<- owner_serial + 1L
         compact_owner <- paste0("compact:", owner_serial)
         compact_acquired <- FALSE
+        compact_finished <- FALSE
+        compact_sent <- FALSE
         compact_result <- NULL
         release_compact_owner <- function() {
           if (isTRUE(compact_acquired)) {
@@ -3734,6 +4878,11 @@ make_claude_handler <- function(options       = NULL,
           release_compact()
         }
         finish_compact <- function(status, message) {
+          if (compact_finished) return(invisible(NULL))
+          compact_finished <<- TRUE
+          if (compact_sent && is.null(compact_result)) {
+            record$coordinator$retire(simpleError(message))
+          }
           release_compact_owner()
           phase <- if (identical(status, "ok")) "complete" else "error"
           send_action_result(message, status, value = compact_value(phase, message))
@@ -3741,6 +4890,7 @@ make_claude_handler <- function(options       = NULL,
         record$coordinator$acquire(compact_owner, function() {
           compact_acquired <<- TRUE
           tryCatch({
+            compact_sent <<- TRUE
             cl$send("/compact")
             .claude_start_compact_poll(
               client = cl,
@@ -3765,9 +4915,10 @@ make_claude_handler <- function(options       = NULL,
                   thread_id, compact_result$session_id,
                   record$project %||% route$project,
                   route$last_run_id, FALSE,
-                  is_current = function() identical(consumer_records[[thread_id]], record),
+                  is_current = consumer_guard(thread_id, record),
+                  watch_updates = TRUE,
                   on_complete = function(ok, reason = NULL) {
-                    if (isTRUE(ok)) {
+                    if (isTRUE(ok) || inherits(reason, "claude_history_pending")) {
                       finish_compact(status, message)
                     } else {
                       finish_compact("error", paste0(
@@ -3786,6 +4937,8 @@ make_claude_handler <- function(options       = NULL,
           }, error = function(error) {
             finish_compact("error", paste0("Compact failed: ", conditionMessage(error)))
           })
+        }, on_error = function(error) {
+          finish_compact("error", paste0("Compact failed: ", conditionMessage(error)))
         })
       } else if (identical(id, "mcp")) {
         if (is.null(cl)) { ok("No active session yet"); return(invisible()) }
@@ -3827,9 +4980,17 @@ make_claude_handler <- function(options       = NULL,
       } else if (grepl("^stoptask:", id)) {
         # #7 stop_task 按 id:停单个运行中的子agent任务。
         task_id <- sub("^stoptask:", "", id)
-        if (is.null(cl)) { ok("No active session"); return(invisible()) }
-        cl$stop_task(task_id)
-        ok(paste0("Stopped task ", substr(task_id, 1, 8)))
+        if (is.null(cl)) { err("No active Claude connection; task status is unavailable."); return(invisible()) }
+        stop_async <- cl$stop_task_async
+        if (!is.function(stop_async)) {
+          err("Update ClaudeAgentSDK and restart R to confirm task-stop requests.")
+          return(invisible(NULL))
+        }
+        stop_async(
+          task_id, timeout_ms = 5000L,
+          on_fulfilled = function(value) ok("Task stop requested; waiting for its terminal status."),
+          on_rejected = function(error) err(conditionMessage(error))
+        )
       } else if (grepl("^tag:", id)) {
         # #8 tag session:给当前会话打标签。
         sid <- read_session_id(thread_id)
@@ -3850,7 +5011,7 @@ make_claude_handler <- function(options       = NULL,
   cleanup <- function() {
     memory_guard$dispose()
     usage_probe_manager$close()
-    retire_threads(names(clients), async = FALSE)
+    retire_threads(unique(c(names(clients), names(consumer_records))), async = FALSE, force = TRUE)
     for (route in persistent_routes) {
       if (is.null(route)) next
       route$ui_generation <- as.integer(route$ui_generation %||% 0L) + 1L
@@ -3868,10 +5029,13 @@ make_claude_handler <- function(options       = NULL,
     persistent_routes <<- list()
     transcript_reconcilers <<- list()
     active_turn_owners <<- list()
+    foreground_cancels <<- list()
     invisible(NULL)
   }
 
-  handler_fn <- coro::async(function(
+  # Shiny captures coroutine stacks at every await. Keep synchronous dispatch
+  # outside the generated coroutine AST rather than nesting it inside async().
+  new_foreground_turn <- function(
     message, thread_id, attachments,
     on_chunk, on_done, on_error,
     on_tool_call, on_tool_result, on_thinking,
@@ -3885,20 +5049,21 @@ make_claude_handler <- function(options       = NULL,
     on_diagnostics = NULL,
     ide_context = NULL, project = NULL, run_id = NULL,
     continuation_kind = NULL,
-    ui_owner = NULL
+    ui_owner = NULL, register_cancel = NULL
   ) {
+    cancel_requested <- FALSE
     continuation_kind <- .normalize_claude_continuation_kind(continuation_kind)
     emit_run_phase <- function(stage) {
       if (is.function(on_run_phase)) on_run_phase(stage)
       invisible(NULL)
     }
     finish_cancelled_before_send <- function() {
-      if (!isTRUE(is_cancelled())) return(FALSE)
+      if (!cancel_requested && !isTRUE(is_cancelled())) return(FALSE)
       on_done()
       TRUE
     }
     if (!memory_guard_admits("foreground")) {
-      on_error(memory_pressure_message)
+      on_error(memory_guard_block_message("foreground"))
       return(invisible(NULL))
     }
     route <- route_for(thread_id)
@@ -3942,8 +5107,9 @@ make_claude_handler <- function(options       = NULL,
       return(invisible(NULL))
     }
     generation <- route$ui_generation
-    bind_owner_callback <- function(name, fallback = function(...) invisible(NULL)) {
+    bind_owner_callback <- function(name, fallback = NULL) {
       if (!is.function(route$ui_callbacks[[name]])) return(NULL)
+      if (is.null(fallback)) return(owner_dispatch(thread_id, ui_owner, generation, name))
       owner_dispatch(thread_id, ui_owner, generation, name, fallback)
     }
     on_chunk <- bind_owner_callback("on_chunk")
@@ -3978,130 +5144,160 @@ make_claude_handler <- function(options       = NULL,
     active_turn_owners[[thread_id]] <<- ui_owner
     usage_generation <- as.integer(usage_generations[[thread_id]] %||% 0L) + 1L
     usage_generations[[thread_id]] <<- usage_generation
-    on.exit({
+    client <- NULL
+    record <- NULL
+    foreground_owner <- NULL
+    foreground_acquired <- FALSE
+    cancel_wait <- NULL
+    sent_to_cli <- FALSE
+    send_completed <- FALSE
+    terminal_result <- NULL
+    closed <- FALSE
+    handed_off <- FALSE
+    cold <- FALSE
+    pending_approval <- NULL
+    pending_decision <- NULL
+    halted <- FALSE
+    expire_approval <- function(reason) {
+      current <- pending_approval
+      promise <- pending_decision
+      pending_approval <<- NULL
+      pending_decision <<- NULL
+      .cancel_claude_approval(promise)
+      if (!is.null(current)) {
+        on_tool_result(current$tool_call_id, conditionMessage(reason), is_error = TRUE)
+      }
+      invisible(NULL)
+    }
+
+    release_foreground <- function() {
+      if (isTRUE(foreground_acquired)) {
+        record$coordinator$release(foreground_owner)
+        foreground_acquired <<- FALSE
+      }
+      invisible(NULL)
+    }
+    close <- function() {
+      if (closed) return(invisible(NULL))
+      closed <<- TRUE
+      on.exit(release_foreground(), add = TRUE)
+      expire_approval(simpleError("Approval expired because its Claude turn ended."))
+      if (is.function(cancel_wait)) cancel_wait()
+      cancel_wait <<- NULL
+      if (sent_to_cli && is.null(terminal_result) && !is.null(record) &&
+          !isTRUE(record$retired)) {
+        record$coordinator$retire(simpleError(
+          "Claude turn ended without a confirmed terminal result; the connection was closed for safe recovery."
+        ))
+      }
       active_turns[[thread_id]] <<- NULL
       if (identical(active_turn_owners[[thread_id]], ui_owner)) {
         active_turn_owners[[thread_id]] <<- NULL
       }
+      if (identical(foreground_cancels[[thread_id]], request_cancel)) {
+        foreground_cancels[[thread_id]] <<- NULL
+      }
+      release_foreground()
       flush_pending_client_reset()
       memory_guard$on_idle()
-    }, add = TRUE)
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-
-    # A global model choice must settle before a cold client snapshots make_opts().
-    # Recheck because another switch can start while this coroutine is suspended.
-    repeat {
-      switch_state <- pending_model_switch(thread_id)
-      if (is.null(switch_state)) break
-      emit_run_phase("model-switch")
-      coro::await(switch_state$promise)
+      invisible(NULL)
     }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-
-    # 每线程冷启动:该线程尚无 client → connect() 要 spawn CLI 子进程 + initialize,
-    # 首条消息慢。先发"冷启动中"信号,并【让出事件循环】使指示器在阻塞 connect 之前
-    # 就渲染出来(否则 sendCustomMessage 会排到 connect 之后才 flush,指示器出现太晚)。
-    cold <- is.null(clients[[thread_id]])
-    if (cold) emit_run_phase("cold-connect")
-    if (cold && !is.null(on_warming)) {
-      # resuming=TRUE 表示恢复已有 session（磁盘有映射）；否则是全新对话的冷启动。
-      resuming <- !is.null(read_session_id(thread_id))
-      on_warming(TRUE, resuming)
-      coro::await(later_promise(0.05))
-    }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-    # The warming yield lets actions run, so check again immediately before
-    # make_opts() snapshots the global model for a cold client.
-    repeat {
-      switch_state <- pending_model_switch(thread_id)
-      if (is.null(switch_state)) break
-      emit_run_phase("model-switch")
-      coro::await(switch_state$promise)
-    }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-    client <- tryCatch(
-      get_client(thread_id, project),
-      error = function(e) { on_error(conditionMessage(e)); NULL }
-    )
-    if (cold && !is.null(on_warming)) on_warming(FALSE)  # 连上(或失败)即清除指示器
-    if (is.null(client)) return(invisible(NULL))
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-
-    # A model control request is settled by the transport's existing stdout
-    # dispatcher. Wait before taking the foreground consumer owner so this gate
-    # neither competes for stdout nor blocks a genuine proactive reconciliation.
-    repeat {
-      switch_state <- pending_model_switch(thread_id)
-      if (is.null(switch_state)) break
-      emit_run_phase("model-switch")
-      coro::await(switch_state$promise)
-    }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-
-    record <- coordinator_for(thread_id, client, project)
-    owner_serial <<- owner_serial + 1L
-    foreground_owner <- paste0("foreground:", run_id %||% owner_serial, ":", owner_serial)
-    foreground_acquired <- FALSE
     on.exit({
-      if (isTRUE(foreground_acquired)) {
-        record$coordinator$release(foreground_owner)
-        foreground_acquired <- FALSE
-      }
+      if (!handed_off) close()
     }, add = TRUE)
-    repeat {
-      emit_run_phase("consumer-acquire")
-      acquire_promise <- promises::promise(function(resolve, reject) {
-        record$coordinator$acquire(foreground_owner, function() {
-          foreground_acquired <<- TRUE
-          resolve(TRUE)
-        })
-      })
-      coro::await(acquire_promise)
-      if (finish_cancelled_before_send()) return(invisible(NULL))
+    request_cancel <- function() {
+      cancel_requested <<- TRUE
+      if (is.function(cancel_wait)) cancel_wait()
+      if (sent_to_cli && foreground_acquired && !halted && !isTRUE(record$retired)) {
+        begin_interrupt()
+      }
+      invisible(NULL)
+    }
+    foreground_cancels[[thread_id]] <<- request_cancel
+    if (is.function(register_cancel)) register_cancel(request_cancel)
+
+    model_switch <- function() {
       switch_state <- pending_model_switch(thread_id)
-      if (is.null(switch_state)) break
-      record$coordinator$release(foreground_owner)
-      foreground_acquired <- FALSE
+      if (is.null(switch_state)) return(NULL)
       emit_run_phase("model-switch")
-      coro::await(switch_state$promise)
+      switch_state$promise
     }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-    emit_run_phase("sending")
-
-    # #5 命令自动发现:每个 client 首次连接后拉一次 get_server_info(),把 CLI 真实
-    # slash 命令 + output styles 推给 UI 填充 slash 面板(每线程只发一次)。
-    if (!is.null(on_commands) && !isTRUE(commands_discovered[[thread_id]])) {
-      commands_discovered[[thread_id]] <<- TRUE
-      tryCatch({
-        info <- client$get_server_info()
-        cmds <- info$commands %||% list()
-        styles <- info$output_styles %||% info$outputStyles %||% list()
-        on_commands(cmds, styles)
-      }, error = function(e) NULL)
+    warming <- function() {
+      cold <<- is.null(clients[[thread_id]])
+      if (cold) emit_run_phase("cold-connect")
+      if (cold && !is.null(on_warming)) {
+        on_warming(TRUE, !is.null(read_session_id(thread_id)))
+        return(TRUE)
+      }
+      FALSE
     }
-    if (finish_cancelled_before_send()) return(invisible(NULL))
+    connect <- function() {
+      client <<- tryCatch(
+        get_client(thread_id, project),
+        error = function(e) { on_error(conditionMessage(e)); NULL }
+      )
+      if (cold && !is.null(on_warming)) on_warming(FALSE)
+      !is.null(client)
+    }
+    acquire <- function() {
+      if (is.null(record)) {
+        record <<- coordinator_for(thread_id, client, project)
+        owner_serial <<- owner_serial + 1L
+        foreground_owner <<- paste0("foreground:", run_id %||% owner_serial, ":", owner_serial)
+      }
+      emit_run_phase("consumer-acquire")
+      promises::promise(function(resolve, reject) {
+        cancel_wait <<- record$coordinator$acquire(
+          foreground_owner,
+          on_acquired = function() {
+            foreground_acquired <<- TRUE
+            record$reconciler$invalidate()
+            resolve(TRUE)
+          },
+          on_error = function(reason) {
+            if (inherits(reason, "claude_consumer_cancelled")) resolve(FALSE)
+            else reject(reason)
+          }
+        )
+      })
+    }
+    send <- function() {
+      emit_run_phase("sending")
 
-    atts <- attachments %||% list()
-    img_parts <- lapply(
-      Filter(function(a) identical(a$type, "image"), atts),
-      function(a) a$data
-    )
-    # PDF 附件 → Claude 原生 document block;从 text_sections 排除,避免双处理。
-    doc_parts <- lapply(Filter(.att_is_pdf, atts), function(a) a$data)
-    text_sections <- .attachment_text_sections(Filter(function(a) !.att_is_pdf(a), atts))
-    full_message <- message
-    if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
-    full_message <- .append_ide_context(full_message, ide_context)
+      # Commands belong to this client; discover them only on its first send.
+      if (!is.null(on_commands) && !isTRUE(commands_discovered[[thread_id]])) {
+        commands_discovered[[thread_id]] <<- TRUE
+        tryCatch({
+          info <- client$get_server_info()
+          cmds <- info$commands %||% list()
+          styles <- info$output_styles %||% info$outputStyles %||% list()
+          on_commands(cmds, styles)
+        }, error = function(e) NULL)
+      }
+      if (finish_cancelled_before_send()) return(FALSE)
 
-    # Images ride as Anthropic content blocks; image-only sends omit the empty text
-    # block (see .claude_message_content). send() accepts a string OR a block list.
-    if (finish_cancelled_before_send()) return(invisible(NULL))
-    client$send(.claude_message_content(full_message, img_parts, doc_parts))
-    emit_run_phase("awaiting-model")
+      atts <- attachments %||% list()
+      img_parts <- lapply(
+        Filter(function(a) identical(a$type, "image"), atts),
+        function(a) a$data
+      )
+      doc_parts <- lapply(Filter(.att_is_pdf, atts), function(a) a$data)
+      text_sections <- .attachment_text_sections(Filter(function(a) !.att_is_pdf(a), atts))
+      full_message <- message
+      if (nzchar(text_sections)) full_message <- paste0(text_sections, "\n\n", message)
+      full_message <- .append_ide_context(full_message, ide_context)
+
+      if (finish_cancelled_before_send()) return(FALSE)
+      sent_to_cli <<- TRUE
+      client$send(.claude_message_content(full_message, img_parts, doc_parts))
+      send_completed <<- TRUE
+      emit_run_phase("awaiting-model")
+      TRUE
+    }
 
     interrupted              <- FALSE
     chunk_count              <- 0L
-    streamed_text            <- ""
+    streamed_text            <- .new_claude_text_accumulator()
     assistant_terminal_parts <- character(0)
     assistant_terminal_resolves_post_tool <- FALSE
     assistant_terminal_force_text <- ""
@@ -4113,7 +5309,6 @@ make_claude_handler <- function(options       = NULL,
     awaiting_post_tool_text  <- FALSE
     malformed_text_seen      <- FALSE
     terminal_error           <- NULL
-    terminal_result          <- NULL
     usage_probe_start        <- NULL
     auto_continue_requested  <- FALSE
     auto_continue_notice     <- NULL
@@ -4197,7 +5392,7 @@ make_claude_handler <- function(options       = NULL,
       }
       flush_tool_blocks(mark_completed = TRUE)
       chunk_count <<- chunk_count + 1L
-      streamed_text <<- paste0(streamed_text, text)
+      streamed_text$append(text)
       has_visible_text <- nzchar(trimws(text))
       if (has_visible_text) {
         visible_text_seen <<- TRUE
@@ -4234,7 +5429,7 @@ make_claude_handler <- function(options       = NULL,
     # 中断时清理半截 tool block：on_tool_call_start 已在前端建了卡片，但参数未收完、
     # 未 emit on_tool_call，正常 flush 会跳过它们（emitted=FALSE）导致卡片永久转圈。
     # 这里对所有未审批的 block 发 "Interrupted" result，与前端 onDone 兜底对齐。
-    # pending_tool_ids 由调用点负责清理（避免 coro async 内 <<- 的不确定性）。
+    # pending_tool_ids 由调用点负责清理。
     interrupt_tool_blocks <- function() {
       for (key in ls(tb)) {
         blk <- tb[[key]]
@@ -4253,764 +5448,788 @@ make_claude_handler <- function(options       = NULL,
     drain_start        <- NULL  # interrupted 时记录起点
     reclaim_large_result <- FALSE
 
-    repeat {
-      if (!interrupted && is_cancelled()) {
-        interrupted <- TRUE
-        drain_start <- Sys.time()
-        tryCatch(client$interrupt(), error = function(e) NULL)
-        # 立即清理半截工具卡，不等 drain（drain 只认 ResultMessage，会漏掉它们）
-        interrupt_tool_blocks()
-        for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
-        pending_tool_ids <- character(0)
+    begin_interrupt <- function() {
+      if (interrupted) return(invisible(FALSE))
+      interrupted <<- TRUE
+      drain_start <<- Sys.time()
+      tryCatch({
+        if (!is.null(pending_approval)) {
+          client$deny_tool(pending_approval$message$request_id, "Interrupted", interrupt = FALSE)
+        }
+        client$interrupt()
+      }, error = function(error) {
+        terminal_error <<- conditionMessage(error)
+        halted <<- TRUE
+        record$coordinator$retire(error)
+      })
+      expire_approval(simpleError("Approval cancelled by the user."))
+      interrupt_tool_blocks()
+      for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+      pending_tool_ids <<- character(0)
+      invisible(TRUE)
+    }
+    step <- function() {
+      if (halted) return("done")
+      if (!interrupted && (cancel_requested || is_cancelled())) begin_interrupt()
+      if (halted) return("done")
+      next_message <- record$coordinator$poll_one(foreground_owner)
+      if (interrupted && inherits(next_message, "ResultMessage")) {
+        terminal_result <<- next_message
+        persist_session(thread_id, next_message$session_id)
+        route$background_tasks$observe(next_message)
+        return("done")
       }
-
-      # 墙钟封顶：无论 poll 空或非空，中断后超时即强制收尾
       if (interrupted && !is.null(drain_start) &&
           as.numeric(Sys.time() - drain_start, units = "secs") >= DRAIN_TIMEOUT_SECS) {
-        message("[CLAUDE] drain timeout after interrupt - forcing done")
-        break
+        message("[CLAUDE] drain timeout after interrupt - retiring unconfirmed connection")
+        return("done")
       }
-
-      next_message <- record$coordinator$poll_one(foreground_owner)
-      msgs <- list()
-      if (!is.null(next_message)) msgs <- list(next_message)
-      if (length(msgs) == 0) {
-        coro::await(later_promise(0.05)); next
-      }
-
-      done <- FALSE; drain_done <- FALSE
-
-      for (msg in msgs) {
-        if (interrupted) {
-          if (inherits(msg, "ResultMessage")) {
-            terminal_result <- msg
-            persist_session(thread_id, msg$session_id)
-            drain_done <- TRUE; break
-          }
-          next
+      if (is.null(next_message)) return("idle")
+      if (interrupted) {
+        if (.claude_passive_message(next_message)) process_message(next_message)
+        if (inherits(next_message, "PermissionRequestMessage")) {
+          client$deny_tool(next_message$request_id, "Interrupted", interrupt = FALSE)
         }
+        return("continue")
+      }
 
-        if (inherits(msg, "StreamEvent")) {
-          evt   <- msg$event
-          etype <- evt[["type"]]
-          delta <- evt[["delta"]]
-          bidx  <- as.character(evt[["index"]] %||% "")
-          parent <- msg[["parent_tool_use_id"]]  # 子agent工具的父 Task 调用 id(用于嵌套缩进)
-          parented <- !is.null(parent) && length(parent) > 0L &&
-            !is.na(parent[[1L]]) && nzchar(as.character(parent[[1L]]))
+      status <- process_message(next_message)
+      next_message <- NULL
+      if (isTRUE(reclaim_large_result)) {
+        # The processor frame and this poll's direct reference are now released.
+        .claude_full_gc()
+        reclaim_large_result <<- FALSE
+      }
+      status
+    }
 
-          if (!parented && identical(etype, "message_delta")) {
-            assistant_stop_reason <- delta[["stop_reason"]] %||%
-              evt[["message"]][["stop_reason"]] %||% assistant_stop_reason
-          } else if (identical(etype, "content_block_start")) {
-            blk <- evt[["content_block"]]
-            if (identical(blk[["type"]], "tool_use")) {
-              mark_structured_tool()
-              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
-                                 args_buf="", emitted=FALSE, approval_handled=FALSE)
-              if (!is.null(on_tool_call_start))
-                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
-                                   annotations=list(parentToolCallId=parent))
-            } else if (identical(blk[["type"]], "server_tool_use")) {
-              mark_structured_tool()
-              # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
-              # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
-              tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
-                                 args_buf="", emitted=FALSE, approval_handled=FALSE, server=TRUE)
-              if (!is.null(on_tool_call_start))
-                on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
-                                   annotations=list(serverTool=TRUE, parentToolCallId=parent))
-            } else if (identical(blk[["type"]], "advisor_tool_result")) {
-              # 服务端工具结果块(wire 名 advisor_tool_result,非 server_tool_result):
-              # 直接作为对应工具的结果发出(无 is_error 字段)。
-              advisor_result <- blk[["content"]]
-              if (.claude_tool_result_is_oversized(advisor_result)) {
-                reclaim_large_result <- TRUE
-              }
-              on_tool_result(
-                blk[["tool_use_id"]],
-                .claude_ui_tool_result(advisor_result),
-                is_error = FALSE
-              )
-            }
+    process_message <- function(msg) {
+      route$background_tasks$observe(msg, foreground = TRUE)
+      if (inherits(msg, "StreamEvent")) {
+        evt   <- msg$event
+        etype <- evt[["type"]]
+        delta <- evt[["delta"]]
+        bidx  <- as.character(evt[["index"]] %||% "")
+        parent <- msg[["parent_tool_use_id"]]  # 子agent工具的父 Task 调用 id(用于嵌套缩进)
+        parented <- !is.null(parent) && length(parent) > 0L &&
+          !is.na(parent[[1L]]) && nzchar(as.character(parent[[1L]]))
 
-          } else if (identical(etype, "content_block_delta") && is.list(delta)) {
-            if (identical(delta[["type"]], "input_json_delta") && nzchar(bidx) && !is.null(tb[[bidx]])) {
-              tb[[bidx]]$args_buf <- paste0(tb[[bidx]]$args_buf, delta[["partial_json"]] %||% "")
-              if (!is.null(on_tool_call_delta) && nzchar(delta[["partial_json"]] %||% ""))
-                on_tool_call_delta(tool_call_id=tb[[bidx]]$id, delta=delta[["partial_json"]])
-            }
-
-            if (!parented && identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
-              text_guard$push(delta[["text"]])
-              malformed_text_seen <- isTRUE(text_guard$malformed_seen())
-            }
-            if (!parented && identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% "")) {
-              thinking_content_seen <- TRUE
-              on_thinking(delta[["thinking"]])
-            }
-
-          } else if (identical(etype, "content_block_stop") && nzchar(bidx) && !is.null(tb[[bidx]])) {
-            blk <- tb[[bidx]]
-            if (!isTRUE(blk$approval_handled)) {
-              args_parsed <- tryCatch(
-                jsonlite::fromJSON(blk$args_buf, simplifyVector = FALSE),
-                error = function(e) list()
-              )
-              annotations <- c(
-                if (isTRUE(blk$server)) list(serverTool = TRUE) else list(),
-                list(parentToolCallId = blk$parent)
-              )
-              remember_edit_call(blk$id, blk$name, args_parsed, annotations)
-              on_tool_call(
-                tool_call_id = blk$id,
-                tool_name = blk$name,
-                args = args_parsed,
-                annotations = annotations
-              )
-              tb[[bidx]]$emitted <- TRUE
-            }
-          }
-
-        } else if (inherits(msg, "UserMessage")) {
-          # Claude Code executes client tools between assistant turns and emits
-          # their real result in a UserMessage ToolResultBlock. Preserve that
-          # result (not the synthetic terminal "Completed") so TaskCreate ids
-          # can be deterministically associated with later TaskUpdate calls.
-          user_tool_results <- .claude_user_tool_results(msg)
-          for (tool_result in user_tool_results) {
-            tuid <- as.character(tool_result$tool_use_id %||% "")
-            if (!nzchar(tuid)) next
-            if (structured_tool_seen) tool_result_boundary_seen <- TRUE
-            pending_edit <- pending_edit_calls[[tuid]]
-            if (!isTRUE(tool_result$is_error) && !is.null(pending_edit)) {
-              recovery <- tryCatch(
-                .claude_edit_result_recovery(tool_result$result, pending_edit$args),
-                error = function(error) NULL
-              )
-              if (!is.null(recovery)) {
-                on_tool_call(
-                  tool_call_id = tuid,
-                  tool_name = pending_edit$name,
-                  args = recovery$args,
-                  annotations = utils::modifyList(
-                    pending_edit$annotations,
-                    list(diffStartLine = recovery$diffStartLine)
-                  )
-                )
-              }
-            }
-            if (.claude_tool_result_is_oversized(tool_result$result)) {
-              reclaim_large_result <- TRUE
+        if (!parented && identical(etype, "message_delta")) {
+          assistant_stop_reason <<- delta[["stop_reason"]] %||%
+            evt[["message"]][["stop_reason"]] %||% assistant_stop_reason
+        } else if (identical(etype, "content_block_start")) {
+          blk <- evt[["content_block"]]
+          if (identical(blk[["type"]], "tool_use")) {
+            mark_structured_tool()
+            tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
+                               args=.new_claude_text_accumulator(), emitted=FALSE, approval_handled=FALSE)
+            if (!is.null(on_tool_call_start))
+              on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
+                                 annotations=list(parentToolCallId=parent))
+          } else if (identical(blk[["type"]], "server_tool_use")) {
+            mark_structured_tool()
+            # 服务端工具(web_search/web_fetch/advisor 等):CLI/服务端执行,无需审批,
+            # 作为工具卡展示并打 serverTool 标记(参数仍走 input_json_delta 累积)。
+            tb[[bidx]] <- list(id=blk[["id"]], name=blk[["name"]], parent=parent,
+                               args=.new_claude_text_accumulator(), emitted=FALSE, approval_handled=FALSE, server=TRUE)
+            if (!is.null(on_tool_call_start))
+              on_tool_call_start(tool_call_id=blk[["id"]], tool_name=blk[["name"]],
+                                 annotations=list(serverTool=TRUE, parentToolCallId=parent))
+          } else if (identical(blk[["type"]], "advisor_tool_result")) {
+            # 服务端工具结果块(wire 名 advisor_tool_result,非 server_tool_result):
+            # 直接作为对应工具的结果发出(无 is_error 字段)。
+            advisor_result <- blk[["content"]]
+            if (.claude_tool_result_is_oversized(advisor_result)) {
+              reclaim_large_result <<- TRUE
             }
             on_tool_result(
-              tuid,
-              .claude_ui_tool_result(tool_result$result),
-              is_error = tool_result$is_error
+              blk[["tool_use_id"]],
+              .claude_ui_tool_result(advisor_result),
+              is_error = FALSE
             )
-            remove_pending_edit_call(tuid)
-            pending_tool_ids <- setdiff(pending_tool_ids, tuid)
-            for (key in ls(tb)) {
-              if (identical(as.character(tb[[key]]$id), tuid)) rm(list = key, envir = tb)
+          }
+
+        } else if (identical(etype, "content_block_delta") && is.list(delta)) {
+          if (identical(delta[["type"]], "input_json_delta") && nzchar(bidx) && !is.null(tb[[bidx]])) {
+            tb[[bidx]]$args$append(delta[["partial_json"]] %||% "")
+            if (!is.null(on_tool_call_delta) && nzchar(delta[["partial_json"]] %||% ""))
+              on_tool_call_delta(tool_call_id=tb[[bidx]]$id, delta=delta[["partial_json"]])
+          }
+
+          if (!parented && identical(delta[["type"]], "text_delta") && nzchar(delta[["text"]] %||% "")) {
+            text_guard$push(delta[["text"]])
+            malformed_text_seen <<- isTRUE(text_guard$malformed_seen())
+          }
+          if (!parented && identical(delta[["type"]], "thinking_delta") && nzchar(delta[["thinking"]] %||% "")) {
+            thinking_content_seen <<- TRUE
+            on_thinking(delta[["thinking"]])
+          }
+
+        } else if (identical(etype, "content_block_stop") && nzchar(bidx) && !is.null(tb[[bidx]])) {
+          blk <- tb[[bidx]]
+          if (!isTRUE(blk$approval_handled)) {
+            args_parsed <- tryCatch(
+              jsonlite::fromJSON(blk$args$value(), simplifyVector = FALSE),
+              error = function(e) list()
+            )
+            annotations <- c(
+              if (isTRUE(blk$server)) list(serverTool = TRUE) else list(),
+              list(parentToolCallId = blk$parent)
+            )
+            remember_edit_call(blk$id, blk$name, args_parsed, annotations)
+            on_tool_call(
+              tool_call_id = blk$id,
+              tool_name = blk$name,
+              args = args_parsed,
+              annotations = annotations
+            )
+            tb[[bidx]]$emitted <- TRUE
+          }
+        }
+
+      } else if (inherits(msg, "UserMessage")) {
+        # Claude Code executes client tools between assistant turns and emits
+        # their real result in a UserMessage ToolResultBlock. Preserve that
+        # result (not the synthetic terminal "Completed") so TaskCreate ids
+        # can be deterministically associated with later TaskUpdate calls.
+        user_tool_results <- .claude_user_tool_results(msg)
+        for (tool_result in user_tool_results) {
+          tuid <- as.character(tool_result$tool_use_id %||% "")
+          if (!nzchar(tuid)) next
+          if (structured_tool_seen) tool_result_boundary_seen <<- TRUE
+          pending_edit <- pending_edit_calls[[tuid]]
+          if (!isTRUE(tool_result$is_error) && !is.null(pending_edit)) {
+            recovery <- tryCatch(
+              .claude_edit_result_recovery(tool_result$result, pending_edit$args),
+              error = function(error) NULL
+            )
+            if (!is.null(recovery)) {
+              on_tool_call(
+                tool_call_id = tuid,
+                tool_name = pending_edit$name,
+                args = recovery$args,
+                annotations = utils::modifyList(
+                  pending_edit$annotations,
+                  list(diffStartLine = recovery$diffStartLine)
+                )
+              )
+            }
+          }
+          if (.claude_tool_result_is_oversized(tool_result$result)) {
+            reclaim_large_result <<- TRUE
+          }
+          on_tool_result(
+            tuid,
+            .claude_ui_tool_result(tool_result$result),
+            is_error = tool_result$is_error
+          )
+          remove_pending_edit_call(tuid)
+          pending_tool_ids <<- setdiff(pending_tool_ids, tuid)
+          for (key in ls(tb)) {
+            if (identical(as.character(tb[[key]]$id), tuid)) rm(list = key, envir = tb)
+          }
+        }
+
+      } else if (inherits(msg, "AssistantMessage")) {
+        assistant_parent <- msg[["parent_tool_use_id"]]
+        assistant_parented <- !is.null(assistant_parent) &&
+          length(assistant_parent) > 0L && !is.na(assistant_parent[[1L]]) &&
+          nzchar(as.character(assistant_parent[[1L]]))
+        if (assistant_parented) return("continue")
+        assistant_stop_reason <<- msg$stop_reason %||% assistant_stop_reason
+        assistant_text_so_far <- ""
+        message_resolves_post_tool <- FALSE
+        message_force_text <- FALSE
+        for (block in msg$content %||% list()) {
+          if (inherits(block, "ThinkingBlock")) {
+            thinking_content_seen <<- TRUE
+            thinking_text <- block$thinking %||% ""
+            if (nzchar(thinking_text)) on_thinking(thinking_text)
+          } else if (inherits(block, "ToolUseBlock") ||
+              inherits(block, "ServerToolUseBlock")) {
+            mark_structured_tool()
+            message_resolves_post_tool <- FALSE
+            message_force_text <- FALSE
+          } else if (inherits(block, "TextBlock")) {
+            assistant_text_so_far <- paste0(
+              assistant_text_so_far,
+              block$text %||% ""
+            )
+            filtered_block <- .claude_filter_complete_text(assistant_text_so_far)
+            new_text <- .claude_terminal_suffix(
+              streamed_text$value(),
+              filtered_block$text
+            )
+            has_visible_block <- nzchar(trimws(filtered_block$text))
+            has_novel_text <- nzchar(trimws(new_text))
+            if (has_visible_block &&
+                (tool_result_boundary_seen || has_novel_text)) {
+              message_resolves_post_tool <- TRUE
+              message_force_text <- tool_result_boundary_seen && !has_novel_text
+            }
+          }
+        }
+        # Some backend/image and post-Agent rounds deliver a complete top-level
+        # AssistantMessage without partial StreamEvent text deltas. Keep the
+        # snapshot for terminal reconciliation, but deliver its safe missing
+        # suffix now instead of waiting for a later ResultMessage.
+        final_text <- .claude_assistant_text(msg)
+        if (nzchar(final_text) &&
+            (length(assistant_terminal_parts) == 0L ||
+             !identical(utils::tail(assistant_terminal_parts, 1L), final_text))) {
+          assistant_terminal_parts <<- c(assistant_terminal_parts, final_text)
+        }
+        if (isTRUE(message_resolves_post_tool)) {
+          assistant_terminal_resolves_post_tool <<- TRUE
+          if (isTRUE(message_force_text)) {
+            assistant_terminal_force_text <<- final_text
+          }
+        }
+        if (nzchar(final_text)) {
+          # A complete AssistantMessage closes any partial text-guard buffer.
+          # This preserves stream order before suffix comparison.
+          text_guard$finish()
+          malformed_text_seen <<- malformed_text_seen ||
+            isTRUE(text_guard$malformed_seen())
+          filtered_final <- .claude_filter_complete_text(final_text)
+          malformed_text_seen <<- malformed_text_seen ||
+            isTRUE(filtered_final$malformed)
+          immediate_protocol_violation <- !structured_tool_seen &&
+            (isTRUE(filtered_final$malformed) ||
+             identical(assistant_stop_reason, "tool_use"))
+          if (!immediate_protocol_violation && nzchar(filtered_final$text)) {
+            missing_text <- .claude_terminal_suffix(
+              streamed_text$value(),
+              filtered_final$text
+            )
+            if (nzchar(missing_text)) {
+              emit_guarded_text(
+                missing_text,
+                resolves_post_tool = message_resolves_post_tool
+              )
+            }
+            if (awaiting_post_tool_text &&
+                isTRUE(message_resolves_post_tool) &&
+                !nzchar(missing_text) &&
+                isTRUE(message_force_text)) {
+              emit_guarded_text(
+                filtered_final$text,
+                resolves_post_tool = TRUE
+              )
+            }
+          }
+        }
+
+      } else if (inherits(msg, "PermissionRequestMessage")) {
+        # PermissionRequestMessage is provider/harness-structured tool evidence
+        # even when a backend omits the preceding streaming content block.
+        mark_structured_tool()
+        # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
+        # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
+        # approve_tool/deny_tool 仍用 request_id。
+        tuid <- msg$tool_use_id %||% msg$request_id
+        streamed_tool_input <- list()
+        for (bidx in ls(tb)) {
+          if (identical(tb[[bidx]]$id, tuid)) {
+            tb[[bidx]]$approval_handled <- TRUE
+            streamed_tool_input <- tryCatch(
+              jsonlite::fromJSON(tb[[bidx]]$args$value(), simplifyVector = FALSE),
+              error = function(e) list()
+            )
+            if (!is.list(streamed_tool_input) || is.null(names(streamed_tool_input))) {
+              streamed_tool_input <- list()
+            }
+            break
+          }
+        }
+        # PermissionRequest 的 tool_input 可能为空/partial，但同一 tool_use_id 的
+        # input_json_delta 已包含完整参数。顶层浅覆盖可让 Permission 字段权威，
+        # 同时避免 modifyList 递归合并 questions 这类 JSON array/无名 list。
+        permission_tool_input <- msg$tool_input
+        if (is.null(permission_tool_input)) permission_tool_input <- list()
+        effective_tool_input <- streamed_tool_input
+        if (!is.list(permission_tool_input) ||
+            (length(permission_tool_input) > 0L && is.null(names(permission_tool_input)))) {
+          effective_tool_input <- permission_tool_input
+        } else if (length(permission_tool_input) > 0L) {
+          effective_tool_input[names(permission_tool_input)] <- permission_tool_input
+        }
+        approval_annotations <- list(
+          requiresApproval = TRUE,
+          suggestions = msg$suggestions %||% list(),
+          # v0.2.1:审批卡片主文案/按钮标签/副标题
+          title = msg$title,
+          displayName = msg$display_name,
+          description = msg$description
+        )
+        tuid_key <- as.character(tuid %||% "")
+        prior_edit <- NULL
+        if (nzchar(tuid_key)) prior_edit <- pending_edit_calls[[tuid_key]]
+        if (!is.null(prior_edit)) {
+          approval_annotations <- utils::modifyList(
+            prior_edit$annotations,
+            approval_annotations
+          )
+        }
+        remember_edit_call(
+          tuid, msg$tool_name, effective_tool_input, approval_annotations
+        )
+        on_tool_call(
+          tool_call_id = tuid,
+          tool_name = msg$tool_name,
+          args = effective_tool_input,
+          annotations = approval_annotations
+        )
+
+        pending_approval <<- list(
+          message = msg, tool_call_id = tuid, input = effective_tool_input,
+          owned = route$background_tasks$owns(msg)
+        )
+        return("approval")
+
+      } else if (inherits(msg, "ResultMessage")) {
+        terminal_result <<- msg
+        result_is_error <- isTRUE(msg$is_error)
+        text_guard$finish()
+        malformed_text_seen <<- malformed_text_seen ||
+          isTRUE(text_guard$malformed_seen())
+
+        if (result_is_error && !intentional_deny) {
+          terminal_error <<- .claude_result_error_message(msg)
+          interrupt_tool_blocks()
+          for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+          pending_tool_ids <<- character(0)
+        } else if (!result_is_error) {
+          raw_terminal_candidates <- list()
+          assistant_text <- paste0(assistant_terminal_parts, collapse = "")
+          result_text <- .claude_result_text(msg)
+          if (nzchar(assistant_text)) {
+            raw_terminal_candidates <- c(
+              raw_terminal_candidates,
+              list(list(
+                text = assistant_text,
+                resolves_post_tool = assistant_terminal_resolves_post_tool,
+                force_text = assistant_terminal_force_text
+              ))
+            )
+          }
+          if (nzchar(result_text)) {
+            raw_terminal_candidates <- c(
+              raw_terminal_candidates,
+              list(list(
+                text = result_text,
+                resolves_post_tool = TRUE,
+                force_text = if (tool_result_boundary_seen) result_text else ""
+              ))
+            )
+          }
+
+          terminal_candidates <- list()
+          for (candidate in raw_terminal_candidates) {
+            filtered <- .claude_filter_complete_text(candidate$text)
+            malformed_text_seen <<- malformed_text_seen || isTRUE(filtered$malformed)
+            if (nzchar(filtered$text)) {
+              filtered_force <- .claude_filter_complete_text(
+                candidate$force_text %||% ""
+              )
+              malformed_text_seen <<- malformed_text_seen ||
+                isTRUE(filtered_force$malformed)
+              terminal_candidates <- c(
+                terminal_candidates,
+                list(list(
+                  text = filtered$text,
+                  resolves_post_tool = isTRUE(candidate$resolves_post_tool) &&
+                    nzchar(trimws(filtered$text)),
+                  force_text = filtered_force$text
+                ))
+              )
             }
           }
 
-        } else if (inherits(msg, "AssistantMessage")) {
-          assistant_parent <- msg[["parent_tool_use_id"]]
-          assistant_parented <- !is.null(assistant_parent) &&
-            length(assistant_parent) > 0L && !is.na(assistant_parent[[1L]]) &&
-            nzchar(as.character(assistant_parent[[1L]]))
-          if (assistant_parented) next
-          assistant_stop_reason <- msg$stop_reason %||% assistant_stop_reason
-          assistant_text_so_far <- ""
-          message_resolves_post_tool <- FALSE
-          message_force_text <- FALSE
-          for (block in msg$content %||% list()) {
-            if (inherits(block, "ThinkingBlock")) {
-              thinking_content_seen <- TRUE
-              thinking_text <- block$thinking %||% ""
-              if (nzchar(thinking_text)) on_thinking(thinking_text)
-            } else if (inherits(block, "ToolUseBlock") ||
-                inherits(block, "ServerToolUseBlock")) {
-              mark_structured_tool()
-              message_resolves_post_tool <- FALSE
-              message_force_text <- FALSE
-            } else if (inherits(block, "TextBlock")) {
-              assistant_text_so_far <- paste0(
-                assistant_text_so_far,
-                block$text %||% ""
-              )
-              filtered_block <- .claude_filter_complete_text(assistant_text_so_far)
-              new_text <- .claude_terminal_suffix(
-                streamed_text,
-                filtered_block$text
-              )
-              has_visible_block <- nzchar(trimws(filtered_block$text))
-              has_novel_text <- nzchar(trimws(new_text))
-              if (has_visible_block &&
-                  (tool_result_boundary_seen || has_novel_text)) {
-                message_resolves_post_tool <- TRUE
-                message_force_text <- tool_result_boundary_seen && !has_novel_text
-              }
+          stop_reason <- msg$stop_reason %||% assistant_stop_reason
+          protocol_violation <- !structured_tool_seen &&
+            (malformed_text_seen || identical(stop_reason, "tool_use"))
+          if (protocol_violation) {
+            terminal_error <<- paste0(
+              "Upstream protocol error: the model announced a tool call ",
+              "without a structured tool_use block. No text was executed."
+            )
+            interrupt_tool_blocks()
+            for (tid in pending_tool_ids) {
+              on_tool_result(tid, "Interrupted", is_error = TRUE)
             }
-          }
-          # Some backend/image and post-Agent rounds deliver a complete top-level
-          # AssistantMessage without partial StreamEvent text deltas. Keep the
-          # snapshot for terminal reconciliation, but deliver its safe missing
-          # suffix now instead of waiting for a later ResultMessage.
-          final_text <- .claude_assistant_text(msg)
-          if (nzchar(final_text) &&
-              (length(assistant_terminal_parts) == 0L ||
-               !identical(utils::tail(assistant_terminal_parts, 1L), final_text))) {
-            assistant_terminal_parts <- c(assistant_terminal_parts, final_text)
-          }
-          if (isTRUE(message_resolves_post_tool)) {
-            assistant_terminal_resolves_post_tool <- TRUE
-            if (isTRUE(message_force_text)) {
-              assistant_terminal_force_text <- final_text
-            }
-          }
-          if (nzchar(final_text)) {
-            # A complete AssistantMessage closes any partial text-guard buffer.
-            # This preserves stream order before suffix comparison.
-            text_guard$finish()
-            malformed_text_seen <- malformed_text_seen ||
-              isTRUE(text_guard$malformed_seen())
-            filtered_final <- .claude_filter_complete_text(final_text)
-            malformed_text_seen <- malformed_text_seen ||
-              isTRUE(filtered_final$malformed)
-            immediate_protocol_violation <- !structured_tool_seen &&
-              (isTRUE(filtered_final$malformed) ||
-               identical(assistant_stop_reason, "tool_use"))
-            if (!immediate_protocol_violation && nzchar(filtered_final$text)) {
-              missing_text <- .claude_terminal_suffix(
-                streamed_text,
-                filtered_final$text
-              )
+            pending_tool_ids <<- character(0)
+          } else {
+            for (candidate in terminal_candidates) {
+              missing_text <- .claude_terminal_suffix(streamed_text$value(), candidate$text)
               if (nzchar(missing_text)) {
                 emit_guarded_text(
                   missing_text,
-                  resolves_post_tool = message_resolves_post_tool
+                  resolves_post_tool = candidate$resolves_post_tool
                 )
               }
               if (awaiting_post_tool_text &&
-                  isTRUE(message_resolves_post_tool) &&
-                  !nzchar(missing_text) &&
-                  isTRUE(message_force_text)) {
+                  isTRUE(candidate$resolves_post_tool) &&
+                  nzchar(trimws(candidate$force_text %||% ""))) {
                 emit_guarded_text(
-                  filtered_final$text,
+                  candidate$force_text,
                   resolves_post_tool = TRUE
                 )
               }
             }
-          }
-
-        } else if (inherits(msg, "PermissionRequestMessage")) {
-          # PermissionRequestMessage is provider/harness-structured tool evidence
-          # even when a backend omits the preceding streaming content block.
-          mark_structured_tool()
-          # request_id 是审批控制 id(UUID);tool_use_id 与流式 tool_use 块同 id。
-          # 用 tool_use_id 作 UI 卡片 id → 与流式卡片【合并成一张】(否则重复两张卡);
-          # approve_tool/deny_tool 仍用 request_id。
-          tuid <- msg$tool_use_id %||% msg$request_id
-          streamed_tool_input <- list()
-          for (bidx in ls(tb)) {
-            if (identical(tb[[bidx]]$id, tuid)) {
-              tb[[bidx]]$approval_handled <- TRUE
-              streamed_tool_input <- tryCatch(
-                jsonlite::fromJSON(tb[[bidx]]$args_buf, simplifyVector = FALSE),
-                error = function(e) list()
-              )
-              if (!is.list(streamed_tool_input) || is.null(names(streamed_tool_input))) {
-                streamed_tool_input <- list()
-              }
-              break
-            }
-          }
-          # PermissionRequest 的 tool_input 可能为空/partial，但同一 tool_use_id 的
-          # input_json_delta 已包含完整参数。顶层浅覆盖可让 Permission 字段权威，
-          # 同时避免 modifyList 递归合并 questions 这类 JSON array/无名 list。
-          permission_tool_input <- msg$tool_input
-          if (is.null(permission_tool_input)) permission_tool_input <- list()
-          effective_tool_input <- streamed_tool_input
-          if (!is.list(permission_tool_input) ||
-              (length(permission_tool_input) > 0L && is.null(names(permission_tool_input)))) {
-            effective_tool_input <- permission_tool_input
-          } else if (length(permission_tool_input) > 0L) {
-            effective_tool_input[names(permission_tool_input)] <- permission_tool_input
-          }
-          approval_annotations <- list(
-            requiresApproval = TRUE,
-            suggestions = msg$suggestions %||% list(),
-            # v0.2.1:审批卡片主文案/按钮标签/副标题
-            title = msg$title,
-            displayName = msg$display_name,
-            description = msg$description
-          )
-          tuid_key <- as.character(tuid %||% "")
-          prior_edit <- NULL
-          if (nzchar(tuid_key)) prior_edit <- pending_edit_calls[[tuid_key]]
-          if (!is.null(prior_edit)) {
-            approval_annotations <- utils::modifyList(
-              prior_edit$annotations,
-              approval_annotations
+            terminal_kind <- .claude_terminal_kind(
+              thinking_content_seen,
+              visible_text_seen,
+              structured_tool_seen,
+              stop_reason,
+              result_text
             )
-          }
-          remember_edit_call(
-            tuid, msg$tool_name, effective_tool_input, approval_annotations
-          )
-          on_tool_call(
-            tool_call_id = tuid,
-            tool_name = msg$tool_name,
-            args = effective_tool_input,
-            annotations = approval_annotations
-          )
-
-          decision <- coro::await(wait_for_approval(tuid))
-
-          if (!interrupted && is_cancelled()) {
-            interrupted <- TRUE
-            drain_start <- Sys.time()
-            tryCatch(client$deny_tool(msg$request_id, "Interrupted"), error = function(e) NULL)
-            tryCatch(client$interrupt(), error = function(e) NULL)
-            on_tool_result(tuid, "Interrupted", is_error = TRUE)
-            # 清理其它半截工具卡（parallel tool use 场景）
-            interrupt_tool_blocks()
-            for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
-            pending_tool_ids <- character(0)
-          } else if (isTRUE(decision$approved)) {
-            decision_record <- "approved"
-            if (!is.null(decision$answers) && length(decision$answers)) {
-              decision_record <- list(status = "approved", answers = decision$answers)
-            }
-            approval_applied <- FALSE
-            # Plan 47 B:交互表单收集的值合并进 effective tool input 经 updated_input 回传。
-            if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
-              ui <- utils::modifyList(effective_tool_input %||% list(), decision$updatedInput)
-              update_edit_effective_args(tuid, ui)
-              approval_applied <- apply_permission_response(
-                function() client$approve_tool(msg$request_id, updated_input = ui),
-                tuid
-              )
-            } else if (!is.null(decision$answers) && length(decision$answers)) {
-              # AskUserQuestion:答案经 updated_input$answers 回传(record 键=问题文本,值=label/数组)。
-              ui <- effective_tool_input %||% list()
-              ui$answers <- decision$answers
-              update_edit_effective_args(tuid, ui)
-              approval_applied <- apply_permission_response(
-                function() client$approve_tool(msg$request_id, updated_input = ui),
-                tuid
-              )
-            } else {
-              # "Always allow" 多选:suggestionIdxs 数组(新);兼容单个 suggestionIdx。
-              idxs <- decision$suggestionIdxs
-              if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
-              idxs <- suppressWarnings(as.integer(unlist(idxs)))
-              n_sug <- length(msg$suggestions)
-              idxs <- unique(idxs[!is.na(idxs) & idxs >= 0 & idxs < n_sug])
-              perms <- Filter(Negate(is.null), lapply(idxs, function(i)
-                .claude_suggestion_to_perm(msg$suggestions[[i + 1L]])))
-              approval_applied <- apply_permission_response(
-                function() {
-                  if (length(perms)) {
-                    client$approve_tool(msg$request_id, updated_permissions = perms)
-                  } else {
-                    client$approve_tool(msg$request_id)
-                  }
-                },
-                tuid
-              )
-            }
-            if (!isTRUE(approval_applied)) {
-              done <- TRUE
-              break
-            }
-            .record_tool_decision(decisions_path, tuid, decision_record)
-            pending_tool_ids <- c(pending_tool_ids, tuid)
-          } else {
-            # 纯 Deny(无留言)= 拒绝并【中断】agent —— 用户说"不",就停下,避免 Claude
-            # 自行继续 / 反复用别的工具重问审批(interrupt=TRUE)。
-            # "Deny & tell Claude…"(有留言)= 带指引的拒绝,让 Claude 据此调整,不中断。
-            # 注意:coro async 体内不能写 `x <- if(...) ... else ...`,故用普通语句赋值。
-            has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
-            deny_msg <- "Denied by user"
-            if (has_msg) deny_msg <- decision$customMessage
-            if (!has_msg) intentional_deny <- TRUE
-            denial_applied <- apply_permission_response(
-              function() client$deny_tool(
-                msg$request_id, deny_msg, interrupt = !has_msg
-              ),
-              tuid
-            )
-            if (!isTRUE(denial_applied)) {
-              intentional_deny <- FALSE
-              done <- TRUE
-              break
-            }
-            .record_tool_decision(decisions_path, tuid, "denied")
-            on_tool_result(tuid, deny_msg, is_error = TRUE)
-            if (!has_msg) {
-              interrupted <- TRUE
-              drain_start <- Sys.time()
-              interrupt_tool_blocks()
-              for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
-              pending_tool_ids <- character(0)
-            }
-          }
-
-        } else if (inherits(msg, "ResultMessage")) {
-          terminal_result <- msg
-          result_is_error <- isTRUE(msg$is_error)
-          text_guard$finish()
-          malformed_text_seen <- malformed_text_seen ||
-            isTRUE(text_guard$malformed_seen())
-
-          if (result_is_error && !intentional_deny) {
-            terminal_error <- .claude_result_error_message(msg)
-            interrupt_tool_blocks()
-            for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
-            pending_tool_ids <- character(0)
-          } else if (!result_is_error) {
-            raw_terminal_candidates <- list()
-            assistant_text <- paste0(assistant_terminal_parts, collapse = "")
-            result_text <- .claude_result_text(msg)
-            if (nzchar(assistant_text)) {
-              raw_terminal_candidates <- c(
-                raw_terminal_candidates,
-                list(list(
-                  text = assistant_text,
-                  resolves_post_tool = assistant_terminal_resolves_post_tool,
-                  force_text = assistant_terminal_force_text
-                ))
-              )
-            }
-            if (nzchar(result_text)) {
-              raw_terminal_candidates <- c(
-                raw_terminal_candidates,
-                list(list(
-                  text = result_text,
-                  resolves_post_tool = TRUE,
-                  force_text = if (tool_result_boundary_seen) result_text else ""
-                ))
-              )
-            }
-
-            terminal_candidates <- list()
-            for (candidate in raw_terminal_candidates) {
-              filtered <- .claude_filter_complete_text(candidate$text)
-              malformed_text_seen <- malformed_text_seen || isTRUE(filtered$malformed)
-              if (nzchar(filtered$text)) {
-                filtered_force <- .claude_filter_complete_text(
-                  candidate$force_text %||% ""
-                )
-                malformed_text_seen <- malformed_text_seen ||
-                  isTRUE(filtered_force$malformed)
-                terminal_candidates <- c(
-                  terminal_candidates,
-                  list(list(
-                    text = filtered$text,
-                    resolves_post_tool = isTRUE(candidate$resolves_post_tool) &&
-                      nzchar(trimws(filtered$text)),
-                    force_text = filtered_force$text
-                  ))
-                )
-              }
-            }
-
-            stop_reason <- msg$stop_reason %||% assistant_stop_reason
-            protocol_violation <- !structured_tool_seen &&
-              (malformed_text_seen || identical(stop_reason, "tool_use"))
-            if (protocol_violation) {
-              terminal_error <- paste0(
-                "Upstream protocol error: the model announced a tool call ",
-                "without a structured tool_use block. No text was executed."
-              )
-              interrupt_tool_blocks()
-              for (tid in pending_tool_ids) {
-                on_tool_result(tid, "Interrupted", is_error = TRUE)
-              }
-              pending_tool_ids <- character(0)
-            } else {
-              for (candidate in terminal_candidates) {
-                missing_text <- .claude_terminal_suffix(streamed_text, candidate$text)
-                if (nzchar(missing_text)) {
-                  emit_guarded_text(
-                    missing_text,
-                    resolves_post_tool = candidate$resolves_post_tool
+            if (!identical(message, "/reload-skills")) {
+              is_tool_recovery <- identical(continuation_kind, "tool-postlude")
+              is_generic_recovery <- identical(continuation_kind, "generic")
+              is_minimal_recovery <- identical(continuation_kind, "minimal")
+              is_recovery <- is_tool_recovery || is_generic_recovery ||
+                is_minimal_recovery
+              if (awaiting_post_tool_text) {
+                # Any recovery that starts another tool must fail closed rather
+                # than recursively creating a fresh tool-postlude chain.
+                if (is.function(on_auto_continue) && !is_recovery) {
+                  auto_continue_requested <<- TRUE
+                  auto_continue_notice <<- .CLAUDE_AUTO_CONTINUE_NOTICE
+                  auto_continue_prompt <<- .CLAUDE_AUTO_CONTINUE_PROMPT
+                  auto_continue_kind <<- "tool-postlude"
+                } else {
+                  terminal_error <<- paste0(
+                    "Upstream ended after a tool call without a final ",
+                    "user-visible response. Please retry the request."
                   )
                 }
-                if (awaiting_post_tool_text &&
-                    isTRUE(candidate$resolves_post_tool) &&
-                    nzchar(trimws(candidate$force_text %||% ""))) {
-                  emit_guarded_text(
-                    candidate$force_text,
-                    resolves_post_tool = TRUE
+              } else if (!visible_text_seen) {
+                # Ordinary and tool-postlude no-visible successes advance to
+                # generic. Generic advances once to the exact user-proven
+                # minimal prompt; minimal is the hard bound.
+                if (is.function(on_auto_continue) &&
+                    (!is_recovery || is_tool_recovery)) {
+                  auto_continue_requested <<- TRUE
+                  auto_continue_notice <<- .CLAUDE_EMPTY_RESPONSE_NOTICE
+                  auto_continue_prompt <<- .CLAUDE_EMPTY_RESPONSE_PROMPT
+                  auto_continue_kind <<- "generic"
+                } else if (is.function(on_auto_continue) && is_generic_recovery) {
+                  auto_continue_requested <<- TRUE
+                  auto_continue_notice <<- .CLAUDE_MINIMAL_CONTINUE_NOTICE
+                  auto_continue_prompt <<- .CLAUDE_MINIMAL_CONTINUE_PROMPT
+                  auto_continue_kind <<- "minimal"
+                } else if (is_minimal_recovery) {
+                  if (identical(terminal_kind, "thinking_only_end_turn")) {
+                    terminal_error <<- paste0(
+                      "Claude ended with a thinking-only response at end_turn ",
+                      "after bounded automatic continuation recovery. No tool call was ",
+                      "inferred or executed from thinking text. Please retry ",
+                      "the request, run /compact, or switch model."
+                    )
+                  } else {
+                    terminal_error <<- paste0(
+                      "Automatic continuation also ended without a user-visible ",
+                      "response. Please retry the request."
+                    )
+                  }
+                } else {
+                  terminal_error <<- paste0(
+                    "Upstream ended without a user-visible response. ",
+                    "Please retry the request."
                   )
                 }
               }
-              terminal_kind <- .claude_terminal_kind(
-                thinking_content_seen,
-                visible_text_seen,
-                structured_tool_seen,
-                stop_reason,
-                result_text
-              )
-              if (!identical(message, "/reload-skills")) {
-                is_tool_recovery <- identical(continuation_kind, "tool-postlude")
-                is_generic_recovery <- identical(continuation_kind, "generic")
-                is_minimal_recovery <- identical(continuation_kind, "minimal")
-                is_recovery <- is_tool_recovery || is_generic_recovery ||
-                  is_minimal_recovery
-                if (awaiting_post_tool_text) {
-                  # Any recovery that starts another tool must fail closed rather
-                  # than recursively creating a fresh tool-postlude chain.
-                  if (is.function(on_auto_continue) && !is_recovery) {
-                    auto_continue_requested <- TRUE
-                    auto_continue_notice <- .CLAUDE_AUTO_CONTINUE_NOTICE
-                    auto_continue_prompt <- .CLAUDE_AUTO_CONTINUE_PROMPT
-                    auto_continue_kind <- "tool-postlude"
-                  } else {
-                    terminal_error <- paste0(
-                      "Upstream ended after a tool call without a final ",
-                      "user-visible response. Please retry the request."
-                    )
-                  }
-                } else if (!visible_text_seen) {
-                  # Ordinary and tool-postlude no-visible successes advance to
-                  # generic. Generic advances once to the exact user-proven
-                  # minimal prompt; minimal is the hard bound.
-                  if (is.function(on_auto_continue) &&
-                      (!is_recovery || is_tool_recovery)) {
-                    auto_continue_requested <- TRUE
-                    auto_continue_notice <- .CLAUDE_EMPTY_RESPONSE_NOTICE
-                    auto_continue_prompt <- .CLAUDE_EMPTY_RESPONSE_PROMPT
-                    auto_continue_kind <- "generic"
-                  } else if (is.function(on_auto_continue) && is_generic_recovery) {
-                    auto_continue_requested <- TRUE
-                    auto_continue_notice <- .CLAUDE_MINIMAL_CONTINUE_NOTICE
-                    auto_continue_prompt <- .CLAUDE_MINIMAL_CONTINUE_PROMPT
-                    auto_continue_kind <- "minimal"
-                  } else if (is_minimal_recovery) {
-                    if (identical(terminal_kind, "thinking_only_end_turn")) {
-                      terminal_error <- paste0(
-                        "Claude ended with a thinking-only response at end_turn ",
-                        "after bounded automatic continuation recovery. No tool call was ",
-                        "inferred or executed from thinking text. Please retry ",
-                        "the request, run /compact, or switch model."
-                      )
-                    } else {
-                      terminal_error <- paste0(
-                        "Automatic continuation also ended without a user-visible ",
-                        "response. Please retry the request."
-                      )
-                    }
-                  } else {
-                    terminal_error <- paste0(
-                      "Upstream ended without a user-visible response. ",
-                      "Please retry the request."
-                    )
-                  }
-                }
-              }
             }
           }
+        }
 
-          for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
-          pending_tool_ids <- character(0)
-          flush_tool_blocks(mark_completed = TRUE)
-          if (identical(message, "/reload-skills") && !result_is_error && is.null(terminal_error)) {
-            reload_project <- record$project
-            record$coordinator$invalidate()
-            record$reconciler$invalidate()
-            if (identical(consumer_records[[thread_id]], record)) {
-              consumer_records[[thread_id]] <<- NULL
-            }
-            client <- .claude_reload_skills_thread(
-              thread_id = thread_id,
-              result = msg,
-              get_client = function(id) clients[[id]],
-              set_client = function(id, value) {
-                clients[[id]] <<- value
-                invisible(value)
-              },
-              persist_session = persist_session,
-              disconnect_client = .disconnect_claude_client_safely,
-              resume_client = function(id, sid) {
-                strict_resume_sids[[id]] <<- sid
-                resumed <- connect_new_client(
-                  id, make_opts(id, sid, project = reload_project)
-                )
-                strict_resume_sids[[id]] <<- NULL
-                resumed
-              },
-              publish_commands = function(commands, output_styles) {
-                if (!is.null(on_commands)) on_commands(commands, output_styles)
-              }
-            )
-            record <- coordinator_for(thread_id, client, reload_project)
-            commands_discovered[[thread_id]] <<- TRUE
-          } else {
-            persist_session(thread_id, msg$session_id)
+        for (tid in pending_tool_ids) on_tool_result(tid, "Completed", is_error = FALSE)
+        pending_tool_ids <<- character(0)
+        flush_tool_blocks(mark_completed = TRUE)
+        if (identical(message, "/reload-skills") && !result_is_error && is.null(terminal_error)) {
+          reload_project <- record$project
+          record$coordinator$invalidate()
+          record$reconciler$invalidate()
+          if (identical(consumer_records[[thread_id]], record)) {
+            consumer_records[[thread_id]] <<- NULL
           }
-          # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
-          if (!is.null(on_usage)) {
-            u <- msg$usage
-            # tokens = ResultMessage.usage 之和 = 本轮累计吞吐(footer 显示;不含 output)。
-            tokens <- tryCatch(
-              (u[["input_tokens"]] %||% 0) +
-                (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
-              error = function(e) NULL)
-            # 模型名(msg$model 常为命名 list,名字即模型串,如 "claude-sonnet-4.6[1m]")。
-            model_name <- tryCatch({
-              if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
-            }, error = function(e) NULL)
-            u_cost <- msg$total_cost_usd
-            u_turns <- msg$num_turns
-            u_dur <- msg$duration_ms
-            # ResultMessage usage is available now and must be published before
-            # completion. Context occupancy is a distinct value; leave it
-            # unknown unless the non-blocking async probe supplies it later.
-            publish_usage <- function(context_tokens, context_window) {
-              tryCatch(
-                on_usage(
-                  cost_usd = u_cost,
-                  tokens = tokens,
-                  context_tokens = context_tokens,
-                  turns = u_turns,
-                  duration_ms = u_dur,
-                  model = model_name,
-                  context_window = context_window
-                ),
-                error = function(e) NULL
+          client <<- .claude_reload_skills_thread(
+            thread_id = thread_id,
+            result = msg,
+            get_client = function(id) clients[[id]],
+            set_client = function(id, value) {
+              clients[[id]] <<- value
+              invisible(value)
+            },
+            persist_session = persist_session,
+            disconnect_client = .disconnect_claude_client_safely,
+            resume_client = function(id, sid) {
+              strict_resume_sids[[id]] <<- sid
+              resumed <- connect_new_client(
+                id, make_opts(id, sid, project = reload_project)
               )
+              strict_resume_sids[[id]] <<- NULL
+              resumed
+            },
+            publish_commands = function(commands, output_styles) {
+              if (!is.null(on_commands)) on_commands(commands, output_styles)
             }
-            publish_usage(NULL, NULL)
-            async_usage <- tryCatch(
-              client$get_context_usage_async,
+          )
+          record <<- coordinator_for(thread_id, client, reload_project)
+          commands_discovered[[thread_id]] <<- TRUE
+        } else {
+          persist_session(thread_id, msg$session_id)
+        }
+        # #1 成本/用量:把 ResultMessage 的 cost/usage 上报 UI。
+        if (!is.null(on_usage)) {
+          u <- msg$usage
+          # tokens = ResultMessage.usage 之和 = 本轮累计吞吐(footer 显示;不含 output)。
+          tokens <- tryCatch(
+            (u[["input_tokens"]] %||% 0) +
+              (u[["cache_read_input_tokens"]] %||% 0) + (u[["cache_creation_input_tokens"]] %||% 0),
+            error = function(e) NULL)
+          # 模型名(msg$model 常为命名 list,名字即模型串,如 "claude-sonnet-4.6[1m]")。
+          model_name <- tryCatch({
+            if (is.list(msg$model)) names(msg$model)[[1]] else as.character(msg$model)[[1]]
+          }, error = function(e) NULL)
+          u_cost <- msg$total_cost_usd
+          u_turns <- msg$num_turns
+          u_dur <- msg$duration_ms
+          # ResultMessage usage is available now and must be published before
+          # completion. Context occupancy is a distinct value; leave it
+          # unknown unless the non-blocking async probe supplies it later.
+          publish_usage <- .claude_usage_publisher(
+            on_usage, u_cost, tokens, u_turns, u_dur, model_name
+          )
+          publish_usage(NULL, NULL)
+          async_usage <- tryCatch(
+            client$get_context_usage_async,
+            error = function(error) NULL
+          )
+          async_args <- NULL
+          if (is.function(async_usage)) {
+            async_args <- tryCatch(
+              names(formals(async_usage)),
               error = function(error) NULL
             )
-            async_args <- NULL
-            if (is.function(async_usage)) {
-              async_args <- tryCatch(
-                names(formals(async_usage)),
-                error = function(error) NULL
+          }
+          if (is.function(async_usage) &&
+              all(c("on_fulfilled", "on_rejected") %in% async_args)) {
+            usage_probe_start <<- function() {
+              usage_probe_manager$request(
+                thread_id,
+                client,
+                record,
+                usage_generation,
+                publish_usage
               )
             }
-            if (is.function(async_usage) &&
-                all(c("on_fulfilled", "on_rejected") %in% async_args)) {
-              usage_probe_start <- function() {
-                usage_probe_manager$request(
-                  thread_id,
-                  client,
-                  record,
-                  usage_generation,
-                  publish_usage
-                )
-              }
-            }
-          }
-          emit_run_phase("finalizing")
-          done <- TRUE; break
-
-        # #2 子agent/Task 进度(system 子类型消息)。
-        } else if (inherits(msg, "TaskStartedMessage")) {
-          route$background_tasks$observe(msg, foreground = TRUE)
-          if (!is.null(on_task)) on_task(msg$task_id, "started",
-                                         description = msg$description, tool_name = msg$task_type)
-        } else if (inherits(msg, "TaskProgressMessage")) {
-          if (!is.null(on_task)) on_task(msg$task_id, "progress",
-                                         description = msg$description, tool_name = msg$last_tool_name)
-        } else if (inherits(msg, "TaskNotificationMessage")) {
-          route$background_tasks$observe(msg, foreground = TRUE)
-          if (!is.null(on_task)) on_task(msg$task_id, "notification",
-                                         status = msg$status, summary = msg$summary)
-        } else if (inherits(msg, "TaskUpdatedMessage")) {
-          route$background_tasks$observe(msg, foreground = TRUE)
-          # 部分子agent的终态只经 task_updated 的 patch到达(无单独 notification)。
-          # patch 里可能带 status/description,尽力提取,收尾进度卡。
-          if (!is.null(on_task)) {
-            patch <- msg$patch %||% list()
-            on_task(msg$task_id, "updated",
-                    status = msg$status %||% patch$status,
-                    description = patch$description %||% patch$prompt)
-          }
-
-        # #3 限流告警。
-        } else if (inherits(msg, "RateLimitEvent")) {
-          if (!is.null(on_rate_limit)) {
-            info <- msg$rate_limit_info
-            on_rate_limit(status = info$status, resets_at = info$resets_at,
-                          utilization = info$utilization, type = info$rate_limit_type)
-          }
-
-        # hook 事件流(需 ClaudeAgentOptions include_hook_events=TRUE 才会吐)→ 状态行。
-        } else if (inherits(msg, "HookEventMessage")) {
-          if (!is.null(on_status))
-            on_status(paste0("hook:", msg$subtype),
-                      text = paste0("Hook: ", msg$hook_event_name %||% msg$subtype))
-
-        # #4 系统状态行:subtype = status / thinking_tokens / init 等(TaskXxx 已在上面拦截)。
-        } else if (inherits(msg, "SystemMessage")) {
-          if (!is.null(on_status)) {
-            d <- msg$data
-            txt <- tryCatch(d[["status"]] %||% d[["message"]] %||% d[["text"]] %||% NULL,
-                            error = function(e) NULL)
-            on_status(msg$subtype, text = if (is.character(txt)) txt else NULL)
           }
         }
-      }
+        emit_run_phase("finalizing")
+        return("done")
 
-      if (isTRUE(reclaim_large_result)) {
-        # Release this poll batch's direct references before asking R to return
-        # pages from a one-off oversized result. No timer or extra poll is added.
-        next_message <- NULL
-        msgs <- NULL
-        msg <- NULL
-        user_tool_results <- NULL
-        tool_result <- NULL
-        advisor_result <- NULL
-        evt <- NULL
-        blk <- NULL
-        delta <- NULL
-        .claude_full_gc()
-        reclaim_large_result <- FALSE
+      # #2 子agent/Task 进度(system 子类型消息)。
+      } else if (inherits(msg, "TaskStartedMessage")) {
+        if (!is.null(on_task)) on_task(msg$task_id, "started",
+                                       description = msg$description, tool_name = msg$task_type)
+      } else if (inherits(msg, "TaskProgressMessage")) {
+        if (!is.null(on_task)) on_task(msg$task_id, "progress",
+                                       description = msg$description, tool_name = msg$last_tool_name)
+      } else if (inherits(msg, "TaskNotificationMessage")) {
+        if (!is.null(on_task)) on_task(msg$task_id, "notification",
+                                       status = msg$status, summary = msg$summary)
+      } else if (inherits(msg, "TaskUpdatedMessage")) {
+        # 部分子agent的终态只经 task_updated 的 patch到达(无单独 notification)。
+        # patch 里可能带 status/description,尽力提取,收尾进度卡。
+        if (!is.null(on_task)) {
+          patch <- msg$patch %||% list()
+          on_task(msg$task_id, "updated",
+                  status = msg$status %||% patch$status,
+                  description = patch$description %||% patch$prompt)
+        }
+
+      # #3 限流告警。
+      } else if (inherits(msg, "RateLimitEvent")) {
+        if (!is.null(on_rate_limit)) {
+          info <- msg$rate_limit_info
+          on_rate_limit(status = info$status, resets_at = info$resets_at,
+                        utilization = info$utilization, type = info$rate_limit_type)
+        }
+
+      # hook 事件流(需 ClaudeAgentOptions include_hook_events=TRUE 才会吐)→ 状态行。
+      } else if (inherits(msg, "HookEventMessage")) {
+        if (!is.null(on_status))
+          on_status(paste0("hook:", msg$subtype),
+                    text = paste0("Hook: ", msg$hook_event_name %||% msg$subtype))
+
+      # #4 系统状态行:subtype = status / thinking_tokens / init 等(TaskXxx 已在上面拦截)。
+      } else if (inherits(msg, "SystemMessage")) {
+        if (!is.null(on_status)) {
+          d <- msg$data
+          txt <- tryCatch(d[["status"]] %||% d[["message"]] %||% d[["text"]] %||% NULL,
+                          error = function(e) NULL)
+          on_status(msg$subtype, text = if (is.character(txt)) txt else NULL)
+        }
       }
-      if (drain_done || done) break
-      coro::await(later_promise(0.01))
+      "continue"
     }
 
-    terminal_sid <- tryCatch(
-      terminal_result$session_id %||% terminal_result$sessionId %||% read_session_id(thread_id),
-      error = function(error) read_session_id(thread_id)
-    )
-    if (!is.null(terminal_sid) && length(terminal_sid) &&
-        !is.na(terminal_sid[[1L]]) && nzchar(as.character(terminal_sid[[1L]]))) {
-      terminal_sid <- as.character(terminal_sid[[1L]])
-      if (isTRUE(route$proactive_published)) {
-        reconciliation <- promises::promise(function(resolve, reject) {
-          tryCatch(
-            record$reconciler$reconcile(
-              thread_id = thread_id,
-              session_id = terminal_sid,
-              project = record$project,
-              after_run_id = run_id,
-              must_advance = TRUE,
-              is_current = function() identical(consumer_records[[thread_id]], record),
-              on_complete = function(ok, reason = NULL) {
-                resolve(list(ok = ok, reason = reason))
-              }
-            ),
-            error = function(error) resolve(list(ok = FALSE, reason = error))
+    approval <- function() {
+      if (is.null(pending_approval)) stop("No pending foreground approval", call. = FALSE)
+      pending_decision <<- wait_for_approval(pending_approval$tool_call_id)
+      pending_decision
+    }
+    poll_approval <- function() {
+      if (is.null(pending_approval)) return(FALSE)
+      if (cancel_requested || is_cancelled()) {
+        begin_interrupt()
+        return(FALSE)
+      }
+      terminal <- record$coordinator$poll_control(foreground_owner, process_message)
+      if (terminal || (isTRUE(pending_approval$owned) &&
+                      !route$background_tasks$owns(pending_approval$message))) {
+        expire_approval(simpleError("Approval expired because its task or Claude turn ended."))
+        return(FALSE)
+      }
+      TRUE
+    }
+    decide <- function(decision) {
+      if (isTRUE(decision$expired)) {
+        expire_approval(simpleError("Approval expired before a decision could be applied."))
+        return(invisible(NULL))
+      }
+      if (is.null(pending_approval)) stop("No pending foreground approval", call. = FALSE)
+      msg <- pending_approval$message
+      tuid <- pending_approval$tool_call_id
+      effective_tool_input <- pending_approval$input
+      pending_approval <<- NULL
+      pending_decision <<- NULL
+
+      if (!interrupted && (cancel_requested || is_cancelled())) {
+        interrupted <<- TRUE
+        drain_start <<- Sys.time()
+        client$deny_tool(msg$request_id, "Interrupted", interrupt = FALSE)
+        client$interrupt()
+        on_tool_result(tuid, "Interrupted", is_error = TRUE)
+        interrupt_tool_blocks()
+        for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+        pending_tool_ids <<- character(0)
+      } else if (isTRUE(decision$approved)) {
+        decision_record <- "approved"
+        if (!is.null(decision$answers) && length(decision$answers)) {
+          decision_record <- list(status = "approved", answers = decision$answers)
+        }
+        approval_applied <- FALSE
+        if (!is.null(decision$updatedInput) && length(decision$updatedInput)) {
+          ui <- utils::modifyList(effective_tool_input %||% list(), decision$updatedInput)
+          update_edit_effective_args(tuid, ui)
+          approval_applied <- apply_permission_response(
+            function() client$approve_tool(msg$request_id, updated_input = ui),
+            tuid
           )
-        })
-        reconciliation <- coro::await(reconciliation)
-        if (!isTRUE(reconciliation$ok) && is.null(terminal_error)) {
-          terminal_error <- paste0(
-            "Transcript reconciliation failed: ",
-            conditionMessage(reconciliation$reason %||% simpleError("unknown error"))
+        } else if (!is.null(decision$answers) && length(decision$answers)) {
+          ui <- effective_tool_input %||% list()
+          ui$answers <- decision$answers
+          update_edit_effective_args(tuid, ui)
+          approval_applied <- apply_permission_response(
+            function() client$approve_tool(msg$request_id, updated_input = ui),
+            tuid
+          )
+        } else {
+          idxs <- decision$suggestionIdxs
+          if (is.null(idxs) && !is.null(decision$suggestionIdx)) idxs <- decision$suggestionIdx
+          idxs <- suppressWarnings(as.integer(unlist(idxs)))
+          n_sug <- length(msg$suggestions)
+          idxs <- unique(idxs[!is.na(idxs) & idxs >= 0 & idxs < n_sug])
+          perms <- Filter(Negate(is.null), lapply(idxs, function(i)
+            .claude_suggestion_to_perm(msg$suggestions[[i + 1L]])))
+          approval_applied <- apply_permission_response(
+            function() {
+              if (length(perms)) {
+                client$approve_tool(msg$request_id, updated_permissions = perms)
+              } else {
+                client$approve_tool(msg$request_id)
+              }
+            },
+            tuid
           )
         }
+        if (!isTRUE(approval_applied)) {
+          halted <<- TRUE
+          return(invisible(NULL))
+        }
+        .record_tool_decision(decisions_path, tuid, decision_record)
+        pending_tool_ids <<- c(pending_tool_ids, tuid)
       } else {
+        # A plain denial interrupts; a denial with guidance lets the agent adapt.
+        has_msg <- !is.null(decision$customMessage) && nzchar(trimws(decision$customMessage))
+        deny_msg <- "Denied by user"
+        if (has_msg) deny_msg <- decision$customMessage
+        if (!has_msg) intentional_deny <<- TRUE
+        denial_applied <- apply_permission_response(
+          function() client$deny_tool(
+            msg$request_id, deny_msg, interrupt = !has_msg
+          ),
+          tuid
+        )
+        if (!isTRUE(denial_applied)) {
+          intentional_deny <<- FALSE
+          halted <<- TRUE
+          return(invisible(NULL))
+        }
+        .record_tool_decision(decisions_path, tuid, "denied")
+        on_tool_result(tuid, deny_msg, is_error = TRUE)
+        if (!has_msg) {
+          interrupted <<- TRUE
+          drain_start <<- Sys.time()
+          interrupt_tool_blocks()
+          for (tid in pending_tool_ids) on_tool_result(tid, "Interrupted", is_error = TRUE)
+          pending_tool_ids <<- character(0)
+        }
+      }
+      invisible(NULL)
+    }
+
+    reconcile <- function() {
+      if (is.null(record) || (!send_completed && is.null(terminal_result))) return(NULL)
+      terminal_sid <- tryCatch(
+        terminal_result$session_id %||% terminal_result$sessionId %||% read_session_id(thread_id),
+        error = function(error) read_session_id(thread_id)
+      )
+      if (!is.null(terminal_sid) && length(terminal_sid) &&
+          !is.na(terminal_sid[[1L]]) && nzchar(as.character(terminal_sid[[1L]]))) {
+        terminal_sid <- as.character(terminal_sid[[1L]])
+        if (!is.null(terminal_error)) {
+          record$reconciler$reconcile(
+            thread_id, terminal_sid, record$project, run_id,
+            must_advance = TRUE,
+            watch_updates = TRUE,
+            is_current = consumer_guard(thread_id, record),
+            on_complete = function(ok, reason = NULL) invisible(NULL)
+          )
+          return(NULL)
+        }
+        if (isTRUE(route$proactive_published)) {
+          return(promises::promise(function(resolve, reject) {
+            tryCatch(
+              record$reconciler$reconcile(
+                thread_id = thread_id,
+                session_id = terminal_sid,
+                project = record$project,
+                after_run_id = run_id,
+                must_advance = TRUE,
+                watch_updates = TRUE,
+                is_current = consumer_guard(thread_id, record),
+                on_complete = function(ok, reason = NULL) {
+                  resolve(list(ok = ok, reason = reason))
+                }
+              ),
+              error = function(error) resolve(list(ok = FALSE, reason = error))
+            )
+          }))
+        }
         tryCatch(
           record$reconciler$baseline(
             thread_id, terminal_sid, record$project
@@ -5018,27 +6237,140 @@ make_claude_handler <- function(options       = NULL,
           error = function(error) NULL
         )
       }
+      NULL
     }
-    if (!is.null(run_id) && length(run_id) && !is.na(run_id[[1L]]) &&
-        nzchar(as.character(run_id[[1L]]))) {
-      route$last_run_id <- as.character(run_id[[1L]])
+    complete <- function(reconciliation) {
+      if (!is.null(reconciliation) &&
+          !isTRUE(reconciliation$ok) && is.null(terminal_error)) {
+        if (!inherits(reconciliation$reason, "claude_history_pending")) {
+          terminal_error <<- paste0(
+            "Transcript reconciliation failed: ",
+            conditionMessage(reconciliation$reason %||% simpleError("unknown error"))
+          )
+        }
+      }
+      if (!is.null(run_id) && length(run_id) && !is.na(run_id[[1L]]) &&
+          nzchar(as.character(run_id[[1L]]))) {
+        route$last_run_id <- as.character(run_id[[1L]])
+        if (isTRUE(send_completed) || !is.null(terminal_result)) {
+          route$has_foreground_context <- TRUE
+        }
+      }
+      if (!is.null(terminal_error)) {
+        on_error(terminal_error)
+      } else {
+        if (isTRUE(auto_continue_requested)) {
+          .call_compatible_callback(on_auto_continue, list(
+            notice = auto_continue_notice,
+            prompt = auto_continue_prompt,
+            kind = auto_continue_kind
+          ))
+        }
+        on_done()
+      }
+      if (is.function(usage_probe_start)) usage_probe_start()
+      invisible(NULL)
+    }
+    fail <- function(error) {
+      terminal_error <<- conditionMessage(error)
+      halted <<- TRUE
+      expire_approval(error)
+      interrupt_tool_blocks()
+      for (tool_id in pending_tool_ids) on_tool_result(tool_id, "Interrupted", is_error = TRUE)
+      pending_tool_ids <<- character()
+      invisible(NULL)
     }
 
-    if (!is.null(terminal_error)) {
-      on_error(terminal_error)
-    } else {
-      if (isTRUE(auto_continue_requested)) {
-        .call_compatible_callback(on_auto_continue, list(
-          notice = auto_continue_notice,
-          prompt = auto_continue_prompt,
-          kind = auto_continue_kind
-        ))
+    turn <- list(
+      cancelled = finish_cancelled_before_send, model_switch = model_switch,
+      warming = warming, connect = connect, acquire = acquire,
+      release = release_foreground, send = send,
+      pump = function() .claude_foreground_batch(step),
+      approval = approval, poll_approval = poll_approval, decide = decide,
+      reconcile = reconcile, complete = complete, close = close, fail = fail
+    )
+    handed_off <- TRUE
+    turn
+  }
+
+  handler_fn <- coro::async(function(
+    message, thread_id, attachments,
+    on_chunk, on_done, on_error,
+    on_tool_call, on_tool_result, on_thinking,
+    is_cancelled, wait_for_approval,
+    on_tool_call_start = NULL, on_tool_call_delta = NULL,
+    on_auto_continue = NULL,
+    on_usage = NULL, on_task = NULL, on_rate_limit = NULL, on_status = NULL,
+    on_proactive_messages = NULL, on_proactive_task = NULL,
+    on_proactive_rate_limit = NULL, on_proactive_status = NULL,
+    on_commands = NULL, on_warming = NULL, on_run_phase = NULL,
+    on_diagnostics = NULL,
+    ide_context = NULL, project = NULL, run_id = NULL,
+    continuation_kind = NULL,
+    ui_owner = NULL, register_cancel = NULL
+  ) {
+    turn <- new_foreground_turn(
+      message = message, thread_id = thread_id, attachments = attachments,
+      on_chunk = on_chunk, on_done = on_done, on_error = on_error,
+      on_tool_call = on_tool_call, on_tool_result = on_tool_result,
+      on_thinking = on_thinking, is_cancelled = is_cancelled,
+      wait_for_approval = wait_for_approval,
+      on_tool_call_start = on_tool_call_start, on_tool_call_delta = on_tool_call_delta,
+      on_auto_continue = on_auto_continue, on_usage = on_usage,
+      on_task = on_task, on_rate_limit = on_rate_limit, on_status = on_status,
+      on_proactive_messages = on_proactive_messages, on_proactive_task = on_proactive_task,
+      on_proactive_rate_limit = on_proactive_rate_limit, on_proactive_status = on_proactive_status,
+      on_commands = on_commands, on_warming = on_warming, on_run_phase = on_run_phase,
+      on_diagnostics = on_diagnostics, ide_context = ide_context, project = project,
+      run_id = run_id,       continuation_kind = continuation_kind, ui_owner = ui_owner,
+      register_cancel = register_cancel
+    )
+    if (is.null(turn)) return(invisible(NULL))
+    on.exit(turn$close(), add = TRUE)
+    tryCatch({
+    if (turn$cancelled()) return(invisible(NULL))
+    repeat {
+      switch <- turn$model_switch()
+      if (is.null(switch)) break
+      coro::await(switch)
+    }
+    if (turn$cancelled()) return(invisible(NULL))
+    if (turn$warming()) coro::await(later_promise(0.05))
+    if (turn$cancelled()) return(invisible(NULL))
+    # Warming can yield to another model selection before make_opts() snapshots it.
+    repeat {
+      switch <- turn$model_switch()
+      if (is.null(switch)) break
+      coro::await(switch)
+    }
+    if (turn$cancelled()) return(invisible(NULL))
+    if (!turn$connect()) return(invisible(NULL))
+    if (turn$cancelled()) return(invisible(NULL))
+    repeat {
+      switch <- turn$model_switch()
+      if (is.null(switch)) break
+      coro::await(switch)
+    }
+    if (turn$cancelled()) return(invisible(NULL))
+    repeat {
+      acquired <- coro::await(turn$acquire())
+      if (!isTRUE(acquired)) {
+        turn$cancelled()
+        return(invisible(NULL))
       }
-      on_done()
+      if (turn$cancelled()) return(invisible(NULL))
+      switch <- turn$model_switch()
+      if (is.null(switch)) break
+      turn$release()
+      coro::await(switch)
     }
-    if (is.function(usage_probe_start)) {
-      usage_probe_start()
-    }
+    if (turn$cancelled()) return(invisible(NULL))
+    if (!turn$send()) return(invisible(NULL))
+    coro::await(.claude_foreground_pump(turn))
+    }, error = function(error) turn$fail(error))
+    reconciliation <- turn$reconcile()
+    if (!is.null(reconciliation)) reconciliation <- coro::await(reconciliation)
+    turn$complete(reconciliation)
     invisible(NULL)
   })
 
@@ -5108,6 +6440,7 @@ make_claude_handler <- function(options       = NULL,
   attr(handler_fn, ".publish_persistent_messages") <- publish_persistent_messages
   attr(handler_fn, ".memory_guard_observe") <- memory_guard$observe
   attr(handler_fn, ".memory_guard_snapshot") <- memory_guard$snapshot
+  attr(handler_fn, ".memory_guard_allows") <- memory_guard$allows
   attr(handler_fn, "supports_concurrent_threads") <- TRUE
   attr(handler_fn, "action_handler") <- claude_action
   attr(handler_fn, "ui_capabilities") <- list(
@@ -5127,7 +6460,7 @@ make_claude_handler <- function(options       = NULL,
   # 预热:提前 get_client(连接 CLI 子进程并缓存),使该线程首条消息不再冷启动。
   attr(handler_fn, "warmup") <- function(thread_id, project = NULL) {
     if (!memory_guard_admits("warmup")) {
-      stop(memory_pressure_message, call. = FALSE)
+      stop(memory_guard_block_message("warmup"), call. = FALSE)
     }
     client <- get_client(thread_id, project)
     coordinator_for(thread_id, client, project)$coordinator$start_idle(

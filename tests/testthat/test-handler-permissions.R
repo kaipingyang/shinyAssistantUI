@@ -158,3 +158,142 @@ test_that(".claude_suggestion_to_perm maps the three suggestion types", {
   expect_null(shinyAssistantUI:::.claude_suggestion_to_perm(list(type = "unknownKind")))
   expect_null(shinyAssistantUI:::.claude_suggestion_to_perm(NULL))
 })
+
+test_that("approval cancellation unregisters only its own resolver and ignores a stale click", {
+  wait <- NULL
+  handler <- function(message, wait_for_approval, on_done) {
+    wait <<- wait_for_approval
+    on_done()
+  }
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "synthetic", threadId = "approval-thread", runId = "approval-run", ts = 1
+    ))
+    for (i in seq_len(100L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (is.function(wait)) break
+    }
+    decision <- NULL
+    pending <- wait("same-tool")
+    cancel <- attr(pending, "cancel", exact = TRUE)
+    expect_true(is.function(cancel))
+    if (is.function(cancel)) {
+      promises::then(pending, function(value) decision <<- value)
+      expect_true(cancel())
+      expect_false(cancel())
+      later::run_now(0)
+      expect_true(decision$expired)
+
+      replacement <- NULL
+      promises::then(wait("same-tool"), function(value) replacement <<- value)
+      expect_false(cancel())
+      session$setInputs(chat_input_tool_approval = list(
+        toolCallId = "same-tool", approved = TRUE, ts = 2
+      ))
+      session$flushReact()
+      later::run_now(0)
+      expect_true(replacement$approved)
+    }
+  })
+})
+
+test_that("owner-aware variadic handler wrappers receive the same identity as history attachment", {
+  attached_owner <- received_owner <- NULL
+  finished <- FALSE
+  handler <- function(...) {
+    args <- list(...)
+    received_owner <<- args$ui_owner
+    finished <<- TRUE
+    args$on_done()
+  }
+  attr(handler, "attach_ui_owner") <- function(thread_id, ui_owner, callbacks, ...) {
+    attached_owner <<- ui_owner
+    TRUE
+  }
+  attr(handler, "detach_ui_owner") <- function(ui_owner) invisible(TRUE)
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat", handler = handler,
+      on_session_load = function(session_id, thread_id, send_thread) send_thread(list())
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "synthetic-session", threadId = "same-browser",
+      requestId = "history-1", ts = 1
+    ))
+    session$flushReact()
+    expect_true(is.character(attached_owner) && nzchar(attached_owner))
+    session$setInputs(chat_input = list(
+      text = "synthetic", threadId = "same-browser", runId = "run-1", ts = 2
+    ))
+    for (i in seq_len(100L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (finished) break
+    }
+    expect_true(finished)
+    expect_identical(received_owner, attached_owner)
+  })
+})
+
+test_that("ordinary variadic handlers do not receive a private browser identity", {
+  received <- NULL
+  handler <- function(...) {
+    received <<- list(...)
+    received$on_done()
+  }
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = handler)
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "synthetic", threadId = "ordinary", runId = "ordinary-run", ts = 1
+    ))
+    for (i in seq_len(100L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (!is.null(received)) break
+    }
+    expect_true(is.list(received))
+    expect_false("ui_owner" %in% names(received))
+  })
+})
+
+test_that("history-only attachment can await a later background approval without a new foreground run", {
+  waiting <- NULL
+  handler <- function(...) NULL
+  attr(handler, "attach_ui_owner") <- function(thread_id, ui_owner, callbacks, ...) {
+    waiting <<- callbacks$wait_for_approval
+    TRUE
+  }
+  attr(handler, "detach_ui_owner") <- function(ui_owner) invisible(TRUE)
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer(
+      "chat", handler = handler,
+      on_session_load = function(session_id, thread_id, send_thread) send_thread(list())
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      type = "load_session", sessionId = "synthetic-session", threadId = "history-only",
+      requestId = "history-only-request", ts = 1
+    ))
+    session$flushReact()
+    expect_true(is.function(waiting))
+    if (is.function(waiting)) {
+      decision <- NULL
+      promises::then(waiting("later-background-tool"), function(value) decision <<- value)
+      session$setInputs(chat_input_tool_approval = list(
+        toolCallId = "later-background-tool", approved = TRUE, ts = 2
+      ))
+      session$flushReact()
+      later::run_now(0)
+      expect_true(decision$approved)
+    }
+  })
+})

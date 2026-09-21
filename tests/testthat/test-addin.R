@@ -226,7 +226,7 @@ test_that("Background Job memory guard exposes the addin monitor without diagnos
     session$flushReact()
     expect_true(is.function(memory_observer))
     addon <- attr(server_args$handler, "ui_addons")$memoryMonitor
-    expect_identical(addon$version, 2L)
+    expect_identical(addon$version, 3L)
     expect_named(addon, c("version", "ownerSeed", "lastRevision"))
     expect_gt(addon$ownerSeed, 0)
     expect_null(server_args$diagnostics)
@@ -268,7 +268,8 @@ test_that("Background Job memory guard exposes the addin monitor without diagnos
     expect_null(attr(server_args$handler, "ui_addons")$settings)
     expect_null(attr(server_args$handler, "ui_addons")$performanceOrb)
     expect_named(sent[[1L]]$message$sample, c(
-      "state", "pssBytes", "rssBytes", "cgroupCurrentBytes", "cgroupMaxBytes",
+      "state", "pssBytes", "rssBytes", "treeRssBytes", "treeProcessCount",
+      "cgroupCurrentBytes", "cgroupMaxBytes",
       "cgroupLimited", "softPssBytes", "hardPssBytes", "softRssBytes", "hardRssBytes"
     ))
     expect_false(grepl("PROMPT-SENTINEL", paste(capture.output(str(sent)), collapse = "")))

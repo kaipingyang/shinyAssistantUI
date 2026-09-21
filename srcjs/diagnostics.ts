@@ -1,4 +1,4 @@
-import { DIAGNOSTICS_EVENT_SPEC, DIAGNOSTICS_FORBIDDEN_NAMES } from "./diagnostics-schema.generated";
+import { DIAGNOSTICS_EVENT_SPEC, DIAGNOSTICS_FORBIDDEN_NAMES, DIAGNOSTICS_LIMITS } from "./diagnostics-schema.generated";
 
 export type DiagnosticsConfig = {
   version: 2; enabled: true; schema: 1;
@@ -7,16 +7,24 @@ export type DiagnosticsConfig = {
 export type DiagnosticsMetric = number | string;
 export type DiagnosticsEvent = { schema: 1; event: keyof typeof DIAGNOSTICS_EVENT_SPEC; ts: number; metrics: Record<string, DiagnosticsMetric> };
 export type DiagnosticsBatch = { version: 2; schema: 1; rows: DiagnosticsEvent[] };
+export type LongTaskObservation = {
+  state: "supported" | "unsupported";
+  count: number; durationUs: number; maxUs: number;
+};
 export interface DiagnosticsMonitor {
   record(event: string, metrics?: unknown): void;
   recordOwnedMarkdownPreprocess(durationUs: number): void;
   samplePageHeap(): "supported" | "unsupported";
+  subscribeLongTasks(handler: (observation: LongTaskObservation) => void): () => void;
   flush(): void;
   close(): void;
 }
 type PerformanceEntryListLike = { getEntries(): ArrayLike<{ duration?: number; startTime?: number }> };
 type PerformanceObserverLike = { observe(options: unknown): void; disconnect(): void };
-type PerformanceObserverConstructor = new (callback: (entries: PerformanceEntryListLike) => void) => PerformanceObserverLike;
+type PerformanceObserverConstructor = {
+  new (callback: (entries: PerformanceEntryListLike) => void): PerformanceObserverLike;
+  readonly supportedEntryTypes?: readonly string[];
+};
 type DiagnosticsEnvironment = {
   window?: Window;
   document?: Document;
@@ -42,10 +50,10 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export function parseDiagnosticsConfig(value: unknown): DiagnosticsConfig | null {
   if (!isRecord(value) || !exactKeys(value, CONFIG_KEYS) || value.version !== 2 || value.enabled !== true || value.schema !== 1 ||
-      !safeInt(value.batchMax) || value.batchMax < 1 || value.batchMax > 100 ||
-      !safeInt(value.queueMax) || value.queueMax < value.batchMax || value.queueMax > 1000 ||
+      !safeInt(value.batchMax) || value.batchMax < 1 || value.batchMax > DIAGNOSTICS_LIMITS.batchRows ||
+      !safeInt(value.queueMax) || value.queueMax < value.batchMax || value.queueMax > DIAGNOSTICS_LIMITS.queueRows ||
       !safeInt(value.batchMaxBytes) || value.batchMaxBytes < 4096 || value.batchMaxBytes > 262144 ||
-      !safeInt(value.eventMaxBytes) || value.eventMaxBytes < 512 || value.eventMaxBytes > 8192 ||
+      !safeInt(value.eventMaxBytes) || value.eventMaxBytes < 512 || value.eventMaxBytes > DIAGNOSTICS_LIMITS.rowBytes ||
       value.eventMaxBytes > value.batchMaxBytes) return null;
   return value as DiagnosticsConfig;
 }
@@ -76,6 +84,10 @@ export function sanitizeDiagnosticsEvent(event: unknown, metrics: unknown = {}, 
 
 const NOOP_MONITOR: DiagnosticsMonitor = Object.freeze({
   record: () => {}, recordOwnedMarkdownPreprocess: () => {}, samplePageHeap: () => "unsupported" as const,
+  subscribeLongTasks: (handler: (observation: LongTaskObservation) => void) => {
+    handler({ state: "unsupported", count: 0, durationUs: 0, maxUs: 0 });
+    return () => {};
+  },
   flush: () => {}, close: () => {},
 });
 export function createDiagnosticsMonitor(candidate: unknown, send: (batch: DiagnosticsBatch) => void,
@@ -92,6 +104,8 @@ export function createDiagnosticsMonitor(candidate: unknown, send: (batch: Diagn
   const queue: DiagnosticsEvent[] = [];
   const longtaskKeys = new Set<string>();
   const longtaskOrder: string[] = [];
+  const longtaskListeners = new Set<(observation: LongTaskObservation) => void>();
+  let longtaskState: LongTaskObservation["state"] = "unsupported";
   let longtaskCount = 0; let longtaskDurationUs = 0; let longtaskMaxUs = 0;
   let dropped = 0; let closed = false; let closing = false;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -193,9 +207,11 @@ export function createDiagnosticsMonitor(candidate: unknown, send: (batch: Diagn
     targetDocument.addEventListener("shiny:connected", onConnected);
     targetDocument.addEventListener("shiny:disconnected", onDisconnected);
   }
-  if (Observer) {
+  if (Observer && (!Observer.supportedEntryTypes || Observer.supportedEntryTypes.includes("longtask"))) {
     try {
       observer = new Observer((entries) => {
+        if (closed || closing) return;
+        const delta: LongTaskObservation = { state: "supported", count: 0, durationUs: 0, maxUs: 0 };
         for (const entry of Array.from(entries.getEntries())) {
           if (typeof entry.duration !== "number" || !Number.isFinite(entry.duration) || entry.duration < 0) continue;
           const key = `${entry.startTime ?? "x"}:${entry.duration}`;
@@ -206,15 +222,29 @@ export function createDiagnosticsMonitor(candidate: unknown, send: (batch: Diagn
           longtaskCount = saturatingAdd(longtaskCount, 1);
           longtaskDurationUs = saturatingAdd(longtaskDurationUs, durationUs);
           longtaskMaxUs = Math.max(longtaskMaxUs, durationUs);
+          delta.count = saturatingAdd(delta.count, 1);
+          delta.durationUs = saturatingAdd(delta.durationUs, durationUs);
+          delta.maxUs = Math.max(delta.maxUs, durationUs);
         }
         schedule();
+        if (delta.count > 0) for (const listener of longtaskListeners) listener(delta);
       });
       observer.observe({ type: "longtask", buffered: true });
+      longtaskState = "supported";
     } catch { try { observer?.disconnect(); } catch { /* fail open */ } observer = undefined; }
   }
   record("frontend_mount");
   return {
     record,
+    subscribeLongTasks(handler) {
+      if (closed || closing) {
+        handler({ state: "unsupported", count: 0, durationUs: 0, maxUs: 0 });
+        return () => {};
+      }
+      longtaskListeners.add(handler);
+      handler({ state: longtaskState, count: 0, durationUs: 0, maxUs: 0 });
+      return () => { longtaskListeners.delete(handler); };
+    },
     recordOwnedMarkdownPreprocess(durationUs) {
       const safe = Math.min(MAX_SAFE, Math.max(0, Math.round(durationUs)));
       record("owned_markdown_preprocess_summary", { count: 1, durationUs: safe, maxUs: safe });
@@ -230,6 +260,7 @@ export function createDiagnosticsMonitor(candidate: unknown, send: (batch: Diagn
       if (closed || closing) return;
       record("frontend_unmount");
       closing = true;
+      longtaskListeners.clear();
       try { observer?.disconnect(); } catch { /* fail open */ }
       observer = undefined;
       targetWindow?.removeEventListener("error", onWindowError);

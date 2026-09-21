@@ -277,23 +277,27 @@ if (!bridge.current) bridge.current = createShinyBridge(inputId);
 
 JS 通过 `Shiny.setInputValue` 发送 `{ threadId, text, ... }`，R 端用 `msg$threadId`（camelCase），**不是** `msg$thread_id`。Shiny 保留 JSON 属性名，不做任何大小写转换。
 
-### @assistant-ui/tap 生产模式 tapEffectEvent 陈旧回调（关键）
+### @assistant-ui/tap 必须保持生产模式（Plan 135）
 
-`tapEffectEvent` 在 `process.env.NODE_ENV === "production"` 时直接返回 `callbackRef.current`（旧回调），而不是稳定包装函数。导致 `@` mention 的 `handleKeyDown` 里捕获的 `open` 永远是上一帧的 `false`，键盘导航完全失效。
+旧版 `tapEffectEvent` 的生产分支曾返回陈旧回调，导致 `@` 菜单键盘导航失效。
+**当前安装版本已修复**：`useEffectEvent` 在生产模式也返回稳定包装函数，调用时读取最新 ref。
+原先强制整个 tap 包 `isDevelopment = true` 的 Vite 补丁已移除；它会保留额外快照检查和开发模式重放，
+增加长历史输入时的脚本成本，不能作为历史修复重新加回。
 
-**修复**：`vite.config.ts` 里加 transform 插件，把 `@assistant-ui/tap` 的 `env.js` 替换为 `export const isDevelopment = true`：
+`srcjs/tap-production.test.ts` 在独立生产进程验证回调身份稳定、状态更新可见及无开发模式重放。
+构建后仍需验证真实 `@`/slash 键盘行为。旧故障记录见 `.claude/docs/tap-production-bug.md`。
 
-```typescript
-{
-  name: "patch-tap-is-development",
-  transform(code, id) {
-    if (id.includes("@assistant-ui/tap") && id.endsWith("/env.js"))
-      return { code: "export const isDevelopment = true;\n", map: null };
-  },
-},
-```
+### 长历史的 store 事件上下文兼容（Plan 135）
 
-详见 `.claude/docs/tap-production-bug.md`。
+当前 `@assistant-ui/store` 的 `useAuiRoot` 每次更新创建新的
+`{ clientRef, emit, destroySignal }` 事件上下文；所有消息的 ComposerClient 都订阅它，
+使输入时连未挂载的历史消息资源也重新计算。仅减少 DOM 数量不能解决这部分脚本成本。
+
+`vite.config.mts` 的 `stabilizeAssistantStoreContext` 只对已核实的 `dist/useAui.js` 形状做构建期转换，
+按上述三项输入 memoize 事件上下文，**不**固定另一个可变的 building-client 上下文。
+不修改上游目录或 `node_modules`，不改变生产模式。模块形状变化会显式中止构建，升级依赖时须复核。
+`srcjs/assistant-store-context.test.ts` 用真实生产依赖验证：输入不重算 240 条不变历史，
+单条消息更新仅重算该条，内容和事件仍正确。实际性能与交互以安装后的 Chromium 验收为准。
 
 ### useEffect 依赖数组与对象引用稳定性
 
@@ -334,6 +338,84 @@ session$sendCustomMessage("tool-result", list(
 JS 端用 `Shiny.renderHtml(html, $([]), dependencies).html` 解析后再插入 DOM。
 
 **纯静态 HTML**（无 Shiny input/output）不需要此序列，直接 `innerHTML` 即可。
+
+### Claude 前台协程必须保持小而纯编排（Plan 138 / 140）
+
+Shiny 默认深层异步栈会在 promise 订阅时捕获 coro 生成的状态机调用。
+不要把消息解析、工具处理等大函数定义塞回 `coro::async()` 的函数体内，
+即使只是内部嵌套一个普通 helper，AST 仍会进入状态机。
+`make_claude_handler()` 的同步状态位于兄弟闭包 `new_foreground_turn()`；
+async 只编排模型切换、warming、consumer acquire、单次 foreground pump await 与 reconcile。
+前台沿用单 owner coordinator，每批最多 32 条/8ms，审批与 Result 立即停止；
+`.claude_foreground_pump()` 用一个完成 promise 和至多一个待执行 timer，
+空队列等 50ms、缓冲未空时让出后立即继续。审批暂停聊天分发；
+同一个 owner/timer 每秒接收控制 ACK、Task 状态和失活信号，不得另起 reader。
+不要恢复每次 idle 都 `coro::await` 的热循环、逐消息固定 10ms 等待，
+也不要通过全局关闭 `shiny.deepstacktrace`/JIT 掩盖回归。
+当前 promises 无公开的 domain getter；内部 getter 的签名与 domain 形状有显式兼容检查，
+升级后若不兼容必须复核，不能静默丢失 Shiny 上下文。usage publisher 只捕获已求值小快照；
+默认 owner fallback 在兄弟 dispatcher 作用域创建，不能重新捕获已完成 turn。
+`later::later()` 返回的是绑定 owning loop 的取消函数；取消时调用它本身，
+不要传给内部 `later:::cancel(callback_id_s, loop_id)`。公共 `.cancel_later_timer()`
+与 pump 都使用该契约，非法 handle/取消异常不得伪装成成功。
+`verify_handler_performance.R` 用真实安装包、默认深栈与本地 SDK peer 检查内存和时延，
+`verify_foreground_pump.R` 覆盖 60/120 秒慢流、长静默及迟到/不回复 usage，
+`verify_handler_protocol.R` 覆盖历史工具、审批、Stop 和线程隔离；不再用 AST 克隆替换 handler。
+
+### Claude 长任务与终态恢复（Plan 142）
+
+120 秒是后台静默提示阈值，不是健康 CLI、工具或审批的总时长上限。
+parented Agent 消息不打开顶层 owner。取消/失败先 drain 已有 Result；
+超时未确认、死亡或 compact 失去终态则退役旧连接，不能交给下一轮复用，
+也不能自动重放可能已执行的工具。cleanup/delete 会立即退役并结算等待者；
+配置重连等待活跃后台 Task，不能只看前台 `active_turns`。
+
+后台审批仅沿结构化调用及活跃 Task 的父链登记，终态撤权；过期 promise
+的 cancel 只移除自己的 Shiny resolver，迟到决策不得操作新连接。
+审批的浏览器身份使用稳定 `ui_owner`，不能把同一浏览器的历史刷新
+（更新 `ui_generation`）当成换 owner。history/proactive 两个替换入口共用
+`mergePendingApprovals()` 保留未回答卡片；提交决策写 `approvalResult`，
+真实执行结果仍由 SDK 的 UserMessage ToolResult 回传，不能用批准代替完成。
+暴露 `attach_ui_owner` 的 handler 包装器即使只声明 `...`，server 也必须
+透传同一 `ui_owner`，否则前台 legacy owner 与历史 owner 会互相替换。
+history-only callbacks 同样携带当前 browser 的 `wait_for_approval`（run 为
+NULL）；否则历史重开之后才到达的新后台审批会被误判为没有交互通道。
+新浏览器尚未发送时，bridge 只为明确已知 threadId 的无 runId 工具事件
+使用独立后台回调，不污染普通 run map/legacy fallback。实际工具更新复用
+`makeToolCallbacks()`，不能创建伪 run。新 history owner 清旧浏览器 runId
+并失效旧同步 job，已确认的前台来源标记与浏览器因果 ID 分开保存。
+Task Stop 使用 SDK `stop_task_async()`：ACK 不是终态，失败/未确认可重试。
+必须配套 ClaudeAgentSDK `>= 0.2.5.9000`，升级后重启既有 Job。
+
+终态转录的短等待与最多 30 秒补读分离；首个已变化的 user-only 快照
+不代表完整答复已落盘。`reconcile()` 先 force 跨 timer 参数，完成通知后
+置空回调，`consumer_guard()` 在兄弟作用域捕获轻量 record，
+不能因补读重新留住整个 foreground turn。新轮次/连接代际失效旧补读。
+错误轮次可恢复权威回复但保留错误；本地取消和发送失败不准被旧快照覆盖。
+`verify_long_task_lifecycle.R` 是真实 SDK/JSONL/Chromium 长任务门禁，
+覆盖活跃审批时的历史分页，以及完整 browser reload 后才到达的新审批和结果；
+后者不能先发伪前台消息来注册回调。`smoke` 模式不能代替 125 秒验收。
+
+### ellmer / codeagent 的调度与清理（Plan 141）
+
+codeagent 本地适配器的同步逻辑放在普通 `new_turn()` 闭包，外层只做小协程编排；
+上游 codeagent 的 `codeagent_stream_async()` 也需使用共享小 driver，不能只更新本包。
+保留 JIT、深栈与 Shield/citation 全段扫描/渲染语义；不能靠关掉保护来缩短首块时间。
+ellmer 与上游 codeagent 用普通 promise callback 推进真实 iterator，外层协程只等待一次，
+不要改成固定空轮询；`finally` 必须等待 iterator 的异步 `close`，不能先释放本轮引用。
+标准 promise domain 传播须保留。两者都在异常安全的退出路径解除 current 回调。
+ellmer handler 可被多个 session 复用，因此关闭时取消 server 自己的
+`cancel_fns`，不能全局清空聊天缓存。
+remote 已是单完成 promise：每批最多 32 事件/8ms，保留原 40ms idle 间隔；
+完整 raw JSONL frame 才解码，双向 UTF-8 半帧必须保留。审批 promise 暂停分发，
+但继续轻量检查 worker 存活。关闭/错误只结算一次，失效句柄不能复用。
+worker 主循环用 `later::run_now()` 的工作信号；仅回调和命令都无工作时短暂 sleep，
+不能恢复每轮固定 10ms sleep，否则 promise 链会把快流节流成数十秒。
+`verify_codeagent_latency.R` 验默认 JIT 的真实安装组合，
+`verify_backend_handlers.R` 用本地 SSE peer 驱动真实后端与 Chromium，不读取模型凭据。
+200 片段快流门禁还未全部通过：最小公开 ellmer 通路也有同样的依赖内部开销，
+不能把外层 driver 变小或合成首块改善写成全负载性能已解决；`ellmer-direct`
+仅用于定位边界，不能代替实际 handler 验收。
 
 ### CRITICAL: coro::async 内禁止 if-as-expression 赋值
 

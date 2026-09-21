@@ -401,7 +401,13 @@ test_that("assistantUIServer owns one consolidated session finalizer", {
 test_that("Claude memory diagnostics are owner-bound and detach makes them inert", {
   handler <- make_claude_handler(
     session_map_path = tempfile(fileext = ".rds"),
-    memory_guard_config = .memory_guard_default_config()
+    memory_guard_config = .memory_guard_default_config(),
+    memory_sampler = function() list(
+      available = TRUE, source = "fixture", pss_bytes = 80, rss_bytes = 90,
+      private_dirty_bytes = 70, anonymous_bytes = 60,
+      cgroup_current_bytes = 200, cgroup_max_bytes = 1000,
+      cgroup_events = list(high = 3, max = 2, oom = 1, oom_kill = 0)
+    )
   )
   withr::defer(attr(handler, "cleanup")())
   observed <- list()
@@ -427,5 +433,23 @@ test_that("Claude memory diagnostics are owner-bound and detach makes them inert
   before <- length(observed)
   expect_true(detach("diag-owner"))
   expect_true(observe_memory())
+  expect_identical(memory$metrics$private_dirty_bytes, 70)
+  expect_identical(memory$metrics$anonymous_bytes, 60)
+  expect_identical(memory$metrics$cgroup_high_events, 3)
+  expect_identical(memory$metrics$cgroup_max_events, 2)
+  expect_identical(memory$metrics$cgroup_oom_events, 1)
+  expect_identical(memory$metrics$cgroup_oom_kill_events, 0)
+  expect_identical(memory$metrics$r_heap_after_gc_bytes, 0)
+  expect_identical(memory$metrics$guard_gc_count, 0)
+  expect_identical(memory$metrics$sdk_client_count, 0)
+  expect_identical(memory$metrics$sdk_consumer_count, 0)
+  expect_identical(memory$metrics$sdk_route_count, 1)
+  expect_identical(memory$metrics$sdk_messages_seen, 0)
+  expect_identical(memory$metrics$sdk_buffered_message_count, 0)
+  expect_identical(memory$metrics$sdk_waiter_count, 0)
+  expect_identical(memory$metrics$sdk_usage_probe_pending_count, 0)
+  expect_identical(memory$metrics$sdk_message_bytes_seen, 0)
+  expect_identical(memory$metrics$sdk_max_batch_bytes, 0)
+  expect_identical(memory$metrics$active_turn_count, 0)
   expect_identical(length(observed), before)
 })

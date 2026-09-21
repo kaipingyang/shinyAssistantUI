@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
+import type { ThreadMessageLike } from "@assistant-ui/core";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
+  mergePendingApprovals, markToolApprovalSubmitted,
   extractAttachments, expandSlashCommands, safeUrl, parseFileRef,
   preprocessStreamingMarkdown, detectSlashTrigger, applyEdit,
   computeToolDepth, themeToCssVars, formatMessageTime, detectMentionTrigger,
@@ -145,6 +147,54 @@ describe("markStaleToolCalls", () => {
   it("content 非数组不崩", () => {
     const msgs = [{ id: "m1", role: "assistant", content: "raw" }] as any;
     expect(() => markStaleToolCalls(msgs, "X")).not.toThrow();
+  });
+});
+
+describe("pending approval history merge", () => {
+  const part = {
+    type: "tool-call" as const, toolCallId: "pending", toolName: "Bash",
+    args: {}, argsText: "{}", artifact: { requiresApproval: true },
+  };
+  const live: ThreadMessageLike = {
+    id: "live-tool", role: "assistant",
+    content: [{ type: "text", text: "obsolete live text" }, part],
+  };
+
+  it("preserves only the unanswered tool rather than replaying obsolete text", () => {
+    expect(mergePendingApprovals([], [live])).toEqual([
+      { ...live, content: [part] },
+    ]);
+  });
+
+  it("matches the exact tool id across different canonical message ids without duplicates", () => {
+    const historical: ThreadMessageLike = {
+      id: "canonical-tool", role: "assistant",
+      content: [{ ...part, artifact: {}, result: "Session ended" }],
+    };
+    expect(mergePendingApprovals([historical], [live])).toEqual([
+      { ...historical, content: [part] },
+    ]);
+  });
+
+  it("merges a missing pending part into an existing message id", () => {
+    expect(mergePendingApprovals([
+      { id: "live-tool", role: "assistant", content: "Canonical text" },
+    ], [live])).toEqual([
+      { id: "live-tool", role: "assistant",
+        content: [{ type: "text", text: "Canonical text" }, part] },
+    ]);
+  });
+
+  it("does not preserve submitted or settled approvals and leaves unknown ids untouched", () => {
+    const current = [live];
+    expect(markToolApprovalSubmitted(current, "other", true)).toBe(current);
+    const approved = markToolApprovalSubmitted(current, "pending", true);
+    expect(JSON.stringify(approved)).toContain('"approvalResult":"approved"');
+    expect(JSON.stringify(current)).not.toContain("approvalResult");
+    expect(mergePendingApprovals([], approved)).toEqual([]);
+    expect(mergePendingApprovals([], [{
+      ...live, content: [{ ...part, result: "Actual result" }],
+    }])).toEqual([]);
   });
 });
 

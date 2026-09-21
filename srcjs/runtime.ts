@@ -27,7 +27,7 @@ import {
 } from "./diagnostics";
 import type {
   ShinyBridge, SessionsPayload, ProactiveMessagesPayload, IdeContextMeta, WorkspaceMentionItem,
-  AttachmentData, QuoteInfo, RunPhase, RunStage, AutoContinueKind,
+  AttachmentData, QuoteInfo, RunPhase, RunStage, AutoContinueKind, RunCallbacks,
 } from "./bridge";
 import {
   createCopilotServiceBridge,
@@ -62,6 +62,7 @@ import { buildChecklistSnapshot } from "./checklist-reducer";
 import {
   createTaskMonitorState,
   isTaskTerminalStatus,
+  failTaskStop,
   reduceTaskMonitorEvent,
   requestTaskStop,
   selectThreadTaskMonitor,
@@ -74,6 +75,7 @@ import {
 } from "./shiny-config-context";
 import {
   storageKey, makeThreadId, markStaleToolCalls, stripAttachmentData,
+  mergePendingApprovals, markToolApprovalSubmitted,
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
   resolveToolFileReference,
 } from "./helpers";
@@ -205,6 +207,7 @@ type CompactActionProgress = {
 };
 
 const COMPACT_CLIENT_TIMEOUT_MS = 185_000;
+const TASK_STOP_CONFIRM_TIMEOUT_MS = 15_000;
 
 const isCompactPhase = (value: unknown): value is CompactPhase =>
   value === "starting" || value === "compacting" || value === "complete" || value === "error";
@@ -324,7 +327,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }
   const memoryMonitorConfig = useMemo(() => parseMemoryMonitorAddon(config), [config]);
   const memoryMonitorKey = memoryMonitorConfig
-    ? [memoryMonitorConfig.ownerSeed, memoryMonitorConfig.lastRevision].join("|")
+    ? [memoryMonitorConfig.version, memoryMonitorConfig.ownerSeed, memoryMonitorConfig.lastRevision].join("|")
     : "";
   const memoryMonitorBridgeRef = useRef<MemoryMonitorBridge | null>(null);
   const diagnosticsSettingsConfig = useMemo(() => parseDiagnosticsSettingsAddon(config), [config]);
@@ -362,7 +365,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const activeRunsRef = useRef<Set<string>>(new Set());
   const deletedThreadIdsRef = useRef<Set<string>>(new Set());
   const activeTaskRunIdsRef = useRef<Record<string, string>>({});
-  const completedRunIdsRef = useRef<Record<string, string>>({});
+  const settledRunIdsRef = useRef<Record<string, string>>({});
+  const cancelledRunIdsRef = useRef<Record<string, string>>({});
+  const runErrorNoticesRef = useRef(new Map<string, {
+    runId: string; message: ThreadMessageLike & { id: string };
+  }>());
   const knownThreadIdsRef = useRef(new Set<string>());
   const proactiveRevisionsRef = useRef(new Map<string, number>());
   const proactiveBeforeSessionsRef = useRef(new Map<string, ProactiveMessagesPayload[]>());
@@ -521,9 +528,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     state: MemoryGuardState | "waiting";
     sample: MemoryMonitorSample | null;
     frame: MemoryMonitorFrame | null;
+    receivedAt: number | null;
+    refreshing: boolean;
   };
   const [memoryMonitorView, setMemoryMonitorView] = useState<MemoryMonitorView | undefined>(
-    () => memoryMonitorConfig ? { state: "waiting", sample: null, frame: null } : undefined,
+    () => memoryMonitorConfig ? { state: "waiting", sample: null, frame: null, receivedAt: null, refreshing: false } : undefined,
   );
   const [diagnosticsSettingsSnapshot, setDiagnosticsSettingsSnapshot] =
     useState<DiagnosticsSettingsSnapshot | undefined>(undefined);
@@ -536,6 +545,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const setMemoryMonitorVisible = useCallback((visible: boolean) => {
     memoryMonitorBridgeRef.current?.setVisible(visible === true);
   }, []);
+  const refreshMemoryMonitor = useCallback(() => {
+    memoryMonitorBridgeRef.current?.refresh();
+  }, []);
   useEffect(() => {
     const parsed = parseMemoryMonitorAddon(config);
     if (!parsed || !memoryMonitorKey) {
@@ -545,11 +557,19 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     }
     const monitorBridge = createMemoryMonitorBridge(inputId, parsed);
     memoryMonitorBridgeRef.current = monitorBridge;
-    setMemoryMonitorView({ state: "waiting", sample: null, frame: null });
+    setMemoryMonitorView({ state: "waiting", sample: null, frame: null, receivedAt: null, refreshing: false });
+    monitorBridge.onPendingChange((refreshing) => {
+      setMemoryMonitorView((previous) => {
+        if (!previous || memoryMonitorBridgeRef.current !== monitorBridge ||
+            previous.refreshing === refreshing) return previous;
+        return { ...previous, refreshing };
+      });
+    });
     monitorBridge.onSample((frame) => {
+      const receivedAt = Date.now();
       setMemoryMonitorView((previous) => {
         if (!previous || memoryMonitorBridgeRef.current !== monitorBridge) return previous;
-        return { state: frame.sample.state, sample: frame.sample, frame };
+        return { state: frame.sample.state, sample: frame.sample, frame, receivedAt, refreshing: false };
       });
     });
     return () => {
@@ -560,7 +580,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
       monitorBridge.dispose();
     };
-  }, [inputId, memoryMonitorKey]); // exact v2 primitives are included in the key.
+  }, [inputId, memoryMonitorKey]); // Every validated protocol primitive is included in the key.
 
   useEffect(() => {
     const parsed = parseDiagnosticsSettingsAddon(config);
@@ -596,17 +616,28 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [inputId, diagnosticsSettingsKey]);
 
   const diagnosticsLaunchEnabled = diagnosticsLaunchConfig?.launchEnabled ?? diagnosticsKey.length > 0;
-  const performanceOrbController = useMemo<PerformanceOrbController | undefined>(() => {
-    if (!diagnosticsSettingsConfig) return undefined;
-    return createPerformanceOrbController({
-      diagnosticsEnabled: diagnosticsLaunchEnabled,
-      observeLongTasks: !diagnosticsLaunchEnabled,
+  const performanceOrbControllerRef = useRef<PerformanceOrbController | null>(null);
+  const [performanceOrbController, setPerformanceOrbController] = useState<PerformanceOrbController>();
+  useEffect(() => {
+    if (!diagnosticsSettingsKey) {
+      setPerformanceOrbController(undefined);
+      return;
+    }
+    const monitor = diagnosticsMonitorRef.current;
+    const controller = createPerformanceOrbController({
+      observeLongTasks: !monitor,
       onFrameSummary: (metrics) => diagnosticsMonitorRef.current?.record("frame_summary", metrics),
-      onLongTaskSummary: (metrics) => diagnosticsMonitorRef.current?.record("longtask_summary", metrics),
       onPageHeap: () => diagnosticsMonitorRef.current?.samplePageHeap(),
     });
-  }, [inputId, diagnosticsSettingsKey, diagnosticsLaunchEnabled]);
-  useEffect(() => () => performanceOrbController?.dispose(), [performanceOrbController]);
+    const unsubscribe = monitor?.subscribeLongTasks(controller.acceptLongTasks);
+    performanceOrbControllerRef.current = controller;
+    setPerformanceOrbController(controller);
+    return () => {
+      unsubscribe?.();
+      if (performanceOrbControllerRef.current === controller) performanceOrbControllerRef.current = null;
+      controller.dispose();
+    };
+  }, [inputId, diagnosticsSettingsKey, diagnosticsKey]);
   const requestSetting = useCallback((field: DiagnosticsSettingField, value: DiagnosticsSettingValue) =>
     diagnosticsSettingsBridgeRef.current?.request(field, value) ?? null, []);
   const recordOwnedMarkdownPreprocess = diagnosticsLaunchEnabled
@@ -994,7 +1025,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     proactiveBeforeSessionsRef.current.delete(threadId);
     proactiveAfterRunRef.current.delete(threadId);
     proactiveSkipNextHistoryRefreshRef.current.delete(threadId);
-    delete completedRunIdsRef.current[threadId];
+    delete settledRunIdsRef.current[threadId];
+    delete cancelledRunIdsRef.current[threadId];
+    runErrorNoticesRef.current.delete(threadId);
   }, []);
 
   const invalidateHistoryForProactive = useCallback((threadId: string) => {
@@ -1049,7 +1082,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     }
 
     setMessagesMap((previous) => {
-      const incoming = normalizeProactiveMessages(payload.messages, payload.revision);
+      const incoming = mergePendingApprovals(
+        normalizeProactiveMessages(payload.messages, payload.revision),
+        previous[threadId] ?? [],
+      );
       const incomingIds = new Set(
         incoming.map((message) => message.id)
           .filter((id): id is string => typeof id === "string"),
@@ -1063,8 +1099,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         message.role === "user" && typeof message.id === "string" &&
         pendingUserIds.has(message.id) && !incomingIds.has(message.id)
       );
+      const errorNotice = runErrorNoticesRef.current.get(threadId);
+      const notices = errorNotice && errorNotice.runId === payload.afterRunId
+        && !incomingIds.has(errorNotice.message.id)
+        ? [errorNotice.message] : [];
       const updated = normalizeProactiveMessages(
-        [...incoming, ...pendingUsers],
+        [...incoming, ...notices, ...pendingUsers],
         payload.revision,
       );
       messageRepositoriesRef.current.get(threadId)?.resetVisiblePath(updated);
@@ -1080,7 +1120,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         typeof payload.threadId !== "string" || payload.threadId.length === 0 ||
         !Number.isSafeInteger(payload.revision) || payload.revision < 0 ||
         !Array.isArray(payload.messages) ||
-        (payload.afterRunId !== undefined && typeof payload.afterRunId !== "string")) return;
+        (payload.afterRunId != null && typeof payload.afterRunId !== "string")) return;
 
     const threadId = payload.threadId;
     if (deletedThreadIdsRef.current.has(threadId)) return;
@@ -1105,7 +1145,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       return;
     }
 
-    if (payload.afterRunId && completedRunIdsRef.current[threadId] !== payload.afterRunId) return;
+    if (payload.afterRunId && settledRunIdsRef.current[threadId] !== payload.afterRunId) return;
     proactiveRevisionsRef.current.set(threadId, payload.revision);
     commitProactiveReplacement(payload);
   }, [commitProactiveReplacement]);
@@ -1248,6 +1288,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   // ── 注册 clear（新建线程）────────────────────────────────────────────────
   useEffect(() => {
+    const toolBridge = bridge.current;
+    toolBridge.setBackgroundToolCallbacks((threadId) => {
+      if (!knownThreadIdsRef.current.has(threadId) || deletedThreadIdsRef.current.has(threadId) ||
+          activeRunsRef.current.has(threadId)) return undefined;
+      return makeToolCallbacks(threadId);
+    });
     bridge.current.onClear(() => {
       const newId = makeThreadId();
       knownThreadIdsRef.current.add(newId);
@@ -1338,6 +1384,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
       const target = requestId ? actionAckRefs.current.get(requestId) : undefined;
       if (!target) return;
+      const stoppedTaskId = target.actionId.startsWith("stoptask:")
+        ? target.actionId.slice("stoptask:".length) : undefined;
+      if (stoppedTaskId && result.status === "error") {
+        if (target.timeoutId !== undefined) window.clearTimeout(target.timeoutId);
+        setTaskMonitorState((previous) => failTaskStop(
+          previous, target.threadId, stoppedTaskId, result.message || "Task stop failed.",
+        ));
+      }
 
       if (target.actionId === "compact") {
         const incoming = result.value && typeof result.value === "object"
@@ -1380,13 +1434,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         return;
       }
 
-      if (!result.message) return;
+      const resultMessage = result.message || (stoppedTaskId && result.status === "error" ? "Task stop failed." : "");
+      if (!resultMessage) return;
       const prefix = result.status === "error" ? "\u26a0\ufe0f"
         : result.status === "progress" ? "\u23f3"
         : "\u2713";
-      const renderedMessage = result.message.includes("\n")
-        ? `${prefix}\n\n${result.message}`
-        : `${prefix} ${result.message}`;
+      const renderedMessage = resultMessage.includes("\n")
+        ? `${prefix}\n\n${resultMessage}`
+        : `${prefix} ${resultMessage}`;
       setMessagesMap((prev) => {
         const msgs = prev[target.threadId] ?? [];
         const updated = msgs.map((m): ThreadMessageLike =>
@@ -1398,7 +1453,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, target.threadId, updated);
         return { ...prev, [target.threadId]: updated };
       });
-      if (result.status !== "progress") actionAckRefs.current.delete(requestId!);
+      if (result.status !== "progress" && (!stoppedTaskId || result.status === "error")) {
+        actionAckRefs.current.delete(requestId!);
+      }
       const effect = result.value && typeof result.value === "object"
         ? (result.value as { effect?: unknown }).effect
         : undefined;
@@ -1425,6 +1482,22 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     // ── #2 子agent/Task 进度 ──────────────────────────────────────────────────
     bridge.current.onTask((d) => {
       const tid = d.threadId ?? currentThreadIdRef.current;
+      if (isTaskTerminalStatus(d.status)) {
+        for (const [requestId, target] of actionAckRefs.current) {
+          if (target.threadId !== tid || target.actionId !== `stoptask:${d.taskId}`) continue;
+          if (target.timeoutId !== undefined) window.clearTimeout(target.timeoutId);
+          actionAckRefs.current.delete(requestId);
+          setMessagesMap((previous) => {
+            const updated = (previous[tid] ?? []).map((message): ThreadMessageLike =>
+              message.id === target.ackId
+                ? { ...message, content: [{ type: "text", text: `✓ Task is ${d.status}.` }] }
+                : message,
+            );
+            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, tid, updated);
+            return { ...previous, [tid]: updated };
+          });
+        }
+      }
       setTaskMonitorState((previous) => reduceTaskMonitorEvent(previous, {
         threadId: tid,
         taskId: d.taskId,
@@ -1465,6 +1538,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const statusKind = d.status === "status" && typeof d.text === "string"
         ? d.text
         : d.status;
+      if (statusKind === "idle" || statusKind === "") {
+        setStatusTextMap((previous) => ({ ...previous, [tid]: null }));
+        return;
+      }
       if (RUN_SCOPED_TRANSIENT_STATUSES.has(statusKind) &&
           !activeRunsRef.current.has(tid)) {
         setStatusTextMap((previous) => ({ ...previous, [tid]: null }));
@@ -1828,7 +1905,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           }
           updated = [...older, ...(prev[threadId] ?? [])];
         } else {
-          updated = incoming;
+          updated = mergePendingApprovals(incoming, prev[threadId] ?? []);
           messageRepositoriesRef.current.get(threadId)?.resetVisiblePath(updated);
         }
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
@@ -1851,11 +1928,105 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       currentThreadIdRef.current,
       projectForThreadId(currentThreadIdRef.current),
     );
+    return () => toolBridge.setBackgroundToolCallbacks(null);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     requestIdeContextFor(currentThreadId);
   }, [currentThreadId, requestIdeContextFor]);
+
+  function makeToolCallbacks(threadId: string): Pick<RunCallbacks, "onToolCall" | "onToolResult"> {
+    return {
+      onToolCall: (toolCall) => {
+        diagnosticsMonitorRef.current?.record("tool_delta_summary", { count: 0, bytes: 0, toolCount: 1 });
+        const startedAt = Date.now();
+        streamingIdsRef.current[threadId] = null;
+        setMessagesMap((prev) => {
+          const threadMsgs = prev[threadId] ?? [];
+          const existing = threadMsgs.find((m) => m.id === `tool-${toolCall.toolCallId}`);
+          let updated: ThreadMessageLike[];
+          if (existing) {
+            updated = threadMsgs.map((m): ThreadMessageLike => {
+              if (m.id !== `tool-${toolCall.toolCallId}`) return m;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const content = m.content as any[];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const cidx = content.findIndex((p: any) => p.type === "tool-call");
+              if (cidx < 0) return m;
+              const newContent = [...content];
+              newContent[cidx] = {
+                ...content[cidx],
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                args: toolCall.args as any,
+                argsText: toolCall.argsText,
+                timing: content[cidx].timing ?? { startedAt },
+                artifact: {
+                  ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
+                    ? content[cidx].artifact : {}),
+                  ...(toolCall.annotations ?? {}),
+                  argsStreaming: false,
+                },
+              };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return { ...m, content: newContent } as any;
+            });
+          } else {
+            updated = [...threadMsgs, {
+              id: `tool-${toolCall.toolCallId}`,
+              role: "assistant" as const,
+              content: [{
+                type: "tool-call" as const,
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                args: toolCall.args as any,
+                argsText: toolCall.argsText,
+                timing: { startedAt },
+                artifact: { ...(toolCall.annotations ?? {}), argsStreaming: false },
+              }],
+            }];
+          }
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+          return { ...prev, [threadId]: updated };
+        });
+      },
+      onToolResult: (toolCallId, result, isError) => {
+        const completedAt = Date.now();
+        setMessagesMap((prev) => {
+          const threadMsgs = prev[threadId] ?? [];
+          const updated = threadMsgs.map((m): ThreadMessageLike => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const content = m.content as any[];
+            if (!Array.isArray(content)) return m;
+            const cidx = content.findIndex(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (p: any) => p?.type === "tool-call" && p.toolCallId === toolCallId,
+            );
+            if (cidx < 0) return m;
+            const newContent = [...content];
+            newContent[cidx] = {
+              ...content[cidx],
+              timing: {
+                startedAt: content[cidx].timing?.startedAt ?? completedAt,
+                completedAt,
+              },
+              artifact: {
+                ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
+                  ? content[cidx].artifact : {}),
+                argsStreaming: false,
+              },
+              result,
+              isError,
+            };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return { ...m, content: newContent } as any;
+          });
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+          return { ...prev, [threadId]: updated };
+        });
+      },
+    };
+  }
 
   // ── 启动一次 streaming run（onNew 和 onReload 共用）────────────────────────
   const startRun = useCallback(
@@ -1871,7 +2042,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       // 登记本 run：active 集合用于多 tab 同步保护；run 序号和 ID 用于拒绝
       // 同线程旧后端 terminal，避免它提前推进 service FIFO 或结束新任务。
       activeRunsRef.current.add(threadId);
-      delete completedRunIdsRef.current[threadId];
+      delete settledRunIdsRef.current[threadId];
+      delete cancelledRunIdsRef.current[threadId];
+      runErrorNoticesRef.current.delete(threadId);
       const mySeq = (runSeqRef.current[threadId] ?? 0) + 1;
       runSeqRef.current[threadId] = mySeq;
       const runId = `run-${Date.now()}-${threadId}-${mySeq}`;
@@ -2019,105 +2192,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             return { ...prev, [threadId]: updated };
           });
         },
-        onToolCall: (toolCall) => {
-          diagnosticsMonitorRef.current?.record("tool_delta_summary", { count: 0, bytes: 0, toolCount: 1 });
-          const startedAt = Date.now();
-          streamingIdsRef.current[threadId] = null;
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            const existing = threadMsgs.find((m) => m.id === `tool-${toolCall.toolCallId}`);
-            let updated: ThreadMessageLike[];
-            if (existing) {
-              // 已被 onToolCallStart 创建（Claude 流式路径）：补全解析后的 args + artifact，不重复 push
-              updated = threadMsgs.map((m): ThreadMessageLike => {
-                if (m.id !== `tool-${toolCall.toolCallId}`) return m;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const content = m.content as any[];
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const cidx = content.findIndex((p: any) => p.type === "tool-call");
-                if (cidx < 0) return m;
-                const newContent = [...content];
-                newContent[cidx] = {
-                  ...content[cidx],
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  args: toolCall.args as any,
-                  argsText: toolCall.argsText,
-                  timing: content[cidx].timing ?? { startedAt },
-                  artifact: {
-                    ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
-                      ? content[cidx].artifact
-                      : {}),
-                    ...(toolCall.annotations ?? {}),
-                    argsStreaming: false,
-                  },
-                };
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                return { ...m, content: newContent } as any;
-              });
-            } else {
-              // 无 start（ellmer 路径）：整包新建
-              updated = [
-                ...threadMsgs,
-                {
-                  id: `tool-${toolCall.toolCallId}`,
-                  role: "assistant" as const,
-                  content: [
-                    {
-                      type: "tool-call" as const,
-                      toolCallId: toolCall.toolCallId,
-                      toolName: toolCall.toolName,
-                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                      args: toolCall.args as any,
-                      argsText: toolCall.argsText,
-                      timing: { startedAt },
-                      artifact: { ...(toolCall.annotations ?? {}), argsStreaming: false },
-                    },
-                  ],
-                },
-              ];
-            }
-            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
-        onToolResult: (toolCallId, result, isError) => {
-          const completedAt = Date.now();
-          setMessagesMap((prev) => {
-            const threadMsgs = prev[threadId] ?? [];
-            const updated = threadMsgs.map((m): ThreadMessageLike => {
-              // 按 type + toolCallId 定位 part（不假设 content[0]），与
-              // markStaleToolCalls / onToolCallDelta 保持一致，兼容未来多 part 消息。
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const content = m.content as any[];
-              if (!Array.isArray(content)) return m;
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const cidx = content.findIndex(
-                (p: any) => p?.type === "tool-call" && p.toolCallId === toolCallId,
-              );
-              if (cidx < 0) return m;
-              const newContent = [...content];
-              newContent[cidx] = {
-                ...content[cidx],
-                timing: {
-                  startedAt: content[cidx].timing?.startedAt ?? completedAt,
-                  completedAt,
-                },
-                artifact: {
-                  ...(content[cidx].artifact && typeof content[cidx].artifact === "object"
-                    ? content[cidx].artifact
-                    : {}),
-                  argsStreaming: false,
-                },
-                result,
-                isError,
-              };
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              return { ...m, content: newContent } as any;
-            });
-            if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
-            return { ...prev, [threadId]: updated };
-          });
-        },
+        ...makeToolCallbacks(threadId),
         onSource: (source) => {
           if (!streamingIdsRef.current[threadId]) streamingIdsRef.current[threadId] = `assistant-${Date.now()}`;
           const msgId = streamingIdsRef.current[threadId];
@@ -2231,6 +2306,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
         onDone: (doneSuggestions, incomingRunId, cancelled = false) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          cancelled = cancelled || cancelledRunIdsRef.current[threadId] === runId;
           diagnosticsMonitorRef.current?.record("run_state", {
             phase: cancelled ? "cancelled" : "complete",
           });
@@ -2242,7 +2318,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           diagnosticsMonitorRef.current?.record("owned_commit_summary", {
             messageCount: ownedMessages.length, toolCount: ownedToolCount,
           });
-          performanceOrbController?.sampleSemanticTerminal();
+          performanceOrbControllerRef.current?.sampleSemanticTerminal();
           diagnosticsMonitorRef.current?.flush();
           streamingIdsRef.current[threadId] = null;
           // 只有当前 thread 仍是发起此 run 的 thread 时才清 running 状态
@@ -2256,8 +2332,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           // 避免 run 重入（edit 后立即 reload 等）时旧 run 的 onDone 误删新 run 的 callbacks。
           if (isLatestRun()) {
             activeRunsRef.current.delete(threadId);
-            if (cancelled) delete completedRunIdsRef.current[threadId];
-            else completedRunIdsRef.current[threadId] = runId;
+            if (cancelled) delete settledRunIdsRef.current[threadId];
+            else settledRunIdsRef.current[threadId] = runId;
+            runErrorNoticesRef.current.delete(threadId);
             delete activeTaskRunIdsRef.current[threadId];
             clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
@@ -2286,6 +2363,12 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
         onError: (errMsg, incomingRunId) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          const cancelled = cancelledRunIdsRef.current[threadId] === runId;
+          const errorNotice: ThreadMessageLike & { id: string } = {
+            id: `error-${runId}`,
+            role: "assistant",
+            content: [{ type: "text", text: `⚠ Error: ${errMsg}` }],
+          };
           diagnosticsMonitorRef.current?.record("run_state", { phase: "error" });
           const ownedMessages = messagesMapRef.current[threadId] ?? [];
           const ownedToolCount = ownedMessages.reduce((count, message) => count +
@@ -2295,36 +2378,41 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           diagnosticsMonitorRef.current?.record("owned_commit_summary", {
             messageCount: ownedMessages.length, toolCount: ownedToolCount,
           });
-          performanceOrbController?.sampleSemanticTerminal();
+          performanceOrbControllerRef.current?.sampleSemanticTerminal();
           diagnosticsMonitorRef.current?.flush();
           streamingIdsRef.current[threadId] = null;
           setStatusTextMap((previous) => ({ ...previous, [threadId]: null }));
-          if (usesRunStateProtocol) setThreadRunPhase(threadId, "error");
+          if (usesRunStateProtocol) setThreadRunPhase(threadId, cancelled ? "cancelled" : "error");
           if (isLatestRun()) {
             activeRunsRef.current.delete(threadId);
+            if (cancelled) {
+              delete settledRunIdsRef.current[threadId];
+              runErrorNoticesRef.current.delete(threadId);
+            } else {
+              settledRunIdsRef.current[threadId] = runId;
+              runErrorNoticesRef.current.set(threadId, { runId, message: errorNotice });
+            }
             delete activeTaskRunIdsRef.current[threadId];
             clearLatestTaskActivity(threadId);
             setThreadRunning(threadId, false);
             bridge.current.retireRunCallbacks(threadId);
           }
           advancePendingSubmissionsRef.current(threadId, runId, false);
-          if (proactiveAfterRunRef.current.get(threadId)?.afterRunId === runId) {
-            proactiveAfterRunRef.current.delete(threadId);
-          }
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const { messages: settled } = markStaleToolCalls(threadMsgs, "Interrupted");
-            const updated = [
-              ...settled,
-              {
-                id: `error-${Date.now()}`,
-                role: "assistant" as const,
-                content: [{ type: "text" as const, text: `⚠ Error: ${errMsg}` }],
-              },
-            ];
+            const updated = [...settled, errorNotice];
             if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
             return { ...prev, [threadId]: updated };
           });
+          const pendingReplacement = proactiveAfterRunRef.current.get(threadId);
+          if (pendingReplacement?.afterRunId === runId) {
+            proactiveAfterRunRef.current.delete(threadId);
+            if (!cancelled && isLatestRun()) {
+              proactiveRevisionsRef.current.set(threadId, pendingReplacement.revision);
+              commitProactiveReplacement(pendingReplacement);
+            }
+          }
         },
       });
 
@@ -2649,7 +2737,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // (on_action 执行真实操作,如切模型 / 清历史)。绝不触发 AI run。
   const invokeAction = useCallback((item: ActionItemDef) => {
     const threadId = currentThreadIdRef.current;
-    if (blockingActionsRef.current[threadId]) return;
+    if (blockingActionsRef.current[threadId]) return false;
     const label = item.label ?? item.id;
     const command = item.command ?? item.id;
     const requestId = makeActionRequestId();
@@ -2710,6 +2798,23 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         setBlockingActionForThread(threadId);
         actionAckRefs.current.delete(requestId);
       }, COMPACT_CLIENT_TIMEOUT_MS);
+    } else if (item.id.startsWith("stoptask:")) {
+      const taskId = item.id.slice("stoptask:".length);
+      target.timeoutId = window.setTimeout(() => {
+        if (actionAckRefs.current.get(requestId) !== target) return;
+        actionAckRefs.current.delete(requestId);
+        const error = "Task stop was not confirmed. The task may still be running; you can retry.";
+        setTaskMonitorState((previous) => failTaskStop(previous, threadId, taskId, error));
+        setMessagesMap((previous) => {
+          const updated = (previous[threadId] ?? []).map((message): ThreadMessageLike =>
+            message.id === ackId
+              ? { ...message, content: [{ type: "text", text: `⚠ ${error}` }] }
+              : message,
+          );
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+          return { ...previous, [threadId]: updated };
+        });
+      }, TASK_STOP_CONFIRM_TIMEOUT_MS);
     }
     actionAckRefs.current.set(requestId, target);
     bridge.current.sendAction(
@@ -2718,6 +2823,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       { requestId },
       projectForThreadId(threadId),
     );
+    return true;
   }, [inputId, setBlockingActionForThread]);
   invokeActionRef.current = invokeAction;
 
@@ -2909,6 +3015,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   // ── onCancel ─────────────────────────────────────────────────────────────
   const onCancel = useCallback(async () => {
     const threadId = currentThreadId;
+    const runId = activeTaskRunIdsRef.current[threadId];
+    if (runId) cancelledRunIdsRef.current[threadId] = runId;
     // Do NOT null streamingIdRef here — in-flight chunks that arrive before R
     // detects the cancel would create a new message bubble (second AI avatar).
     // Let onDone null it naturally once the stream is fully closed.
@@ -2916,7 +3024,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     if (usesRunStateProtocol) setThreadRunPhase(threadId, "cancelled");
     // Do NOT clear callbacks here — R will still send on_tool_result / on_done
     // during drain mode after interrupt. Let onDone clear them naturally.
-    bridge.current.sendCancel(threadId, activeTaskRunIdsRef.current[threadId]);
+    bridge.current.sendCancel(threadId, runId);
   }, [currentThreadId]);
 
   // ── new thread creation ──────────────────────────────────────────────────
@@ -3215,8 +3323,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const sendToolApproval = useCallback(
     (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => {
       bridge.current.sendToolApproval(toolCallId, approved, opts);
+      setMessagesMap((previous) => {
+        const next = { ...previous };
+        let changed = false;
+        for (const [threadId, messages] of Object.entries(previous)) {
+          const updated = markToolApprovalSubmitted(messages, toolCallId, approved);
+          if (updated === messages) continue;
+          next[threadId] = updated;
+          changed = true;
+          if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
+        }
+        return changed ? next : previous;
+      });
     },
-    [] // eslint-disable-line react-hooks/exhaustive-deps
+    [inputId, usesClientPersistence, setMessagesMap],
   );
 
   const setPermissionMode = useCallback((nextValue: string) => {
@@ -3329,9 +3449,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     const threadId = currentThreadIdRef.current;
     const requested = requestTaskStop(taskMonitorStateRef.current, threadId, taskId);
     if (!requested.shouldDispatch) return;
+    if (!invokeAction({ id: `stoptask:${taskId}`, label: "Stop task" })) {
+      setTaskMonitorState((previous) => failTaskStop(
+        previous, threadId, taskId, "Wait for the current action to finish, then retry Stop.",
+      ));
+      return;
+    }
     taskMonitorStateRef.current = requested.state;
     setTaskMonitorState(requested.state);
-    invokeAction({ id: `stoptask:${taskId}`, label: "Stop task" });
   }, [invokeAction]);
 
   const runtime = useExternalStoreRuntime<ThreadMessage>({
@@ -3462,6 +3587,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     memoryMonitor: memoryMonitorView ? {
       ...memoryMonitorView,
       setVisible: setMemoryMonitorVisible,
+      refresh: refreshMemoryMonitor,
     } : undefined,
     diagnosticsLogging: diagnosticsSettingsConfig ? {
       desired: diagnosticsDesired === true,

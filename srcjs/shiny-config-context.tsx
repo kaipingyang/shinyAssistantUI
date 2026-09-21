@@ -118,7 +118,10 @@ export interface ShinyConfigCtx {
     state: MemoryGuardState | "waiting";
     sample: MemoryMonitorSample | null;
     frame: MemoryMonitorFrame | null;
+    receivedAt?: number | null;
+    refreshing?: boolean;
     setVisible: (visible: boolean) => void;
+    refresh?: () => void;
   };
   diagnosticsLogging?: {
     desired: boolean;

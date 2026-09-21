@@ -1,3 +1,4 @@
+main <- function() {
 suppressPackageStartupMessages({
   library(callr)
   library(chromote)
@@ -19,6 +20,7 @@ check <- function(name, condition, detail = "") {
   invisible(passed)
 }
 
+browser <- NULL
 app <- callr::r_bg(
   function(project, port) {
     setwd(project)
@@ -32,7 +34,7 @@ app <- callr::r_bg(
   stdout = log_paths[[1L]], stderr = log_paths[[2L]]
 )
 cleanup <- make_verification_cleanup(
-  browser_session = function() if (exists("browser", inherits = FALSE)) browser else NULL,
+  browser_session = function() browser,
   app_process = function() app,
   paths = log_paths
 )
@@ -139,10 +141,16 @@ check("client stops paging when 240 window saturates",
       sprintf("requests=%d", requests))
 check("browser DOM message window is bounded", dom_count <= 240L,
       sprintf("dom_messages=%d", dom_count))
-check("complete newest 240-message window is visible",
-      dom_count == 240L &&
-        isTRUE(value("document.body.innerText.includes('BOUNDED_USER_041')")) &&
-        isTRUE(value("document.body.innerText.includes('BOUNDED_ASSISTANT_160')")))
+check("retained window contains 240 messages without mounting all",
+      dom_count < 240L && isTRUE(value(
+        "document.querySelector('[data-slot=aui_virtualized-messages]')?.dataset.messageCount==='240'"
+      )))
+value("(()=>{const v=document.querySelector('[data-slot=aui_thread-viewport]');v.style.scrollBehavior='auto';v.scrollTop=0;return true})()")
+check("oldest retained turn is reachable by scrolling", wait_for(
+  "document.body.innerText.includes('BOUNDED_USER_041')"
+))
+check("newest retained tail remains available",
+      isTRUE(value("document.body.innerText.includes('BOUNDED_ASSISTANT_160')")))
 check("window-evicted loaded prefix is absent from DOM",
       !isTRUE(value("document.body.innerText.includes('BOUNDED_USER_036')")))
 check("bounded localStorage snapshot exists", !is.null(storage),
@@ -168,3 +176,5 @@ if (length(failures)) stop(
   "Bounded-history Chromium verification failed: ", paste(failures, collapse = ", ")
 )
 cat("BOUNDED_HISTORY_CHROMIUM_DONE\n")
+}
+main()

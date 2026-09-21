@@ -8,6 +8,10 @@ export type MemoryMonitorSample = {
   state: MemoryGuardState;
   pssBytes: number;
   rssBytes: number;
+  /** RSS of the addin R process plus its transitive children (CLI and friends). */
+  treeRssBytes: number;
+  /** How many processes treeRssBytes covers, including the R process itself. */
+  treeProcessCount: number;
   cgroupCurrentBytes: number;
   cgroupMaxBytes: number;
   cgroupLimited: boolean;
@@ -15,10 +19,13 @@ export type MemoryMonitorSample = {
   hardPssBytes: number;
   softRssBytes: number;
   hardRssBytes: number;
+  sampledAt?: number;
+  treeSampledAt?: number;
+  cgroupSampledAt?: number;
 };
-export type MemoryMonitorAddonConfig = { version: 2; ownerSeed: number; lastRevision: number };
+export type MemoryMonitorAddonConfig = { version: 2 | 3; ownerSeed: number; lastRevision: number };
 export type MemoryMonitorFrame = {
-  version: 2;
+  version: 2 | 3;
   ownerId: number;
   openId: number;
   revision: number;
@@ -29,9 +36,11 @@ const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 const CONFIG_KEYS = ["version", "ownerSeed", "lastRevision"];
 const FRAME_KEYS = ["version", "ownerId", "openId", "revision", "sample"];
 const SAMPLE_KEYS = [
-  "state", "pssBytes", "rssBytes", "cgroupCurrentBytes", "cgroupMaxBytes",
+  "state", "pssBytes", "rssBytes", "treeRssBytes", "treeProcessCount",
+  "cgroupCurrentBytes", "cgroupMaxBytes",
   "cgroupLimited", "softPssBytes", "hardPssBytes", "softRssBytes", "hardRssBytes",
 ];
+const TIME_KEYS = ["sampledAt", "treeSampledAt", "cgroupSampledAt"];
 const STATES = new Set<MemoryGuardState>(["normal", "soft", "hard", "recovering", "disabled", "unknown"]);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -48,26 +57,32 @@ const nonNegativeSafe = (value: unknown): value is number =>
 export function parseMemoryMonitorAddon(config: Record<string, unknown> | undefined): MemoryMonitorAddonConfig | undefined {
   if (!isRecord(config?.addons)) return undefined;
   const value = config.addons.memoryMonitor;
-  if (!isRecord(value) || !exactKeys(value, CONFIG_KEYS) || value.version !== 2 ||
+  if (!isRecord(value) || !exactKeys(value, CONFIG_KEYS) || (value.version !== 2 && value.version !== 3) ||
       !positiveSafe(value.ownerSeed) || !nonNegativeSafe(value.lastRevision)) return undefined;
-  return { version: 2, ownerSeed: value.ownerSeed, lastRevision: value.lastRevision };
+  return { version: value.version, ownerSeed: value.ownerSeed, lastRevision: value.lastRevision };
 }
 
-function parseSample(value: unknown): MemoryMonitorSample | undefined {
-  if (!isRecord(value) || !exactKeys(value, SAMPLE_KEYS) ||
+function parseSample(value: unknown, version: 2 | 3): MemoryMonitorSample | undefined {
+  const keys = version === 3 ? [...SAMPLE_KEYS, ...TIME_KEYS] : SAMPLE_KEYS;
+  if (!isRecord(value) || !exactKeys(value, keys) ||
       typeof value.state !== "string" || !STATES.has(value.state as MemoryGuardState) ||
       typeof value.cgroupLimited !== "boolean") return undefined;
   for (const key of SAMPLE_KEYS.slice(1)) {
     if (key !== "cgroupLimited" && !nonNegativeSafe(value[key])) return undefined;
   }
+  if (version === 3) {
+    for (const key of TIME_KEYS) {
+      if (!nonNegativeSafe(value[key]) || value[key] > 8.64e15) return undefined;
+    }
+  }
   return value as MemoryMonitorSample;
 }
 
 export function parseMemoryMonitorFrame(value: unknown): MemoryMonitorFrame | undefined {
-  if (!isRecord(value) || !exactKeys(value, FRAME_KEYS) || value.version !== 2 ||
+  if (!isRecord(value) || !exactKeys(value, FRAME_KEYS) || (value.version !== 2 && value.version !== 3) ||
       !positiveSafe(value.ownerId) || !positiveSafe(value.openId) || !nonNegativeSafe(value.revision)) return undefined;
-  const sample = parseSample(value.sample);
-  return sample ? { version: 2, ownerId: value.ownerId, openId: value.openId, revision: value.revision, sample } : undefined;
+  const sample = parseSample(value.sample, value.version);
+  return sample ? { version: value.version, ownerId: value.ownerId, openId: value.openId, revision: value.revision, sample } : undefined;
 }
 
 type Owner = { receive(data: unknown): void };
@@ -87,7 +102,9 @@ function dispatcherFor(inputId: string): Dispatcher {
 
 export type MemoryMonitorBridge = {
   onSample(handler: (frame: MemoryMonitorFrame) => void): void;
+  onPendingChange(handler: (pending: boolean) => void): void;
   setVisible(visible: boolean): boolean;
+  refresh(): boolean;
   snapshot(): MemoryMonitorFrame | null;
   dispose(): void;
 };
@@ -102,19 +119,34 @@ export function createMemoryMonitorBridge(inputId: string, config: MemoryMonitor
   let openId = 0;
   let revision = config.lastRevision;
   let visible = false;
+  let awaitingFrame = false;
   let frozen: MemoryMonitorFrame | null = null;
   let subscriber: ((frame: MemoryMonitorFrame) => void) | null = null;
+  let pendingSubscriber: ((pending: boolean) => void) | null = null;
+  let pendingValue = false;
   let disposed = false;
   let retryUsed = false;
+  let sendFailed = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingEnvelope: Record<string, unknown> | null = null;
+  const isPending = () => visible && awaitingFrame && !sendFailed;
+  const notifyPending = () => {
+    const next = isPending();
+    if (next === pendingValue) return;
+    pendingValue = next;
+    pendingSubscriber?.(next);
+  };
 
   const send = (envelope: Record<string, unknown>, allowRetry: boolean): boolean => {
     try {
       Shiny.setInputValue(`${inputId}_memory_monitor_visible`, envelope, { priority: "event" });
       pendingEnvelope = null;
+      sendFailed = false;
+      notifyPending();
       return true;
     } catch {
+      sendFailed = true;
+      notifyPending();
       if (allowRetry && !retryUsed && retryTimer === undefined) {
         retryUsed = true;
         pendingEnvelope = envelope;
@@ -124,20 +156,33 @@ export function createMemoryMonitorBridge(inputId: string, config: MemoryMonitor
           if (!retry || disposed || dispatcher.active !== owner) return;
           send(retry, false);
         }, 0);
+      } else if (visible && !disposed) {
+        console.warn("[shinyAssistantUI] Memory snapshot request could not be sent; refresh to retry.");
       }
       return false;
     }
   };
   const envelope = (nextVisible: boolean) => ({
-    version: 2, ownerId, openId, visible: nextVisible, revision, sample: null,
+    version: config.version, ownerId, openId, visible: nextVisible, revision, sample: null,
   });
   const owner: Owner = {
     receive(data) {
-      if (disposed || dispatcher.active !== owner || !visible || frozen) return;
+      if (disposed || dispatcher.active !== owner || !awaitingFrame) return;
       const frame = parseMemoryMonitorFrame(data);
-      if (!frame || frame.ownerId !== ownerId || frame.openId !== openId || frame.revision < revision) return;
-      frozen = frame;
+      if (!frame || frame.version !== config.version ||
+          frame.ownerId !== ownerId || frame.openId !== openId || frame.revision < revision) return;
+      awaitingFrame = false;
+      sendFailed = false;
+      pendingEnvelope = null;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
       revision = frame.revision;
+      notifyPending();
+      if (!visible) {
+        send(envelope(false), false);
+        return;
+      }
+      frozen = frame;
       subscriber?.(frame);
     },
   };
@@ -149,31 +194,68 @@ export function createMemoryMonitorBridge(inputId: string, config: MemoryMonitor
       subscriber = handler;
       if (frozen) handler(frozen);
     },
+    onPendingChange(handler) {
+      if (disposed || dispatcher.active !== owner) return;
+      pendingSubscriber = handler;
+      pendingValue = isPending();
+      handler(pendingValue);
+    },
     setVisible(nextVisible) {
       if (disposed || dispatcher.active !== owner || ownerId >= MAX_SAFE && previousOwner >= MAX_SAFE) return false;
       if (nextVisible) {
-        if (visible) return true;
+        if (visible || awaitingFrame) {
+          visible = true;
+          if (awaitingFrame && sendFailed && retryTimer === undefined) {
+            retryUsed = false;
+            return send(envelope(true), true);
+          }
+          notifyPending();
+          return true;
+        }
         if (openId >= MAX_SAFE) return false;
         openId += 1;
         visible = true;
+        awaitingFrame = true;
         frozen = null;
         retryUsed = false;
         return send(envelope(true), true);
       }
       if (!visible) return true;
       visible = false;
+      notifyPending();
+      // Wait for the reply's revision before sending another open/close envelope.
+      if (awaitingFrame) return true;
       pendingEnvelope = null;
       if (retryTimer !== undefined) { clearTimeout(retryTimer); retryTimer = undefined; }
       return send(envelope(false), false);
     },
+    refresh() {
+      if (disposed || dispatcher.active !== owner || !visible) return false;
+      if (awaitingFrame) {
+        if (!sendFailed || retryTimer !== undefined) return false;
+        retryUsed = false;
+        return send(envelope(true), true);
+      }
+      if (openId >= MAX_SAFE) return false;
+      pendingEnvelope = null;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      openId += 1;
+      awaitingFrame = true;
+      frozen = null;
+      retryUsed = false;
+      return send(envelope(true), true);
+    },
     snapshot: () => frozen,
     dispose() {
       if (disposed) return;
+      pendingSubscriber = null;
       if (visible) {
         visible = false;
         send(envelope(false), false);
       }
       disposed = true;
+      awaitingFrame = false;
       subscriber = null;
       frozen = null;
       pendingEnvelope = null;

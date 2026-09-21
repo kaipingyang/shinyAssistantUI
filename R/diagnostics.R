@@ -48,15 +48,9 @@
 .diagnostics_disabled_config <- function(reason = NULL) list(enabled = FALSE, sampled = FALSE, reason = reason)
 
 .cancel_later_timer <- function(timer) {
-  if (is.null(timer) || !requireNamespace("later", quietly = TRUE)) {
-    return(invisible(FALSE))
-  }
-  cancel <- tryCatch(
-    utils::getFromNamespace("cancel", "later"),
-    error = function(error) NULL
-  )
-  if (!is.function(cancel)) return(invisible(FALSE))
-  tryCatch({ cancel(timer); invisible(TRUE) }, error = function(error) invisible(FALSE))
+  if (is.null(timer)) return(invisible(FALSE))
+  if (!is.function(timer)) stop("Expected a later cancellation function", call. = FALSE)
+  invisible(timer())
 }
 .diagnostics_scalar_logical <- function(value) is.logical(value) && length(value) == 1L && !is.na(value)
 .diagnostics_scalar_character <- function(value) is.character(value) && length(value) == 1L && !is.na(value) && nzchar(value)
@@ -66,6 +60,18 @@
 }
 .diagnostics_safe_integer <- function(value) {
   if (!.diagnostics_integer_in(value, 0, 2^53 - 1)) NULL else as.numeric(value)
+}
+
+.diagnostics_unique_callbacks <- function(callbacks) {
+  sinks <- list()
+  Filter(function(callback) {
+    if (!is.function(callback)) return(FALSE)
+    sink <- attr(callback, "diagnostics_sink", exact = TRUE)
+    if (!is.function(sink)) return(TRUE)
+    if (any(vapply(sinks, identical, logical(1), y = sink))) return(FALSE)
+    sinks[[length(sinks) + 1L]] <<- sink
+    TRUE
+  }, callbacks)
 }
 
 .normalize_diagnostics_config <- function(config = NULL,
@@ -229,10 +235,28 @@
       state = .diagnostics_memory_state(metrics$guard_state %||% "unknown"),
       pssBytes = .diagnostics_nonnegative(metrics$pss_bytes),
       rssBytes = .diagnostics_nonnegative(metrics$rss_bytes),
+      privateDirtyBytes = .diagnostics_nonnegative(metrics$private_dirty_bytes),
+      anonymousBytes = .diagnostics_nonnegative(metrics$anonymous_bytes),
       cgroupCurrentBytes = .diagnostics_nonnegative(metrics$cgroup_current_bytes),
       cgroupMaxBytes = .diagnostics_nonnegative(metrics$cgroup_max_bytes),
       cgroupLimit = if (identical(metrics$cgroup_limit, "limited")) "limited" else
         if (identical(metrics$cgroup_limit, "unlimited")) "unlimited" else "unknown",
+      cgroupHighEvents = .diagnostics_nonnegative(metrics$cgroup_high_events),
+      cgroupMaxEvents = .diagnostics_nonnegative(metrics$cgroup_max_events),
+      cgroupOomEvents = .diagnostics_nonnegative(metrics$cgroup_oom_events),
+      cgroupOomKillEvents = .diagnostics_nonnegative(metrics$cgroup_oom_kill_events),
+      rHeapAfterGcBytes = .diagnostics_nonnegative(metrics$r_heap_after_gc_bytes),
+      guardGcCount = .diagnostics_nonnegative(metrics$guard_gc_count),
+      sdkClientCount = .diagnostics_nonnegative(metrics$sdk_client_count),
+      sdkConsumerCount = .diagnostics_nonnegative(metrics$sdk_consumer_count),
+      sdkRouteCount = .diagnostics_nonnegative(metrics$sdk_route_count),
+      sdkMessagesSeen = .diagnostics_nonnegative(metrics$sdk_messages_seen),
+      sdkMessageBytesSeen = .diagnostics_nonnegative(metrics$sdk_message_bytes_seen),
+      sdkMaxBatchBytes = .diagnostics_nonnegative(metrics$sdk_max_batch_bytes),
+      sdkBufferedMessageCount = .diagnostics_nonnegative(metrics$sdk_buffered_message_count),
+      sdkWaiterCount = .diagnostics_nonnegative(metrics$sdk_waiter_count),
+      sdkUsageProbePendingCount = .diagnostics_nonnegative(metrics$sdk_usage_probe_pending_count),
+      activeTurnCount = .diagnostics_nonnegative(metrics$active_turn_count),
       softPssBytes = .diagnostics_nonnegative(metrics$soft_pss_bytes),
       hardPssBytes = .diagnostics_nonnegative(metrics$hard_pss_bytes),
       softRssBytes = .diagnostics_nonnegative(metrics$soft_rss_bytes),
@@ -586,8 +610,17 @@
   if (slot <= 90L) return(list(event = "memory_guard_sample", metrics = list(
     state = c("normal", "soft", "hard", "unknown", "unsupported")[[cycle %% 5L + 1L]],
     pssBytes = value, rssBytes = value,
+    privateDirtyBytes = value, anonymousBytes = value,
     cgroupCurrentBytes = value, cgroupMaxBytes = value,
     cgroupLimit = c("limited", "unlimited", "unknown")[[cycle %% 3L + 1L]],
+    cgroupHighEvents = value, cgroupMaxEvents = value,
+    cgroupOomEvents = value, cgroupOomKillEvents = value,
+    rHeapAfterGcBytes = value, guardGcCount = value,
+    sdkClientCount = value, sdkConsumerCount = value, sdkRouteCount = value,
+    sdkMessagesSeen = value, sdkMessageBytesSeen = value,
+    sdkMaxBatchBytes = value, sdkBufferedMessageCount = value,
+    sdkWaiterCount = value, sdkUsageProbePendingCount = value,
+    activeTurnCount = value,
     softPssBytes = value,
     hardPssBytes = value, softRssBytes = value, hardRssBytes = value
   )))

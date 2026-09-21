@@ -4,6 +4,7 @@ import {
   parseDiagnosticsConfig,
   sanitizeDiagnosticsEvent,
   type DiagnosticsBatch,
+  type LongTaskObservation,
 } from "./diagnostics";
 
 const config = (over: Record<string, unknown> = {}) => ({
@@ -23,6 +24,14 @@ afterEach(() => {
 });
 
 describe("diagnostics v2 event-driven transport", () => {
+  it("accepts the canonical R default 16 KiB event budget", () => {
+    const backendDefault = config({
+      batchMax: 100, queueMax: 1000, eventMaxBytes: 16384,
+    });
+    expect(parseDiagnosticsConfig(backendDefault)).toEqual(backendDefault);
+    expect(parseDiagnosticsConfig(config({ eventMaxBytes: 16385 }))).toBeNull();
+  });
+
   it("accepts only exact config and exact event metrics", () => {
     expect(parseDiagnosticsConfig(config())).toEqual(config());
     expect(parseDiagnosticsConfig({ ...config(), session: "raw-id" })).toBeNull();
@@ -38,13 +47,27 @@ describe("diagnostics v2 event-driven transport", () => {
     }, 10)?.event).toBe("owned_markdown_preprocess_summary");
     expect(sanitizeDiagnosticsEvent("memory_guard_sample", {
       state: "recovering", pssBytes: 1, rssBytes: 1,
+      privateDirtyBytes: 1, anonymousBytes: 1,
       cgroupCurrentBytes: 3, cgroupMaxBytes: 4, cgroupLimit: "limited",
+      cgroupHighEvents: 0, cgroupMaxEvents: 0, cgroupOomEvents: 0, cgroupOomKillEvents: 0,
+      rHeapAfterGcBytes: 1, guardGcCount: 1,
+      sdkClientCount: 1, sdkConsumerCount: 1, sdkRouteCount: 1,
+      sdkMessagesSeen: 1, sdkMessageBytesSeen: 100, sdkMaxBatchBytes: 100,
+      sdkBufferedMessageCount: 0,
+      sdkWaiterCount: 0, sdkUsageProbePendingCount: 0, activeTurnCount: 0,
       softPssBytes: 1,
       hardPssBytes: 2, softRssBytes: 1, hardRssBytes: 2,
     }, 10)).toBeNull();
     expect(sanitizeDiagnosticsEvent("memory_guard_sample", {
       state: "unsupported", pssBytes: 1, rssBytes: 1,
+      privateDirtyBytes: 1, anonymousBytes: 1,
       cgroupCurrentBytes: 3, cgroupMaxBytes: 4, cgroupLimit: "limited",
+      cgroupHighEvents: 0, cgroupMaxEvents: 0, cgroupOomEvents: 0, cgroupOomKillEvents: 0,
+      rHeapAfterGcBytes: 1, guardGcCount: 1,
+      sdkClientCount: 1, sdkConsumerCount: 1, sdkRouteCount: 1,
+      sdkMessagesSeen: 1, sdkMessageBytesSeen: 100, sdkMaxBatchBytes: 100,
+      sdkBufferedMessageCount: 0,
+      sdkWaiterCount: 0, sdkUsageProbePendingCount: 0, activeTurnCount: 0,
       softPssBytes: 1,
       hardPssBytes: 2, softRssBytes: 1, hardRssBytes: 2,
     }, 10)?.metrics.state).toBe("unsupported");
@@ -150,6 +173,38 @@ describe("diagnostics v2 event-driven transport", () => {
     const row = sent.flatMap((batch) => batch.rows).find((item) => item.event === "longtask_summary");
     expect(row?.metrics).toEqual({ count: 1, durationUs: 12000, maxUs: 12000 });
     monitor.close();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("shares deduplicated long-task deltas and availability without duplicating log rows", () => {
+    vi.useFakeTimers();
+    const sent: DiagnosticsBatch[] = [];
+    const observed: LongTaskObservation[] = [];
+    let callback: ((entries: { getEntries(): Array<{ duration: number; startTime: number }> }) => void) | undefined;
+    const disconnect = vi.fn();
+    class Observer {
+      constructor(cb: NonNullable<typeof callback>) { callback = cb; }
+      observe() {}
+      disconnect = disconnect;
+    }
+    const monitor = createDiagnosticsMonitor(config(), (batch) => sent.push(batch), {
+      PerformanceObserver: Observer,
+    });
+    const unsubscribe = monitor.subscribeLongTasks((value) => observed.push(value));
+    expect(observed).toEqual([{ state: "supported", count: 0, durationUs: 0, maxUs: 0 }]);
+    callback?.({ getEntries: () => [{ startTime: 10, duration: 80 }, { startTime: 10, duration: 80 }] });
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual({ state: "supported", count: 1, durationUs: 80000, maxUs: 80000 });
+    vi.runOnlyPendingTimers();
+    const rows = sent.flatMap((batch) => batch.rows).filter((row) => row.event === "longtask_summary");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.metrics.count).toBe(1);
+    unsubscribe();
+    monitor.close();
+    callback?.({ getEntries: () => [{ startTime: 20, duration: 90 }] });
+    vi.runOnlyPendingTimers();
+    expect(observed).toHaveLength(2);
+    expect(sent.flatMap((batch) => batch.rows).filter((row) => row.event === "longtask_summary")).toHaveLength(1);
     expect(disconnect).toHaveBeenCalledOnce();
   });
 

@@ -4,6 +4,237 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useShinyRuntime } from "./runtime";
 
+describe("long-task error recovery", () => {
+  it("renders background approval after cold history load without starting a foreground run", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = "cold-background";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Cold history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const requests = inputs.filter((item) => item.value?.type === "load_session");
+    await fireR("load-thread", {
+      threadId, requestId: requests[requests.length - 1].value.requestId,
+      messages: [{ id: "existing", role: "assistant", content: [{ type: "text", text: "History" }] }],
+    });
+    await fireR("tool-call", {
+      threadId, toolCallId: "cold-permission", toolName: "Bash", args: {},
+      argsText: "{}", annotations: { requiresApproval: true, inputId: "test" },
+    });
+    expect(JSON.stringify(messages(result))).toContain("cold-permission");
+    expect(result.current.runtime.thread.getState().isRunning).toBe(false);
+    await act(async () => result.current.sendToolApproval("cold-permission", true));
+    await fireR("tool-result", { threadId, toolCallId: "cold-permission", result: "Recovered tool result" });
+    expect(JSON.stringify(messages(result))).toContain("Recovered tool result");
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId, revision: 1, afterRunId: null,
+      messages: [{ id: "cold-reply", role: "assistant",
+        content: [{ type: "text", text: "Cold recovered reply" }] }],
+    });
+    expect(JSON.stringify(messages(result))).toContain("Cold recovered reply");
+    expect(inputs.filter((item) => item.id === "test" && item.value?.text)).toHaveLength(0);
+    await fireR("tool-call", {
+      threadId, runId: "old-browser-run", toolCallId: "stale-tool", toolName: "Bash", args: {},
+    });
+    await fireR("tool-call", {
+      threadId: "unknown-history", toolCallId: "unknown-tool", toolName: "Bash", args: {},
+    });
+    expect(JSON.stringify(messages(result))).not.toContain("stale-tool");
+    expect(result.current.runtime.threads.getState().threadIds).not.toContain("unknown-history");
+    await act(async () => result.current.runtime.threads.getItemById(threadId).delete());
+    await fireR("tool-call", {
+      threadId, toolCallId: "deleted-tool", toolName: "Bash", args: {},
+    });
+    expect(result.current.runtime.threads.getState().threadIds).not.toContain(threadId);
+  });
+
+  it("applies matching authoritative history after an error and retains the error notice", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("Progress question");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) => item.id === "test" && item.value?.text === "Progress question")!.value.runId;
+    const replacement = {
+      version: 1, operation: "replace", threadId, revision: 1, afterRunId: runId,
+      messages: [
+        { id: "canonical-user", role: "user", content: [{ type: "text", text: "Progress question" }] },
+        { id: "canonical-answer", role: "assistant", content: [{ type: "text", text: "Completed progress report" }] },
+      ],
+    };
+    await fireR("proactive-messages", replacement);
+    await fireR("error", { threadId, runId, message: "Synthetic upstream failure" });
+    expect(messages(result).some((message) => message.id === "canonical-answer")).toBe(true);
+    expect(JSON.stringify(messages(result))).toContain("Synthetic upstream failure");
+    await fireR("proactive-messages", {
+      ...replacement, revision: 2,
+      messages: [...replacement.messages,
+        { id: "late-detail", role: "assistant", content: [{ type: "text", text: "Late detail" }] }],
+    });
+    expect(messages(result).some((message) => message.id === "late-detail")).toBe(true);
+    expect(JSON.stringify(messages(result))).toContain("Synthetic upstream failure");
+  });
+
+  it("does not apply the failed run's history over a later foreground question", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("First question");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) => item.id === "test")!.value.runId;
+    await fireR("error", { threadId, runId, message: "First failure" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("Second question");
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId, revision: 99, afterRunId: runId,
+      messages: [{ id: "obsolete", role: "assistant", content: [{ type: "text", text: "Old answer" }] }],
+    });
+    expect(messages(result).some((message) => message.id === "obsolete")).toBe(false);
+    expect(JSON.stringify(messages(result))).toContain("Second question");
+  });
+
+  it("allows retrying a Task Stop after an explicit action failure", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = currentThreadId(result);
+    await fireR("task", { threadId, taskId: "background", kind: "started" });
+    await act(async () => result.current.stopTask("background"));
+    const request = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId, requestId: request.requestId, actionId: "stoptask:background",
+      status: "error", message: "Stop was rejected",
+    });
+    expect(result.current.tasks[0].stopping).toBe(false);
+    await act(async () => result.current.stopTask("background"));
+    expect(inputs.filter((item) => item.id === "test_action")).toHaveLength(2);
+  });
+
+  it("does not restore a cancelled run when its drain ends with an error", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("Cancel this question");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) => item.id === "test")!.value.runId;
+    await act(async () => result.current.cancelRun());
+    const replacement = {
+      version: 1, operation: "replace", threadId, revision: 1, afterRunId: runId,
+      messages: [{ id: "cancelled-answer", role: "assistant",
+        content: [{ type: "text", text: "Must not restore after Stop" }] }],
+    };
+    await fireR("proactive-messages", replacement);
+    await fireR("error", { threadId, runId, message: "Connection closed during Stop" });
+    await fireR("proactive-messages", { ...replacement, revision: 2 });
+    expect(messages(result).some((message) => message.id === "cancelled-answer")).toBe(false);
+    expect(JSON.stringify(messages(result))).toContain("Cancel this question");
+  });
+
+  it("keeps Stop unconfirmed after ACK and allows a retry after the terminal deadline", async () => {
+    vi.useFakeTimers();
+    const { result } = setup({ persistence: "server" });
+    const threadId = currentThreadId(result);
+    await fireR("task", { threadId, taskId: "background", kind: "started" });
+    await act(async () => result.current.stopTask("background"));
+    const first = inputs.find((item) => item.id === "test_action")!.value;
+    await fireR("action-result", {
+      threadId, requestId: first.requestId, actionId: "stoptask:background",
+      status: "ok", message: "Stop requested",
+    });
+    expect(result.current.tasks[0].stopping).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    expect(result.current.tasks[0]).toMatchObject({
+      stopping: false, stopError: expect.stringContaining("not confirmed"),
+    });
+    await act(async () => result.current.stopTask("background"));
+    const requests = inputs.filter((item) => item.id === "test_action");
+    expect(requests).toHaveLength(2);
+    expect(result.current.tasks[0]).toMatchObject({ stopping: true });
+    expect(result.current.tasks[0].stopError).toBeUndefined();
+
+    await fireR("action-result", {
+      threadId, requestId: first.requestId, actionId: "stoptask:background",
+      status: "error", message: "Late failure from old request",
+    });
+    expect(result.current.tasks[0].stopping).toBe(true);
+    await fireR("task", {
+      threadId, taskId: "background", kind: "notification", status: "stopped",
+    });
+    await fireR("action-result", {
+      threadId, requestId: requests[1].value.requestId, actionId: "stoptask:background",
+      status: "error", message: "Late failure after terminal",
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    expect(result.current.tasks).toHaveLength(0);
+    await act(async () => result.current.stopTask("background"));
+    expect(inputs.filter((item) => item.id === "test_action")).toHaveLength(2);
+    expect(JSON.stringify(messages(result))).toContain("Task is stopped");
+    expect(JSON.stringify(messages(result))).not.toContain("Late failure");
+  });
+
+  it("marks disconnected task status as terminal without claiming Stop succeeded", async () => {
+    const { result } = setup({ persistence: "server" });
+    const threadId = currentThreadId(result);
+    await fireR("task", { threadId, taskId: "background", kind: "started" });
+    await act(async () => result.current.stopTask("background"));
+    await fireR("task", {
+      threadId, taskId: "background", kind: "updated", status: "disconnected",
+      summary: "Connection closed; task outcome is unknown.",
+    });
+    expect(result.current.tasks).toHaveLength(0);
+    await act(async () => result.current.stopTask("background"));
+    expect(inputs.filter((item) => item.id === "test_action")).toHaveLength(1);
+    expect(JSON.stringify(messages(result))).toContain("disconnected");
+    expect(JSON.stringify(messages(result))).not.toContain("Task is stopped");
+  });
+
+  it("preserves an unanswered background approval across history refresh and proactive snapshots", async () => {
+    const { result } = setup({ persistence: "server" });
+    const original = currentThreadId(result);
+    const threadId = "approval-history";
+    await fireR("sessions", { sessions: [{ id: threadId, title: "Background approval" }] });
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const initial = inputs.filter((item) => item.value?.type === "load_session");
+    await fireR("load-thread", {
+      threadId, requestId: initial[initial.length - 1].value.requestId, messages: [],
+    });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("Start a background task");
+      await result.current.runtime.thread.composer.send();
+    });
+    const outbound = inputs.filter((item) => item.id === "test" && item.value?.runId);
+    const runId = outbound[outbound.length - 1].value.runId;
+    await fireR("done", { threadId, runId });
+    await fireR("tool-call", {
+      threadId, toolCallId: "background-permission", toolName: "Bash",
+      args: { command: "echo synthetic" }, argsText: '{"command":"echo synthetic"}',
+      annotations: { requiresApproval: true, inputId: "test" },
+    });
+    await act(async () => result.current.runtime.threads.switchToThread(original));
+    await act(async () => result.current.runtime.threads.switchToThread(threadId));
+    const refreshes = inputs.filter((item) => item.value?.type === "load_session");
+    await fireR("load-thread", {
+      threadId, requestId: refreshes[refreshes.length - 1].value.requestId, messages: [],
+    });
+    expect(JSON.stringify(messages(result))).toContain("background-permission");
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId, revision: 1, afterRunId: runId, messages: [],
+    });
+    expect(JSON.stringify(messages(result))).toContain("background-permission");
+    await act(async () => result.current.sendToolApproval("background-permission", true));
+    expect(JSON.stringify(messages(result))).toContain('"approvalResult":"approved"');
+    await fireR("tool-result", {
+      threadId, toolCallId: "background-permission", result: "Actual background result",
+    });
+    expect(JSON.stringify(messages(result))).toContain("Actual background result");
+    await fireR("proactive-messages", {
+      version: 1, operation: "replace", threadId, revision: 2, afterRunId: runId, messages: [],
+    });
+    expect(messages(result)).toHaveLength(0);
+  });
+});
+
 // mock 全局 Shiny：捕获注册的 customMessageHandler + 记录 setInputValue
 type Handler = (data: unknown) => void;
 let handlers: Map<string, Handler>;
@@ -259,6 +490,39 @@ describe("useShinyRuntime — globally bounded server thread windows", () => {
 
 
 describe("useShinyRuntime — optional memory monitor addin", () => {
+  it("keeps manual refresh available if a queued retry fails after a fast reopen", () => {
+    vi.useFakeTimers();
+    const inputId = "memory-runtime-failed-reopen";
+    let available = false;
+    vi.stubGlobal("Shiny", {
+      addCustomMessageHandler: (type: string, handler: Handler) => handlers.set(type, handler),
+      setInputValue: (id: string, value: unknown) => {
+        if (id === `${inputId}_memory_monitor_visible` && !available) throw new Error("transport unavailable");
+        inputs.push({ id, value });
+      },
+    });
+    const rendered = renderHook(() => useShinyRuntime(inputId, {
+      addons: { memoryMonitor: { version: 2, ownerSeed: 71, lastRevision: 0 } },
+    }));
+    try {
+      act(() => {
+        rendered.result.current.memoryMonitor?.setVisible(true);
+        rendered.result.current.memoryMonitor?.setVisible(false);
+        rendered.result.current.memoryMonitor?.setVisible(true);
+      });
+      act(() => vi.runOnlyPendingTimers());
+      expect(rendered.result.current.memoryMonitor?.refreshing).toBe(false);
+      available = true;
+      act(() => rendered.result.current.memoryMonitor?.refresh());
+      expect(rendered.result.current.memoryMonitor?.refreshing).toBe(true);
+      expect(inputs.find((input) => input.id === `${inputId}_memory_monitor_visible`)?.value)
+        .toMatchObject({ version: 2, ownerId: 71, openId: 1, revision: 0 });
+    } finally {
+      rendered.unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("freezes one exact v2 snapshot per opening and cleans visibility", async () => {
     const inputId = "memory-runtime";
     const enabled = { addons: { memoryMonitor: { version: 2, ownerSeed: 10, lastRevision: 0 } } };
@@ -277,6 +541,7 @@ describe("useShinyRuntime — optional memory monitor addin", () => {
     expect(open1.ownerId).toBeGreaterThanOrEqual(10);
     expect(open1.openId).toBe(1);
     const sample = { state: "normal", pssBytes: 80, rssBytes: 90,
+      treeRssBytes: 260, treeProcessCount: 3,
       cgroupCurrentBytes: 2465 * 1024 ** 2, cgroupMaxBytes: 29296 * 1024 ** 2,
       cgroupLimited: true,
       softPssBytes: 100, hardPssBytes: 200, softRssBytes: 125, hardRssBytes: 225 };
@@ -299,6 +564,45 @@ describe("useShinyRuntime — optional memory monitor addin", () => {
     expect(opens().at(-1)?.value).toMatchObject({ visible: false });
     await act(async () => dispatch?.({ version: 2, ...open2, revision: 9, sample }));
     expect(rendered.result.current.memoryMonitor).toBeUndefined();
+    rendered.unmount();
+  });
+
+  it("exposes refresh that advances openId in place and accepts one new frame", async () => {
+    const inputId = "memory-runtime-refresh";
+    const enabled = { addons: { memoryMonitor: { version: 2, ownerSeed: 20, lastRevision: 0 } } };
+    const rendered = renderHook(
+      ({ config }) => useShinyRuntime(inputId, config),
+      { initialProps: { config: enabled as Record<string, unknown> }, reactStrictMode: true },
+    );
+    const dispatch = handlers.get(`${inputId}:memory-monitor-sample`);
+    const opens = () => inputs.filter((item) => item.id === `${inputId}_memory_monitor_visible`);
+    const sample = { state: "normal", pssBytes: 80, rssBytes: 90,
+      treeRssBytes: 260, treeProcessCount: 3,
+      cgroupCurrentBytes: 2465 * 1024 ** 2, cgroupMaxBytes: 29296 * 1024 ** 2,
+      cgroupLimited: true,
+      softPssBytes: 100, hardPssBytes: 200, softRssBytes: 125, hardRssBytes: 225 };
+
+    expect(rendered.result.current.memoryMonitor?.refresh).toBeTypeOf("function");
+    act(() => rendered.result.current.memoryMonitor?.setVisible(true));
+    const open1Envelope = opens().at(-1)?.value as { ownerId: number; openId: number };
+    const open1 = { ownerId: open1Envelope.ownerId, openId: open1Envelope.openId };
+    await act(async () => dispatch?.({ version: 2, ...open1, revision: 3, sample }));
+    expect(rendered.result.current.memoryMonitor?.sample?.pssBytes).toBe(80);
+
+    act(() => rendered.result.current.memoryMonitor?.refresh?.());
+    const open2 = opens().at(-1)?.value as
+      { ownerId: number; openId: number; visible: boolean; revision: number };
+    expect(open2.openId).toBe(open1.openId + 1);
+    expect(open2.visible).toBe(true);
+    expect(open2.revision).toBe(3);
+
+    await act(async () => dispatch?.({ version: 2, ...open1, revision: 4, sample: { ...sample, pssBytes: 55 } }));
+    expect(rendered.result.current.memoryMonitor?.sample?.pssBytes).toBe(80);
+    await act(async () => dispatch?.({
+      version: 2, ownerId: open2.ownerId, openId: open2.openId,
+      revision: 5, sample: { ...sample, pssBytes: 120 },
+    }));
+    expect(rendered.result.current.memoryMonitor?.sample?.pssBytes).toBe(120);
     rendered.unmount();
   });
 });
@@ -3843,6 +4147,71 @@ describe("useShinyRuntime — diagnostics committed lifecycle", () => {
     <React.StrictMode>{children}</React.StrictMode>
   );
   const telemetry = () => inputs.filter((item) => item.id === "test_telemetry");
+
+  it("keeps one live collector and a working Orb through StrictMode and config replacement", () => {
+    vi.useFakeTimers();
+    type Entries = { getEntries(): Array<{ duration: number; startTime: number }> };
+    const observers: Observer[] = [];
+    class Observer {
+      active = false;
+      constructor(readonly callback: (entries: Entries) => void) { observers.push(this); }
+      observe() { this.active = true; }
+      disconnect() { this.active = false; }
+    }
+    vi.stubGlobal("PerformanceObserver", Observer);
+    const config = {
+      diagnostics: diagnostics({ eventMaxBytes: 16384 }),
+      addons: { diagnosticsSettings: {
+        version: 2, kind: "settings_bind", ownerSeed: 61, ownerId: 61, fields: {
+          autoStartCopilotApi: { value: true, revision: 0 },
+          defaultPermissionMode: { value: "default", revision: 0 },
+          modeVisibility: { value: { showBypass: true, showYolo: true }, revision: 0 },
+          composerDensity: { value: "comfortable", revision: 0 },
+          assistantTextSize: { value: "medium", revision: 0 },
+          runREnabled: { value: true, revision: 0 },
+          showClaudeEditsInRStudio: { value: true, revision: 0 },
+          diagnosticsEnabled: { value: true, revision: 0 },
+          showPerformanceOrb: { value: true, revision: 0 },
+        },
+      } },
+    };
+    const hook = renderHook(({ value }) => useShinyRuntime("test", value), {
+      initialProps: { value: config }, reactStrictMode: true,
+    });
+    try {
+      expect(observers.filter((observer) => observer.active)).toHaveLength(1);
+      const controller = hook.result.current.performanceOrbController!;
+      act(() => controller.setExpanded(true));
+      expect(controller.snapshot().expanded).toBe(true);
+      expect(controller.snapshot().longTaskState).toBe("supported");
+      act(() => observers.find((observer) => observer.active)?.callback({
+        getEntries: () => [{ startTime: 1, duration: 80 }],
+      }));
+      expect(controller.snapshot().longTaskCount).toBe(1);
+      act(() => controller.setExpanded(false));
+      act(() => vi.runOnlyPendingTimers());
+      const longtasks = telemetry().flatMap((batch) => batch.value.rows as Array<{ event: string; metrics: { count: number } }>)
+        .filter((row) => row.event === "longtask_summary");
+      expect(longtasks.map((row) => row.metrics.count)).toEqual([1]);
+
+      hook.rerender({ value: { ...config, diagnostics: diagnostics({ eventMaxBytes: 16384, batchMax: 50 }) } });
+      expect(observers.filter((observer) => observer.active)).toHaveLength(1);
+      const replacement = hook.result.current.performanceOrbController!;
+      expect(replacement).not.toBe(controller);
+      act(() => replacement.setExpanded(true));
+      act(() => observers.find((observer) => observer.active)?.callback({
+        getEntries: () => [{ startTime: 2, duration: 90 }],
+      }));
+      expect(replacement.snapshot().longTaskCount).toBe(1);
+      act(() => controller.setExpanded(true));
+      expect(controller.snapshot().expanded).toBe(false);
+    } finally {
+      hook.unmount();
+      vi.runOnlyPendingTimers();
+      vi.unstubAllGlobals();
+    }
+    expect(observers.every((observer) => !observer.active)).toBe(true);
+  });
 
   it("does not create timers/listeners or send when config is absent/malformed", () => {
     vi.useFakeTimers();

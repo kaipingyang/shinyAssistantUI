@@ -12,6 +12,7 @@ export type MonitoredTask = TaskMonitorEvent & {
   startedAt: number;
   updatedAt: number;
   stopping: boolean;
+  stopError?: string;
 };
 
 export type TaskMonitorState = {
@@ -24,7 +25,7 @@ export type ThreadTaskMonitor = {
   recentTerminal: MonitoredTask[];
 };
 
-const TERMINAL = /^(completed|done|stopped|failed|killed|cancelled|canceled|errored)$/i;
+const TERMINAL = /^(completed|done|stopped|failed|killed|cancelled|canceled|errored|disconnected)$/i;
 export const isTaskTerminalStatus = (status?: string) => TERMINAL.test(status ?? "");
 const isTerminal = isTaskTerminalStatus;
 
@@ -70,6 +71,7 @@ export function reduceTaskMonitorEvent(
     toolName: event.toolName ?? previous?.toolName,
     summary: event.summary ?? previous?.summary,
   };
+  if (isTerminal(status)) delete task.stopError;
   const nextThread = boundedThread(
     { ...previousThread, [event.taskId]: task },
     state.maxRecentTerminal,
@@ -87,7 +89,8 @@ export function requestTaskStop(
   if (!task || task.stopping || isTerminal(task.status)) {
     return { state, shouldDispatch: false };
   }
-  const next = { ...task, stopping: true, updatedAt: now };
+  const next: MonitoredTask = { ...task, stopping: true, updatedAt: now };
+  delete next.stopError;
   return {
     state: {
       ...state,
@@ -97,6 +100,26 @@ export function requestTaskStop(
       },
     },
     shouldDispatch: true,
+  };
+}
+
+export function failTaskStop(
+  state: TaskMonitorState,
+  threadId: string,
+  taskId: string,
+  error: string,
+): TaskMonitorState {
+  const task = state.byThread[threadId]?.[taskId];
+  if (!task || isTerminal(task.status)) return state;
+  return {
+    ...state,
+    byThread: {
+      ...state.byThread,
+      [threadId]: {
+        ...state.byThread[threadId],
+        [taskId]: { ...task, stopping: false, stopError: error },
+      },
+    },
   };
 }
 

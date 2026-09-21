@@ -16,6 +16,8 @@ const sample = {
   state: "normal" as const,
   pssBytes: 80,
   rssBytes: 90,
+  treeRssBytes: 260,
+  treeProcessCount: 3,
   cgroupCurrentBytes: 2465 * 1024 ** 2,
   cgroupMaxBytes: 29296 * 1024 ** 2,
   cgroupLimited: true,
@@ -40,6 +42,30 @@ beforeEach(() => {
 });
 
 describe("memory monitor exact v2 latest snapshot", () => {
+  it("negotiates v3 real sample times while continuing to accept v2", () => {
+    const config = { ...addon(70), version: 3 as const };
+    expect(parseMemoryMonitorAddon({ addons: { memoryMonitor: config } })).toEqual(config);
+    const timed = {
+      ...frame(70, 1, 7), version: 3,
+      sample: { ...sample, sampledAt: 1789723063000, treeSampledAt: 1789723053000, cgroupSampledAt: 1789723053000 },
+    };
+    expect(parseMemoryMonitorFrame(timed)).toEqual(timed);
+    expect(parseMemoryMonitorFrame(frame(70, 1, 7))).toEqual(frame(70, 1, 7));
+    expect(parseMemoryMonitorFrame({ ...timed, sample: { ...timed.sample, sampledAt: -1 } })).toBeUndefined();
+    expect(parseMemoryMonitorFrame({ ...timed, sample: { ...timed.sample, sampledAt: Number.MAX_SAFE_INTEGER } })).toBeUndefined();
+    expect(parseMemoryMonitorFrame({ ...timed, sample: { ...timed.sample, extra: 1 } })).toBeUndefined();
+    expect(parseMemoryMonitorFrame({ ...timed, sample })).toBeUndefined();
+    const inputId = `memory-v3-${serial}`;
+    const bridge = createMemoryMonitorBridge(inputId, config);
+    bridge.setVisible(true);
+    expect(inputs.at(-1)?.value).toMatchObject({ version: 3, ownerId: 70 });
+    handlers[`${inputId}:memory-monitor-sample`](frame(70, 1, 7));
+    expect(bridge.snapshot()).toBeNull();
+    handlers[`${inputId}:memory-monitor-sample`](timed);
+    expect(bridge.snapshot()).toEqual(timed);
+    bridge.dispose();
+  });
+
   it("accepts only exact v2 config/frame and all six independent wire states", () => {
     expect(parseMemoryMonitorAddon({ addons: { memoryMonitor: addon() } })).toEqual(addon());
     expect(parseMemoryMonitorAddon({ addons: { memoryMonitor: { ...addon(), state: "waiting" } } })).toBeUndefined();
@@ -127,4 +153,144 @@ describe("memory monitor exact v2 latest snapshot", () => {
     bridge.dispose();
     vi.useRealTimers();
   });
+});
+
+
+it("refreshes one frozen opening with a higher openId and rejects stale frames", () => {
+  const inputId = `memory-refresh-${serial}`;
+  const bridge = createMemoryMonitorBridge(inputId, addon(50));
+  const rows: MemoryMonitorFrame[] = [];
+  bridge.onSample((value) => rows.push(value));
+
+  expect(bridge.refresh()).toBe(false);
+  expect(bridge.setVisible(true)).toBe(true);
+  handlers[`${inputId}:memory-monitor-sample`](frame(50, 1, 7));
+  expect(bridge.snapshot()?.revision).toBe(7);
+
+  expect(bridge.refresh()).toBe(true);
+  expect(inputs.at(-1)?.value).toEqual({
+    version: 2, ownerId: 50, openId: 2, visible: true, revision: 7, sample: null,
+  });
+  expect(bridge.snapshot()).toBeNull();
+  handlers[`${inputId}:memory-monitor-sample`](frame(50, 1, 8));
+  expect(rows).toHaveLength(1);
+  handlers[`${inputId}:memory-monitor-sample`](frame(50, 2, 8));
+  expect(rows).toHaveLength(2);
+  expect(bridge.snapshot()?.openId).toBe(2);
+
+  bridge.dispose();
+  expect(bridge.refresh()).toBe(false);
+});
+
+it("coalesces in-flight visibility and refresh changes without losing the revision acknowledgement", () => {
+  const inputId = `memory-overlap-${serial}`;
+  const bridge = createMemoryMonitorBridge(inputId, addon(80));
+  const rows: MemoryMonitorFrame[] = [];
+  bridge.onSample((value) => rows.push(value));
+  bridge.setVisible(true);
+  expect(bridge.refresh()).toBe(false);
+  bridge.setVisible(false);
+  bridge.setVisible(true);
+  expect(inputs).toHaveLength(1);
+  handlers[`${inputId}:memory-monitor-sample`](frame(80, 1, 7));
+  expect(rows).toHaveLength(1);
+  expect(bridge.refresh()).toBe(true);
+  bridge.setVisible(false);
+  expect(inputs).toHaveLength(2);
+  handlers[`${inputId}:memory-monitor-sample`](frame(80, 2, 8));
+  expect(rows).toHaveLength(1);
+  expect(inputs.at(-1)?.value).toEqual({
+    version: 2, ownerId: 80, openId: 2, visible: false, revision: 8, sample: null,
+  });
+  bridge.setVisible(true);
+  expect(inputs.at(-1)?.value).toEqual({
+    version: 2, ownerId: 80, openId: 3, visible: true, revision: 8, sample: null,
+  });
+  handlers[`${inputId}:memory-monitor-sample`](frame(80, 3, 9));
+  expect(rows).toHaveLength(2);
+  bridge.dispose();
+});
+
+it("allows retry after both transport attempts fail without advancing the unacknowledged opening", () => {
+  vi.useFakeTimers();
+  let attempts = 0;
+  const sent: unknown[] = [];
+  vi.stubGlobal("Shiny", {
+    addCustomMessageHandler: (type: string, handler: Handler) => { handlers[type] = handler; },
+    setInputValue: (_id: string, value: unknown) => {
+      attempts += 1;
+      if (attempts <= 2) throw new Error("transport unavailable");
+      sent.push(value);
+    },
+  });
+  const inputId = `memory-failed-retry-${serial}`;
+  const bridge = createMemoryMonitorBridge(inputId, addon(90));
+  try {
+    expect(bridge.setVisible(true)).toBe(false);
+    vi.runOnlyPendingTimers();
+    expect(attempts).toBe(2);
+    expect(bridge.refresh()).toBe(true);
+    expect(sent).toEqual([{ version: 2, ownerId: 90, openId: 1, visible: true, revision: 0, sample: null }]);
+    handlers[`${inputId}:memory-monitor-sample`](frame(90, 1, 7));
+    expect(bridge.snapshot()?.revision).toBe(7);
+  } finally {
+    bridge.dispose();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("retries the same opening when reopened after exhausted transport retries", () => {
+  vi.useFakeTimers();
+  let available = false;
+  const sent: unknown[] = [];
+  vi.stubGlobal("Shiny", {
+    addCustomMessageHandler: (type: string, handler: Handler) => { handlers[type] = handler; },
+    setInputValue: (_id: string, value: unknown) => {
+      if (!available) throw new Error("transport unavailable");
+      sent.push(value);
+    },
+  });
+  const bridge = createMemoryMonitorBridge(`memory-reopen-failed-${serial}`, addon(95));
+  try {
+    bridge.setVisible(true);
+    vi.runOnlyPendingTimers();
+    bridge.setVisible(false);
+    available = true;
+    expect(bridge.setVisible(true)).toBe(true);
+    expect(sent).toEqual([{ version: 2, ownerId: 95, openId: 1, visible: true, revision: 0, sample: null }]);
+  } finally {
+    bridge.dispose();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("requires the process tree fields and still rejects unknown ones", () => {
+  const inputId = `memory-tree-${serial}`;
+  const bridge = createMemoryMonitorBridge(inputId, addon(50));
+  const frames: MemoryMonitorFrame[] = [];
+  bridge.onSample((frame) => frames.push(frame));
+  bridge.setVisible(true);
+  const envelope = inputs.at(-1)?.value as { ownerId: number; openId: number };
+
+  const dispatch = (s: Record<string, unknown>) => handlers[`${inputId}:memory-monitor-sample`]?.({
+    version: 2, ownerId: envelope.ownerId, openId: envelope.openId, revision: 1, sample: s,
+  });
+
+  const { treeRssBytes: _omitted, ...withoutTree } = sample;
+  dispatch(withoutTree);
+  expect(frames).toHaveLength(0);
+
+  dispatch({ ...sample, unexpectedField: 1 });
+  expect(frames).toHaveLength(0);
+
+  dispatch({ ...sample, treeRssBytes: -1 });
+  expect(frames).toHaveLength(0);
+
+  dispatch(sample);
+  expect(frames).toHaveLength(1);
+  expect(frames[0]?.sample.treeRssBytes).toBe(260);
+  expect(frames[0]?.sample.treeProcessCount).toBe(3);
+  bridge.dispose();
 });

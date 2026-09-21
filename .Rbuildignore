@@ -16,6 +16,7 @@
 ^assistant-ui-src$
 .*\.(png|jpe?g)$
 ^\.ellmer_sessions$
+^diagnose($|/)
 ^\.claude$
 ^\.codegraph($|/)
 ^\.kiro$

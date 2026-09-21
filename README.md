@@ -37,6 +37,25 @@ only the optional R backend used by the app. See the pkgdown
 custom handlers, ellmer, ClaudeAgentSDK, codeagent, RStudio addin prerequisites, contributor builds,
 and the current distribution/compatibility gaps.
 
+The codeagent adapter keeps synchronous turn handling outside a small async
+coroutine. The matching codeagent streaming implementation also uses a shared
+small driver; both packages must be updated to receive the latency improvement.
+Data Shield and enabled web citations still buffer text until their final
+scan/render step. Remote workers use the library selected by `libpath`, not
+automatically the host's newly installed codeagent. Stream callbacks are released
+on errors, and closing a Shiny session cancels its own registered runs without
+clearing other sessions' shared ellmer history. Remote JSONL transport preserves
+split UTF-8 frames and surfaces connection/callback errors instead of silently
+waiting or reporting success. The worker sleeps only when idle, not after every
+ready promise callback. Both local stream drivers wait for asynchronous iterator
+cleanup before releasing the turn, including callback failures and cancellation.
+These changes do not eliminate ellmer's own per-fragment coroutine overhead:
+the high-rate SSE benchmark still exposes a throughput limit under Shiny's default
+deep-stack domains. See `tests/verify/verify_codeagent_latency.R` and
+`tests/verify/verify_backend_handlers.R` for bounded, local-only regression gates;
+the latter's `ellmer-direct` performance arm isolates the public ellmer API
+without using a package handler.
+
 ## Usage
 
 ```r
@@ -142,9 +161,18 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
   ```
 
   `ask` rules also accept per-tool / per-path patterns such as `"Bash(rm*)"` or `"Read(/tmp/**)"`.
-- **Local diagnostics and performance**: the addin shows a compact Performance Orb and writes privacy-filtered operational summaries to `~/.claude_addin/diagnostics` by default. Logs are local only, retain at most 50 MiB / 7 days, and exclude prompts, responses, file paths, environment values, raw IDs, error text, and stacks. Use **Settings → Save diagnostic logs** to opt out; stop the existing Background Job and reopen the addin for the logging change to take effect. Hiding the Orb does not disable the memory guard.
-- Requires the [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) package and a
-  working `claude` CLI. Runs in the browser if called outside RStudio.
+- **Local diagnostics and performance**: the addin shows a compact Performance Orb and writes privacy-filtered operational summaries to `~/.claude_addin/diagnostics` by default. Logs are local only, retain at most 50 MiB / 7 days, and exclude prompts, responses, file paths, environment values, raw IDs, error text, and stacks. Use **Settings → Save diagnostic logs** to opt out; stop the existing Background Job and reopen the addin for the logging change to take effect. Hiding the Orb does not disable the memory guard. A high process-memory state pauses background warmup/automatic work but keeps explicit chat available while the session cgroup has safe headroom.
+- **Reading the Performance snapshot**: **Refreshed** is when the browser received a snapshot, while **Process sampled**, **Tree sampled**, and **Session sampled** show the actual measurements and their ages in local time. Refresh retrieves the latest background sample; it does not force GC or refresh the slower tree/cgroup measurements. Missing timestamps from older servers are explicitly unavailable. Frame p95 and jank cover the latest 600 frame intervals, not input latency; long tasks count observations while the panel is open and show their availability rather than an unmeasured zero. Diagnostic logging and the Orb share one long-task observer. In smaller viewers the panel stays within its host and scrolls instead of clipping its contents.
+- **Claude handler scheduling**: synchronous message parsing stays outside the small async coroutine. Each foreground turn awaits one completion promise instead of creating a new await chain on every idle poll. A single `later` timer processes at most 32 messages or 8 ms per normal batch, yields immediately for buffered work, and waits 50 ms for an empty queue. Approval pauses conversation dispatch, while the same owner checks controls, task events, and connection health once per second; terminal results stop the foreground timer. Late context-usage callbacks retain only the usage snapshot, not the completed turn. Cancellation, tools, history, concurrent threads, Shiny promise domains, deep-stack tracing, and R JIT retain their existing contracts.
+- **Long tasks and recovery**: healthy background work and approvals are not stopped merely because two minutes elapsed. An interruption drains its terminal result before another turn can use that queue; an unconfirmed drain or disconnected CLI retires the old connection without replaying tools. Parent-agent messages do not wait for a nonexistent top-level result. Task Stop acknowledgements mean “requested”, not “stopped”; failures or missing terminal events allow retry, and disconnection is reported as an unknown outcome. Error replies can recover from authoritative history without hiding the error or overriding a cancelled/newer request. Terminal history reconciliation releases its short foreground wait and follows late writes for at most 30 seconds, including replies written after an initially user-only snapshot. Reopen history if synchronization remains unavailable. History-only browser attachments can receive newly arriving background approvals and results without sending a prompt; run-scoped events from the previous browser remain isolated. Memory admission still limits new work, but never suppresses already-running tasks' notifications.
+- **Investigating R memory**: [`tests/verify/compare_sdk_memory.R`](tests/verify/compare_sdk_memory.R) compares the installed SDK alone, the production handler, a thin shinychat adapter, and the current widget in fresh processes. Run it through the bounded verifier's `browser` mode. It uses a local deterministic stream-json peer, not an AI provider, while retaining the real SDK subprocess/parser; records resident memory separately from post-GC R heap; and checks output, restored history, browser errors, and process cleanup. `AUI_MEMORY_ARMS`, `AUI_MEMORY_EVENTS`, and `AUI_MEMORY_OUT` select the experiment and evidence directory. `AUI_MEMORY_DEEPSTACK=0` is an isolated diagnostic control, not a production fix or a change to an existing addin Job. Do not use `--resume` across different environment-controlled experiments.
+- **Handler regression gates**: [`verify_handler_performance.R`](tests/verify/verify_handler_performance.R) enforces resident-memory and latency bounds at 1,200/2,400 events; [`verify_foreground_pump.R`](tests/verify/verify_foreground_pump.R) adds 60/120-second slow streams, a 60-second quiet wait, and delayed/missing context-usage replies (`AUI_FOREGROUND_MODE=slow|quiet|usage`, `AUI_FOREGROUND_OUT` for evidence). [`verify_handler_protocol.R`](tests/verify/verify_handler_protocol.R) drives restored tool history, real SDK approvals, Stop, and two concurrent threads through Chromium. All use the installed production handler, default deep-stack tracing, and local synthetic CLI peers; they never execute tools or contact an AI provider. Run through the bounded verifier's `browser` mode, with `--timeout 240` for the foreground-pump gates. `AUI_MEMORY_PROFILE=1` on the comparison script records separate CPU/allocation profiles for diagnosis; profiled timings are not the performance-gate measurements.
+- **Long-task regression gate**: [`verify_long_task_lifecycle.R`](tests/verify/verify_long_task_lifecycle.R) uses the installed SDK and widget with real isolated JSONL history. One Chromium instance exercises a 125-second background task, foreground/background approvals held for 125 seconds, Stop rejection/retry, parented-only completion, delayed error replies, EOF recovery, history paging during a live approval, and new approvals arriving after a full browser reload without another foreground prompt. Run with the bounded verifier's `browser --timeout 240`; `AUI_LONG_TASK_OUT` preserves evidence. `AUI_LONG_TASK_MODE=smoke` is a short fixture check, not evidence of the long-duration gate.
+- **Long-history rendering**: threads with more than 60 retained messages use a measured virtual window, keeping nearby messages, the latest tail, and active editors/focused controls mounted. History paging and streaming retain their scroll anchors without keeping every message component subscribed while you type. The existing history-retention limit is unchanged. Browser Find (Ctrl+F) and cross-message text selection cover only currently mounted content; scroll to older messages to render them.
+- Requires [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK) `>= 0.2.5.9000`
+  and a working `claude` CLI. Update both packages and restart the existing addin Background
+  Job: an already-running R process does not reload either package automatically.
+  Runs in the browser if called outside RStudio. The CLI's own tool limits are unchanged.
 
 ### Claude Code slash commands and skills
 

@@ -64,9 +64,10 @@ plan91_drain_shiny <- function(session, done, limit = 200L) {
 test_that("idle empty polling backs off to 500ms and resets on a message", {
   scheduler <- plan91_scheduler()
   polls <- 0L
+  wake_batch <- list(plan91_sdk_message("TaskProgressMessage", task_id = "wake"))
   queue <- list(
     list(), list(), list(),
-    list(plan91_sdk_message("TaskProgressMessage", task_id = "wake")),
+    wake_batch,
     list()
   )
   coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
@@ -90,8 +91,16 @@ test_that("idle empty polling backs off to 500ms and resets on a message", {
   expect_equal(delays, c(0.1, 0.2, 0.4, 0.5, 0.1))
   expect_identical(polls, 5L)
   expect_identical(
-    coordinator$metrics()[c("idle_polls", "empty_idle_polls", "messages_seen", "idle_poll_ms")],
-    list(idle_polls = 5L, empty_idle_polls = 4L, messages_seen = 1L, idle_poll_ms = 200)
+    coordinator$metrics()[c(
+      "idle_polls", "empty_idle_polls", "messages_seen",
+      "message_bytes_seen", "max_batch_bytes", "idle_poll_ms"
+    )],
+    list(
+      idle_polls = 5L, empty_idle_polls = 4L, messages_seen = 1L,
+      message_bytes_seen = shinyAssistantUI:::.claude_message_batch_size_bytes(wake_batch),
+      max_batch_bytes = shinyAssistantUI:::.claude_message_batch_size_bytes(wake_batch),
+      idle_poll_ms = 200
+    )
   )
 })
 
@@ -135,7 +144,8 @@ test_that("consumer coordinator freezes the proposed internal surface", {
   expect_named(
     coordinator,
     c(
-      "start_idle", "acquire", "poll_one", "release", "invalidate",
+      "start_idle", "acquire", "poll_one", "poll_control", "interrupt_idle",
+      "release", "retire", "invalidate",
       "is_busy", "metrics"
     ),
     ignore.order = FALSE
@@ -270,15 +280,17 @@ test_that("foreground waits for an opened idle turn Result and reconciliation", 
 })
 
 
-test_that("raw batch tail after Result is retained for the next owner", {
+test_that("raw batch tail after Result is reconciled before a new foreground owner", {
   scheduler <- plan91_scheduler()
   polls <- 0L
   acquired <- character()
   reconcile_done <- NULL
+  events <- character()
   batch <- list(
     plan91_sdk_message("AssistantMessage", id = "cron-a"),
     plan91_sdk_message("ResultMessage", session_id = "session-a"),
-    plan91_sdk_message("AssistantMessage", id = "cron-b")
+    plan91_sdk_message("AssistantMessage", id = "cron-b"),
+    plan91_sdk_message("ResultMessage", session_id = "session-b")
   )
 
   coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
@@ -288,7 +300,7 @@ test_that("raw batch tail after Result is retained for the next owner", {
     },
     schedule = scheduler$schedule,
     now = function() 0,
-    on_idle_event = function(message) invisible(NULL),
+    on_idle_event = function(message) events <<- c(events, message$id),
     on_idle_result = function(message, on_complete) reconcile_done <<- on_complete,
     on_idle_failure = function(reason) stop(plan91_reason_text(reason)),
     deny_idle_permission = function(message) stop("unexpected permission request"),
@@ -303,12 +315,19 @@ test_that("raw batch tail after Result is retained for the next owner", {
   expect_true(is.function(reconcile_done))
   expect_length(acquired, 0L)
   reconcile_done()
+  expect_length(acquired, 0L)
+  reconcile_done <- NULL
+  for (step in seq_len(8L)) {
+    scheduler$run_next()
+    if (is.function(reconcile_done)) break
+  }
+  expect_identical(events, c("cron-a", "cron-b"))
+  expect_true(is.function(reconcile_done))
+  expect_length(acquired, 0L)
+  reconcile_done()
   expect_identical(acquired, "foreground")
-
-  tail <- coordinator$poll_one("foreground")
-  expect_s3_class(tail, "AssistantMessage")
-  expect_identical(tail$id, "cron-b")
   expect_identical(polls, 1L)
+  expect_null(coordinator$poll_one("foreground"))
   coordinator$release("foreground")
 })
 
@@ -362,9 +381,18 @@ test_that("idle permission deny failure interrupts and never approves interactiv
     request_id = "permission-1",
     approve = function(...) approvals <<- approvals + 1L
   )
+  queue <- list(list(
+    request, request,
+    plan91_sdk_message("ResultMessage", session_id = "denied", is_error = TRUE)
+  ))
 
   coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
-    poll_messages = function() list(request, request),
+    poll_messages = function() {
+      if (!length(queue)) return(list())
+      value <- queue[[1L]]
+      queue <<- queue[-1L]
+      value
+    },
     schedule = scheduler$schedule,
     now = function() 0,
     on_idle_event = function(message) invisible(NULL),
@@ -385,13 +413,16 @@ test_that("idle permission deny failure interrupts and never approves interactiv
   expect_identical(deny_calls, 1L)
   expect_identical(interrupts, 1L)
   expect_identical(approvals, 0L)
+  expect_length(failures, 0L)
+  expect_true(coordinator$is_busy())
+  scheduler$run_next()
   expect_length(failures, 1L)
   expect_match(failures[[1L]], "deny transport failed", fixed = TRUE)
   expect_false(coordinator$is_busy())
 })
 
 
-test_that("idle timeout fails closed and releases a foreground waiter", {
+test_that("long idle waiting preserves the owner until its Result arrives", {
   scheduler <- plan91_scheduler()
   clock <- 0
   interrupts <- 0L
@@ -404,8 +435,10 @@ test_that("idle timeout fails closed and releases a foreground waiter", {
       polls <<- polls + 1L
       if (polls == 1L) {
         list(plan91_sdk_message("AssistantMessage", id = "never-finishes"))
-      } else {
+      } else if (polls == 2L) {
         list()
+      } else {
+        list(plan91_sdk_message("ResultMessage", session_id = "long-wait"))
       }
     },
     schedule = scheduler$schedule,
@@ -427,9 +460,11 @@ test_that("idle timeout fails closed and releases a foreground waiter", {
   clock <- 1e9
   scheduler$run_next()
 
-  expect_identical(interrupts, 1L)
-  expect_length(failures, 1L)
-  expect_match(failures[[1L]], "timed out", ignore.case = TRUE)
+  expect_identical(interrupts, 0L)
+  expect_length(failures, 0L)
+  expect_length(acquired, 0L)
+  expect_true(coordinator$is_busy())
+  scheduler$run_next()
   expect_identical(acquired, "foreground")
   coordinator$release("foreground")
   expect_false(coordinator$is_busy())
@@ -680,7 +715,7 @@ test_that("stale reconciliation generation cannot publish", {
 })
 
 
-test_that("must_advance timeout retains last good state and reports failure", {
+test_that("must_advance defers then reports unavailable history without losing last good state", {
   scheduler <- plan91_scheduler()
   clock <- 0
   s0 <- list(list(id = "h-1", role = "assistant", content = "old"))
@@ -688,6 +723,7 @@ test_that("must_advance timeout retains last good state and reports failure", {
   candidate <- s0
   published <- list()
   completed <- list()
+  deferred <- list()
 
   reconciler <- shinyAssistantUI:::.new_claude_transcript_reconciler(
     read_snapshot = function(thread_id, session_id, project) candidate,
@@ -700,7 +736,10 @@ test_that("must_advance timeout retains last good state and reports failure", {
     schedule = scheduler$schedule,
     now = function() clock,
     quiet_delay = 0,
-    deadline = 2
+    deadline = 2,
+    on_deferred = function(thread_id, after_run_id, status, reason) {
+      deferred[[length(deferred) + 1L]] <<- list(status = status, reason = reason)
+    }
   )
 
   reconciler$baseline("thread-1", "session-1", "/project/a")
@@ -713,13 +752,18 @@ test_that("must_advance timeout retains last good state and reports failure", {
   )
   expect_gt(scheduler$size(), 0L)
   clock <- 3
-  scheduler$run_all()
+  scheduler$run_next()
 
   expect_length(published, 0L)
   expect_length(completed, 1L)
   expect_false(completed[[1L]]$ok)
-  expect_match(plan91_reason_text(completed[[1L]]$reason), "timed out", ignore.case = TRUE)
+  expect_s3_class(completed[[1L]]$reason, "claude_history_pending")
   expect_false(reconciler$has_published())
+  clock <- 31
+  scheduler$run_all()
+  expect_length(completed, 1L)
+  expect_identical(vapply(deferred, `[[`, "", "status"), c("pending", "error"))
+  expect_match(plan91_reason_text(deferred[[2L]]$reason), "unavailable", fixed = TRUE)
 
   candidate <- s1
   reconciler$reconcile(
@@ -917,7 +961,7 @@ test_that("idle permission denial is deduplicated by generation and request id",
   scheduler$run_next()
 
   expect_identical(deny_calls, 1L)
-  expect_identical(interrupts, 2L)
+  expect_identical(interrupts, 1L)
   coordinator$invalidate()
 })
 
@@ -1338,10 +1382,17 @@ test_that("detached idle denial holds owner until failure reconciliation complet
   failures <- character()
   denied <- 0L
   interrupted <- 0L
+  queue <- list(
+    list(plan91_sdk_message("PermissionRequestMessage", request_id = "detached")),
+    list(plan91_sdk_message("ResultMessage", session_id = "detached", is_error = TRUE))
+  )
   coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
-    poll_messages = function() list(plan91_sdk_message(
-      "PermissionRequestMessage", request_id = "detached"
-    )),
+    poll_messages = function() {
+      if (!length(queue)) return(list())
+      value <- queue[[1L]]
+      queue <<- queue[-1L]
+      value
+    },
     schedule = scheduler$schedule,
     now = function() 0,
     on_idle_event = function(message) invisible(NULL),
@@ -1360,6 +1411,9 @@ test_that("detached idle denial holds owner until failure reconciliation complet
 
   expect_identical(denied, 1L)
   expect_identical(interrupted, 1L)
+  expect_length(failures, 0L)
+  expect_length(foreground, 0L)
+  scheduler$run_next()
   expect_length(failures, 1L)
   expect_identical(
     failures[[1L]],
@@ -1515,10 +1569,14 @@ test_that("make_claude_handler routes owned background approval and reconciles d
     content = "Reply written before detached approval interruption"
   ))
   events <- character()
-  queue <- list(list(plan91_sdk_message(
-    "PermissionRequestMessage", request_id = "deny-detached",
-    tool_name = "Bash", tool_input = list(command = "detached")
-  )))
+  statuses <- character()
+  queue <- list(list(
+    plan91_sdk_message(
+      "PermissionRequestMessage", request_id = "deny-detached",
+      tool_name = "Bash", tool_input = list(command = "detached")
+    ),
+    plan91_sdk_message("ResultMessage", session_id = "session-owned", is_error = TRUE)
+  ))
   for (i in seq_len(500L)) {
     later::run_now(0.01)
     if (length(statuses) && length(proactive) >= 1L &&
@@ -1538,18 +1596,20 @@ test_that("make_claude_handler routes owned background approval and reconciles d
 })
 
 
-test_that("memory admission gate prevents a new idle opener without polling", {
+test_that("memory admission does not discard already delivered idle output", {
   scheduler <- plan91_scheduler()
   allowed <- FALSE
   polls <- 0L
+  events <- 0L
   coordinator <- shinyAssistantUI:::.new_claude_consumer_coordinator(
     poll_messages = function() {
       polls <<- polls + 1L
-      list(plan91_sdk_message("AssistantMessage", content = list()))
+      if (polls == 1L) list(plan91_sdk_message("AssistantMessage", content = list()))
+      else list(plan91_sdk_message("ResultMessage", session_id = "memory-delivery"))
     },
     schedule = scheduler$schedule,
     now = function() 0,
-    on_idle_event = function(message) stop("blocked opener was dispatched"),
+    on_idle_event = function(message) events <<- events + 1L,
     on_idle_result = function(message, on_complete) on_complete(),
     on_idle_failure = function(reason) stop(plan91_reason_text(reason)),
     deny_idle_permission = function(message) stop("unexpected permission"),
@@ -1559,13 +1619,15 @@ test_that("memory admission gate prevents a new idle opener without polling", {
 
   coordinator$start_idle(0.1)
   expect_equal(scheduler$run_next(), 0.1)
-  expect_identical(polls, 0L)
-  expect_false(coordinator$is_busy())
-  expect_identical(coordinator$metrics()$idle_open, FALSE)
-
-  allowed <- TRUE
-  expect_equal(scheduler$run_next(), 0.1)
   expect_identical(polls, 1L)
+  expect_identical(events, 1L)
+  expect_true(coordinator$is_busy())
+  expect_true(coordinator$metrics()$idle_open)
+
+  expect_equal(scheduler$run_next(), 0.1)
+  expect_identical(polls, 2L)
+  expect_false(coordinator$is_busy())
+  coordinator$invalidate()
 })
 
 test_that("memory admission gate lets an already-open idle turn drain to Result", {
@@ -1607,4 +1669,41 @@ test_that("memory admission gate lets an already-open idle turn drain to Result"
   expect_identical(events, 1L)
   expect_identical(results, 1L)
   expect_false(coordinator$is_busy())
+})
+
+
+test_that("transcript reconciliation state retains only a compact SHA-256", {
+  large_snapshot <- list(text = strrep("x", 2 * 1024^2), nested = list(1:1000))
+  fingerprint <- shinyAssistantUI:::.claude_transcript_fingerprint(large_snapshot)
+  state <- shinyAssistantUI:::.claude_transcript_state(fingerprint, revision = 7L)
+
+  expect_match(fingerprint, "^[0-9a-f]{64}$")
+  expect_named(state, c("fingerprint", "revision"), ignore.order = FALSE)
+  expect_identical(state$revision, 7L)
+  expect_lt(as.numeric(utils::object.size(state)), 2048)
+  expect_identical(
+    fingerprint,
+    shinyAssistantUI:::.claude_transcript_fingerprint(large_snapshot)
+  )
+  changed <- large_snapshot
+  changed$text <- paste0(changed$text, "y")
+  expect_false(identical(
+    fingerprint,
+    shinyAssistantUI:::.claude_transcript_fingerprint(changed)
+  ))
+})
+
+test_that("idle coordinator state does not block hard GC settle", {
+  expect_false(shinyAssistantUI:::.memory_guard_coordinator_blocks_gc(list(
+    owner = "idle", waiters = 0L, buffered_messages = 50L, idle_open = TRUE
+  )))
+  expect_false(shinyAssistantUI:::.memory_guard_coordinator_blocks_gc(list(
+    owner = "none", waiters = 0L, buffered_messages = 1L, idle_open = FALSE
+  )))
+  expect_true(shinyAssistantUI:::.memory_guard_coordinator_blocks_gc(list(
+    owner = "foreground", waiters = 0L, buffered_messages = 0L, idle_open = FALSE
+  )))
+  expect_true(shinyAssistantUI:::.memory_guard_coordinator_blocks_gc(list(
+    owner = "idle", waiters = 1L, buffered_messages = 0L, idle_open = TRUE
+  )))
 })

@@ -29,6 +29,7 @@ test_that("model action commits only after async acknowledgement", {
     session_map_path = tempfile(fileext = ".rds")
   )
   cap <- attr(handler, "ui_capabilities")$model
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   expect_identical(cap$value, "default")
   expect_true(all(c("default", "haiku", "sonnet", "opus") %in%
                     vapply(cap$options, `[[`, character(1), "value")))
@@ -88,6 +89,7 @@ test_that("model action retries one transient acknowledgement timeout", {
                    include_partial_messages = TRUE),
     session_map_path = tempfile(fileext = ".rds")
   )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   attr(handler, "warmup")("t1")
   attr(handler, "action_handler")(
     "model:sonnet", "t1",
@@ -134,6 +136,7 @@ test_that("model action rejection preserves the previous model", {
                    include_partial_messages = TRUE),
     session_map_path = tempfile(fileext = ".rds")
   )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   attr(handler, "warmup")("t1")
   attr(handler, "action_handler")(
     "model:sonnet", "t1",
@@ -199,6 +202,7 @@ test_that("model actions and committed state are isolated by thread", {
                    include_partial_messages = TRUE),
     session_map_path = tempfile(fileext = ".rds")
   )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   attr(handler, "warmup")("t1")
   result <- function(thread) function(message, status = "ok", value = NULL) {
     results[[length(results) + 1L]] <<- list(thread = thread, status = status, message = message)
@@ -281,10 +285,26 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
                    include_partial_messages = TRUE),
     session_map_path = tempfile(fileext = ".rds")
   )
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  settled <- FALSE
+  handler_rejection <- NULL
+  start <- function(...) {
+    settled <<- FALSE
+    handler_rejection <<- NULL
+    promises::then(handler(...), function(value) {
+      settled <<- TRUE
+      NULL
+    }, function(reason) {
+      handler_rejection <<- reason
+      settled <<- TRUE
+      NULL
+    })
+    invisible(NULL)
+  }
   attr(handler, "warmup")("t1")
   attr(handler, "action_handler")("model:sonnet", "t1", function(...) NULL)
 
-  handler(
+  start(
     message = "next", thread_id = "t1", attachments = list(),
     on_chunk = function(...) stage_trace <<- c(stage_trace, "streaming-callback"),
     on_done = function(...) done <<- TRUE,
@@ -311,8 +331,10 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
   model_pending$resolve(list())
   for (i in seq_len(100L)) {
     later::run_now(0.01)
-    if (done || !is.null(error)) break
+    if (settled || !is.null(error)) break
   }
+  expect_true(settled)
+  expect_null(handler_rejection)
   expect_null(error)
   expect_identical(sends, 1L)
   expect_true(done)
@@ -328,7 +350,7 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
   done <- FALSE
   error <- NULL
   attr(handler, "action_handler")("model:opus", "t1", function(...) NULL)
-  handler(
+  start(
     message = "after rejection", thread_id = "t1", attachments = list(),
     on_chunk = function(...) NULL,
     on_done = function(...) done <<- TRUE,
@@ -345,8 +367,10 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
   model_pending$reject(simpleError("model switch rejected"))
   for (i in seq_len(100L)) {
     later::run_now(0.01)
-    if (done || !is.null(error)) break
+    if (settled || !is.null(error)) break
   }
+  expect_true(settled)
+  expect_null(handler_rejection)
   expect_null(error)
   expect_identical(sends, 2L)
   expect_true(done)
@@ -354,7 +378,7 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
   done <- FALSE
   cancelled <- FALSE
   attr(handler, "action_handler")("model:haiku", "t1", function(...) NULL)
-  handler(
+  start(
     message = "cancel before send", thread_id = "t1", attachments = list(),
     on_chunk = function(...) NULL,
     on_done = function(...) done <<- TRUE,
@@ -370,8 +394,10 @@ test_that("foreground send waits asynchronously for the pending model acknowledg
   model_pending$resolve(list())
   for (i in seq_len(100L)) {
     later::run_now(0.01)
-    if (done || !is.null(error)) break
+    if (settled || !is.null(error)) break
   }
+  expect_true(settled)
+  expect_null(handler_rejection)
   expect_null(error)
   expect_true(done)
   expect_identical(sends, 2L)
@@ -389,5 +415,6 @@ test_that("models= 覆盖档位、default 恒在首位、按传入顺序", {
     session_map_path = tempfile(fileext = ".rds")
   )
   vals <- vapply(attr(handler, "ui_capabilities")$model$options, `[[`, character(1), "value")
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   expect_identical(vals, c("default", "gpt-4o", "claude-x"))
 })

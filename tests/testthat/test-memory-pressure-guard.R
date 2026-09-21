@@ -132,11 +132,13 @@ test_that("production sampler escalates from RSS to authoritative PSS near press
   )
 }
 
-.memory_sample <- function(pss) list(
+.memory_sample <- function(pss, cgroup_current = NULL, cgroup_max = NULL) list(
   available = TRUE,
   source = "smaps_rollup",
   pss_bytes = as.numeric(pss),
   rss_bytes = as.numeric(pss) + 10,
+  cgroup_current_bytes = cgroup_current,
+  cgroup_max_bytes = cgroup_max,
   captured_at = Sys.time()
 )
 
@@ -315,4 +317,343 @@ test_that("memory guard observation reuses samples and cannot affect state", {
   )
   expect_true(throwing$observe())
   expect_identical(throwing$snapshot()$state, "normal")
+})
+
+
+test_that("process hard pressure warns but does not block explicit work when cgroup has headroom", {
+  samples <- list(
+    .memory_sample(210, .memory_guard_gib(2), .memory_guard_gib(10)),
+    .memory_sample(220, .memory_guard_gib(2), .memory_guard_gib(10))
+  )
+  index <- 0L
+  guard <- .new_memory_pressure_guard(
+    sample = function() { index <<- index + 1L; samples[[index]] },
+    busy_snapshot = function() list(busy = TRUE),
+    gc_full = function() invisible(NULL),
+    schedule = .fake_memory_scheduler()$schedule,
+    config = .memory_guard_test_config()
+  )
+  guard$observe(); guard$observe()
+  expect_identical(guard$snapshot()$state, "hard_pending")
+  expect_true(guard$allows("foreground"))
+  expect_true(guard$allows("compact"))
+  expect_true(guard$allows("resume"))
+  expect_true(guard$allows("reload"))
+  expect_false(guard$allows("warmup"))
+  expect_false(guard$allows("proactive"))
+  expect_false(guard$allows("auto_continue"))
+})
+
+test_that("cgroup critical pressure still blocks explicit model work", {
+  samples <- list(
+    .memory_sample(210, .memory_guard_gib(9.5), .memory_guard_gib(10)),
+    .memory_sample(220, .memory_guard_gib(9.5), .memory_guard_gib(10))
+  )
+  index <- 0L
+  guard <- .new_memory_pressure_guard(
+    sample = function() { index <<- index + 1L; samples[[index]] },
+    busy_snapshot = function() list(busy = TRUE),
+    gc_full = function() invisible(NULL),
+    schedule = .fake_memory_scheduler()$schedule,
+    config = .memory_guard_test_config()
+  )
+  guard$observe(); guard$observe()
+  expect_false(guard$allows("foreground"))
+  expect_false(guard$allows("resume"))
+  expect_true(guard$allows("approval"))
+})
+
+test_that("hard idle re-evaluates later samples and can recover", {
+  samples <- list(
+    .memory_sample(210, .memory_guard_gib(2), .memory_guard_gib(10)),
+    .memory_sample(220, .memory_guard_gib(2), .memory_guard_gib(10)),
+    .memory_sample(220, 20, 100),
+    .memory_sample(150, 20, 100)
+  )
+  index <- 0L
+  scheduler <- .fake_memory_scheduler()
+  guard <- .new_memory_pressure_guard(
+    sample = function() { index <<- index + 1L; samples[[index]] },
+    busy_snapshot = function() list(busy = FALSE),
+    gc_full = function() invisible(NULL),
+    schedule = scheduler$schedule,
+    config = .memory_guard_test_config()
+  )
+  guard$observe(); guard$observe()
+  scheduler$run_next()
+  expect_identical(guard$snapshot()$state, "hard_idle")
+  guard$observe()
+  expect_identical(guard$snapshot()$state, "soft")
+  expect_true(guard$allows("foreground"))
+})
+
+
+test_that("guard GC tracker captures post-GC heap without an extra collection", {
+  calls <- 0L
+  result <- matrix(0, nrow = 2L, ncol = 6L,
+                   dimnames = list(c("Ncells", "Vcells"),
+                                   c("used", "(Mb)", "gc trigger", "(Mb)", "max used", "(Mb)")))
+  result[, 2L] <- c(12.5, 37.25)
+  tracker <- shinyAssistantUI:::.new_memory_guard_gc_tracker(function() {
+    calls <<- calls + 1L
+    result
+  })
+
+  expect_identical(tracker$snapshot(), list(
+    r_heap_after_gc_bytes = 0,
+    guard_gc_count = 0
+  ))
+  tracker$collect()
+  expect_identical(calls, 1L)
+  expect_identical(tracker$snapshot(), list(
+    r_heap_after_gc_bytes = round((12.5 + 37.25) * 1024^2),
+    guard_gc_count = 1
+  ))
+})
+
+test_that("process tree RSS sums the addin R process and its transitive children", {
+  root <- tempfile("memory-tree-")
+  pid <- 4242L
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  write_proc <- function(p, rss_kib, children = integer()) {
+    dir.create(file.path(root, p, "task", p), recursive = TRUE)
+    writeLines(c("Name:\tR", paste0("VmRSS:\t", rss_kib, " kB")),
+               file.path(root, p, "status"))
+    writeLines(paste(children, collapse = " "),
+               file.path(root, p, "task", p, "children"))
+  }
+  write_proc(pid, 2048, c(100L, 200L))
+  write_proc(100L, 512, integer())
+  write_proc(200L, 1024, 300L)
+  write_proc(300L, 256, integer())
+
+  tree <- .read_process_tree_rss(pid = pid, proc_root = root)
+  expect_identical(tree$bytes, (2048 + 512 + 1024 + 256) * 1024)
+  expect_identical(tree$count, 4L)
+})
+
+test_that("process tree RSS fails open and stays bounded", {
+  root <- tempfile("memory-tree-open-")
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  write_status <- function(p, rss_kib) {
+    dir.create(file.path(root, p, "task", p), recursive = TRUE)
+    writeLines(c("Name:\tR", paste0("VmRSS:\t", rss_kib, " kB")),
+               file.path(root, p, "status"))
+  }
+
+  # No children file at all: the tree collapses to the process itself.
+  write_status(700L, 4096)
+  alone <- .read_process_tree_rss(pid = 700L, proc_root = root)
+  expect_identical(alone$bytes, 4096 * 1024)
+  expect_identical(alone$count, 1L)
+
+  # A child listed but already gone contributes nothing and does not error.
+  writeLines("701", file.path(root, 700L, "task", 700L, "children"))
+  vanished <- .read_process_tree_rss(pid = 700L, proc_root = root)
+  expect_identical(vanished$bytes, 4096 * 1024)
+  expect_identical(vanished$count, 1L)
+
+  # A cycle terminates instead of recursing forever.
+  write_status(800L, 1024)
+  write_status(801L, 1024)
+  writeLines("801", file.path(root, 800L, "task", 800L, "children"))
+  writeLines("800", file.path(root, 801L, "task", 801L, "children"))
+  cyclic <- .read_process_tree_rss(pid = 800L, proc_root = root)
+  expect_identical(cyclic$bytes, 2048 * 1024)
+  expect_identical(cyclic$count, 2L)
+
+  # An entirely absent process yields NULL rather than a wrong number.
+  expect_null(.read_process_tree_rss(pid = 9999L, proc_root = root))
+})
+
+test_that("memory snapshot exposes process tree RSS alongside single-process metrics", {
+  root <- tempfile("memory-snapshot-tree-")
+  pid <- 4343L
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  dir.create(file.path(root, pid, "task", pid), recursive = TRUE)
+  writeLines(c("Rss:  4096 kB", "Pss:  3072 kB"), file.path(root, pid, "smaps_rollup"))
+  writeLines(c("Name:\tR", "VmRSS:\t4096 kB"), file.path(root, pid, "status"))
+  writeLines("900", file.path(root, pid, "task", pid, "children"))
+  dir.create(file.path(root, 900L, "task", 900L), recursive = TRUE)
+  writeLines(c("Name:\tclaude", "VmRSS:\t8192 kB"), file.path(root, 900L, "status"))
+
+  snapshot <- .read_linux_memory_snapshot(
+    pid = pid, proc_root = root, cgroup_root = tempfile("absent-cgroup-")
+  )
+  expect_identical(snapshot$rss_bytes, 4096 * 1024)
+  expect_identical(snapshot$tree_rss_bytes, (4096 + 8192) * 1024)
+  expect_identical(snapshot$tree_process_count, 2L)
+})
+
+test_that("production sampler throttles the process tree walk with cgroup", {
+  root <- tempfile("memory-throttle-")
+  pid <- 5150L
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  cgroup <- file.path(root, "cgroup")
+  dir.create(file.path(root, pid, "task", pid), recursive = TRUE)
+  dir.create(file.path(root, 6000L, "task", 6000L), recursive = TRUE)
+  dir.create(cgroup, recursive = TRUE)
+  writeLines(c("Name:\tR", "VmRSS:\t4096 kB"), file.path(root, pid, "status"))
+  writeLines("6000", file.path(root, pid, "task", pid, "children"))
+  writeLines(c("Name:\tclaude", "VmRSS:\t2048 kB"), file.path(root, 6000L, "status"))
+  writeLines("2048", file.path(cgroup, "memory.current"))
+  writeLines("max", file.path(cgroup, "memory.max"))
+
+  sampler <- .new_linux_memory_guard_sampler(
+    pid = pid, proc_root = root, cgroup_root = cgroup, cgroup_every = 3L
+  )
+  first <- sampler()
+  expect_identical(first$tree_rss_bytes, (4096 + 2048) * 1024)
+  expect_identical(first$tree_process_count, 2L)
+
+  # The child disappears; the throttled tick keeps serving the cached tree value.
+  unlink(file.path(root, 6000L), recursive = TRUE, force = TRUE)
+  second <- sampler()
+  expect_identical(second$tree_rss_bytes, (4096 + 2048) * 1024)
+  expect_identical(second$tree_process_count, 2L)
+
+  # Refresh ticks are count 1, 3, 6, ... so the third call walks again and sees
+  # the tree shrink; the following throttled tick reuses that fresher value.
+  third <- sampler()
+  expect_identical(third$tree_rss_bytes, 4096 * 1024)
+  expect_identical(third$tree_process_count, 1L)
+  fourth <- sampler()
+  expect_identical(fourth$tree_rss_bytes, 4096 * 1024)
+  expect_identical(fourth$tree_process_count, 1L)
+})
+
+test_that("a pending usage probe does not starve full GC but real work still defers it", {
+  make_guard <- function(snapshot_fn) {
+    collected <- 0L
+    pending <- list()
+    guard <- .new_memory_pressure_guard(
+      sample = function() list(
+        available = TRUE, source = "test", rss_bytes = 3 * 1024^3, pss_bytes = NULL
+      ),
+      busy_snapshot = snapshot_fn,
+      gc_full = function() { collected <<- collected + 1L; invisible(NULL) },
+      schedule = function(callback, delay) {
+        pending[[length(pending) + 1L]] <<- callback
+        function() invisible(TRUE)
+      },
+      config = list(enabled = TRUE, consecutive_samples = 1L,
+                    soft_rss_bytes = 1024^3, hard_rss_bytes = 2 * 1024^3)
+    )
+    list(guard = guard, collected = function() collected)
+  }
+
+  # A probe in flight is a lightweight IPC round-trip, not R work: GC must still run.
+  probe_only <- make_guard(function() list(busy = TRUE, gc_blocked = FALSE))
+  probe_only$guard$observe()
+  expect_identical(probe_only$collected(), 1L)
+
+  # Real R work (an active turn, compaction, ...) must still defer the collection.
+  real_work <- make_guard(function() list(busy = TRUE, gc_blocked = TRUE))
+  real_work$guard$observe()
+  expect_identical(real_work$collected(), 0L)
+
+  # A snapshot without the new field keeps the old meaning (back-compat).
+  legacy <- make_guard(function() list(busy = TRUE))
+  legacy$guard$observe()
+  expect_identical(legacy$collected(), 0L)
+})
+
+test_that("started guard keeps one ticker after every GC settlement outcome", {
+  for (outcome in c("high", "recovered", "unavailable", "busy")) {
+    scheduler <- .fake_memory_scheduler()
+    reads <- collections <- 0L
+    busy <- FALSE
+    guard <- .new_memory_pressure_guard(
+      sample = function() {
+        reads <<- reads + 1L
+        if (reads >= 3L && outcome == "unavailable") return(list(available = FALSE))
+        if (reads >= 3L && outcome == "recovered") return(.memory_sample(50))
+        .memory_sample(220)
+      },
+      busy_snapshot = function() list(busy = busy),
+      gc_full = function() collections <<- collections + 1L,
+      schedule = scheduler$schedule,
+      config = .memory_guard_test_config()
+    )
+    guard$start()
+    scheduler$run_next()
+    scheduler$run_next()
+    expect_true(guard$snapshot()$settling, info = outcome)
+    if (outcome == "busy") busy <- TRUE
+    scheduler$run_next()
+    expect_false(guard$snapshot()$settling, info = outcome)
+    expect_identical(scheduler$pending(), 1L, info = outcome)
+    expect_identical(collections, 1L, info = outcome)
+    expect_identical(
+      guard$snapshot()$state,
+      if (outcome == "recovered") "normal" else "hard_idle",
+      info = outcome
+    )
+    scheduler$run_next()
+    scheduler$run_next()
+    expect_identical(reads, 5L, info = outcome)
+    expect_identical(scheduler$pending(), 1L, info = outcome)
+    expect_identical(collections, 1L, info = outcome)
+    guard$dispose()
+    expect_identical(scheduler$pending(), 0L, info = outcome)
+  }
+})
+
+test_that("cancelled ticks cannot replace a newer settle or restart a disposed guard", {
+  callbacks <- list()
+  reads <- 0L
+  guard <- .new_memory_pressure_guard(
+    sample = function() { reads <<- reads + 1L; .memory_sample(220) },
+    busy_snapshot = function() list(busy = FALSE),
+    gc_full = function() invisible(NULL),
+    schedule = function(callback, delay) {
+      callbacks[[length(callbacks) + 1L]] <<- callback
+      function() invisible(NULL)
+    },
+    config = .memory_guard_test_config()
+  )
+  guard$start()
+  stale_tick <- callbacks[[1L]]
+  guard$observe()
+  guard$observe()
+  settle <- callbacks[[2L]]
+  settle()
+  before <- reads
+  before_callbacks <- length(callbacks)
+  stale_tick()
+  expect_identical(reads, before)
+  expect_identical(length(callbacks), before_callbacks)
+  expect_identical(before_callbacks, 3L)
+  guard$dispose()
+  callbacks[[length(callbacks)]]()
+  expect_identical(reads, before)
+})
+
+test_that("cached tree and cgroup retain their own original sample times", {
+  root <- tempfile("memory-timestamps-")
+  pid <- 8181L
+  proc <- file.path(root, pid)
+  cgroup <- file.path(root, "cgroup")
+  dir.create(proc, recursive = TRUE)
+  dir.create(cgroup)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  writeLines("VmRSS: 2048 kB", file.path(proc, "status"))
+  writeLines(c("Rss: 2048 kB", "Pss: 1536 kB"), file.path(proc, "smaps_rollup"))
+  writeLines("4096", file.path(cgroup, "memory.current"))
+  writeLines("8192", file.path(cgroup, "memory.max"))
+  clock <- as.POSIXct("2026-09-18 09:00:00", tz = "UTC")
+  sampler <- .new_linux_memory_guard_sampler(
+    pid = pid, proc_root = root, cgroup_root = cgroup,
+    cgroup_every = 3L, pss_trigger_bytes = 1, now = function() clock
+  )
+  first <- sampler()
+  clock <- clock + 5
+  second <- sampler()
+  clock <- clock + 5
+  third <- sampler()
+  expect_equal(as.numeric(second$captured_at - first$captured_at), 5)
+  expect_identical(second$tree_captured_at, first$captured_at)
+  expect_identical(second$cgroup_captured_at, first$captured_at)
+  expect_identical(third$tree_captured_at, third$captured_at)
+  expect_identical(third$cgroup_captured_at, third$captured_at)
 })

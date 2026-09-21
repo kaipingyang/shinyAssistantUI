@@ -293,6 +293,7 @@ test_that("Result usage is immediate and legacy sync context usage is never auto
   usages <- list()
   done <- FALSE
   error <- NULL
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
   handler(
     message = "test", thread_id = "thread-result-usage", attachments = list(),
     on_chunk = function(...) NULL,
@@ -543,21 +544,24 @@ test_that("make_claude_handler refreshes Result fallback through async usage onl
     on_usage = function(...) usages[[length(usages) + 1L]] <<- list(...)
   )
   handler_settled <- FALSE
+  handler_rejection <- NULL
   promises::then(
     handler_promise,
     onFulfilled = function(value) handler_settled <<- TRUE,
-    onRejected = function(reason) handler_settled <<- TRUE
+    onRejected = function(reason) {
+      handler_rejection <<- reason
+      handler_settled <<- TRUE
+      NULL
+    }
   )
-  for (i in seq_len(100L)) {
-    later::run_now()
-    if (isTRUE(done) || !is.null(error)) break
-    Sys.sleep(0.002)
+  deadline <- Sys.time() + 5
+  while (!handler_settled && is.null(error) && Sys.time() < deadline) {
+    later::run_now(0.01)
   }
 
   expect_true(done)
-  later::run_now()
-  later::run_now()
   expect_true(handler_settled)
+  expect_null(handler_rejection)
   expect_null(error)
   expect_identical(async_calls, 1L)
   expect_identical(callback_timeout, Inf)
@@ -570,4 +574,56 @@ test_that("make_claude_handler refreshes Result fallback through async usage onl
   expect_identical(usages[[2L]]$tokens, 42)
   expect_identical(usages[[2L]]$context_tokens, 777)
   expect_identical(usages[[2L]]$context_window, 1000000L)
+})
+
+test_that("a callback-mode probe that never answers is settled by its deadline", {
+  skip_if_not_installed("promises")
+  skip_if_not_installed("later")
+
+  state <- new.env(parent = emptyenv())
+  state$calls <- 0L
+  state$captured <- NULL
+  client <- new.env(parent = emptyenv())
+  # Callback mode: the SDK takes on_fulfilled/on_rejected and here never calls either,
+  # which is exactly the field failure (in_flight stuck TRUE forever).
+  client$get_context_usage_async <- function(timeout_ms = Inf,
+                                             on_fulfilled = NULL,
+                                             on_rejected = NULL) {
+    state$calls <- state$calls + 1L
+    state$captured <- list(on_fulfilled = on_fulfilled, timeout_ms = timeout_ms)
+    invisible(NULL)
+  }
+
+  record <- new.env(parent = emptyenv())
+  published <- list()
+  manager <- .new_claude_usage_probe_manager(
+    is_current = function(thread_id, client, consumer_record, generation) TRUE,
+    probe_timeout_secs = 0.05
+  )
+  publish <- function(context_tokens, context_window) {
+    published[[length(published) + 1L]] <<- context_tokens
+  }
+
+  manager$request("thread-a", client, record, 1L, publish)
+  expect_identical(state$calls, 1L)
+  expect_identical(manager$pending_count(), 1L)
+
+  # No answer ever arrives; the deadline must release the flag on its own.
+  deadline <- Sys.time() + 5
+  while (manager$pending_count() > 0L && Sys.time() < deadline) {
+    later::run_now(0.05)
+  }
+  expect_identical(manager$pending_count(), 0L)
+
+  # A late answer must not double-settle or publish a stale figure.
+  state$captured$on_fulfilled(list(
+    totalTokens = 321L, rawMaxTokens = 1000000L, maxTokens = 967000L
+  ))
+  later::run_now()
+  expect_length(published, 0L)
+
+  # The next request must start a fresh probe rather than stay wedged.
+  manager$request("thread-a", client, record, 1L, publish)
+  expect_identical(state$calls, 2L)
+  manager$close()
 })

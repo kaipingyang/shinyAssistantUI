@@ -155,6 +155,47 @@ describe("bridge inputId 前缀隔离（多 widget）", () => {
     expect(cbA.calls.chunk).toEqual([["A"]]);
     expect(cbB.calls.chunk).toEqual([["B"]]);
   });
+
+  describe("cold-history background tool routing", () => {
+    it("uses an explicit thread-only tool route without inventing a foreground run", () => {
+      const bridge = createShinyBridge("chat");
+      const callbacks = mkCallbacks();
+      bridge.setBackgroundToolCallbacks((threadId) => threadId === "history" ? callbacks : undefined);
+      handlers["chat:tool-call"]({
+        threadId: "history", toolCallId: "background-tool", toolName: "Bash", args: {}, argsText: "{}",
+      });
+      handlers["chat:tool-result"]({
+        threadId: "history", toolCallId: "background-tool", result: "actual result",
+      });
+      expect(callbacks.calls.toolCall).toHaveLength(1);
+      expect(callbacks.calls.toolResult).toEqual([["background-tool", "actual result", false]]);
+      handlers["chat:chunk"]({ threadId: "history", text: "not a live run" });
+      handlers["chat:tool-call"]({
+        threadId: "history", runId: "old-browser-run", toolCallId: "stale", toolName: "Bash",
+      });
+      handlers["chat:tool-call"]({ toolCallId: "ambiguous", toolName: "Bash" });
+      expect(callbacks.calls.toolCall).toHaveLength(1);
+      expect(callbacks.calls.chunk).toBeUndefined();
+      bridge.setBackgroundToolCallbacks(null);
+      handlers["chat:tool-result"]({ threadId: "history", toolCallId: "background-tool", result: "late" });
+      expect(callbacks.calls.toolResult).toHaveLength(1);
+    });
+
+    it("does not alter active or legacy single-thread callback routing", () => {
+      const bridge = createShinyBridge("chat");
+      const active = mkCallbacks();
+      const background = mkCallbacks();
+      bridge.setBackgroundToolCallbacks(() => background);
+      bridge.setRunCallbacks("foreground", active);
+      handlers["chat:tool-call"]({
+        threadId: "foreground", toolCallId: "live", toolName: "Bash", args: {}, argsText: "{}",
+      });
+      handlers["chat:chunk"]({ text: "legacy single-thread" });
+      expect(active.calls.toolCall).toHaveLength(1);
+      expect(active.calls.chunk).toEqual([["legacy single-thread"]]);
+      expect(background.calls.toolCall).toBeUndefined();
+    });
+  });
 });
 
 describe("bridge sessions 缓冲回放", () => {

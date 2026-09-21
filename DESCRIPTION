@@ -1,6 +1,6 @@
 Package: shinyAssistantUI
 Title: AI Assistant Chat UI for Shiny
-Version: 0.5.7.9000
+Version: 0.5.7.9002
 Authors@R: person("Kaiping", "Yang", role = c("aut", "cre"),
                   email = "1260146556@qq.com")
 Description: Wraps the '@assistant-ui/react' JavaScript library in a native
@@ -30,7 +30,7 @@ Suggests:
     promises,
     later,
     ellmer,
-    ClaudeAgentSDK (>= 0.2.5),
+    ClaudeAgentSDK (>= 0.2.5.9000),
     here,
     rstudioapi,
     cli,
