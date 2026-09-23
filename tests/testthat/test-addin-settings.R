@@ -1,5 +1,16 @@
 # addin_settings.json 读写 + 迁移(Plan 46)。
 
+test_that("wire integers enforce both bounds independently of the positive flag", {
+  for (positive in c(FALSE, TRUE)) {
+    expect_null(.settings_safe_integer(2^53, positive = positive))
+    expect_null(.settings_safe_integer(-1, positive = positive))
+    expect_null(.settings_safe_integer(1.5, positive = positive))
+    expect_identical(.settings_safe_integer(2^53 - 1, positive = positive), 2^53 - 1)
+  }
+  expect_identical(.settings_safe_integer(0), 0)
+  expect_null(.settings_safe_integer(0, positive = TRUE))
+})
+
 test_that(".read/.write_addin_settings round-trip preserves copilot auto-start", {
   path <- tempfile(fileext = ".json"); on.exit(unlink(path), add = TRUE)
   s <- list(defaultPermissionMode = "bypassPermissions",

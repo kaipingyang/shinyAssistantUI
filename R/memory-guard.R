@@ -133,6 +133,21 @@
   output
 }
 
+.memory_parse_pressure <- function(path) {
+  output <- list(some = NULL, full = NULL)
+  for (line in .memory_read_lines(path)) {
+    parts <- strsplit(trimws(line), "[[:space:]]+")[[1L]]
+    if (length(parts) < 2L || !(parts[[1L]] %in% names(output))) next
+    avg <- grep("^avg10=", parts[-1L], value = TRUE)
+    if (length(avg) != 1L) next
+    value <- suppressWarnings(as.numeric(sub("^avg10=", "", avg)))
+    if (is.finite(value) && value >= 0 && value <= 100) {
+      output[[parts[[1L]]]] <- value
+    }
+  }
+  output
+}
+
 .memory_process_rss_bytes <- function(pid, proc_root) {
   status <- .memory_read_lines(file.path(proc_root, pid, "status"))
   if (!length(status)) return(NULL)
@@ -226,11 +241,14 @@
     .read_process_tree_rss(pid = pid, proc_root = proc_root)
   } else NULL
   cgroup_current <- cgroup_max <- NULL
-  cgroup_events <- list()
+  cgroup_events <- cgroup_stat <- list()
+  cgroup_pressure <- list(some = NULL, full = NULL)
   if (isTRUE(include_cgroup)) {
     cgroup_current <- .memory_parse_scalar_file(file.path(cgroup_root, "memory.current"))
     cgroup_max <- .memory_parse_scalar_file(file.path(cgroup_root, "memory.max"), infinity = TRUE)
     cgroup_events <- .memory_parse_events(file.path(cgroup_root, "memory.events"))
+    cgroup_stat <- .memory_parse_events(file.path(cgroup_root, "memory.stat"))
+    cgroup_pressure <- .memory_parse_pressure(file.path(cgroup_root, "memory.pressure"))
   }
   captured_at <- now()
 
@@ -249,7 +267,9 @@
     anonymous_bytes = anonymous,
     cgroup_current_bytes = cgroup_current,
     cgroup_max_bytes = cgroup_max,
-    cgroup_events = cgroup_events
+    cgroup_events = cgroup_events,
+    cgroup_stat = cgroup_stat,
+    cgroup_pressure = cgroup_pressure
   )
 }
 
@@ -271,6 +291,8 @@
     cgroup_current_bytes = NULL,
     cgroup_max_bytes = NULL,
     cgroup_events = list(),
+    cgroup_stat = list(),
+    cgroup_pressure = list(some = NULL, full = NULL),
     tree_rss_bytes = NULL,
     tree_process_count = NULL,
     tree_captured_at = NULL,

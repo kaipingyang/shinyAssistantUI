@@ -45,6 +45,8 @@
 
 :root {
   --radius: 0.625rem;
+  --aui-link-color: #2563eb;
+  --aui-link-hover-color: #1d4ed8;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -74,6 +76,8 @@
 }
 
 .dark {
+  --aui-link-color: #60a5fa;
+  --aui-link-hover-color: #93c5fd;
   --background: oklch(0.141 0.005 285.823);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.21 0.006 285.885);
@@ -123,6 +127,30 @@
 
 .aui-root .text-primary {
   color: revert-layer !important;
+}
+
+/* Web links stay distinct from the neutral button primary and the host theme. */
+.aui-root a.aui-web-link[href] {
+  color: var(--aui-link-color);
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
+
+.aui-root a.aui-web-link[href]:hover,
+.aui-root a.aui-web-link[href]:focus-visible {
+  color: var(--aui-link-hover-color);
+}
+
+.aui-root a.aui-web-link[href]:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* bslib's unlayered code colors must not hide confirmed vs unresolved references. */
+.aui-root code.aui-md-inline-code {
+  background-color: revert-layer;
+  color: revert-layer;
 }
 
 /* Image-only user messages render an empty text part (<p><span data-status></span></p>)

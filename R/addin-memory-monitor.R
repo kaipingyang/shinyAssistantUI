@@ -17,10 +17,17 @@
   .memory_monitor_safe_number(floor(value * 1000))
 }
 
+.memory_monitor_percentage <- function(value) {
+  if (!is.numeric(value) || length(value) != 1L ||
+      !is.finite(value) || value < 0 || value > 100) return(NULL)
+  as.numeric(value)
+}
+
 .memory_monitor_exact_open <- function(value) {
   is.list(value) && identical(names(value), c(
     "version", "ownerId", "openId", "visible", "revision", "sample"
-  )) && (identical(value$version, 2L) || identical(value$version, 3L)) &&
+  )) && (identical(value$version, 2L) || identical(value$version, 3L) ||
+         identical(value$version, 4L)) &&
     !is.null(.settings_safe_integer(value$ownerId, positive = TRUE)) &&
     !is.null(.settings_safe_integer(value$openId, positive = TRUE)) &&
     .diagnostics_scalar_logical(value$visible) &&
@@ -44,9 +51,68 @@
   state$disposed <- FALSE
   state$revision <- 0
   state$latest <- NULL
+  state$cgroup_previous <- NULL
+  state$cgroup_deltas <- NULL
   state$owner_allocator <- 0
   state$serial <- 0L
   state$bindings <- new.env(hash = TRUE, parent = emptyenv())
+
+  safe_session <- function(sample) {
+    stat <- if (is.list(sample$cgroup_stat)) sample$cgroup_stat else list()
+    events <- if (is.list(sample$cgroup_events)) sample$cgroup_events else list()
+    pressure <- if (is.list(sample$cgroup_pressure)) sample$cgroup_pressure else list()
+    counters <- list(
+      limitEvents = .settings_safe_integer(events$max),
+      oomEvents = .settings_safe_integer(events$oom),
+      oomKillEvents = .settings_safe_integer(events$oom_kill)
+    )
+    at <- .memory_monitor_time_ms(sample$cgroup_captured_at)
+    previous <- state$cgroup_previous
+    deltas <- list(
+      limitEventsDelta = NULL, oomEventsDelta = NULL, oomKillEventsDelta = NULL,
+      intervalMs = NULL
+    )
+    if (at > 0 && !is.null(previous)) {
+      if (identical(at, previous$at)) {
+        # Fast RSS ticks reuse the same cgroup sample, not a new zero-event interval.
+        deltas <- state$cgroup_deltas
+      } else if (at > previous$at) {
+        deltas$intervalMs <- .settings_safe_integer(at - previous$at, positive = TRUE)
+        for (name in names(counters)) {
+          current <- counters[[name]]
+          before <- previous$counters[[name]]
+          if (!is.null(current) && !is.null(before) && current >= before) {
+            deltas[[paste0(name, "Delta")]] <- current - before
+          }
+        }
+      }
+    }
+    if (at == 0) {
+      state$cgroup_previous <- NULL
+    } else if (is.null(previous) || !identical(at, previous$at)) {
+      state$cgroup_previous <- list(at = at, counters = counters)
+    }
+    state$cgroup_deltas <- deltas
+    limit_kind <- "unknown"
+    if (!is.null(.settings_safe_integer(sample$cgroup_max_bytes))) {
+      limit_kind <- "limited"
+    } else if (identical(sample$cgroup_max_bytes, Inf)) {
+      limit_kind <- "unlimited"
+    }
+    c(list(
+      currentAvailable = !is.null(.settings_safe_integer(sample$cgroup_current_bytes)),
+      limitKind = limit_kind,
+      anonBytes = .settings_safe_integer(stat$anon),
+      fileBytes = .settings_safe_integer(stat$file),
+      inactiveFileBytes = .settings_safe_integer(stat$inactive_file),
+      shmemBytes = .settings_safe_integer(stat$shmem),
+      dirtyFileBytes = .settings_safe_integer(stat$file_dirty),
+      writebackFileBytes = .settings_safe_integer(stat$file_writeback)
+    ), counters, deltas, list(
+      psiSomeAvg10 = .memory_monitor_percentage(pressure$some),
+      psiFullAvg10 = .memory_monitor_percentage(pressure$full)
+    ))
+  }
 
   safe_sample <- function(sample, next_state) {
     cgroup_max <- sample$cgroup_max_bytes
@@ -67,7 +133,8 @@
       hardRssBytes = thresholds$hardRssBytes,
       sampledAt = .memory_monitor_time_ms(sample$captured_at),
       treeSampledAt = .memory_monitor_time_ms(sample$tree_captured_at),
-      cgroupSampledAt = .memory_monitor_time_ms(sample$cgroup_captured_at)
+      cgroupSampledAt = .memory_monitor_time_ms(sample$cgroup_captured_at),
+      session = safe_session(sample)
     )
   }
 
@@ -76,6 +143,7 @@
         !isTRUE(binding$expanded) || isTRUE(binding$sent_for_open) ||
         is.null(state$latest)) return(invisible(FALSE))
     sample <- state$latest
+    if (binding$version < 4L) sample$session <- NULL
     if (identical(binding$version, 2L)) {
       sample[c("sampledAt", "treeSampledAt", "cgroupSampledAt")] <- NULL
     }
@@ -136,7 +204,7 @@
     binding <- new.env(parent = emptyenv())
     binding$session <- session; binding$input_id <- as.character(input_id)[[1L]]
     binding$owner_id <- state$owner_allocator; binding$open_id <- 0
-    binding$version <- 3L
+    binding$version <- 4L
     binding$expanded <- FALSE; binding$sent_for_open <- FALSE
     binding$sent_revision <- 0; binding$retry_used <- FALSE
     binding$disposed <- FALSE; binding$observer <- NULL
@@ -183,7 +251,7 @@
     )
     session$onSessionEnded(function() dispose_binding(key))
     list(
-      config = list(version = 3L, ownerSeed = binding$owner_id,
+      config = list(version = 4L, ownerSeed = binding$owner_id,
                     lastRevision = binding$sent_revision),
       unbind = function() dispose_binding(key)
     )
@@ -194,6 +262,8 @@
     state$disposed <- TRUE
     for (key in ls(state$bindings, all.names = TRUE)) dispose_binding(key)
     state$latest <- NULL
+    state$cgroup_previous <- NULL
+    state$cgroup_deltas <- NULL
     TRUE
   }
 
@@ -211,7 +281,7 @@
   }
 
   list(
-    config = function() list(version = 3L, protocol = "latest-snapshot"),
+    config = function() list(version = 4L, protocol = "latest-snapshot"),
     observe = observe, bind = bind, dispose = dispose, snapshot = snapshot
   )
 }

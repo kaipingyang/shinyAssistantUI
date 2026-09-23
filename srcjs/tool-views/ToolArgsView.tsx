@@ -374,7 +374,7 @@ export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view
                   href={f.href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="break-all text-blue-700 underline dark:text-blue-300"
+                  className="aui-web-link break-all"
                 >
                   {f.value}
                 </a>

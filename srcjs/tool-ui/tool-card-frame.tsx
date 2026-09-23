@@ -178,7 +178,7 @@ export type ToolCard = ReturnType<typeof useToolCard>;
 // (pending && needsApproval && 未决策 时显示 meta + 传入的 approvalBody)+ 决策指示。
 export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approvalBody?: ReactNode }) {
   const { onOpenFile, lazyToolResults } = useShinyConfig();
-  const { opening, open: openFile } = useOpeningFile(onOpenFile);
+  const { opening, failed, open: openFile } = useOpeningFile(onOpenFile);
   const {
     toolName, displayArgs, argsText, result, status, timing, ann, registryKey,
     pending, needsApproval, decision, depth, open, setOpen,
@@ -281,9 +281,10 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
             <button
               type="button"
               data-open-file={filePath}
+              data-file-open-state={opening ? "opening" : failed ? "failed" : "idle"}
               aria-busy={opening}
-              aria-label={opening ? `Opening ${filePath}` : `Open ${filePath} in RStudio`}
-              title={opening ? `Opening ${filePath}…` : `Open ${filePath} in RStudio`}
+              aria-label={opening ? `Opening ${filePath}` : failed ? `Could not open ${filePath}. Retry` : `Open ${filePath} in RStudio`}
+              title={opening ? `Opening ${filePath}…` : failed ? `Could not open ${filePath}. Click to retry.` : `Open ${filePath} in RStudio`}
               onClick={() => openFile(filePath)}
               className="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex w-fit items-center gap-1 rounded px-1 py-0.5 text-[11px] transition-colors"
             >

@@ -5,6 +5,7 @@ suppressPackageStartupMessages({
 })
 main <- function() {
   source("tests/verify/owned_process_cleanup.R", local = TRUE)
+  source("tests/verify/window_error_capture.R", local = TRUE)
   `%||%` <- function(x, y) if (is.null(x)) y else x
   proj <- normalizePath(".", winslash = "/", mustWork = TRUE)
   port <- httpuv::randomPort()
@@ -37,7 +38,7 @@ main <- function() {
   chromote::set_chrome_args(unique(c(chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu")))
   b <- ChromoteSession$new(width = 620, height = 480)
   errs <- character()
-  b$Runtime$enable()
+  window_errors <- capture_browser_window_errors(b, function() "current-question")
   b$Runtime$consoleAPICalled(callback_ = function(m) {
     if (identical(m$type, "error")) {
       errs <<- c(errs, paste(vapply(m$args, function(a) as.character(a$value %||% a$description %||% ""), character(1)), collapse = " "))
@@ -103,6 +104,7 @@ main <- function() {
   b$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
   b$Page$loadEventFired()
   chk("widget mounted", wait("!!document.querySelector('.aui-root')", 12))
+  chk("direct window-error observer is installed", isTRUE(val("window.__auiWindowErrorProbeReady")))
   send("QUESTION ONE alpha", 1)
   send("QUESTION TWO beta", 2)
   send("QUESTION THREE gamma", 3)
@@ -128,6 +130,7 @@ main <- function() {
   ), barText())
 
   chk("no browser console errors", length(errs) == 0, if (length(errs)) paste(utils::head(errs, 3), collapse = " | ") else "0 errors")
+  chk("no direct window error events", length(window_errors()) == 0L)
   cleanup()
   if (length(failures)) stop("verification failed: ", paste(failures, collapse = ", "))
   cat("CURRENT_QUESTION_VERIFY_DONE\n")

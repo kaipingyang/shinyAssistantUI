@@ -26,15 +26,15 @@ memory_open <- function(binding, open_id, visible, revision = 0) list(
   visible = visible, revision = revision, sample = NULL
 )
 
-test_that("memory monitor advertises v3 latest-snapshot capability", {
+test_that("memory monitor advertises v4 latest-snapshot capability", {
   plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
   on.exit(plugin$dispose(), add = TRUE)
   expect_identical(plugin$config(), list(
-    version = 3L, protocol = "latest-snapshot"
+    version = 4L, protocol = "latest-snapshot"
   ))
   bound <- bind_memory_v2(plugin, "chat_input")
   expect_named(bound$binding$config, c("version", "ownerSeed", "lastRevision"))
-  expect_identical(bound$binding$config$version, 3L)
+  expect_identical(bound$binding$config$version, 4L)
   expect_gt(bound$binding$config$ownerSeed, 0)
 })
 
@@ -186,13 +186,14 @@ test_that("memory v3 exposes real sample times and keeps cached refreshes honest
   plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
   on.exit(plugin$dispose(), add = TRUE)
   bound <- bind_memory_v2(plugin, "timed_input")
-  expect_identical(bound$binding$config$version, 3L)
+  expect_identical(bound$binding$config$version, 4L)
   captured <- as.POSIXct("2026-09-18 09:17:43", tz = "UTC")
   plugin$observe(list(
     pss_bytes = 80, rss_bytes = 90,
     captured_at = captured,
     tree_captured_at = captured - 10,
-    cgroup_captured_at = captured - 10
+    cgroup_captured_at = captured - 10,
+    cgroup_stat = list(anon = 60, file = 40)
   ), "normal", "normal")
   request <- memory_open(bound$binding, 1, TRUE)
   request$version <- 3L
@@ -201,6 +202,7 @@ test_that("memory v3 exposes real sample times and keeps cached refreshes honest
   if (!length(bound$sent())) return(invisible(NULL))
   frame <- bound$sent()[[1L]]$message
   expect_identical(frame$version, 3L)
+  expect_false("session" %in% names(frame$sample))
   expect_identical(frame$sample$sampledAt, as.numeric(captured) * 1000)
   expect_identical(frame$sample$treeSampledAt, as.numeric(captured - 10) * 1000)
   expect_identical(frame$sample$cgroupSampledAt, as.numeric(captured - 10) * 1000)
@@ -210,4 +212,122 @@ test_that("memory v3 exposes real sample times and keeps cached refreshes honest
   expect_length(bound$sent(), 2L)
   expect_identical(bound$sent()[[2L]]$message$sample, frame$sample)
   expect_identical(bound$sent()[[2L]]$message$revision, frame$revision)
+})
+
+memory_v4_sample <- function(at, events = list(max = 12529, oom = 0, oom_kill = 0)) list(
+  pss_bytes = 300 * 1024^2, rss_bytes = 335 * 1024^2,
+  captured_at = at, cgroup_captured_at = at,
+  cgroup_current_bytes = 28 * 1024^3, cgroup_max_bytes = 30 * 1024^3,
+  cgroup_stat = list(anon = 1.75 * 1024^3, file = 26.25 * 1024^3,
+                     inactive_file = 26 * 1024^3, shmem = 0,
+                     file_dirty = 0, file_writeback = 0, private_path = "/PRIVATE"),
+  cgroup_events = events,
+  cgroup_pressure = list(some = 0.25, full = 0, private_prompt = "SECRET")
+)
+
+memory_v4_reader <- function(bound) {
+  opening <- 0
+  revision <- 0
+  function() {
+    opening <<- opening + 1
+    request <- memory_open(bound$binding, opening, TRUE, revision)
+    request$version <- 4L
+    bound$input(request)
+    expect_length(bound$sent(), opening)
+    frame <- bound$sent()[[opening]]$message
+    revision <<- frame$revision
+    frame$sample
+  }
+}
+
+test_that("memory v4 sends only allowlisted session fields with explicit nulls", {
+  plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
+  on.exit(plugin$dispose(), add = TRUE)
+  bound <- bind_memory_v2(plugin, "breakdown_input")
+  read <- memory_v4_reader(bound)
+  at <- as.POSIXct("2026-09-22 09:00:00", tz = "UTC")
+  plugin$observe(memory_v4_sample(at), "normal", "normal")
+  sample <- read()
+  expect_identical(bound$sent()[[1L]]$message$version, 4L)
+  expect_identical(sample$session, list(
+    currentAvailable = TRUE, limitKind = "limited",
+    anonBytes = 1.75 * 1024^3, fileBytes = 26.25 * 1024^3,
+    inactiveFileBytes = 26 * 1024^3, shmemBytes = 0,
+    dirtyFileBytes = 0, writebackFileBytes = 0,
+    limitEvents = 12529, oomEvents = 0, oomKillEvents = 0,
+    limitEventsDelta = NULL, oomEventsDelta = NULL, oomKillEventsDelta = NULL,
+    intervalMs = NULL, psiSomeAvg10 = 0.25, psiFullAvg10 = 0
+  ))
+  wire <- jsonlite::toJSON(sample, auto_unbox = TRUE, null = "null")
+  expect_match(wire, '"limitEventsDelta":null', fixed = TRUE)
+  expect_false(grepl("SECRET|PRIVATE|private_", wire))
+  expect_identical(read(), sample)
+})
+
+test_that("session counter deltas follow actual samples, not refreshes or fast RSS ticks", {
+  plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
+  on.exit(plugin$dispose(), add = TRUE)
+  bound <- bind_memory_v2(plugin, "delta_input")
+  read <- memory_v4_reader(bound)
+  at <- as.POSIXct("2026-09-22 09:00:00", tz = "UTC")
+  plugin$observe(memory_v4_sample(at), "normal", "normal")
+  expect_null(read()$session$intervalMs)
+  sample <- memory_v4_sample(at + 10, list(max = 12532, oom = 1, oom_kill = 0))
+  plugin$observe(sample, "normal", "normal")
+  delta <- read()$session
+  expect_identical(delta$intervalMs, 10000)
+  expect_identical(delta$limitEventsDelta, 3)
+  expect_identical(delta$oomEventsDelta, 1)
+  expect_identical(delta$oomKillEventsDelta, 0)
+  sample$captured_at <- at + 15
+  plugin$observe(sample, "normal", "normal")
+  expect_identical(read()$session, delta)
+  expect_identical(read()$session, delta)
+
+  plugin$observe(memory_v4_sample(at + 20, list(max = 2, oom = 2, oom_kill = 0)),
+                 "normal", "normal")
+  reset <- read()$session
+  expect_null(reset$limitEventsDelta)
+  expect_identical(reset$oomEventsDelta, 1)
+  expect_identical(reset$intervalMs, 10000)
+  plugin$observe(memory_v4_sample(at + 19), "normal", "normal")
+  rollback <- read()$session
+  expect_null(rollback$intervalMs)
+  expect_null(rollback$limitEventsDelta)
+  sample$cgroup_captured_at <- NULL
+  plugin$observe(sample, "normal", "normal")
+  missing <- read()$session
+  expect_null(missing$intervalMs)
+  expect_null(missing$oomEventsDelta)
+  plugin$observe(memory_v4_sample(at + 30), "normal", "normal")
+  expect_null(read()$session$intervalMs)
+})
+
+test_that("session unavailable fields differ from valid zero and explicit unlimited", {
+  plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(memory_v2_config())
+  on.exit(plugin$dispose(), add = TRUE)
+  bound <- bind_memory_v2(plugin, "missing_input")
+  read <- memory_v4_reader(bound)
+  plugin$observe(list(), "normal", "normal")
+  missing <- read()$session
+  expect_false(missing$currentAvailable)
+  expect_identical(missing$limitKind, "unknown")
+  expect_true(all(vapply(missing[-c(1L, 2L)], is.null, logical(1))))
+
+  plugin$observe(list(
+    cgroup_current_bytes = 0, cgroup_max_bytes = Inf,
+    cgroup_stat = list(anon = -1, file = 1.5, inactive_file = 2^53,
+                       shmem = "0", file_dirty = NA_real_, file_writeback = 0),
+    cgroup_events = list(max = -1, oom = Inf, oom_kill = 0),
+    cgroup_pressure = list(some = 101, full = 0)
+  ), "normal", "normal")
+  zero <- read()$session
+  expect_true(zero$currentAvailable)
+  expect_identical(zero$limitKind, "unlimited")
+  for (field in c("anonBytes", "fileBytes", "inactiveFileBytes", "shmemBytes",
+                  "dirtyFileBytes", "limitEvents", "oomEvents", "psiSomeAvg10"))
+    expect_null(zero[[field]])
+  expect_identical(zero$writebackFileBytes, 0)
+  expect_identical(zero$oomKillEvents, 0)
+  expect_identical(zero$psiFullAvg10, 0)
 })

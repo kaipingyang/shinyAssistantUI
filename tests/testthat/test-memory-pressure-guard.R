@@ -16,6 +16,13 @@ test_that("Linux process memory snapshot separates PSS RSS and cgroup metrics", 
   writeLines("max", file.path(cgroup, "memory.max"))
   writeLines(c("low 1", "high 2", "oom 3", "oom_kill 4"),
              file.path(cgroup, "memory.events"))
+  writeLines(c("anon 1234", "file 4096", "inactive_file 3072", "shmem 128",
+               "file_dirty 0", "file_writeback 64"),
+             file.path(cgroup, "memory.stat"))
+  writeLines(c(
+    "some avg10=1.25 avg60=0.50 avg300=0.10 total=12345",
+    "full avg10=0.00 avg60=0.00 avg300=0.00 total=12"
+  ), file.path(cgroup, "memory.pressure"))
 
   snapshot <- .read_linux_memory_snapshot(
     pid = pid, proc_root = root, cgroup_root = cgroup,
@@ -31,6 +38,24 @@ test_that("Linux process memory snapshot separates PSS RSS and cgroup metrics", 
   expect_identical(snapshot$cgroup_current_bytes, 123456789)
   expect_true(is.infinite(snapshot$cgroup_max_bytes))
   expect_identical(snapshot$cgroup_events$oom_kill, 4)
+  expect_identical(snapshot$cgroup_stat, list(
+    anon = 1234, file = 4096, inactive_file = 3072, shmem = 128,
+    file_dirty = 0, file_writeback = 64
+  ))
+  expect_identical(snapshot$cgroup_pressure, list(some = 1.25, full = 0))
+})
+
+test_that("PSI preserves valid zero and does not turn missing or invalid data into zero", {
+  path <- tempfile("memory-pressure-")
+  on.exit(unlink(path), add = TRUE)
+  expect_identical(.memory_parse_pressure(path), list(some = NULL, full = NULL))
+  for (invalid in c("-1", "101", "NaN", "Inf", "bad")) {
+    writeLines(c(paste0("some avg10=", invalid, " avg60=0 total=0"),
+                 "full avg60=0 avg300=0 total=0"), path)
+    expect_identical(.memory_parse_pressure(path), list(some = NULL, full = NULL))
+  }
+  writeLines(c("some avg10=0.00 avg60=0 total=0", "full avg10=100.00 total=1"), path)
+  expect_identical(.memory_parse_pressure(path), list(some = 0, full = 100))
 })
 
 test_that("Linux process memory snapshot falls back to status and fails open", {
@@ -641,12 +666,18 @@ test_that("cached tree and cgroup retain their own original sample times", {
   writeLines(c("Rss: 2048 kB", "Pss: 1536 kB"), file.path(proc, "smaps_rollup"))
   writeLines("4096", file.path(cgroup, "memory.current"))
   writeLines("8192", file.path(cgroup, "memory.max"))
+  writeLines(c("anon 1024", "file 3072", "inactive_file 2048"),
+             file.path(cgroup, "memory.stat"))
+  writeLines("some avg10=1.25 total=10", file.path(cgroup, "memory.pressure"))
   clock <- as.POSIXct("2026-09-18 09:00:00", tz = "UTC")
   sampler <- .new_linux_memory_guard_sampler(
     pid = pid, proc_root = root, cgroup_root = cgroup,
     cgroup_every = 3L, pss_trigger_bytes = 1, now = function() clock
   )
   first <- sampler()
+  writeLines(c("anon 2048", "file 2048", "inactive_file 1024"),
+             file.path(cgroup, "memory.stat"))
+  writeLines("some avg10=2.50 total=20", file.path(cgroup, "memory.pressure"))
   clock <- clock + 5
   second <- sampler()
   clock <- clock + 5
@@ -654,6 +685,12 @@ test_that("cached tree and cgroup retain their own original sample times", {
   expect_equal(as.numeric(second$captured_at - first$captured_at), 5)
   expect_identical(second$tree_captured_at, first$captured_at)
   expect_identical(second$cgroup_captured_at, first$captured_at)
+  expect_identical(second$cgroup_stat, first$cgroup_stat)
+  expect_identical(second$cgroup_pressure, first$cgroup_pressure)
+  expect_identical(second$cgroup_stat$inactive_file, 2048)
+  expect_identical(second$cgroup_pressure$some, 1.25)
   expect_identical(third$tree_captured_at, third$captured_at)
   expect_identical(third$cgroup_captured_at, third$captured_at)
+  expect_identical(third$cgroup_stat$inactive_file, 1024)
+  expect_identical(third$cgroup_pressure$some, 2.5)
 })

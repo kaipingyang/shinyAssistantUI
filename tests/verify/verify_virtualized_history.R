@@ -6,6 +6,7 @@ suppressPackageStartupMessages({
 
 main <- function() {
   source("tests/verify/owned_process_cleanup.R", local = TRUE)
+  source("tests/verify/window_error_capture.R", local = TRUE)
   `%||%` <- function(x, y) if (is.null(x)) y else x
   project <- normalizePath(".", winslash = "/", mustWork = TRUE)
   expected <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4/shinyAssistantUI"
@@ -40,7 +41,7 @@ main <- function() {
   browser <- ChromoteSession$new(width = 1000, height = 720)
   errors <- character()
   network_errors <- character()
-  browser$Runtime$enable()
+  window_errors <- capture_browser_window_errors(browser, function() "virtualized-history")
   browser$Network$enable()
   browser$Runtime$consoleAPICalled(callback_ = function(event) {
     if (identical(event$type, "error")) {
@@ -86,6 +87,7 @@ main <- function() {
   browser$Page$navigate(sprintf("http://127.0.0.1:%d", port))
   browser$Page$loadEventFired()
   check("fixture sessions arrive", wait_for("document.body.innerText.includes('Virtual History')"))
+  check("direct window-error observer is installed", isTRUE(value("window.__auiWindowErrorProbeReady")))
   check("history opens through the real sidebar", open_history("Virtual History"))
   check("latest history loads", wait_for(
     "document.querySelector('[data-message-id=\"history-360\"]') && document.querySelector('[data-slot=aui_virtualized-messages]')?.dataset.messageCount==='90'"
@@ -189,9 +191,10 @@ main <- function() {
   ))
   check("stream remains bottom aligned", wait_for("vp.scrollHeight-vp.clientHeight-vp.scrollTop<4"))
   check("console/runtime errors", length(errors) == 0L, paste(errors, collapse = " | "))
+  check("direct window errors", length(window_errors()) == 0L)
   check("network failures", length(network_errors) == 0L, paste(network_errors, collapse = " | "))
-  cat(sprintf("VIRTUALIZED_HISTORY_PASS mounted=%s errors=%d network=%d\n",
-              value("rows().length"), length(errors), length(network_errors)))
+  cat(sprintf("VIRTUALIZED_HISTORY_PASS mounted=%s errors=%d window=%d network=%d\n",
+              value("rows().length"), length(errors), length(window_errors()), length(network_errors)))
   cleanup()
 }
 main()

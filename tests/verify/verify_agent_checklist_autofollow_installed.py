@@ -8,6 +8,7 @@ async def main(url: str, expected_version: str = "") -> None:
     failures: list[str] = []
     console_errors: list[str] = []
     runtime_errors: list[str] = []
+    window_errors: list[dict] = []
     network_errors: list[str] = []
     http_errors: list[str] = []
     websocket_urls: list[str] = []
@@ -25,6 +26,20 @@ async def main(url: str, expected_version: str = "") -> None:
         )
         try:
             page = await browser.new_page(viewport={"width": 1000, "height": 900})
+            await page.expose_binding(
+                "auiVerificationWindowError",
+                lambda _source, detail: window_errors.append(detail),
+            )
+            await page.add_init_script(
+                """window.__auiWindowErrorProbeReady=true;
+                window.addEventListener('error', event => {
+                  window.auiVerificationWindowError({
+                    message: event.message || '',
+                    hasErrorObject: Boolean(event.error),
+                    stack: String(event.error?.stack || '').slice(0, 2000)
+                  });
+                });"""
+            )
             page.on(
                 "console",
                 lambda message: console_errors.append(message.text)
@@ -48,6 +63,7 @@ async def main(url: str, expected_version: str = "") -> None:
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_selector(".aui-root", timeout=30000)
+            await page.wait_for_function("window.__auiWindowErrorProbeReady===true")
             await page.wait_for_function(
                 "Boolean(window.Shiny?.shinyapp?.$socket) && "
                 "window.Shiny.shinyapp.$socket.readyState === 1",
@@ -284,6 +300,7 @@ async def main(url: str, expected_version: str = "") -> None:
             check("Shiny WebSocket remains open", bool(websocket_urls) and bool(websocket_open))
             check("no console errors", not console_errors, " | ".join(console_errors[:3]))
             check("no runtime exceptions", not runtime_errors, " | ".join(runtime_errors[:3]))
+            check("no direct window error events", not window_errors, str(window_errors[:3]))
             check("no failed network requests", not network_errors, " | ".join(network_errors[:3]))
             check("no HTTP errors", not http_errors, " | ".join(http_errors[:3]))
         finally:

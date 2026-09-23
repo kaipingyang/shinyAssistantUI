@@ -2,6 +2,7 @@
 
 main <- function() {
   source("tests/verify/owned_process_cleanup.R", local = TRUE)
+  source("tests/verify/window_error_capture.R", local = TRUE)
   home_lib <- "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4"
   site_lib <- "/posit_share/site_library_u/4.4.3"
   .libPaths(c(home_lib, site_lib, .libPaths()))
@@ -63,7 +64,11 @@ main <- function() {
   runtime_errors <- character()
   network_errors <- character()
   `%||%` <- function(x, y) if (is.null(x)) y else x
-  b$Runtime$enable()
+  current_stage <- "lazy-tools"
+  window_errors <- capture_browser_window_errors(
+    b, function() current_stage,
+    trace_resize = identical(Sys.getenv("AUI_TRACE_RESIZE_OBSERVERS"), "1")
+  )
   b$Network$enable()
   b$Runtime$consoleAPICalled(callback_ = function(m) {
     if (identical(m$type, "error")) {
@@ -115,6 +120,7 @@ main <- function() {
     }
     cat("PASS:", label, "\n")
   }
+  assert(isTRUE(ev("window.__auiWindowErrorProbeReady")), "direct window-error observer is installed")
   activate_control <- function(selector) {
     encoded <- jsonlite::toJSON(selector, auto_unbox = TRUE)
     assert(isTRUE(ev(sprintf(
@@ -173,6 +179,7 @@ main <- function() {
     !isTRUE(ev("document.body.innerText.includes('LAZY-LIVE-LINE-00001')")),
     "collapsed live body is absent from DOM"
   )
+  assert(wait_for(sprintf("!!(%s)", write_trigger)), "complete Write card arrives")
   assert(
     identical(ev(sprintf("(%s).getAttribute('aria-expanded')", write_trigger)), "true"),
     "Write remains default-open"
@@ -280,6 +287,7 @@ main <- function() {
   )
 
   # Restore history and prove its large result is also metadata-only until opened.
+  current_stage <- "history-switch-after-question-and-large-result"
   ev("(function(){const e=Array.from(document.querySelectorAll('*')).find(x=>x.textContent.trim()==='Lazy history');if(!e)return false;(e.closest('button')||e).click();return true})()")
   history_trigger <- trigger_js("Bash(synthetic history result)")
   assert(wait_for(sprintf("!!(%s)", history_trigger), 20), "history thread restored")
@@ -305,6 +313,7 @@ main <- function() {
   Sys.sleep(1)
   all_errors <- c(console_errors, runtime_errors)
   assert(length(all_errors) == 0L, "zero console/runtime errors")
+  assert(length(window_errors()) == 0L, "zero direct window error events")
   assert(length(network_errors) == 0L, "zero network loading failures")
   cleanup()
   cat("SUMMARY lazy tool UI browser verification: PASS\n")

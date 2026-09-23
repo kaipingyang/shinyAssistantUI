@@ -4,6 +4,7 @@ suppressPackageStartupMessages({
   library(callr)
 })
 source("tests/verify/owned_process_cleanup.R")
+source("tests/verify/window_error_capture.R")
 
 main <- function() {
   project <- normalizePath(".")
@@ -41,13 +42,15 @@ main <- function() {
     chromote::default_chrome_args(), "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu",
     "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"
   )))
-  browser <- ChromoteSession$new(width = 1100, height = 1050)
+  # Page must remain enabled to preserve the preload error listener across reloads.
+  browser <- ChromoteSession$new(width = 1100, height = 1050, auto_events = FALSE)
   browser$Emulation$setDeviceMetricsOverride(
     width = 1100L, height = 1050L, deviceScaleFactor = 1, mobile = FALSE
   )
   browser$Emulation$setTouchEmulationEnabled(enabled = FALSE)
   browser$Runtime$enable()
   browser$Network$enable()
+  window_errors <- capture_browser_window_errors(browser)
   browser$Runtime$consoleAPICalled(callback_ = function(event) {
     if (identical(event$type, "error")) errors <<- c(errors, "console.error")
   })
@@ -123,15 +126,23 @@ main <- function() {
       "(()=>{const rgb=getComputedStyle(document.body).getPropertyValue('--bs-primary-rgb').trim().split(',').map(Number),expected=`rgb(${rgb.join(', ')})`;return getComputedStyle(document.getElementById('host_theme_background')).backgroundColor===expected&&getComputedStyle(document.getElementById('host_theme_text')).color===expected})()"
     ))
   }
+  link_palette <- function(id) {
+    value(sprintf(
+      "(()=>{const root=document.getElementById('%s'),link=root.querySelector('[data-slot=aui_assistant-text] a.aui-web-link'),thread=root.querySelector('.aui-thread-root');if(!link)return null;const c=new OffscreenCanvas(1,1),x=c.getContext('2d'),rgb=color=>{x.clearRect(0,0,1,1);x.fillStyle=color;x.fillRect(0,0,1,1);return [...x.getImageData(0,0,1,1).data]};const s=getComputedStyle(link),fg=rgb(s.color),bg=rgb(getComputedStyle(thread).backgroundColor),lum=rgb=>{const v=rgb.slice(0,3).map(n=>n/255).map(n=>n<=.04045?n/12.92:((n+.055)/1.055)**2.4);return .2126*v[0]+.7152*v[1]+.0722*v[2]},a=lum(fg),b=lum(bg);return {color:fg,underline:s.textDecorationLine.includes('underline'),contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05),href:link.getAttribute('href'),target:link.target,rel:link.rel}})()",
+      id
+    ))
+  }
   scheme("light")
   browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
   browser$Page$loadEventFired()
   check("three installed theme widgets mount", wait_for("['chat_light','chat_dark','chat_auto'].every(id=>document.getElementById(id)?.querySelectorAll('.aui-thread-root').length===1)"))
+  check("window-error capture is active on initial load", isTRUE(value("window.__auiWindowErrorProbeReady===true")))
+  host_link_color <- value("getComputedStyle(document.getElementById('host_web_link')).color")
   check("desktop mouse hover is available", isTRUE(value("matchMedia('(hover:hover)').matches")))
   initial <- palette()
   cat("INITIAL_PALETTES ", jsonlite::toJSON(initial, auto_unbox = TRUE), "\n", sep = "")
   check("light theme uses scoped CSS-ready tokens", isTRUE(value(
-    "document.getElementById('chat_light').style.getPropertyValue('--primary')==='#2563eb'&&document.getElementById('chat_light').style.getPropertyValue('--background')==='#eff6ff'"
+    "document.getElementById('chat_light').style.getPropertyValue('--primary')==='#a21caf'&&document.getElementById('chat_light').style.getPropertyValue('--background')==='#eff6ff'"
   )))
   check("custom background actually paints the light widget", identical(initial[[1L]]$background, "rgb(239, 246, 255)"))
   check("custom radius reaches the widget", identical(initial[[1L]]$radius, "1rem"))
@@ -155,13 +166,13 @@ main <- function() {
     if (mode == "light") {
       check("light Send button becomes enabled", wait_for("document.querySelector('#chat_light .aui-composer-send')?.disabled===false"))
       check("custom primary paints the enabled Send button", wait_for(
-        "(()=>{const e=document.querySelector('#chat_light .aui-composer-send');return e&&!e.disabled&&getComputedStyle(e).backgroundColor==='rgb(37, 99, 235)'})()"
+        "(()=>{const e=document.querySelector('#chat_light .aui-composer-send');return e&&!e.disabled&&getComputedStyle(e).backgroundColor==='rgb(162, 28, 175)'})()"
       ))
       rgba <- hover_rgba("#chat_light .aui-composer-send", "backgroundColor")
       cat("SEND_HOVER_RGBA ", paste(rgba, collapse = ","), "\n", sep = "")
       check(
         "Send hover retains the themed 80 percent alpha",
-        length(rgba) == 4L && all(abs(rgba - c(37, 99, 235, 204)) <= 1)
+        length(rgba) == 4L && all(abs(rgba - c(162, 28, 175, 204)) <= 1)
       )
     }
     browser$Input$dispatchKeyEvent(type = "keyDown", key = "Enter", code = "Enter", windowsVirtualKeyCode = 13L)
@@ -171,16 +182,26 @@ main <- function() {
       id, mode, id
     )))
     if (mode == "light") {
-      check("custom primary paints assistant links", wait_for(
+      check("assistant links stay blue independently of the custom purple primary", wait_for(
         "(()=>{const e=document.querySelector('#chat_light [data-slot=aui_assistant-text] a');return !!e&&getComputedStyle(e).color==='rgb(37, 99, 235)'})()"
       ))
       rgba <- hover_rgba("#chat_light [data-slot=aui_assistant-text] a", "color")
       cat("LINK_HOVER_RGBA ", paste(rgba, collapse = ","), "\n", sep = "")
       check(
-        "link hover retains the themed 80 percent alpha",
-        length(rgba) == 4L && all(abs(rgba - c(37, 99, 235, 204)) <= 1)
+        "link hover retains opaque readable blue",
+        length(rgba) == 4L && all(abs(rgba - c(29, 78, 216, 255)) <= 1)
       )
     }
+    link <- link_palette(id)
+    expected <- c(37L, 99L, 235L, 255L)
+    if (mode == "dark") expected <- c(96L, 165L, 250L, 255L)
+    cat("LINK_PALETTE ", jsonlite::toJSON(link, auto_unbox = TRUE), "\n", sep = "")
+    check(paste(id, "uses the correct light/dark link palette"),
+          identical(as.integer(unlist(link$color)), expected))
+    check(paste(id, "links remain underlined and meet AA contrast"),
+          isTRUE(link$underline) && link$contrast >= 4.5)
+    check(paste(id, "preserves safe external-link behavior"),
+          identical(link$target, "_blank") && identical(link$rel, "noopener noreferrer"))
     check(paste(id, "does not leak replies to another widget"), isTRUE(value(sprintf(
       "['chat_light','chat_dark','chat_auto'].filter(id=>id!=='%s').every(id=>!document.getElementById(id).innerText.includes('Theme reply: %s theme question'))",
       id, mode
@@ -194,6 +215,9 @@ main <- function() {
   check("auto mode follows a system dark change", wait_for("document.getElementById('chat_auto').classList.contains('dark')"))
   dark <- palette()
   check("auto dark paints the same palette as fixed dark", identical(dark[[2L]]$background, dark[[3L]]$background))
+  check("auto links follow the dark palette", identical(
+    as.integer(unlist(link_palette("chat_auto")$color)), c(96L, 165L, 250L, 255L)
+  ))
   check(
     "system dark does not alter the explicit light theme",
     !dark[[1L]]$dark && identical(dark[[1L]]$background, initial[[1L]]$background)
@@ -207,19 +231,27 @@ main <- function() {
       identical(restored[[3L]]$background, initial[[3L]]$background)
   )
   check("system scheme changes leave host colors unchanged", host_colors_unchanged())
+  check("widget link rules do not recolor host links", identical(
+    value("getComputedStyle(document.getElementById('host_web_link')).color"), host_link_color
+  ))
 
   browser$Page$reload()
   browser$Page$loadEventFired()
+  check("window-error capture survives reload", isTRUE(value("window.__auiWindowErrorProbeReady===true")))
   for (mode in c("light", "dark", "auto")) {
     check(paste(mode, "theme history survives reload"), wait_for(sprintf(
       "document.getElementById('chat_%s')?.innerText.includes('Theme reply: %s theme question')", mode, mode
     )))
   }
   check("all scoped palettes survive reload", identical(palette(), initial))
+  check("restored history links retain the independent blue palette", identical(
+    as.integer(unlist(link_palette("chat_light")$color)), c(37L, 99L, 235L, 255L)
+  ))
   check("host colors remain unchanged after reload", host_colors_unchanged())
   scheme("dark")
   check("remounted auto theme keeps its live media listener", wait_for("document.getElementById('chat_auto').classList.contains('dark')"))
   check("zero console errors or runtime exceptions", length(errors) == 0L)
+  check("zero direct window errors", length(window_errors()) == 0L)
   check("zero network or HTTP errors", length(network_errors) == 0L)
   if (length(failures)) {
     stop("Theme verification failed: ", paste(failures, collapse = ", "), call. = FALSE)

@@ -4,6 +4,70 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useShinyRuntime } from "./runtime";
 
+describe("confirmed file references", () => {
+  it("keeps an open pending until its matching backend acknowledgement arrives", async () => {
+    const { result } = setup({ file_open: true, file_open_protocol: 1 });
+    const threadId = currentThreadId(result);
+    let opened: Promise<boolean> | void;
+    act(() => { opened = result.current.openFile("R/app.R", 17); });
+    const request = inputs.filter((item) => item.id === "test_open_file").at(-1)!.value;
+    expect(request).toMatchObject({ version: 1, path: "R/app.R", line: 17, threadId });
+    expect(typeof request.requestId).toBe("string");
+    await fireR("file-open-result", {
+      version: 1, requestId: request.requestId, threadId, ok: true,
+    });
+    await expect(opened).resolves.toBe(true);
+  });
+
+  it("uses structured hints but not Bash guesses after history load and isolates threads", async () => {
+    const { result } = setup({ persistence: "server", file_open: true, file_reference_protocol: 1 });
+    await fireR("sessions", { sessions: [{ id: "file-history", title: "File history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread("file-history"));
+    const request = inputs.filter((item) => item.value?.type === "load_session").at(-1)!.value;
+    await fireR("load-thread", {
+      threadId: "file-history", requestId: request.requestId,
+      messages: [
+        { id: "file-history-text", role: "assistant",
+          content: [{ type: "text", text: "Now update `settings.json:7`." }] },
+        { id: "file-history-bash", role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "history-bash", toolName: "Bash",
+            args: { command: "ls -l ~/.config/example/settings.json" }, result: "Listed" }] },
+        { id: "file-history-read", role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "history-read", toolName: "Read",
+            args: { file_path: "~/.config/example/known.json" }, result: "Read" }] },
+      ],
+    });
+    expect(result.current.fileReferences?.candidate("settings.json")).toBe("settings.json");
+    expect(result.current.fileReferences?.candidate("known.json")).toBe("~/.config/example/known.json");
+    const view = result.current.fileReferences!;
+    const unsubscribe = view.client.subscribe(view, "settings.json", () => {});
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    const check = inputs.filter((item) => item.id === "test_resolve_files").at(-1)!.value;
+    expect(check).toMatchObject({ version: 1, threadId: "file-history", paths: ["settings.json"] });
+    await fireR("file-references", {
+      version: 1, requestId: check.requestId, threadId: "file-history",
+      files: [{ path: "settings.json", resolvedPath: null }],
+    });
+    expect(view.client.getSnapshot(view, "settings.json")).toBeNull();
+    unsubscribe();
+    await act(async () => result.current.switchToNewThread());
+    const freshId = currentThreadId(result);
+    expect(result.current.fileReferences?.threadId).toBe(freshId);
+    expect(result.current.fileReferences?.candidate("known.json")).toBe("known.json");
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("List the active config");
+      await result.current.runtime.thread.composer.send();
+    });
+    await fireR("tool-call", {
+      threadId: freshId, toolCallId: "live-read", toolName: "Read",
+      args: { file_path: "/tmp/other-project/known.json" },
+    });
+    await act(async () => result.current.openFile("/tmp/other-project/known.json", 9));
+    expect(inputs.filter((item) => item.id === "test_open_file").at(-1)?.value)
+      .toMatchObject({ path: "/tmp/other-project/known.json", line: 9, threadId: freshId });
+  });
+});
+
 describe("long-task error recovery", () => {
   it("renders background approval after cold history load without starting a foreground run", async () => {
     const { result } = setup({ persistence: "server" });

@@ -285,8 +285,8 @@ initial_settings_owner <- as.numeric(value(db,
 check("memory monitor expanded", click_selector(db, "button[aria-label='Memory monitor']"))
 check("memory monitor expanded in viewport", wait_for(db,
   "document.querySelector('button[aria-label=\"Memory monitor\"]')?.getAttribute('aria-expanded') === 'true'", 8))
-check("expanded visibility reaches R with exact v3 envelope", wait_for(db,
-  "(function(){const v=((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible'];return v?.version===3&&v?.visible===true&&v?.sample===null&&Object.keys(v).length===6;})()", 8))
+check("expanded visibility reaches R with exact v4 envelope", wait_for(db,
+  "(function(){const v=((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible'];return v?.version===4&&v?.visible===true&&v?.sample===null&&Object.keys(v).length===6;})()", 8))
 check("first opening freezes latest collapsed observation", wait_for(db,
   "document.querySelector('[data-slot=aui_memory_monitor_content]')?.innerText.includes('PSS 25.0 MB')", 8))
 check("memory v2 renders no history rows", identical(as.integer(value(db,
@@ -351,7 +351,7 @@ check("remounted settings controls appear", wait_for(db,
   "!!document.querySelector('[data-slot=aui_diagnostics_settings]')", 8))
 check("remounted memory monitor opens", click_selector(db, "button[aria-label='Memory monitor']"))
 check("memory remount uses a higher owner accepted by R", wait_for(db, sprintf(
-  "(function(){const v=((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible'];return v?.version===3&&v?.visible===true&&v?.ownerId>%s&&v?.openId===1&&v?.sample===null;})()",
+  "(function(){const v=((window.Shiny&&Shiny.shinyapp&&Shiny.shinyapp.$inputValues)||{})['chat_input_memory_monitor_visible'];return v?.version===4&&v?.visible===true&&v?.ownerId>%s&&v?.openId===1&&v?.sample===null;})()",
   initial_memory_owner
 ), 8))
 check("memory remount still receives the latest frozen snapshot", wait_for(db,

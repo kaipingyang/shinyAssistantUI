@@ -258,10 +258,77 @@ devtools::build()      # build tarball
 
 ## Gotchas
 
+### 历史侧栏搜索与目录覆盖（Plan 151）
+
+`thread-search.ts` 只索引已加载会话标题和已有 `custom.preview`，按 NFKC、
+大小写无关的字面子串匹配；不读取正文、不临时生成摘要、不逐键请求 R。
+Claude SDK 的首条提问预览约 200 字，`sessionsToWorkspaceThreads()` 必须保留它。
+普通/Workspace addin 列举元数据时显式 `limit=NULL`，避免漏掉第 100 条之后的会话；
+公开 `list_claude_sessions()` 的默认值仍是 100，调用方可显式传 `NULL`。
+
+渲染先按完整元数据筛选，再分页（首批 100）。`ItemByIndex` 必须使用原运行时索引，
+不能用筛选后数组的下标。Workspace 搜索仅临时展开匹配项目，清除后恢复用户的
+折叠选择；搜索全局分页不能按项目叠加成无限量 DOM。`verify_history_search.R`
+用 2,001 条合成元数据、双实例、历史工具恢复和三轮有/无预览对照验收。
+
+### 网页链接与按钮主色分离（Plan 152）
+
+助手/工具 Markdown 和 URL 参数使用 `.aui-web-link[href]`，在 `.aui-root` 内
+应用 `--aui-link-color` / `--aui-link-hover-color`：浅色 `#2563EB` / `#1D4ED8`，
+深色 `#60A5FA` / `#93C5FD`。保留下划线及键盘焦点，不能重新绑定灰阶 `--primary`，
+也不能全局改宿主的 `a`。无有效 `href` 的文本不使用链接色；本地文件引用保持自身确认协议。
+`verify_theme.R` 检查实际颜色与对比度、紫色按钮与蓝色链接隔离、系统主题切换和历史恢复。
+
+### 文件确认调度与首击回执（Plan 150）
+
+R 的 file-reference queue 每次最多4条，并在调用之间检查8ms预算；后续用1ms
+正延迟让出，至多1个owned timer。新请求退役旧工作，session teardown取消；
+resolver在显式Shiny domain与isolate中执行，不能恢复整批32条同步lapply。
+单次文件系统调用仍不可抢占，也可能超过8ms预算。
+
+确认缓存重验时保留同scope的旧positive结果，明确negative才撤掉链接；不能把首次
+未确认文件变成链接，也不能让旧request/thread/project回执操作新视图。
+file-open v1回执按requestId/thread匹配；Opening等待真实回执，重复pending点击合并，
+超时仅报告失败，不自动重放。旧无回执callback保留1500ms反馈。
+显式点击传focus=TRUE并直接navigateToFile（同文件也定位/聚焦），自动edit reveal传
+focus=FALSE才使用当前文件跳过逻辑。测试使用合成文件与IDE seam，不打开用户配置。
+
+### 行内文件引用必须先确认（Plan 148）
+
+文件扩展名只用于识别候选，不代表可以打开。`file-reference.ts` 仅订阅已挂载
+行内引用，25ms 合批、每批最多32条、每 widget 至多1批在途；按 thread/project
+隔离并缓存，未订阅项有界淘汰。历史替换、重开和前台结束失效相关缓存，禁止每次
+render 扫盘或新增轮询。只有后端确认的引用有蓝底、虚线、button语义与点击处理；
+未知/不存在/歧义引用保持灰色行内代码。
+
+`assistantUIServer(file_reference_resolver=)` 为可选追加参数，配合 `on_open_file`
+自动启用 v1 批量确认。addin 复用 `.addin_resolve_file_path`：显式 `~/` 先展开，
+普通相对路径必须留在项目内，裸名仅查询已经热过的 workspace index，且必须唯一。
+候选须为可读普通文件；不读取文件内容，不从 Bash 命令文本猜路径。
+打开时再确认，文件被删除或 IDE 导航失败要通知，不能静默假装成功。
+`verify_file_reference_confirmation.R` 在隔离 Home 与合成历史验证灰态、真实点击、
+行号、批量与线程隔离，不读取用户实际配置文件。
+
+### 会话内存口径与快照协议（Plan 147）
+
+Performance Orb 的 `Plugin guard` 只说明插件进程 PSS/RSS，不代表整个 Session 健康。
+`Raw total` 是含缓存的 cgroup 用量；工作集**估计**为 `current - inactive_file`，
+缺失或 `inactive_file > current` 时显示 Unavailable，不能当成精确可分配预算。
+`file` 包含 shmem，不应全部称为可立即回收缓存；dirty/writeback 分开展示。
+
+独立 memory-monitor 协议默认 v4，严格 allowlist 的 `session` 保存 nullable
+stat、PSI avg10、累计计数及采样间增量；旧 v2/v3 帧保持原形状。
+增量窗口取真实 `cgroup_captured_at`，不是点击 Refresh 的间隔；快 RSS tick
+复用缓存窗口，首样本、计数回退或时间缺失不能伪造零增量。只有明确的 `max`
+表示 Unlimited；缺值与真实零分开。stat/PSI 沿用原有慢采样节奏，不新建轮询。
+不改变 guard/admission/GC，也不修改 canonical diagnostics 日志 schema。
+`verify_memory_breakdown.R` 用已安装 Home 包与小型假 cgroup 验证真实浏览器，
+无需制造实际内存压力、执行清缓存或调用外部模型。
+
 ### bslib 与 Tailwind 主色类
 
 Bootstrap 的 `.bg-primary` / `.text-primary` 使用未分层的 `!important`，会盖过
-widget 的 `--primary`，使发送按钮和 Markdown 链接显示宿主主色。`globals.css`
+widget 的 `--primary`，使发送按钮和主色控件显示宿主主色。`globals.css`
 只在 `.aui-root` 内用 `revert-layer !important` 回退这些声明，让 Tailwind 原有
 普通、hover 和透明度样式继续生效；不要全局提高所有 utility 的优先级或硬编码主色。
 `verify_theme.R` 用已安装包验证三个实例的实际颜色、宿主隔离、媒体主题切换与历史重载。
@@ -307,6 +374,20 @@ JS 通过 `Shiny.setInputValue` 发送 `{ threadId, text, ... }`，R 端用 `msg
 不修改上游目录或 `node_modules`，不改变生产模式。模块形状变化会显式中止构建，升级依赖时须复核。
 `srcjs/assistant-store-context.test.ts` 用真实生产依赖验证：输入不重算 240 条不变历史，
 单条消息更新仅重算该条，内容和事件仍正确。实际性能与交互以安装后的 Chromium 验收为准。
+
+### 视口尺寸通知的布局反馈（Plan 145）
+
+历史切换时，上游 `useOnResizeContent` 的同步 ResizeObserver 回调会驱动滚动/
+at-bottom 状态与布局，可能产生 `ResizeObserver loop completed with undelivered notifications.`。
+这种原生 ErrorEvent 不触发 CDP `Runtime.exceptionThrown` 或 `console.error`；
+浏览器门禁还需直接监听 `window.error`，可复用 `tests/verify/window_error_capture.R`。
+
+`vite.config.mts` 的 `deferAssistantViewportResize` 仅转换已核实的
+`@assistant-ui/react/dist/utils/hooks/useOnResizeContent.js`：resize 通知合并到下一动画帧，
+调用最新回调，卸载时取消待执行帧；MutationObserver 的即时处理与 style 过滤保持不变。
+模块形状变化会显式中止构建，升级依赖时须复核。不要全局替换 ResizeObserver、
+过滤告警或关闭滚动/虚拟化来替代修复，也不要修改上游目录或 `node_modules`。
+`srcjs/assistant-viewport-resize.test.ts` 验证真实生产 hook 的调度与清理契约。
 
 ### useEffect 依赖数组与对象引用稳定性
 

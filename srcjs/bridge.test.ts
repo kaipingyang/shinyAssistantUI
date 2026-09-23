@@ -125,6 +125,42 @@ describe("bridge 多线程路由", () => {
     expect(evt2!.value).toMatchObject({ path: "R/util.R", line: null });
   });
 
+  it("routes file confirmation batches independently from open actions", () => {
+    const a = createShinyBridge("file-a");
+    const b = createShinyBridge("file-b");
+    const receiveA = vi.fn();
+    const receiveB = vi.fn();
+    a.onFileReferences(receiveA);
+    b.onFileReferences(receiveB);
+    const request = { version: 1 as const, requestId: "check-1", threadId: "thread-a",
+      project: "/project-a", paths: ["file.R"] };
+    a.resolveFiles(request);
+    expect(inputValues.find((item) => item.id === "file-a_resolve_files")?.value).toEqual(request);
+    const reply = { version: 1, requestId: "check-1", threadId: "thread-a",
+      files: [{ path: "file.R", resolvedPath: "/project-a/file.R" }] };
+    handlers["file-a:file-references"](reply);
+    expect(receiveA).toHaveBeenCalledWith(reply);
+    expect(receiveB).not.toHaveBeenCalled();
+    expect(inputValues.some((item) => item.id.endsWith("_open_file"))).toBe(false);
+  });
+
+  it("adds opening acknowledgement IDs without changing the legacy opening envelope", () => {
+    const bridge = createShinyBridge("file-open");
+    const receive = vi.fn();
+    bridge.onFileOpenResult(receive);
+    bridge.sendOpenFile("R/app.R", 4, "thread-a", "/project", "open-1");
+    expect(inputValues.at(-1)?.value).toMatchObject({
+      version: 1, requestId: "open-1", path: "R/app.R", line: 4,
+      threadId: "thread-a", project: "/project",
+    });
+    const reply = { version: 1, requestId: "open-1", threadId: "thread-a", ok: true };
+    handlers["file-open:file-open-result"](reply);
+    expect(receive).toHaveBeenCalledWith(reply);
+    bridge.sendOpenFile("R/app.R");
+    expect(inputValues.at(-1)?.value).not.toHaveProperty("requestId");
+    expect(inputValues.at(-1)?.value).not.toHaveProperty("version");
+  });
+
   it("sendArchiveSession / sendDeleteSession 发出对应事件（方案B）", () => {
     const b = createShinyBridge("chat");
     b.sendArchiveSession("sess-1", true);

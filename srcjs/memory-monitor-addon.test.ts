@@ -29,6 +29,19 @@ const sample = {
 const frame = (ownerId: number, openId: number, revision: number): MemoryMonitorFrame => ({
   version: 2, ownerId, openId, revision, sample,
 });
+const session = {
+  currentAvailable: true, limitKind: "limited",
+  anonBytes: 1.75 * 1024 ** 3, fileBytes: 26.25 * 1024 ** 3,
+  inactiveFileBytes: 26 * 1024 ** 3, shmemBytes: 0,
+  dirtyFileBytes: 0, writebackFileBytes: 0,
+  limitEvents: 12529, oomEvents: 0, oomKillEvents: 0,
+  limitEventsDelta: null, oomEventsDelta: null, oomKillEventsDelta: null,
+  intervalMs: null, psiSomeAvg10: 0.25, psiFullAvg10: 0,
+};
+const v4Frame = (ownerId = 100, openId = 1, revision = 1) => ({
+  version: 4, ownerId, openId, revision,
+  sample: { ...sample, sampledAt: 1789723063000, treeSampledAt: 0, cgroupSampledAt: 1789723063000, session },
+});
 
 beforeEach(() => {
   handlers = {};
@@ -64,6 +77,65 @@ describe("memory monitor exact v2 latest snapshot", () => {
     handlers[`${inputId}:memory-monitor-sample`](timed);
     expect(bridge.snapshot()).toEqual(timed);
     bridge.dispose();
+  });
+
+  describe("memory monitor v4 session breakdown", () => {
+    it("requires the exact nested shape without confusing null with zero", () => {
+      const valid = v4Frame();
+      expect(parseMemoryMonitorFrame(valid)).toEqual(valid);
+      const replace = (fields: Record<string, unknown>) => ({
+        ...valid, sample: { ...valid.sample, session: { ...session, ...fields } },
+      });
+      for (const key of Object.keys(session)) {
+        const incomplete = { ...session } as Record<string, unknown>;
+        delete incomplete[key];
+        expect(parseMemoryMonitorFrame({ ...valid, sample: { ...valid.sample, session: incomplete } }))
+          .toBeUndefined();
+      }
+      for (const key of ["anonBytes", "fileBytes", "inactiveFileBytes", "shmemBytes",
+        "dirtyFileBytes", "writebackFileBytes", "limitEvents", "oomEvents", "oomKillEvents",
+        "limitEventsDelta", "oomEventsDelta", "oomKillEventsDelta"]) {
+        for (const value of [null, 0, 123]) expect(parseMemoryMonitorFrame(replace({ [key]: value }))).toBeDefined();
+        for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "0", undefined]) {
+          expect(parseMemoryMonitorFrame(replace({ [key]: value }))).toBeUndefined();
+        }
+      }
+      for (const key of ["psiSomeAvg10", "psiFullAvg10"]) {
+        for (const value of [null, 0, 0.25, 100]) expect(parseMemoryMonitorFrame(replace({ [key]: value }))).toBeDefined();
+        for (const value of [-1, 101, NaN, Infinity, "0"]) expect(parseMemoryMonitorFrame(replace({ [key]: value }))).toBeUndefined();
+      }
+      for (const value of [0, -1, 1.5]) expect(parseMemoryMonitorFrame(replace({ intervalMs: value }))).toBeUndefined();
+      expect(parseMemoryMonitorFrame(replace({ intervalMs: 10000 }))).toBeDefined();
+      expect(parseMemoryMonitorFrame(replace({ currentAvailable: 0 }))).toBeUndefined();
+      expect(parseMemoryMonitorFrame(replace({ limitKind: "missing" }))).toBeUndefined();
+      expect(parseMemoryMonitorFrame(replace({ currentAvailable: false, limitKind: "unknown" }))).toBeDefined();
+      expect(parseMemoryMonitorFrame(replace({ limitKind: "unlimited" }))).toBeDefined();
+      expect(parseMemoryMonitorFrame(replace({ path: "/PRIVATE" }))).toBeUndefined();
+      expect(parseMemoryMonitorFrame({ ...valid, sample: { ...valid.sample, session: [] } })).toBeUndefined();
+      expect(parseMemoryMonitorFrame({ ...valid, version: 3 })).toBeUndefined();
+      expect(parseMemoryMonitorFrame({ ...frame(100, 1, 1), sample: { ...sample, session } })).toBeUndefined();
+    });
+
+    it("negotiates v4 while preserving owner/version checks and one frozen frame per refresh", () => {
+      const config = { ...addon(100), version: 4 as const };
+      expect(parseMemoryMonitorAddon({ addons: { memoryMonitor: config } })).toEqual(config);
+      const inputId = `memory-v4-${serial}`;
+      const bridge = createMemoryMonitorBridge(inputId, config);
+      bridge.setVisible(true);
+      expect(inputs.at(-1)?.value).toMatchObject({ version: 4, ownerId: 100 });
+      handlers[`${inputId}:memory-monitor-sample`](frame(100, 1, 1));
+      handlers[`${inputId}:memory-monitor-sample`](v4Frame(99));
+      expect(bridge.snapshot()).toBeNull();
+      handlers[`${inputId}:memory-monitor-sample`](v4Frame());
+      handlers[`${inputId}:memory-monitor-sample`](v4Frame(100, 1, 2));
+      expect(bridge.snapshot()).toEqual(v4Frame());
+      bridge.refresh();
+      handlers[`${inputId}:memory-monitor-sample`](v4Frame(100, 1, 2));
+      expect(bridge.snapshot()).toBeNull();
+      handlers[`${inputId}:memory-monitor-sample`](v4Frame(100, 2, 2));
+      expect(bridge.snapshot()).toEqual(v4Frame(100, 2, 2));
+      bridge.dispose();
+    });
   });
 
   it("accepts only exact v2 config/frame and all six independent wire states", () => {

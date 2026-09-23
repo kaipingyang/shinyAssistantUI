@@ -18,6 +18,21 @@ describe("workspace thread metadata", () => {
     expect(projectForThread(threads[1], "/fallback")).toBe("/work/b");
   });
 
+  it("retains searchable previews with and without a Workspace project, including archived stubs", () => {
+    const incoming = [
+      { id: "plain", title: "Plain", preview: "Older search target", createdAt: "" },
+      { ...sessions[0], preview: "Workspace search target" },
+    ];
+    for (const status of ["regular", "archived"] as const) {
+      const threads = sessionsToWorkspaceThreads(incoming, status);
+      expect(threads[0].custom).toEqual({ preview: "Older search target" });
+      expect(threads[1].custom).toEqual({
+        project: "/work/a", projectLabel: "a", preview: "Workspace search target",
+      });
+      expect(threads.every((thread) => thread.status === status)).toBe(true);
+    }
+  });
+
   it("groups projects in first-seen order and counts active work", () => {
     const threads = sessionsToWorkspaceThreads(sessions, "regular").map((thread) => ({
       ...thread,

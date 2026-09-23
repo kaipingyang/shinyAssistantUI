@@ -25,6 +25,37 @@ export function stabilizeAssistantStoreContext(code: string, id: string) {
   };
 }
 
+export function deferAssistantViewportResize(
+  code: string, id: string,
+): { code: string; map: null } | null {
+  if (!id.endsWith("/@assistant-ui/react/dist/utils/hooks/useOnResizeContent.js")) return null;
+  const resize = /const resizeObserver = new ResizeObserver\(\(\) => \{\s*callbackRef\(\);\s*\}\);/g;
+  const cleanup = /return \(\) => \{\s*resizeObserver\.disconnect\(\);\s*mutationObserver\.disconnect\(\);\s*\};/g;
+  if ([...code.matchAll(resize)].length !== 1 || [...code.matchAll(cleanup)].length !== 1 ||
+      /\bresizeFrame\b/.test(code)) {
+    throw new Error("assistant-ui viewport resize hook changed; re-evaluate the deferred resize compatibility transform");
+  }
+  // Viewport state changes must not resize observed ancestors in the same delivery cycle.
+  return {
+    code: code.replace(resize, `let resizeFrame = null;
+      const resizeObserver = new ResizeObserver(() => {
+        if (resizeFrame !== null) return;
+        resizeFrame = requestAnimationFrame(() => {
+          resizeFrame = null;
+          callbackRef();
+        });
+      });`).replace(cleanup, `return () => {
+        resizeObserver.disconnect();
+        mutationObserver.disconnect();
+        if (resizeFrame !== null) {
+          cancelAnimationFrame(resizeFrame);
+          resizeFrame = null;
+        }
+      };`),
+    map: null,
+  };
+}
+
 export default defineConfig({
   resolve: {
     alias: { "@": resolve(import.meta.dirname, "srcjs") },
@@ -35,6 +66,10 @@ export default defineConfig({
     {
       name: "stabilize-assistant-store-context",
       transform: stabilizeAssistantStoreContext,
+    },
+    {
+      name: "defer-assistant-viewport-resize",
+      transform: deferAssistantViewportResize,
     },
     {
       name: "bump-widget-version",

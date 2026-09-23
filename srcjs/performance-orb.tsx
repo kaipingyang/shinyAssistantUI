@@ -238,6 +238,17 @@ const formatBytes = (value: number | null | undefined): string => {
   const mib = value / 1024 ** 2;
   return mib >= 1024 ? `${(mib / 1024).toFixed(2)} GiB` : `${mib.toFixed(mib >= 100 ? 0 : 1)} MiB`;
 };
+const formatSessionBytes = (value: number | null | undefined) => value === 0 ? "0 B" : formatBytes(value);
+const formatPercent = (value: number | null | undefined) => value == null ? "Unavailable" : `${value.toFixed(2)}%`;
+function SessionCounter({ label, total, delta, intervalMs, slot }: {
+  label: string; total?: number | null; delta?: number | null; intervalMs?: number | null; slot: string;
+}) {
+  return <p data-slot={slot} data-total={total ?? undefined} data-delta={delta ?? undefined}
+    data-interval-ms={intervalMs ?? undefined} title="Delta between background cgroup samples; total is cumulative, not current pressure.">
+    {label} {delta != null && intervalMs != null ? `+${delta} / ${intervalMs / 1000}s` : "Unavailable"}
+    {total == null ? "" : ` (total ${total})`}
+  </p>;
+}
 const titleState = (value: string) => value === "waiting"
   ? "Waiting" : value.charAt(0).toUpperCase() + value.slice(1);
 const guardLabel = (
@@ -245,11 +256,12 @@ const guardLabel = (
   sample: MemoryMonitorSample | null | undefined,
 ) => {
   if (state !== "hard") return titleState(state ?? "waiting");
-  if (!sample?.cgroupLimited || sample.cgroupMaxBytes <= 0) return "Hard";
+  if (!sample?.cgroupLimited || sample.cgroupMaxBytes <= 0 ||
+      (sample.session ? !sample.session.currentAvailable : sample.cgroupCurrentBytes <= 0)) return "Hard";
   const headroom = sample.cgroupMaxBytes - sample.cgroupCurrentBytes;
   const critical = sample.cgroupCurrentBytes / sample.cgroupMaxBytes >= 0.9 ||
     headroom <= 1024 ** 3;
-  return critical ? "Critical (session limit)" : "Process high · chat available";
+  return critical ? "Process high · raw session near limit" : "Process high · chat available";
 };
 
 export function PerformanceOrb({
@@ -312,12 +324,19 @@ export function PerformanceOrb({
       </button>
       {state.expanded && (() => {
         const memory = memoryMonitor?.sample;
-        const cgroupPercent = memory?.cgroupLimited && memory.cgroupMaxBytes > 0
-          ? Math.round(memory.cgroupCurrentBytes / memory.cgroupMaxBytes * 100)
+        const session = memory?.session;
+        const rawCurrent = memory && (session ? session.currentAvailable : memory.cgroupCurrentBytes > 0)
+          ? memory.cgroupCurrentBytes : null;
+        const limitKind = session?.limitKind ?? (memory?.cgroupLimited ? "limited" : "unknown");
+        const rawLimit = limitKind === "limited" ? memory?.cgroupMaxBytes : null;
+        const cgroupPercent = rawCurrent != null && rawLimit != null && rawLimit > 0
+          ? Math.round(rawCurrent / rawLimit * 100)
           : null;
-        const cgroupHeadroom = memory?.cgroupLimited && memory.cgroupMaxBytes > 0
-          ? Math.max(0, memory.cgroupMaxBytes - memory.cgroupCurrentBytes)
+        const cgroupHeadroom = rawCurrent != null && rawLimit != null
+          ? Math.max(0, rawLimit - rawCurrent)
           : null;
+        const workingSet = rawCurrent != null && session?.inactiveFileBytes != null && session.inactiveFileBytes <= rawCurrent
+          ? rawCurrent - session.inactiveFileBytes : null;
         return (
         <div ref={panelRef} id={contentId} role="status" aria-live="polite" style={panelLimits}
           className="bg-popover text-popover-foreground absolute end-0 bottom-11 w-64 overflow-y-auto rounded-lg border p-3 text-xs shadow-lg">
@@ -338,7 +357,8 @@ export function PerformanceOrb({
               slot="aui_memory_refresh_time" age={false} />
             <SnapshotTime label="Process sampled" timestamp={memory?.sampledAt}
               slot="aui_memory_sample_time" />
-            <p>Guard {guardLabel(memoryMonitor?.state, memory)}</p>
+            <p data-slot="aui_process_guard">Plugin guard {guardLabel(memoryMonitor?.state, memory)}</p>
+            <p className="text-muted-foreground text-[10px]">Guard follows plugin process PSS/RSS, not whole-session health.</p>
             <p>PSS {formatBytes(memory?.pssBytes)} · RSS {formatBytes(memory?.rssBytes)}</p>
             <p title="Addin R process plus the Claude CLI it spawned. Shared pages are counted once per process, so this is an upper bound.">
               Process tree {formatBytes(memory?.treeRssBytes)}
@@ -347,10 +367,39 @@ export function PerformanceOrb({
             </p>
             <SnapshotTime label="Tree sampled" timestamp={memory?.treeSampledAt}
               slot="aui_memory_tree_time" />
-            <p>Session {formatBytes(memory?.cgroupCurrentBytes)} / {memory?.cgroupLimited ? formatBytes(memory.cgroupMaxBytes) : "Unlimited"}{cgroupPercent == null ? "" : ` (${cgroupPercent}%)`}</p>
+          </div>
+          <div className="border-border/60 mt-2 border-t pt-2" data-slot="aui_session_memory">
+            <p className="font-medium">Session memory</p>
             <SnapshotTime label="Session sampled" timestamp={memory?.cgroupSampledAt}
               slot="aui_memory_cgroup_time" />
-            <p>Headroom {memory == null ? "Unavailable" : memory.cgroupLimited ? formatBytes(cgroupHeadroom) : "Unlimited"}</p>
+            <p data-slot="aui_session_working_set" data-bytes={workingSet ?? undefined}
+              title="Raw total minus inactive file pages. An estimate, not process RSS or guaranteed reclaimable memory.">
+              Working set estimate {formatSessionBytes(workingSet)}
+            </p>
+            <p data-slot="aui_session_anon" data-bytes={session?.anonBytes ?? undefined}>Anon {formatSessionBytes(session?.anonBytes)}</p>
+            <p data-slot="aui_session_file" data-bytes={session?.fileBytes ?? undefined}>File pages {formatSessionBytes(session?.fileBytes)}</p>
+            <p data-slot="aui_session_inactive_file" data-bytes={session?.inactiveFileBytes ?? undefined}>Inactive file {formatSessionBytes(session?.inactiveFileBytes)}</p>
+            <p data-slot="aui_session_shmem" data-bytes={session?.shmemBytes ?? undefined}>Shmem {formatSessionBytes(session?.shmemBytes)}</p>
+            <p data-slot="aui_session_dirty" data-dirty-bytes={session?.dirtyFileBytes ?? undefined}
+              data-writeback-bytes={session?.writebackFileBytes ?? undefined}>
+              Dirty {formatSessionBytes(session?.dirtyFileBytes)} · Writeback {formatSessionBytes(session?.writebackFileBytes)}
+            </p>
+            <p data-slot="aui_session_raw_usage" data-bytes={rawCurrent ?? undefined} data-limit-bytes={rawLimit ?? undefined}>
+              Raw total (includes cache) {formatSessionBytes(rawCurrent)} / {limitKind === "unlimited" ? "Unlimited" : formatSessionBytes(rawLimit)}{cgroupPercent == null ? "" : ` (${cgroupPercent}%)`}
+            </p>
+            <p>Raw headroom (before reclaim) {limitKind === "unlimited" ? "Unlimited" : formatSessionBytes(cgroupHeadroom)}</p>
+            <p className="text-muted-foreground text-[10px]">Raw headroom is not an allocation budget. Not all file pages are reclaimable; file pages include shmem.</p>
+            <SessionCounter label="Limit hits" slot="aui_session_limit_events" total={session?.limitEvents}
+              delta={session?.limitEventsDelta} intervalMs={session?.intervalMs} />
+            <SessionCounter label="OOM events" slot="aui_session_oom_events" total={session?.oomEvents}
+              delta={session?.oomEventsDelta} intervalMs={session?.intervalMs} />
+            <SessionCounter label="OOM kills" slot="aui_session_oom_kills" total={session?.oomKillEvents}
+              delta={session?.oomKillEventsDelta} intervalMs={session?.intervalMs} />
+            <p data-slot="aui_session_stalls" data-some={session?.psiSomeAvg10 ?? undefined}
+              data-full={session?.psiFullAvg10 ?? undefined}
+              title="10-second moving averages of memory-stalled time. Some: at least one task; full: all non-idle tasks.">
+              Memory stalls (PSI avg10) some {formatPercent(session?.psiSomeAvg10)} · full {formatPercent(session?.psiFullAvg10)}
+            </p>
           </div>
           <div className="border-border/60 mt-2 border-t pt-2" data-slot="aui_browser_performance">
             <p className="font-medium">Browser UI</p>

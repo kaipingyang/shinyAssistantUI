@@ -175,7 +175,7 @@ test_that("Plan 123 retention deletes old inactive candidates but protects activ
   expect_gte(result$deleted_count, 1)
 })
 
-test_that("Plan 123 memory hub advertises v3 and preserves exact v2 opening freeze", {
+test_that("Plan 123 memory hub advertises v4 and preserves exact v2 opening freeze", {
   plugin <- shinyAssistantUI:::.new_memory_monitor_addin_plugin(plan123_memory_config())
   on.exit(plugin$dispose(), add = TRUE)
   session <- shiny::MockShinySession$new()
@@ -185,7 +185,7 @@ test_that("Plan 123 memory hub advertises v3 and preserves exact v2 opening free
   }
   binding <- shiny::withReactiveDomain(session, plugin$bind(session, "chat_input"))
   session$flushReact()
-  expect_identical(binding$config$version, 3L)
+  expect_identical(binding$config$version, 4L)
   owner <- binding$config$ownerSeed
   plugin$observe(list(pss_bytes = 80, rss_bytes = 90), "normal", "normal")
   session$setInputs(chat_input_memory_monitor_visible = list(

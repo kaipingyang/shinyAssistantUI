@@ -94,6 +94,218 @@ test_that(".addin_open_file no longer repeats rstudioapi isAvailable per click",
   expect_true(grepl("navigateToFile", source_text, fixed = TRUE))
 })
 
+test_that("explicit home-relative references expand before project resolution", {
+  root <- tempfile("open-file-home-")
+  home <- file.path(root, "home")
+  project <- file.path(root, "project")
+  dir.create(file.path(home, ".config", "example"), recursive = TRUE)
+  dir.create(file.path(project, "~", ".config", "example"), recursive = TRUE)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  withr::local_envvar(HOME = home)
+  target <- file.path(home, ".config", "example", "settings.json")
+  wrong <- file.path(project, "~", ".config", "example", "settings.json")
+  file.create(target, wrong)
+  expect_identical(
+    .addin_resolve_file_path("~/.config/example/settings.json", project),
+    normalizePath(target, winslash = "/")
+  )
+  expect_null(.addin_resolve_file_path("~/.config/example/missing.json", project))
+  expect_null(.addin_resolve_file_path("settings.json", project))
+  dir.create(file.path(project, "directory.json"))
+  expect_null(.addin_resolve_file_path("directory.json", project))
+})
+
+test_that("server confirms bounded file batches without navigating or reading content", {
+  root <- tempfile("file-reference-server-")
+  dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  target <- file.path(root, "exists.R")
+  file.create(target)
+  opened <- 0L
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = function(...) NULL, working_dir = root,
+                      on_open_file = function(...) opened <<- opened + 1L)
+  }, {
+    sent <- list()
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
+    session$flushReact()
+    expect_true(widget_config(output$chat)$file_open)
+    expect_identical(widget_config(output$chat)$file_reference_protocol, 1L)
+    session$setInputs(chat_input_resolve_files = list(
+      version = 1L, requestId = "files-1", threadId = "history",
+      paths = list("exists.R", "missing.R")
+    ))
+    for (i in seq_len(40L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (any(vapply(sent, function(frame) identical(frame$type, "chat_input:file-references"), logical(1)))) break
+    }
+    frames <- Filter(function(frame) identical(frame$type, "chat_input:file-references"), sent)
+    expect_length(frames, 1L)
+    expect_identical(frames[[1L]]$message, list(
+      version = 1L, requestId = "files-1", threadId = "history",
+      files = list(
+        list(path = "exists.R", resolvedPath = normalizePath(target, winslash = "/")),
+        list(path = "missing.R", resolvedPath = NULL)
+      )
+    ))
+    expect_identical(opened, 0L)
+    expect_warning(session$setInputs(chat_input_resolve_files = list(
+      version = 1L, requestId = "too-many", threadId = "history",
+      paths = as.list(paste0(seq_len(33L), ".R"))
+    )), "Invalid file-reference request")
+    expect_length(Filter(function(frame) identical(frame$type, "chat_input:file-references"), sent), 1L)
+  })
+})
+
+test_that("custom confirmation providers receive thread and project and require an open callback", {
+  requests <- list()
+  domains <- logical()
+  shiny::testServer(function(input, output, session) {
+    signal <- shiny::reactiveVal("readable")
+    assistantUIServer(
+      "chat", handler = function(...) NULL, on_open_file = function(...) NULL,
+      file_reference_resolver = function(path, thread_id, project) {
+        domains <<- c(domains, identical(shiny::getDefaultReactiveDomain(), session) &&
+                        identical(signal(), "readable"))
+        requests[[length(requests) + 1L]] <<- list(path, thread_id, project)
+        if (identical(path, "known.R")) "/host/known.R" else NULL
+      }
+    )
+  }, {
+    session$flushReact()
+    session$setInputs(chat_input_resolve_files = list(
+      version = 1L, requestId = "custom", threadId = "thread-a", project = "/project-a",
+      paths = list("known.R", "unknown.R")
+    ))
+    for (i in seq_len(40L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (length(requests) == 2L) break
+    }
+    expect_identical(requests, list(
+      list("known.R", "thread-a", "/project-a"),
+      list("unknown.R", "thread-a", "/project-a")
+    ))
+    expect_identical(domains, c(TRUE, TRUE))
+  })
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = function(...) NULL)
+  }, {
+    expect_false(isTRUE(widget_config(output$chat)$file_open))
+    expect_null(widget_config(output$chat)$file_reference_protocol)
+  })
+})
+
+test_that("missing files and navigation failures notify instead of silently succeeding", {
+  skip_if_not_installed("rstudioapi")
+  root <- tempfile("open-file-notify-")
+  dir.create(root)
+  on.exit(unlink(root, recursive = TRUE), add = TRUE)
+  target <- file.path(root, "exists.R")
+  file.create(target)
+  notices <- list()
+  navigations <- list()
+  testthat::local_mocked_bindings(
+    showNotification = function(ui, type, ...) {
+      notices[[length(notices) + 1L]] <<- list(message = as.character(ui), type = type)
+      invisible(NULL)
+    },
+    .package = "shiny"
+  )
+  testthat::local_mocked_bindings(
+    getSourceEditorContext = function() list(path = ""),
+    navigateToFile = function(file, line, ...) {
+      navigations[[length(navigations) + 1L]] <<- list(path = file, line = line)
+      if (line == 99L) stop("Synthetic editor failure")
+      invisible(NULL)
+    },
+    .package = "rstudioapi"
+  )
+  .addin_open_file("missing.R", project = root)
+  expect_length(navigations, 0L)
+  expect_length(notices, 1L)
+  expect_match(notices[[1L]]$message, "Unable to locate file", fixed = TRUE)
+
+  .addin_open_file("exists.R", 12L, project = root)
+  expect_identical(navigations[[1L]], list(path = normalizePath(target, winslash = "/"), line = 12L))
+  expect_length(notices, 1L)
+  .addin_open_file("exists.R", 99L, project = root)
+  expect_length(notices, 2L)
+  expect_match(notices[[2L]]$message, "Synthetic editor failure", fixed = TRUE)
+})
+
+test_that("explicit clicks focus the current file and honor its line while automatic reveal stays quiet", {
+  skip_if_not_installed("rstudioapi")
+  target <- tempfile(fileext = ".R")
+  file.create(target)
+  on.exit(unlink(target), add = TRUE)
+  target <- normalizePath(target, winslash = "/")
+  navigations <- list()
+  context_reads <- 0L
+  testthat::local_mocked_bindings(
+    getSourceEditorContext = function() {
+      context_reads <<- context_reads + 1L
+      list(path = target)
+    },
+    navigateToFile = function(file, line, ...) {
+      navigations[[length(navigations) + 1L]] <<- list(path = file, line = line)
+      invisible(NULL)
+    },
+    .package = "rstudioapi"
+  )
+  expect_true(.addin_open_file(target, 42L))
+  expect_identical(navigations, list(list(path = target, line = 42L)))
+  expect_identical(context_reads, 0L)
+  expect_true(.addin_open_file(target, focus = FALSE))
+  expect_length(navigations, 1L)
+  expect_identical(context_reads, 1L)
+})
+
+test_that("file opening acknowledges actual callback outcomes without changing legacy requests", {
+  calls <- list()
+  finish <- NULL
+  shiny::testServer(function(input, output, session) {
+    assistantUIServer("chat", handler = function(...) NULL,
+      on_open_file = function(path, line = NULL, thread_id = NULL, project = NULL, focus = FALSE) {
+        calls[[length(calls) + 1L]] <<- list(path, line, thread_id, project, focus)
+        if (path == "pending.R") {
+          return(promises::promise(function(resolve, reject) finish <<- resolve))
+        }
+        if (path == "failed.R") return(FALSE)
+        NULL
+      })
+  }, {
+    sent <- list()
+    session$sendCustomMessage <- function(type, message) {
+      if (type == "chat_input:file-open-result") sent[[length(sent) + 1L]] <<- message
+    }
+    session$flushReact()
+    expect_identical(widget_config(output$chat)$file_open_protocol, 1L)
+    session$setInputs(chat_input_open_file = list(
+      version = 1L, requestId = "first", path = "pending.R", line = 4L, threadId = "history", project = "/project"
+    ))
+    expect_length(sent, 0L)
+    expect_identical(calls[[1L]], list("pending.R", 4L, "history", "/project", TRUE))
+    finish(TRUE)
+    for (i in seq_len(20L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (length(sent)) break
+    }
+    expect_identical(sent[[1L]], list(version = 1L, requestId = "first", threadId = "history", ok = TRUE))
+    session$setInputs(chat_input_open_file = list(
+      version = 1L, requestId = "failed", path = "failed.R", threadId = "history"
+    ))
+    expect_identical(sent[[2L]], list(version = 1L, requestId = "failed", threadId = "history", ok = FALSE))
+    session$setInputs(chat_input_open_file = list(path = "legacy.R"))
+    expect_length(calls, 3L)
+    expect_length(sent, 2L)
+  })
+})
+
 
 test_that(".addin_resolve_file_path safely handles a repeated cwd basename prefix", {
   parent <- tempfile("open-file-prefix-")

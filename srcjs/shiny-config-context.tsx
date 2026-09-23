@@ -11,6 +11,7 @@ import type { PerformanceOrbController } from "./performance-orb";
 import type { ChecklistSnapshot } from "./checklist-reducer";
 import type { MonitoredTask } from "./task-monitor";
 import type { LazyToolResultClient } from "./lazy-tool-result";
+import type { FileReferenceView } from "./file-reference";
 
 export interface ShinyCommand { name: string; description?: string; prompt: string; category?: string; source?: string; kind?: string; argumentHint?: string; }
 export interface ShinyToolItem { name: string; description?: string; }
@@ -74,7 +75,8 @@ export interface ShinyConfigCtx {
   onEnqueue: (text: string) => void;
   onRename: (threadId: string, title: string) => void;
   onInvokeAction: (item: ShinyActionItem) => void;
-  onOpenFile?: (path: string, line?: number) => void;
+  onOpenFile?: (path: string, line?: number) => void | Promise<boolean>;
+  fileReferences?: FileReferenceView;
   /** Increments whenever runtime accepts a new ordinary user submission. */
   submissionRevision?: number;
   onRunInConsole?: (code: string) => void;

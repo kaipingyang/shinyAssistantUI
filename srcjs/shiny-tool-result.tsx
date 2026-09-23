@@ -20,7 +20,7 @@ function parseInline(text: string): ReactNode[] {
       const href = safeUrl(m[6]);
       nodes.push(href === null
         ? <span key={key++}>{m[5]}</span>
-        : <a key={key++} href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline">{m[5]}</a>);
+        : <a key={key++} href={href} target="_blank" rel="noopener noreferrer" className="aui-web-link">{m[5]}</a>);
     }
     lastIndex = pattern.lastIndex;
   }

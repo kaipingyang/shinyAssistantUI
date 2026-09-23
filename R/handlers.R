@@ -6624,7 +6624,9 @@ make_claude_handler <- function(options       = NULL,
 #' format them for `ctrl$send_sessions()`.
 #'
 #' @param directory Project directory to filter sessions. Defaults to `here::here()`.
-#' @param limit Maximum number of sessions to return.
+#' @param limit Maximum number of sessions to return, or `NULL` for all available
+#'   session metadata. The Claude addins use `NULL` so sidebar search includes
+#'   older and archived sessions; the public helper retains its default of 100.
 #' @param archived_ids Character vector of session ids to mark as archived in the
 #'   returned list (so the sidebar can show them under an archived section).
 #'

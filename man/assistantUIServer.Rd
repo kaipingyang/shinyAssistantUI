@@ -67,7 +67,8 @@ assistantUIServer(
   prewarm = FALSE,
   allow_warmup = TRUE,
   max_concurrent_runs = 1L,
-  diagnostics = NULL
+  diagnostics = NULL,
+  file_reference_resolver = NULL
 )
 }
 \arguments{
@@ -219,10 +220,13 @@ renames a thread in the sidebar. The new title is already persisted
 client-side (localStorage); use this to sync server-side session stores.}
 
 \item{on_open_file}{Optional \verb{function(path, line = NULL)} called when the
-user clicks a file reference in a tool card, or after the assistant edits a
+user clicks a file reference in a tool card or confirmed inline code, or after the assistant edits a
 file (the most recent successful edit of a run is revealed). The Claude
 addin wires this to \code{rstudioapi::navigateToFile()}; leave \code{NULL} (default)
-in browser contexts where no editor is available.}
+in browser contexts where no editor is available.
+An optional \code{focus} argument is \code{TRUE} for an explicit click and \code{FALSE}
+for automatic edit reveal. Return \code{FALSE} (or a promise resolving to it)
+to report failure; other completed return values preserve legacy success.}
 
 \item{on_run_in_console}{Optional \verb{function(code)} called when the user clicks
 "Run in Console" on an R code block. The Claude addin wires this to
@@ -435,6 +439,12 @@ thread are always strict FIFO and never overlap.}
 \item{diagnostics}{Optional diagnostics configuration. \code{NULL} (the default)
 disables telemetry for generic widgets; \code{TRUE} or a validated named list
 enables bounded privacy-filtered diagnostics.}
+
+\item{file_reference_resolver}{Optional \verb{function(path, thread_id = NULL, project = NULL)} returning an existing openable path or \code{NULL}. Used for
+cooperatively scheduled confirmation batches before inline file references become clickable.
+Defaults to checking explicit paths or paths relative to \code{working_dir} when
+\code{on_open_file} is supplied. The Claude addin also uses its warm workspace index.
+It must not read file contents or build a recursive index.}
 }
 \value{
 A list with a \code{clear()} function that creates a new thread in the UI,

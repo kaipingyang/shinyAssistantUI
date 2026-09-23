@@ -18,6 +18,16 @@ const renderResult = (
 );
 
 describe("ShinyToolResult auto renderer", () => {
+  it("shares the scoped web-link palette and retains URL filtering in Markdown results", () => {
+    const view = renderResult("[Docs](https://example.invalid/docs) [Unsafe](javascript:bad)", "markdown");
+    const link = view.getByRole("link", { name: "Docs" });
+    expect(link.className).toContain("aui-web-link");
+    expect(link.className).not.toMatch(/text-primary/);
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(view.queryByRole("link", { name: "Unsafe" })).toBeNull();
+    view.unmount();
+  });
+
   it("reuses the JSON highlighter for object and array results", () => {
     for (const result of [{ query: "Shanghai", count: 2 }, [{ id: 1 }]]) {
       const { container, unmount } = renderResult(result);

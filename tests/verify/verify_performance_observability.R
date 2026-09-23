@@ -272,9 +272,9 @@ verify_performance_observability <- function() {
   ))
 
   click("button[aria-label='Performance diagnostics']")
-  check("memory v3 has a real timestamp", wait_until(function() timestamp("aui_memory_sample_time") > 0))
-  check("v3 envelope remains exact", isTRUE(value(
-    "(()=>{const v=Shiny.shinyapp.$inputValues.chat_input_memory_monitor_visible;return v.version===3&&v.sample===null&&Object.keys(v).length===6})()"
+  check("memory v4 has a real timestamp", wait_until(function() timestamp("aui_memory_sample_time") > 0))
+  check("v4 envelope remains exact", isTRUE(value(
+    "(()=>{const v=Shiny.shinyapp.$inputValues.chat_input_memory_monitor_visible;return v.version===4&&v.sample===null&&Object.keys(v).length===6})()"
   )))
   check("performance panel is inside the viewport", isTRUE(value(
     "(()=>{const r=document.querySelector('[data-slot=aui_performance_orb] [role=status]').getBoundingClientRect();return r.top>=0&&r.left>=0&&r.bottom<=innerHeight&&r.right<=innerWidth})()"

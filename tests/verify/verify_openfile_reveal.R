@@ -4,6 +4,7 @@ suppressPackageStartupMessages({
   library(chromote)
 })
 source("tests/verify/owned_process_cleanup.R")
+source("tests/verify/window_error_capture.R")
 
 main <- function() {
   project <- normalizePath(".")
@@ -50,7 +51,8 @@ main <- function() {
   )))
   browser <- ChromoteSession$new(width = 1440, height = 1050)
   errors <- network_errors <- character()
-  browser$Runtime$enable()
+  current_stage <- "mount"
+  window_errors <- capture_browser_window_errors(browser, function() current_stage)
   browser$Network$enable()
   browser$Runtime$consoleAPICalled(callback_ = function(event) {
     if (identical(event$type, "error")) errors <<- c(errors, "console.error")
@@ -72,6 +74,7 @@ main <- function() {
   quote_js <- function(text) as.character(jsonlite::toJSON(text, auto_unbox = TRUE))
   checks <- 0L
   check <- function(label, ok) {
+    current_stage <<- label
     cat(sprintf("[%s] %s\n", if (isTRUE(ok)) "PASS" else "FAIL", label))
     checks <<- checks + 1L
     if (!isTRUE(ok)) {
@@ -148,6 +151,7 @@ main <- function() {
   check("three installed widgets mount", wait_for(
     "['chat','other','plain'].every(id=>!!document.querySelector(`#${id} .aui-thread-root`))"
   ))
+  check("direct window-error observer is installed", isTRUE(value("window.__auiWindowErrorProbeReady")))
   check("active-file chip has no selection requirement", wait_for(
     "document.querySelector('#chat [data-slot=aui_ide_context]')?.getAttribute('data-context-file')==='R/demo.R'&&!!document.querySelector('#chat [data-slot=aui_selection_visibility]')"
   ))
@@ -234,6 +238,35 @@ main <- function() {
       label
     ))))
   }
+  current_stage <- "multiline-composer-and-viewport-resize"
+  value("document.querySelector('#chat .aui-lexical-input').focus();true")
+  browser$Input$insertText(text = paste(rep(
+    "WINDOW_ERROR_LAYOUT_DRAFT synthetic multiline input", 8L
+  ), collapse = "\n"))
+  for (size in list(c(640L, 700L), c(480L, 540L), c(1024L, 900L), c(1440L, 1050L))) {
+    browser$Emulation$setDeviceMetricsOverride(
+      width = size[[1L]], height = size[[2L]], deviceScaleFactor = 1, mobile = FALSE
+    )
+    browser$Runtime$evaluate(
+      "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))",
+      awaitPromise = TRUE, returnByValue = TRUE
+    )
+    check(paste("draft survives viewport", paste(size, collapse = "x")), isTRUE(value(
+      "document.querySelector('#chat .aui-lexical-input')?.textContent.includes('WINDOW_ERROR_LAYOUT_DRAFT')"
+    )))
+  }
+  value("document.querySelector('#chat .aui-lexical-input').focus();true")
+  browser$Input$dispatchKeyEvent(
+    type = "keyDown", key = "a", code = "KeyA", windowsVirtualKeyCode = 65L, modifiers = 2L
+  )
+  browser$Input$dispatchKeyEvent(
+    type = "keyUp", key = "a", code = "KeyA", windowsVirtualKeyCode = 65L, modifiers = 2L
+  )
+  browser$Input$dispatchKeyEvent(type = "keyDown", key = "Backspace", code = "Backspace", windowsVirtualKeyCode = 8L)
+  browser$Input$dispatchKeyEvent(type = "keyUp", key = "Backspace", code = "Backspace", windowsVirtualKeyCode = 8L)
+  check("layout draft clears without submission", wait_for(
+    "document.querySelector('#chat .aui-lexical-input')?.textContent.trim()===''"
+  ))
   origin <- value("String(performance.timeOrigin)")
   browser$Page$reload()
   check("full reload creates a new document", wait_for(sprintf(
@@ -253,10 +286,11 @@ main <- function() {
     "p.chat.console.length===1&&p.chat.messages.length===1&&p.chat.messages[0].text.includes('SYNTHETIC_CHAT_RESULT_42')&&p.chat.messages[0].thread===p.chat.loads[0].thread"
   )))
   check("zero browser console errors and runtime exceptions", length(errors) == 0L)
+  check("zero direct window error events across all documents", length(window_errors()) == 0L)
   check("zero network failures", length(network_errors) == 0L)
   cleanup()
   cat("HOST_CALLBACKS_VERIFIED checks=", checks,
-      " console=0 runtime=0 network=0 cleanup=true host=synthetic-callbacks\n", sep = "")
+      " console=0 runtime=0 window=0 network=0 cleanup=true host=synthetic-callbacks\n", sep = "")
 }
 
 main()

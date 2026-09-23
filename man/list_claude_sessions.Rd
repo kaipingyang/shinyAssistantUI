@@ -13,7 +13,9 @@ list_claude_sessions(
 \arguments{
 \item{directory}{Project directory to filter sessions. Defaults to \code{here::here()}.}
 
-\item{limit}{Maximum number of sessions to return.}
+\item{limit}{Maximum number of sessions to return, or \code{NULL} for all available
+session metadata. The Claude addins use \code{NULL} so sidebar search includes
+older and archived sessions; the public helper retains its default of 100.}
 
 \item{archived_ids}{Character vector of session ids to mark as archived in the
 returned list (so the sidebar can show them under an archived section).}

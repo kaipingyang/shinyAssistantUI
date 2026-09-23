@@ -52,13 +52,14 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
 
   project <- normalizePath(tempdir(), mustWork = TRUE)
   listed_directory <- NULL
+  listed_limit <- "not-called"
   sent_sessions <- list()
   server_args <- NULL
   normal_stop_calls <- 0L
-  expected <- list(
-    list(id = "11111111-1111-1111-1111-111111111111",
-         title = "Historical session", preview = "Hello", createdAt = 1)
-  )
+  expected <- lapply(seq_len(140L), function(i) list(
+    id = sprintf("history-%03d", i), title = paste("Historical session", i),
+    preview = paste("Preview", i), createdAt = i, archived = identical(i, 140L)
+  ))
 
   local_mocked_bindings(
     make_claude_handler = function(options, cwd_provider = NULL, models = NULL, session_map_path) function(...) NULL,
@@ -70,7 +71,8 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
     },
     list_claude_sessions = function(directory, limit = 100L, archived_ids = character()) {
       listed_directory <<- directory
-      expected
+      listed_limit <<- limit
+      if (is.null(limit)) expected else utils::head(expected, limit)
     },
     assistantUIServer = function(...) {
       server_args <<- list(...)
@@ -95,6 +97,7 @@ test_that(".claude_chat_app injects project sessions into the sidebar", {
 
   expect_identical(normal_stop_calls, 1L)
   expect_identical(listed_directory, project)
+  expect_null(listed_limit)
   expect_length(sent_sessions, 1L)
   expect_identical(sent_sessions[[1L]], list(sessions = expected))
   expect_identical(server_args$persistence, "server")
@@ -226,7 +229,7 @@ test_that("Background Job memory guard exposes the addin monitor without diagnos
     session$flushReact()
     expect_true(is.function(memory_observer))
     addon <- attr(server_args$handler, "ui_addons")$memoryMonitor
-    expect_identical(addon$version, 3L)
+    expect_identical(addon$version, 4L)
     expect_named(addon, c("version", "ownerSeed", "lastRevision"))
     expect_gt(addon$ownerSeed, 0)
     expect_null(server_args$diagnostics)

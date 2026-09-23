@@ -17,6 +17,7 @@ run_long_task_lifecycle_verification <- function() {
   dir.create(root, mode = "0700")
   browser <- app <- NULL
   source("tests/verify/owned_process_cleanup.R", local = TRUE)
+  source("tests/verify/window_error_capture.R", local = TRUE)
   cleanup <- make_verification_cleanup(function() browser, function() app)
   on.exit({
     cleanup()
@@ -210,7 +211,7 @@ run_long_task_lifecycle_verification <- function() {
   )))
   browser <- chromote::ChromoteSession$new(width = 1200, height = 1000)
   console_errors <- runtime_errors <- network_errors <- 0L
-  browser$Runtime$enable()
+  window_errors <- capture_browser_window_errors(browser, function() mode)
   browser$Network$enable()
   browser$Runtime$consoleAPICalled(callback_ = function(event) {
     if (identical(event$type, "error")) console_errors <<- console_errors + 1L
@@ -276,6 +277,7 @@ run_long_task_lifecycle_verification <- function() {
   }
   browser$Page$navigate(paste0("http://127.0.0.1:", port))
   check("installed widget mounted", "!!document.querySelector('.aui-root')")
+  check("direct window-error observer is installed", "window.__auiWindowErrorProbeReady===true")
   select("Alpha")
   check("historical tool card exists", "!!document.querySelector('[data-slot=tool-fallback-trigger]')")
   js("document.querySelector('[data-slot=tool-fallback-trigger]').click(); true")
@@ -344,13 +346,14 @@ run_long_task_lifecycle_verification <- function() {
       sum(kinds == "compact_started") == 1L, sum(kinds == "compact_completed") == 1L,
       !any(kinds == "interrupt"),
       length(readRDS(file.path(root, "events.rds"))$errors) == 0L,
-      console_errors == 0L, runtime_errors == 0L, network_errors == 0L
+      console_errors == 0L, runtime_errors == 0L, network_errors == 0L,
+      length(window_errors()) == 0L
     )
     file.create(file.path(root, "stop"))
     app$wait(5000)
     stopifnot(!app$is_alive(), app$get_exit_status() == 0L)
     cleanup()
-    cat("CLAUDE_CONTROLS_PROTOCOL_PASSED console=0 runtime=0 network=0 cleanup=true\n")
+    cat("CLAUDE_CONTROLS_PROTOCOL_PASSED console=0 runtime=0 window=0 network=0 cleanup=true\n")
     return(invisible(NULL))
   }
   send("LONG_BACKGROUND")
@@ -469,7 +472,8 @@ run_long_task_lifecycle_verification <- function() {
     isTRUE(cold_approvals[[1L]]$allowed),
     sum(kinds == "stop_rejected") == 2L, sum(kinds == "stop_confirmed") == 2L,
     !any(kinds == "interrupt"),
-    console_errors == 0L, runtime_errors == 0L, network_errors == 0L
+    console_errors == 0L, runtime_errors == 0L, network_errors == 0L,
+    length(window_errors()) == 0L
   )
   report <- list(
     mode = mode, package = as.character(packageVersion("shinyAssistantUI")),
@@ -477,7 +481,8 @@ run_long_task_lifecycle_verification <- function() {
     background_seconds = background[[1L]]$seconds,
     approval_seconds = vapply(long_approvals, `[[`, numeric(1), "seconds"),
     cold_history_approval = isTRUE(cold_approvals[[1L]]$allowed),
-    console_errors = console_errors, runtime_errors = runtime_errors, network_errors = network_errors,
+    console_errors = console_errors, runtime_errors = runtime_errors,
+    window_errors = length(window_errors()), network_errors = network_errors,
     events = readRDS(file.path(root, "events.rds"))
   )
   if (nzchar(output)) saveRDS(report, file.path(output, "lifecycle-report.rds"))
@@ -486,7 +491,7 @@ run_long_task_lifecycle_verification <- function() {
   stopifnot(!app$is_alive(), app$get_exit_status() == 0L)
   cleanup()
   cat("LONG_TASK_LIFECYCLE_", toupper(mode),
-      "_PASSED console=0 runtime=0 network=0 cleanup=true\n", sep = "")
+      "_PASSED console=0 runtime=0 window=0 network=0 cleanup=true\n", sep = "")
 }
 
 if (sys.nframe() == 0L) run_long_task_lifecycle_verification()

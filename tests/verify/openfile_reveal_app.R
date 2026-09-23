@@ -91,6 +91,11 @@ server <- function(input, output, session) {
     show_thread_list = TRUE, persistence = "server",
     workspace_mode = TRUE, working_dir = fixture_project,
     ide_context_provider = function() list(path = "/synthetic/demo.R", rel = "R/demo.R"),
+    file_reference_resolver = function(path, ...) {
+      if (startsWith(path, "ERP/")) {
+        shinyAssistantUI:::.addin_resolve_file_path(path, fixture_project)
+      } else path
+    },
     on_open_file = function(path, line = NULL, thread_id = NULL, project = NULL) {
       resolved <- path
       if (startsWith(path, "ERP/")) {

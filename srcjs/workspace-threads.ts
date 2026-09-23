@@ -4,6 +4,7 @@ import type { SessionItem } from "./bridge";
 export type WorkspaceThreadCustom = {
   project?: string;
   projectLabel?: string;
+  preview?: string;
   runPhase?: string;
   activeTaskCount?: number;
 };
@@ -45,20 +46,21 @@ export function sessionsToWorkspaceThreads<T extends ThreadStatus>(
   status: T,
 ): ExternalStoreThreadData<T>[] {
   return sessions.map((session) => {
-    const custom = nonEmptyString(session.project)
-      ? {
+    const custom = {
+      ...(nonEmptyString(session.project) ? {
           project: session.project,
           projectLabel: nonEmptyString(session.projectLabel)
             ? session.projectLabel
             : projectLabel(session.project),
-        }
-      : undefined;
+        } : {}),
+      ...(nonEmptyString(session.preview) ? { preview: session.preview } : {}),
+    };
     return {
       id: session.id,
       status,
       title: session.title || session.id,
-      ...(custom ? { custom } : {}),
-    } as ExternalStoreThreadData<T>;
+      ...(Object.keys(custom).length ? { custom } : {}),
+    };
   });
 }
 

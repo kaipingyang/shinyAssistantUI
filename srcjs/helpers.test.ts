@@ -652,4 +652,33 @@ describe("resolveToolFileReference", () => {
     expect(resolveToolFileReference("subfolder/dm.R", messages)).toBe("subfolder/dm.R");
     expect(resolveToolFileReference("vs.R", messages)).toBe("vs.R");
   });
+
+  it("does not guess a bare filename from Bash command text", () => {
+    const history = [
+      { role: "assistant", content: [{ type: "text", text: "Now update `settings.json`." }] },
+      { role: "assistant", content: [{
+        type: "tool-call", toolName: "Bash",
+        args: { command: "ls -l ~/.config/example/settings.json" },
+      }] },
+    ];
+    expect(resolveToolFileReference("settings.json", history)).toBe("settings.json");
+    expect(resolveToolFileReference("~/.config/other/settings.json", history))
+      .toBe("~/.config/other/settings.json");
+    expect(resolveToolFileReference("other.json", history)).toBe("other.json");
+  });
+
+  it("keeps structured tool paths authoritative and ignores non-Bash text", () => {
+    const command = "cat /tmp/example/dm.R";
+    const bash = { content: [{ type: "tool-call", toolName: "Bash", args: { command } }] };
+    expect(resolveToolFileReference("dm.R", [...messages, bash])).toBe("/project/latest/dm.R");
+    expect(resolveToolFileReference("dm.R", [bash, ...messages])).toBe("/project/latest/dm.R");
+    expect(resolveToolFileReference("dm.R", [{
+      content: [{ type: "tool-call", toolName: "Read",
+        args: { file_path: "/project/explicit/dm.R", command } }],
+    }])).toBe("/project/explicit/dm.R");
+    expect(resolveToolFileReference("dm.R", [{
+      content: [{ type: "text", text: command },
+        { type: "tool-call", toolName: "Other", args: { command } }],
+    }])).toBe("dm.R");
+  });
 });

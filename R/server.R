@@ -196,10 +196,19 @@
 #'   renames a thread in the sidebar. The new title is already persisted
 #'   client-side (localStorage); use this to sync server-side session stores.
 #' @param on_open_file Optional `function(path, line = NULL)` called when the
-#'   user clicks a file reference in a tool card, or after the assistant edits a
+#'   user clicks a file reference in a tool card or confirmed inline code, or after the assistant edits a
 #'   file (the most recent successful edit of a run is revealed). The Claude
 #'   addin wires this to `rstudioapi::navigateToFile()`; leave `NULL` (default)
 #'   in browser contexts where no editor is available.
+#'   An optional `focus` argument is `TRUE` for an explicit click and `FALSE`
+#'   for automatic edit reveal. Return `FALSE` (or a promise resolving to it)
+#'   to report failure; other completed return values preserve legacy success.
+#' @param file_reference_resolver Optional `function(path, thread_id = NULL,
+#'   project = NULL)` returning an existing openable path or `NULL`. Used for
+#'   cooperatively scheduled confirmation batches before inline file references become clickable.
+#'   Defaults to checking explicit paths or paths relative to `working_dir` when
+#'   `on_open_file` is supplied. The Claude addin also uses its warm workspace index.
+#'   It must not read file contents or build a recursive index.
 #' @param on_run_in_console Optional `function(code)` called when the user clicks
 #'   "Run in Console" on an R code block. The Claude addin wires this to
 #'   `rstudioapi::sendToConsole(code, execute = TRUE)` so the code runs in the user's
@@ -379,7 +388,8 @@ assistantUIServer <- function(id, handler,
                               prewarm           = FALSE,
                               allow_warmup      = TRUE,
                               max_concurrent_runs = 1L,
-                              diagnostics       = NULL) {
+                              diagnostics       = NULL,
+                              file_reference_resolver = NULL) {
   force(show_thread_list); force(suggestions); force(commands)
   persistence <- tryCatch(
     match.arg(persistence),
@@ -393,6 +403,10 @@ assistantUIServer <- function(id, handler,
   force(on_feedback); force(modal)
   force(on_rename)
   force(on_open_file)
+  force(file_reference_resolver)
+  if (!is.null(file_reference_resolver) && !is.function(file_reference_resolver)) {
+    stop("`file_reference_resolver` must be a function or NULL.", call. = FALSE)
+  }
   force(on_archive_session)
   force(on_delete_session); force(workspace_mode)
   # 若 handler 暴露了内置动作分发器(如 make_claude_handler 的 ClaudeSDKClient 控制操作)
@@ -639,6 +653,11 @@ assistantUIServer <- function(id, handler,
   if (isTRUE(latex)) config$latex <- TRUE
   # R console 交互（addin/RStudio）：提供 on_run_in_console 时,前端在 R 代码块上显示"Run in Console"。
   if (is.function(on_run_in_console)) config$console_run <- TRUE
+  if (is.function(on_open_file)) {
+    config$file_open <- TRUE
+    config$file_open_protocol <- 1L
+    config$file_reference_protocol <- 1L
+  }
   if (diagnostics_active) {
     config$diagnostics <- list(
       version = 2L,
@@ -805,7 +824,8 @@ assistantUIServer <- function(id, handler,
             path = reveal_path,
             line = NULL,
             thread_id = thread_id,
-            project = project
+            project = project,
+            focus = FALSE
           )), error = function(e) NULL)
         }
         session$sendCustomMessage(paste0(input_id, ":done"),
@@ -1353,18 +1373,94 @@ assistantUIServer <- function(id, handler,
   }
 
   # 点击文件引用 → on_open_file 回调（addin 用 rstudioapi::navigateToFile 在编辑器打开）。
-  if (!is.null(on_open_file)) {
+  file_reference_queue <- NULL
+  if (is.function(on_open_file)) {
     shiny::observeEvent(session$input[[paste0(input_id, "_open_file")]], {
       of <- session$input[[paste0(input_id, "_open_file")]]
-      if (is.null(of) || is.null(of$path) || !nzchar(of$path)) return()
+      if (is.null(of)) return()
+      acknowledged <- is.list(of) && !is.null(of$requestId)
+      if (!is.list(of) || !valid_reference_string(of$path) ||
+          (acknowledged && (!identical(of$version, 1L) ||
+                           !valid_reference_string(of$requestId) ||
+                           !valid_reference_string(of$threadId)))) {
+        warning("Invalid file-open request.", call. = FALSE)
+        return()
+      }
       line <- suppressWarnings(as.integer(of$line))
       if (length(line) != 1L || is.na(line)) line <- NULL
-      tryCatch(.call_compatible_callback(on_open_file, list(
-        path = of$path,
-        line = line,
-        thread_id = of$threadId,
-        project = of$project
-      )), error = function(e) NULL)
+      complete <- function(result) {
+        if (!session_finalized && acknowledged) {
+          session$sendCustomMessage(paste0(input_id, ":file-open-result"), list(
+            version = 1L, requestId = of$requestId, threadId = of$threadId,
+            ok = !identical(result, FALSE)
+          ))
+        }
+        invisible(NULL)
+      }
+      failed <- function(error) {
+        if (session_finalized) return(invisible(NULL))
+        detail <- "File navigation failed."
+        if (inherits(error, "condition")) detail <- conditionMessage(error)
+        else if (is.character(error) && length(error) == 1L && !is.na(error)) detail <- error
+        shiny::showNotification(paste0("Unable to open file: ", detail), type = "error", session = session)
+        complete(FALSE)
+      }
+      tryCatch({
+        result <- .call_compatible_callback(on_open_file, list(
+          path = of$path, line = line, thread_id = of$threadId, project = of$project, focus = TRUE
+        ))
+        if (promises::is.promise(result)) {
+          promises::then(result, onFulfilled = complete, onRejected = failed)
+        } else complete(result)
+      }, error = failed)
+      invisible(NULL)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+  }
+  if (is.function(on_open_file)) {
+    resolve_file_reference <- file_reference_resolver
+    if (is.null(resolve_file_reference)) {
+      resolve_file_reference <- function(path, project = NULL) {
+        .addin_resolve_file_path(path, project %||% working_dir %||% getwd())
+      }
+    }
+    valid_reference_string <- function(value) {
+      is.character(value) && length(value) == 1L && !is.na(value) &&
+        nzchar(value) && nchar(value, type = "bytes") <= 4096L &&
+        !grepl("[\r\n]", value)
+    }
+    file_reference_queue <- .new_file_reference_queue(
+      resolve = function(path, request) shiny::withReactiveDomain(session, shiny::isolate({
+        resolved <- .call_compatible_callback(resolve_file_reference, list(
+          path = path, thread_id = request$threadId, project = request$project
+        ))
+        if (!is.null(resolved) && !valid_reference_string(resolved)) {
+          stop("Invalid file-reference resolver result.", call. = FALSE)
+        }
+        resolved
+      })),
+      deliver = function(request, files) {
+        session$sendCustomMessage(paste0(input_id, ":file-references"), list(
+          version = 1L, requestId = request$requestId, threadId = request$threadId, files = files
+        ))
+      },
+      on_error = function(error) shiny::withReactiveDomain(session, {
+        shiny::showNotification(paste0("Unable to check file reference: ", conditionMessage(error)),
+                                type = "error")
+      })
+    )
+    shiny::observeEvent(session$input[[paste0(input_id, "_resolve_files")]], {
+      msg <- session$input[[paste0(input_id, "_resolve_files")]]
+      if (is.null(msg)) return()
+      if (!is.list(msg) || !identical(msg$version, 1L) ||
+          !valid_reference_string(msg$requestId) || !valid_reference_string(msg$threadId) ||
+          !(is.list(msg$paths) || is.character(msg$paths)) ||
+          length(msg$paths) < 1L || length(msg$paths) > 32L ||
+          !all(vapply(msg$paths, valid_reference_string, logical(1))) ||
+          (!is.null(msg$project) && !valid_reference_string(msg$project))) {
+        warning("Invalid file-reference request.", call. = FALSE)
+        return()
+      }
+      file_reference_queue$submit(msg)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
   }
   # 代码块"Run in Console" → 在用户的活 R 会话执行,并把捕获结果回传前端(喂给 Claude)。
@@ -1941,6 +2037,11 @@ assistantUIServer <- function(id, handler,
     if (session_finalized) return(invisible(FALSE))
     session_finalized <<- TRUE
     diagnostics_closing <<- TRUE
+    if (!is.null(file_reference_queue)) {
+      tryCatch(file_reference_queue$close(), error = function(error) message(
+        "[shinyAssistantUI] File reference cleanup failed: ", conditionMessage(error)
+      ))
+    }
 
     if (!is.null(telemetry_observer)) {
       tryCatch(telemetry_observer$destroy(), error = function(error) NULL)

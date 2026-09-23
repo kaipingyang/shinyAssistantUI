@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { safeUrl, parseFileRef } from "@/helpers";
 import { useShinyConfig } from "@/shiny-config-context";
 import { useOpeningFile } from "@/hooks/use-opening-file";
+import { useResolvedFileReference } from "@/file-reference";
 
 export const preprocessLatexMarkdown = (text: string): string =>
   escapeCurrencyDollars(normalizeMathDelimiters(text));
@@ -214,7 +215,7 @@ const defaultComponents = memoizeMarkdownComponents({
     return (
       <a
         className={cn(
-          "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
+          "aui-md-a aui-web-link",
           className,
         )}
         {...(safe ? { href: safe } : {})}
@@ -322,32 +323,37 @@ const defaultComponents = memoizeMarkdownComponents({
   ),
   code: function Code({ className, children, ...props }) {
     const isCodeBlock = useIsMarkdownCodeBlock();
-    const { onOpenFile } = useShinyConfig();
-    const { opening, open: openFile } = useOpeningFile(onOpenFile);
-    // 行内 code 且长得像仓库文件路径（严格：需已知扩展名）→ addin 里点击在 RStudio 打开。
+    const { onOpenFile, fileReferences } = useShinyConfig();
+    const { opening, failed, open: openFile } = useOpeningFile(onOpenFile);
     const text = typeof children === "string"
       ? children
       : Array.isArray(children) ? children.filter((c) => typeof c === "string").join("") : "";
-    const fileRef = !isCodeBlock && onOpenFile ? parseFileRef(text) : null;
-    if (fileRef && onOpenFile) {
+    const fileRef = !isCodeBlock ? parseFileRef(text) : null;
+    const confirmedPath = useResolvedFileReference(onOpenFile ? fileReferences : undefined, fileRef?.path);
+    if (fileRef && confirmedPath && onOpenFile) {
       return (
         <code
           role="button"
           tabIndex={0}
           data-file-ref={fileRef.path}
+          data-file-open-state={opening ? "opening" : failed ? "failed" : "idle"}
           aria-busy={opening}
-          aria-label={opening ? `Opening ${fileRef.path}` : `Open ${fileRef.path} in RStudio`}
-          title={opening ? `Opening ${fileRef.path}…` : `Open ${fileRef.path}${fileRef.line ? ":" + fileRef.line : ""} in RStudio`}
-          onClick={() => openFile(fileRef.path, fileRef.line)}
+          data-resolved-file={confirmedPath}
+          aria-label={opening ? `Opening ${confirmedPath}` : failed ? `Could not open ${confirmedPath}. Retry`
+            : `Open ${confirmedPath} in RStudio`}
+          title={opening ? `Opening ${confirmedPath}…` : failed ? `Could not open ${confirmedPath}. Click to retry.`
+            : `Open ${confirmedPath}${fileRef.line ? ":" + fileRef.line : ""} in RStudio`}
+          onClick={() => openFile(confirmedPath, fileRef.line)}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
-              openFile(fileRef.path, fileRef.line);
+              openFile(confirmedPath, fileRef.line);
             }
           }}
           className={cn(
             "aui-md-inline-code aui-file-ref bg-blue-500/10 text-blue-700 dark:text-blue-300 hover:bg-blue-500/20 cursor-pointer rounded-md px-1.5 py-0.5 font-mono text-[0.85em] underline decoration-dotted underline-offset-2",
             opening && "inline-flex items-center gap-1",
+            failed && "text-destructive",
             className,
           )}
           {...props}
@@ -360,9 +366,11 @@ const defaultComponents = memoizeMarkdownComponents({
     }
     return (
       <code
+        data-file-ref-candidate={fileRef?.path}
         className={cn(
           !isCodeBlock &&
-            "aui-md-inline-code bg-blue-500/10 text-blue-700 dark:text-blue-300 rounded-md px-1.5 py-0.5 font-mono text-[0.85em]",
+            "aui-md-inline-code rounded-md px-1.5 py-0.5 font-mono text-[0.85em]",
+          !isCodeBlock && (fileRef ? "bg-muted text-foreground" : "bg-blue-500/10 text-blue-700 dark:text-blue-300"),
           className,
         )}
         {...props}

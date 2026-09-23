@@ -82,6 +82,8 @@ import {
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
 import { projectLabel, sessionsToWorkspaceThreads } from "./workspace-threads";
 import { createLazyToolResultClient, type LazyToolResultClient } from "./lazy-tool-result";
+import { createFileReferenceClient, type FileReferenceClient, type FileReferenceView } from "./file-reference";
+import { createFileOpenClient } from "./file-open";
 import {
   AppMessageRepository,
   BROWSER_MESSAGE_WINDOW,
@@ -320,6 +322,20 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     );
     bridge.current.onToolResultChunk((chunk) => lazyToolResults.current.accept(chunk));
   }
+  const fileReferenceClient = useRef<FileReferenceClient>(null!);
+  if (!fileReferenceClient.current) {
+    fileReferenceClient.current = createFileReferenceClient((request) => bridge.current.resolveFiles(request));
+    bridge.current.onFileReferences((data) => fileReferenceClient.current.accept(data));
+  }
+  useEffect(() => () => fileReferenceClient.current.clear(), []);
+  const fileOpenClient = useRef<ReturnType<typeof createFileOpenClient>>(null!);
+  if (!fileOpenClient.current) {
+    fileOpenClient.current = createFileOpenClient((request) => bridge.current.sendOpenFile(
+      request.path, request.line, request.threadId, request.project, request.requestId,
+    ));
+    bridge.current.onFileOpenResult((data) => fileOpenClient.current.accept(data));
+  }
+  useEffect(() => () => fileOpenClient.current.clear(), []);
   const copilotServiceConfig = useMemo(() => parseCopilotServiceAddon(config), [config]);
   const copilotBridge = useRef<CopilotServiceBridge | null>(null);
   if (copilotServiceConfig && !copilotBridge.current) {
@@ -1090,6 +1106,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         !knownThreadIdsRef.current.has(threadId)) return;
 
     invalidateHistoryForProactive(threadId);
+    fileReferenceClient.current.invalidate(threadId);
     if (threadId !== currentThreadIdRef.current && serverSessionIdsRef.current.has(threadId)) {
       // The authoritative replacement satisfies the first hydration. A later
       // revisit still performs an explicit refresh.
@@ -1896,6 +1913,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
 
       const incomingForWindow = data.messages as ThreadMessageLike[];
+      fileReferenceClient.current.invalidate(threadId);
       const existingForWindow = messagesMapRef.current[threadId] ?? [];
       const projectedForWindow = data.prepend === true
         ? [...incomingForWindow, ...existingForWindow]
@@ -3109,13 +3127,34 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const openFile = useCallback((path: string, line?: number) => {
     if (!path) return;
     const threadId = currentThreadIdRef.current;
+    const target = resolveToolFileReference(path, messages);
+    const project = projectForThreadId(threadId);
+    if (config?.file_open_protocol === 1) {
+      return fileOpenClient.current.open(target, line, { threadId, project });
+    }
     bridge.current.sendOpenFile(
-      resolveToolFileReference(path, messages),
+      target,
       line,
       threadId,
-      projectForThreadId(threadId),
+      project,
     );
-  }, [messages, projectForThreadId]);
+  }, [messages, projectForThreadId, config?.file_open_protocol]);
+  const fileOpeningEnabled = config?.file_open === true;
+  const fileReferenceCandidate = useCallback((path: string) =>
+    resolveToolFileReference(path, messages), [messages]);
+  const fileReferences: FileReferenceView | undefined = fileOpeningEnabled && config?.file_reference_protocol === 1
+    ? {
+      client: fileReferenceClient.current, threadId: currentThreadId,
+      project: projectForThreadId(currentThreadId), candidate: fileReferenceCandidate,
+    } : undefined;
+  const fileReferenceRun = useRef({ threadId: currentThreadId, isRunning });
+  useEffect(() => {
+    const previous = fileReferenceRun.current;
+    if (previous.threadId !== currentThreadId || (previous.isRunning && !isRunning)) {
+      fileReferenceClient.current.invalidate(currentThreadId);
+    }
+    fileReferenceRun.current = { threadId: currentThreadId, isRunning };
+  }, [currentThreadId, isRunning]);
   // 代码块"Run in Console"：在用户活 R 会话执行(addin/RStudio；config.console_run 开启才暴露)。
   const consoleRunEnabled = config?.console_run === true;
   const runInConsole = useCallback((code: string) => {
@@ -3501,6 +3540,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     runtime, lazyToolResults: lazyToolResults.current,
     submissionRevision, sendToolApproval, switchToNewThread, newThreadInProject,
     renameThread, openFile, enqueueMessage,
+    fileOpeningEnabled, fileReferences,
     runInConsole, consoleRunEnabled,
     invokeAction, permissionMode, thinking, model,
     blockingAction: blockingActions[currentThreadId],

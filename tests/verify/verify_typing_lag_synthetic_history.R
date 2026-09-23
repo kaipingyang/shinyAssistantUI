@@ -5,9 +5,10 @@
 suppressMessages({ library(chromote); library(callr); library(jsonlite) })
 main <- function() {
 source("tests/verify/owned_process_cleanup.R", local = TRUE)
+source("tests/verify/window_error_capture.R", local = TRUE)
 `%||%` <- function(x, y) if (is.null(x)) y else x
 PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-PORT <- as.integer(Sys.getenv("TYPING_LAG_PORT", "9277"))
+PORT <- as.integer(Sys.getenv("TYPING_LAG_PORT", as.character(httpuv::randomPort())))
 HIST_N <- Sys.getenv("SYNTH_HISTORY_N", "300")
 HIST_KIND <- Sys.getenv("SYNTH_HISTORY_KIND", "mixed")
 cat(sprintf("=== 配置: %s 条 %s 历史 ===\n", HIST_N, HIST_KIND))
@@ -38,7 +39,7 @@ chromote::set_chrome_args(unique(c(
 )))
 b <- chromote::ChromoteSession$new()
 errs <- c()
-b$Runtime$enable()
+window_errors <- capture_browser_window_errors(b, function() "typing-history")
 b$Performance$enable()
 metrics <- function() {
   values <- b$Performance$getMetrics()$metrics
@@ -62,6 +63,7 @@ ev <- function(js) {
 b$Page$navigate(sprintf("http://127.0.0.1:%d/", PORT))
 b$Page$loadEventFired()
 Sys.sleep(3)
+stopifnot(isTRUE(ev("window.__auiWindowErrorProbeReady")))
 
 # 安装 long task + composer keydown 延迟探针(在页面里跑,不依赖 CDP 往返计时)。
 ev("
@@ -210,6 +212,7 @@ for (metric in c("ScriptDuration", "LayoutDuration", "RecalcStyleDuration", "Tas
 }
 
 cat("\nconsole/runtime errors:", length(errs), "\n")
+cat("direct window errors:", length(window_errors()), "\n")
 if (length(errs)) cat(head(unique(errs), 5), sep = "\n")
 
 mounted <- as.integer(ev("document.querySelectorAll('[data-slot=aui_message-slot]').length"))
@@ -219,7 +222,8 @@ cat(sprintf("虚拟窗口验收: mounted=%d (<=48), p95=%.1fms (<=%.1fms)\n",
             mounted, loaded_p95, limit))
 stopifnot(length(frames_empty) == nchar("hello world baseline test 12345"),
           length(frames_loaded) == nchar("hello world after history load 12345"))
-stopifnot(length(errs) == 0L, mounted > 0L, mounted <= 48L, loaded_p95 <= limit)
+stopifnot(length(errs) == 0L, length(window_errors()) == 0L,
+          mounted > 0L, mounted <= 48L, loaded_p95 <= limit)
 stopifnot(isTRUE(ev("document.querySelector('[data-slot=aui_thread-viewport]').clientHeight <= innerHeight + 1")))
 cleanup()
 cat("TYPING_LAG_DONE\n")

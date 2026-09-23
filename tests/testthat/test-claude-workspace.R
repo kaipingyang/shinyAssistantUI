@@ -44,6 +44,31 @@ test_that("workspace snapshot annotates sessions with their owning project", {
   expect_identical(vapply(snapshot, `[[`, character(1), "projectLabel"), c(basename(one), basename(two)))
 })
 
+test_that("workspace snapshot includes the entire metadata catalog and older archived sessions", {
+  one <- withr::local_tempdir()
+  two <- withr::local_tempdir()
+  archive_path <- withr::local_tempfile(fileext = ".rds")
+  .write_archived_ids(archive_path, one, "old-140")
+  limits <- list()
+  fake_list <- function(directory, limit = 100L, archived_ids = character()) {
+    limits[[length(limits) + 1L]] <<- list(value = limit)
+    items <- lapply(seq_len(140L), function(i) list(
+      id = paste0("old-", i), title = paste("Session", i),
+      preview = paste("Catalog preview", i), archived = paste0("old-", i) %in% archived_ids
+    ))
+    if (is.null(limit)) items else utils::head(items, limit)
+  }
+  snapshot <- .workspace_session_snapshot(c(one, two), archive_path, fake_list)
+  expect_length(snapshot, 280L)
+  expect_length(limits, 2L)
+  expect_null(limits[[1L]]$value)
+  expect_null(limits[[2L]]$value)
+  expect_true(snapshot[[140L]]$archived)
+  expect_identical(snapshot[[140L]]$preview, "Catalog preview 140")
+  expect_identical(snapshot[[280L]]$project, normalizePath(two))
+  expect_identical(formals(list_claude_sessions)$limit, 100L)
+})
+
 test_that("assistant server snapshots project into the handler invocation", {
   calls <- list()
   handler <- function(message, thread_id, project, on_done, ...) {
@@ -410,6 +435,23 @@ test_that("compatible callbacks preserve legacy positional prefixes", {
       list(thread_id = "thread-a", project = "/work/a")
     ),
     "/work/a"
+  )
+})
+
+test_that("compatible callbacks retain explicit NULL instead of shifting later protocol fields", {
+  expect_identical(
+    .call_compatible_callback(
+      function(path, project = "default") list(path, project),
+      list(path = "exists.R", thread_id = "history", project = NULL)
+    ),
+    list("exists.R", NULL)
+  )
+  expect_identical(
+    .call_compatible_callback(
+      function(p, l = 99L) list(p, l),
+      list(path = "exists.R", line = NULL, thread_id = "history")
+    ),
+    list("exists.R", NULL)
   )
 })
 

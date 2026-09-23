@@ -13,10 +13,12 @@
 
 # 活动编辑器上下文:list(path, rel, selection, first_line, last_line) 或 NULL。全程 guard。
 # 解析点击的文件引用。先走 cwd/显式路径快路径；裸名 miss 后只读取已经热过的
-# workspace memo（peek 不得触发索引构建），唯一 basename 命中才使用。其余静默。
+# workspace memo（peek 不得触发索引构建），唯一 basename 命中才使用。
 .addin_resolve_file_path <- function(path, project = NULL, workspace_index_peek = NULL) {
-  if (!is.character(path) || length(path) != 1L || !nzchar(path)) return(NULL)
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)) return(NULL)
   path_slashes <- gsub("\\\\", "/", path)
+  if (startsWith(path_slashes, "~/")) path_slashes <- path.expand(path_slashes)
+  openable <- function(candidate) isTRUE(file_test("-f", candidate)) && file.access(candidate, 4L) == 0L
   is_absolute <- startsWith(path_slashes, "/") || grepl("^[A-Za-z]:", path_slashes)
   project_norm <- NULL
   project_prefix <- NULL
@@ -31,7 +33,7 @@
   candidate <- tryCatch(normalizePath(candidate, winslash = "/", mustWork = FALSE),
                         error = function(e) candidate)
   candidate_inside <- is.null(project_norm) || startsWith(candidate, project_prefix)
-  if (file.exists(candidate) && (is_absolute || candidate_inside)) return(candidate)
+  if ((is_absolute || candidate_inside) && openable(candidate)) return(candidate)
 
   # Claude有时在cwd已经是ERP时仍输出ERP/file。direct cwd/ERP/file不存在时，
   # 仅允许剥掉一个与cwd basename精确相同的首段；真实cwd/ERP/file始终由上面的
@@ -44,7 +46,7 @@
         fallback <- file.path(project, stripped)
         fallback <- tryCatch(normalizePath(fallback, winslash = "/", mustWork = FALSE),
                              error = function(e) fallback)
-        if (startsWith(fallback, project_prefix) && file.exists(fallback)) return(fallback)
+        if (startsWith(fallback, project_prefix) && openable(fallback)) return(fallback)
       }
     }
   }
@@ -67,29 +69,46 @@
   project_norm <- tryCatch(normalizePath(project, winslash = "/", mustWork = FALSE),
                            error = function(e) project)
   project_prefix <- paste0(sub("/+$", "", project_norm), "/")
-  if (!startsWith(resolved, project_prefix) || !file.exists(resolved)) return(NULL)
+  if (!startsWith(resolved, project_prefix) || !openable(resolved)) return(NULL)
   resolved
 }
 
 # 点击文件引用 / Claude 编辑后揭示 → 在 RStudio 编辑器打开。
 # RStudio 可用性已在 addin 启动时计算为 native_picker；这里不再为每次点击重复 RPC。
-.addin_open_file <- function(path, line = NULL, project = NULL, workspace_index_peek = NULL) {
-  if (!requireNamespace("rstudioapi", quietly = TRUE)) return(invisible(NULL))
+.addin_open_file <- function(path, line = NULL, project = NULL, workspace_index_peek = NULL,
+                             focus = TRUE) {
+  if (!requireNamespace("rstudioapi", quietly = TRUE)) {
+    shiny::showNotification("File navigation requires rstudioapi.", type = "error")
+    return(invisible(FALSE))
+  }
   abs_path <- .addin_resolve_file_path(path, project, workspace_index_peek)
-  if (is.null(abs_path)) return(invisible(NULL))
-
-  # 已聚焦同一文件则不跳转
-  current <- tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) NULL)
-  if (!is.null(current) && nzchar(current)) {
-    current_norm <- tryCatch(normalizePath(current, winslash = "/", mustWork = FALSE),
-                             error = function(e) current)
-    if (identical(current_norm, abs_path)) return(invisible(NULL))
+  if (is.null(abs_path)) {
+    shiny::showNotification(paste0("Unable to locate file: ", path, ". Use an explicit existing path."),
+                            type = "warning")
+    return(invisible(FALSE))
   }
 
   ln <- suppressWarnings(as.integer(line))
   if (length(ln) != 1L || is.na(ln) || ln < 1L) ln <- -1L
-  tryCatch(rstudioapi::navigateToFile(abs_path, line = ln), error = function(e) NULL)
-  invisible(NULL)
+  if (!isTRUE(focus) && ln < 0L) {
+    current <- tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) NULL)
+    if (!is.null(current) && nzchar(current)) {
+      current_norm <- tryCatch(normalizePath(current, winslash = "/", mustWork = FALSE),
+                               error = function(e) current)
+      if (identical(current_norm, abs_path)) return(invisible(TRUE))
+    }
+  }
+  ok <- tryCatch({
+    result <- rstudioapi::navigateToFile(abs_path, line = ln)
+    if (identical(result, FALSE)) {
+      shiny::showNotification("The editor did not accept file navigation.", type = "error")
+      FALSE
+    } else TRUE
+  }, error = function(e) {
+    shiny::showNotification(paste0("Unable to open file: ", conditionMessage(e)), type = "error")
+    FALSE
+  })
+  invisible(ok)
 }
 
 # 编辑前保存：判定活动文档是否该保存。有路径 + 有 doc id → 返回 id；untitled（无路径）→ NULL

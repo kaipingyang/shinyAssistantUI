@@ -3,6 +3,7 @@
 
 import type { LazyToolResultChunk, LazyToolResultRequest } from "./lazy-tool-result";
 import type { DiagnosticsBatch } from "./diagnostics";
+import type { FileReferenceRequest } from "./file-reference";
 
 declare const Shiny: {
   setInputValue: (id: string, value: unknown, opts?: { priority?: string }) => void;
@@ -158,7 +159,10 @@ export interface ShinyBridge {
   sendToolApproval: (toolCallId: string, approved: boolean, opts?: { suggestionIdx?: number; suggestionIdxs?: number[]; customMessage?: string; answers?: Record<string, string | string[]>; updatedInput?: Record<string, unknown> }) => void;
   sendAction: (actionId: string, threadId: string, options?: ActionRequestOptions, project?: string) => void;
   sendRename: (threadId: string, title: string, project?: string) => void;
-  sendOpenFile: (path: string, line?: number, threadId?: string, project?: string) => void;
+  sendOpenFile: (path: string, line?: number, threadId?: string, project?: string, requestId?: string) => void;
+  onFileOpenResult: (handler: (data: unknown) => void) => void;
+  resolveFiles: (request: FileReferenceRequest) => void;
+  onFileReferences: (handler: (data: unknown) => void) => void;
   sendRunInConsole: (code: string, threadId?: string, project?: string) => void;
   sendArchiveSession: (sessionId: string, archived: boolean, project?: string) => void;
   sendDeleteSession: (sessionId: string, project?: string) => void;
@@ -222,6 +226,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   const bufferedProactiveMessages: ProactiveMessagesPayload[] = [];
   let loadThreadHandler: ((data: HistoryLoadPayload) => void) | null = null;
   let toolResultChunkHandler: ((data: LazyToolResultChunk) => void) | null = null;
+  let fileReferencesHandler: ((data: unknown) => void) | null = null;
+  let fileOpenResultHandler: ((data: unknown) => void) | null = null;
   // `:sessions` 可能在 useEffect 注册 handler 前到达（Shiny 首次 flush 早于 React paint）
   // 缓冲最后一条，onSessions() 注册时立即回放
   let bufferedSessions: SessionsPayload | null = null;
@@ -256,6 +262,8 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   };
 
   // 注册一次，内部路由到对应 threadId 的回调
+  Shiny.addCustomMessageHandler(`${inputId}:file-references`, (data) => fileReferencesHandler?.(data));
+  Shiny.addCustomMessageHandler(`${inputId}:file-open-result`, (data) => fileOpenResultHandler?.(data));
   Shiny.addCustomMessageHandler(`${inputId}:chunk`, (data) => {
     const d = data as { text: string; threadId?: string };
     routeCallback(d.threadId)?.onChunk(d.text);
@@ -454,12 +462,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
       );
     },
 
-    sendOpenFile(path, line, threadId, project) {
+    sendOpenFile(path, line, threadId, project, requestId) {
       Shiny.setInputValue(
         `${inputId}_open_file`,
-        { path, line: line ?? null, ...(threadId && { threadId }), ...(project && { project }), ts: Date.now() },
+        { path, line: line ?? null, ...(threadId && { threadId }), ...(project && { project }),
+          ...(requestId && { version: 1, requestId }), ts: Date.now() },
         { priority: "event" }
       );
+    },
+    onFileOpenResult(handler) {
+      fileOpenResultHandler = handler;
+    },
+    resolveFiles(request) {
+      Shiny.setInputValue(`${inputId}_resolve_files`, request, { priority: "event" });
+    },
+    onFileReferences(handler) {
+      fileReferencesHandler = handler;
     },
 
     sendRunInConsole(code, threadId, project) {

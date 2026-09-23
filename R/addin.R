@@ -603,14 +603,23 @@
         include_export = !is.null(support_bundle_controller)
       ),
       on_open_file     = if (native_picker) {
-        function(path, line = NULL, thread_id = NULL, project = NULL) {
+        function(path, line = NULL, thread_id = NULL, project = NULL, focus = TRUE) {
           target <- project_for(thread_id, project)
           peek <- if (isTRUE(workspace)) {
             function() workspace_index_peek(target)
           } else {
             workspace_index_peek
           }
-          .addin_open_file(path, line, target, peek)
+          .addin_open_file(path, line, target, peek, focus = focus)
+        }
+      } else NULL,
+      file_reference_resolver = if (native_picker) {
+        function(path, thread_id = NULL, project = NULL) {
+          target <- project_for(thread_id, project)
+          peek <- if (isTRUE(workspace)) {
+            function() workspace_index_peek(target)
+          } else workspace_index_peek
+          .addin_resolve_file_path(path, target, peek)
         }
       } else NULL,
       on_run_in_console = if (requireNamespace("rstudioapi", quietly = TRUE) &&
@@ -688,6 +697,7 @@
       } else {
         sessions <- .call_compatible_callback(list_claude_sessions, list(
           directory = cur_dir(),
+          limit = NULL,
           archived_ids = .read_archived_ids(archived_path, cur_dir())
         ))
         list(sessions = sessions)

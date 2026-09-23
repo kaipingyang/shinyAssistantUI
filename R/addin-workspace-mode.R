@@ -36,7 +36,7 @@
     exact <- which(!used & nzchar(arg_names) & arg_names == param)
     if (length(exact)) {
       index <- exact[[1L]]
-      call_args[[param]] <- args[[index]]
+      call_args[param] <- args[index]
       used[[index]] <- TRUE
     }
   }
@@ -45,7 +45,7 @@
     index <- which(!used)
     if (!length(index)) next
     index <- index[[1L]]
-    call_args[[param]] <- args[[index]]
+    call_args[param] <- args[index]
     used[[index]] <- TRUE
   }
   if ("..." %in% params && any(!used)) {
@@ -250,7 +250,7 @@
     project_sessions <- tryCatch(
       .call_compatible_callback(
         list_sessions,
-        list(directory = project, archived_ids = archived_ids)
+        list(directory = project, limit = NULL, archived_ids = archived_ids)
       ),
       error = function(e) list()
     ) %||% list()

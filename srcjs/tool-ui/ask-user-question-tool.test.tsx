@@ -32,6 +32,45 @@ function renderTool(args: unknown, result?: unknown, toolCallId = "ask-malformed
 }
 
 describe("AskUserQuestionToolUI runtime validation", () => {
+  it("rejects two header-only questions without silently treating headers as question bodies", () => {
+    const decide = vi.fn();
+    registerApprovalHandler("chat-header-only", decide);
+    const questions = [
+      { header: "Color", multiSelect: false, options: [{ label: "Blue" }, { label: "Red" }] },
+      { header: "Mode", multiSelect: false, options: [{ label: "Fast" }, { label: "Safe" }] },
+    ];
+    const view = renderTool({ questions }, undefined, "ask-header-only", "chat-header-only");
+    expect(view.container.querySelector("[data-ask-questions-invalid]")).not.toBeNull();
+    expect(view.queryByRole("button", { name: "Submit answer" })).toBeNull();
+    expect(view.queryAllByRole("radio")).toHaveLength(0);
+    fireEvent.click(view.getByText("Skip"));
+    expect(decide).toHaveBeenCalledExactlyOnceWith("ask-header-only", false, {
+      customMessage: "Skipped invalid AskUserQuestion payload",
+    });
+    expect(questions.every((question) => !("question" in question))).toBe(true);
+  });
+
+  it("submits both answers once the original input includes both required question bodies", () => {
+    const decide = vi.fn();
+    registerApprovalHandler("chat-two-questions", decide);
+    const args = {
+      questions: [
+        { question: "Which color?", header: "Color", multiSelect: false, options: [{ label: "Blue" }, { label: "Red" }] },
+        { question: "Which mode?", header: "Mode", multiSelect: false, options: [{ label: "Fast" }, { label: "Safe" }] },
+      ],
+    };
+    const original = JSON.stringify(args);
+    const view = renderTool(args, undefined, "ask-two-questions", "chat-two-questions");
+    expect(view.container.querySelector("[data-ask-questions-invalid]")).toBeNull();
+    fireEvent.click(view.getByLabelText("Blue"));
+    fireEvent.click(view.getByLabelText("Safe"));
+    fireEvent.click(view.getByText("Submit answers"));
+    expect(decide).toHaveBeenCalledExactlyOnceWith("ask-two-questions", true, {
+      answers: { "Which color?": "Blue", "Which mode?": "Safe" },
+    });
+    expect(JSON.stringify(args)).toBe(original);
+  });
+
   it("falls back safely for malformed questions and still lets the user skip", () => {
     const decide = vi.fn();
     registerApprovalHandler("chat-ask", decide);

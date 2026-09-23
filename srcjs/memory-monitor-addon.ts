@@ -4,6 +4,25 @@ declare const Shiny: {
 };
 
 export type MemoryGuardState = "normal" | "soft" | "hard" | "recovering" | "disabled" | "unknown";
+export type MemoryMonitorSession = {
+  currentAvailable: boolean;
+  limitKind: "limited" | "unlimited" | "unknown";
+  anonBytes: number | null;
+  fileBytes: number | null;
+  inactiveFileBytes: number | null;
+  shmemBytes: number | null;
+  dirtyFileBytes: number | null;
+  writebackFileBytes: number | null;
+  limitEvents: number | null;
+  oomEvents: number | null;
+  oomKillEvents: number | null;
+  limitEventsDelta: number | null;
+  oomEventsDelta: number | null;
+  oomKillEventsDelta: number | null;
+  intervalMs: number | null;
+  psiSomeAvg10: number | null;
+  psiFullAvg10: number | null;
+};
 export type MemoryMonitorSample = {
   state: MemoryGuardState;
   pssBytes: number;
@@ -22,10 +41,12 @@ export type MemoryMonitorSample = {
   sampledAt?: number;
   treeSampledAt?: number;
   cgroupSampledAt?: number;
+  session?: MemoryMonitorSession;
 };
-export type MemoryMonitorAddonConfig = { version: 2 | 3; ownerSeed: number; lastRevision: number };
+type MemoryMonitorVersion = 2 | 3 | 4;
+export type MemoryMonitorAddonConfig = { version: MemoryMonitorVersion; ownerSeed: number; lastRevision: number };
 export type MemoryMonitorFrame = {
-  version: 2 | 3;
+  version: MemoryMonitorVersion;
   ownerId: number;
   openId: number;
   revision: number;
@@ -41,6 +62,12 @@ const SAMPLE_KEYS = [
   "cgroupLimited", "softPssBytes", "hardPssBytes", "softRssBytes", "hardRssBytes",
 ];
 const TIME_KEYS = ["sampledAt", "treeSampledAt", "cgroupSampledAt"];
+const SESSION_INTEGER_KEYS = [
+  "anonBytes", "fileBytes", "inactiveFileBytes", "shmemBytes", "dirtyFileBytes", "writebackFileBytes",
+  "limitEvents", "oomEvents", "oomKillEvents", "limitEventsDelta", "oomEventsDelta", "oomKillEventsDelta",
+];
+const SESSION_PERCENT_KEYS = ["psiSomeAvg10", "psiFullAvg10"];
+const SESSION_KEYS = ["currentAvailable", "limitKind", ...SESSION_INTEGER_KEYS, "intervalMs", ...SESSION_PERCENT_KEYS];
 const STATES = new Set<MemoryGuardState>(["normal", "soft", "hard", "recovering", "disabled", "unknown"]);
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -53,33 +80,51 @@ const positiveSafe = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const nonNegativeSafe = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const isVersion = (value: unknown): value is MemoryMonitorVersion => value === 2 || value === 3 || value === 4;
+
+function isSession(value: unknown): value is MemoryMonitorSession {
+  if (!isRecord(value) || !exactKeys(value, SESSION_KEYS) ||
+      typeof value.currentAvailable !== "boolean" ||
+      (value.limitKind !== "limited" && value.limitKind !== "unlimited" && value.limitKind !== "unknown") ||
+      (value.intervalMs !== null && !positiveSafe(value.intervalMs))) return false;
+  for (const key of SESSION_INTEGER_KEYS) {
+    if (value[key] !== null && !nonNegativeSafe(value[key])) return false;
+  }
+  for (const key of SESSION_PERCENT_KEYS) {
+    const percent = value[key];
+    if (percent !== null && (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0 || percent > 100)) return false;
+  }
+  return true;
+}
 
 export function parseMemoryMonitorAddon(config: Record<string, unknown> | undefined): MemoryMonitorAddonConfig | undefined {
   if (!isRecord(config?.addons)) return undefined;
   const value = config.addons.memoryMonitor;
-  if (!isRecord(value) || !exactKeys(value, CONFIG_KEYS) || (value.version !== 2 && value.version !== 3) ||
+  if (!isRecord(value) || !exactKeys(value, CONFIG_KEYS) || !isVersion(value.version) ||
       !positiveSafe(value.ownerSeed) || !nonNegativeSafe(value.lastRevision)) return undefined;
   return { version: value.version, ownerSeed: value.ownerSeed, lastRevision: value.lastRevision };
 }
 
-function parseSample(value: unknown, version: 2 | 3): MemoryMonitorSample | undefined {
-  const keys = version === 3 ? [...SAMPLE_KEYS, ...TIME_KEYS] : SAMPLE_KEYS;
+function parseSample(value: unknown, version: MemoryMonitorVersion): MemoryMonitorSample | undefined {
+  const keys = version === 4 ? [...SAMPLE_KEYS, ...TIME_KEYS, "session"]
+    : version === 3 ? [...SAMPLE_KEYS, ...TIME_KEYS] : SAMPLE_KEYS;
   if (!isRecord(value) || !exactKeys(value, keys) ||
       typeof value.state !== "string" || !STATES.has(value.state as MemoryGuardState) ||
       typeof value.cgroupLimited !== "boolean") return undefined;
   for (const key of SAMPLE_KEYS.slice(1)) {
     if (key !== "cgroupLimited" && !nonNegativeSafe(value[key])) return undefined;
   }
-  if (version === 3) {
+  if (version >= 3) {
     for (const key of TIME_KEYS) {
       if (!nonNegativeSafe(value[key]) || value[key] > 8.64e15) return undefined;
     }
+    if (version === 4 && !isSession(value.session)) return undefined;
   }
   return value as MemoryMonitorSample;
 }
 
 export function parseMemoryMonitorFrame(value: unknown): MemoryMonitorFrame | undefined {
-  if (!isRecord(value) || !exactKeys(value, FRAME_KEYS) || (value.version !== 2 && value.version !== 3) ||
+  if (!isRecord(value) || !exactKeys(value, FRAME_KEYS) || !isVersion(value.version) ||
       !positiveSafe(value.ownerId) || !positiveSafe(value.openId) || !nonNegativeSafe(value.revision)) return undefined;
   const sample = parseSample(value.sample, value.version);
   return sample ? { version: value.version, ownerId: value.ownerId, openId: value.openId, revision: value.revision, sample } : undefined;

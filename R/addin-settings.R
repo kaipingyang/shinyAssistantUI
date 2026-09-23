@@ -26,7 +26,7 @@
 .settings_safe_integer <- function(value, positive = FALSE) {
   if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
       !is.finite(value) || value != floor(value) ||
-      value < if (positive) 1 else 0 || value > 2^53 - 1) return(NULL)
+      value < (if (positive) 1 else 0) || value > 2^53 - 1) return(NULL)
   as.numeric(value)
 }
 
