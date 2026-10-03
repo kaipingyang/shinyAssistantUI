@@ -355,10 +355,10 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     >
       <ThreadPrimitive.Viewport
         ref={viewportRef}
-        autoScroll
-        scrollToBottomOnInitialize
+        autoScroll={false}
+        scrollToBottomOnInitialize={false}
         scrollToBottomOnRunStart={false}
-        scrollToBottomOnThreadSwitch
+        scrollToBottomOnThreadSwitch={false}
         style={{ overflowAnchor: "none" }}
         data-slot="aui_thread-viewport"
         onWheelCapture={(event) => {

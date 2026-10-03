@@ -55,7 +55,10 @@ server <- function(input, output, session) {
       "tool-markdown", "reasoning-auto", "thinking-to-text", "canonical-replace"
     ))
     sequence <- 0L
-    total <- 24L
+    total <- suppressWarnings(as.integer(Sys.getenv("AUI_FOLLOW_TOTAL", "24")))
+    if (is.na(total) || total < 2L) total <- 24L
+    interval <- suppressWarnings(as.numeric(Sys.getenv("AUI_FOLLOW_INTERVAL", "0.12")))
+    if (!is.finite(interval) || interval < 0) interval <- 0.12
     text <- ""
     timer <- NULL
     finished <- FALSE
@@ -131,7 +134,7 @@ server <- function(input, output, session) {
         if (sequence >= total) {
           timer <<- later::later(function() finish(TRUE), 0.45)
         } else {
-          timer <<- later::later(emit, if (initial) 2 else 0.12)
+          timer <<- later::later(emit, if (initial) 2 else interval)
         }
         invisible(NULL)
       }

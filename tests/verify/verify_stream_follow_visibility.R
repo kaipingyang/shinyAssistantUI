@@ -75,9 +75,29 @@ main <- function() {
     }
     result$result$value
   }
+  screenshot_dir <- Sys.getenv("AUI_FOLLOW_SCREENSHOTS", "")
+  screenshot_index <- 0L
+  screenshot_next <- Sys.time()
+  if (nzchar(screenshot_dir)) dir.create(screenshot_dir, recursive = TRUE, showWarnings = FALSE)
+  capture_timed_screenshot <- function() {
+    if (!nzchar(screenshot_dir) || Sys.time() < screenshot_next) return(invisible(NULL))
+    ready <- tryCatch(isTRUE(js("!!document.querySelector('[data-slot=aui_thread-viewport]')")), error = function(e) FALSE)
+    if (!ready) return(invisible(NULL))
+    screenshot_index <<- screenshot_index + 1L
+    screenshot_next <<- Sys.time() + 1
+    stem <- sprintf("%s-%03d", scene, screenshot_index)
+    browser$screenshot(
+      file.path(screenshot_dir, paste0(stem, ".png")),
+      selector = "[data-slot=aui_thread-viewport]"
+    )
+    state <- tryCatch(js("window.followProbe?.snapshot()||{ready:false}"), error = function(e) list(ready = FALSE))
+    writeLines(as.character(jsonlite::toJSON(state, auto_unbox = TRUE, null = "null")),
+               file.path(screenshot_dir, paste0(stem, ".json")))
+  }
   wait <- function(code, timeout = 15) {
     deadline <- Sys.time() + timeout
     repeat {
+      capture_timed_screenshot()
       if (isTRUE(js(code))) return(invisible(TRUE))
       if (!app$is_alive() || Sys.time() > deadline) {
         cat("FOLLOW_WAIT_STATE ", jsonlite::toJSON(js(
