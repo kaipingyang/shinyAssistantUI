@@ -90,6 +90,15 @@ describe("streaming viewport follow intent", () => {
       true,
     )).toBe(false);
   });
+
+  it("honors explicit upward intent inside the bottom tolerance", () => {
+    expect(resolveStreamingFollow(
+      bottom,
+      { scrollTop: 596, scrollHeight: 1000, clientHeight: 400 },
+      true,
+      true,
+    )).toBe(false);
+  });
 });
 
 

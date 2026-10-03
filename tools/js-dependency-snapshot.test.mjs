@@ -42,16 +42,19 @@ test("the snapshot path supports four-part R development versions", () => {
   }
 });
 
-test("the assistant-ui core dependency set is exact and excludes A2UI", () => {
+test("the assistant-ui dependency set is exact and selects one A2UI route", () => {
   const packageJson = JSON.parse(readFileSync(resolve(repositoryRoot, "package.json"), "utf8"));
   const snapshot = createSnapshot(repositoryRoot);
   const expectedRuntime = {
-    "@assistant-ui/react": "0.15.17",
-    "@assistant-ui/react-lexical": "0.2.11",
-    "@assistant-ui/react-markdown": "0.14.13",
-    "@lexical/react": "0.49.0",
-    "@lexical/utils": "0.49.0",
-    lexical: "0.49.0",
+    "@assistant-ui/react": "0.15.23",
+    "@assistant-ui/react-generative-ui": "0.0.22",
+    "@assistant-ui/react-lexical": "0.2.15",
+    "@assistant-ui/react-markdown": "0.14.18",
+    "@lexical/history": "0.51.0",
+    "@lexical/plain-text": "0.51.0",
+    "@lexical/react": "0.51.0",
+    "@lexical/utils": "0.51.0",
+    lexical: "0.51.0",
     react: "19.2.7",
     "react-dom": "19.2.7",
   };
@@ -62,15 +65,14 @@ test("the assistant-ui core dependency set is exact and excludes A2UI", () => {
   }
   assert.equal(
     snapshot.devDependencies["@assistant-ui/react-devtools"]?.declared,
-    "1.2.16",
+    "1.2.22",
   );
   assert.equal(
     snapshot.devDependencies["@assistant-ui/react-devtools"]?.resolved,
-    "1.2.16",
+    "1.2.22",
   );
 
   for (const name of [
-    "@assistant-ui/react-generative-ui",
     "@assistant-ui/react-ag-ui",
     "@a2ui/react",
     "@a2ui/web_core",

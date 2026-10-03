@@ -9,6 +9,12 @@ main <- function() {
   source("tests/verify/window_error_capture.R", local = TRUE)
   `%||%` <- function(x, y) if (is.null(x)) y else x
   project <- normalizePath(".")
+  profile_enabled <- identical(Sys.getenv("AUI_HISTORY_PROFILE"), "1")
+  profile_output <- Sys.getenv("AUI_HISTORY_PROFILE_OUT")
+  if (profile_enabled && !nzchar(profile_output)) {
+    stop("AUI_HISTORY_PROFILE_OUT is required for diagnostic CPU sampling")
+  }
+  if (profile_enabled) dir.create(profile_output, recursive = TRUE, showWarnings = FALSE)
   port <- httpuv::randomPort()
   logs <- c(tempfile("history-search-out-"), tempfile("history-search-err-"))
   app <- browser <- NULL
@@ -46,6 +52,10 @@ main <- function() {
   errors <- network_errors <- character()
   browser$Runtime$enable()
   browser$Network$enable()
+  if (profile_enabled) {
+    browser$Profiler$enable()
+    browser$Profiler$setSamplingInterval(interval = 1000L)
+  }
   window_errors <- capture_browser_window_errors(browser, function() stage)
   probe_js <- paste(readLines("tests/verify/history_search_probe.js", warn = FALSE), collapse = "\n")
   browser$Runtime$consoleAPICalled(callback_ = function(event) {
@@ -305,8 +315,19 @@ main <- function() {
     for (previews in arms) {
       stage <- paste("benchmark", rep, previews)
       navigate(sprintf("?mode=benchmark&previews=%d&rep=%d", previews, rep))
+      if (profile_enabled) {
+        browser$Profiler$start()
+        profile_page_start <- value("performance.now()")
+      }
       for (term in c("H", "History", "History 0", "History 019", "History target", "absent", "History 1998")) {
         search(term)
+      }
+      if (profile_enabled) {
+        cpu <- browser$Profiler$stop()$profile
+        cpu$diagnosticPageStartMs <- profile_page_start
+        path <- file.path(profile_output, sprintf("search-%d-previews-%d.cpuprofile", rep, previews))
+        writeLines(toJSON(cpu, auto_unbox = TRUE, null = "null", digits = NA), path)
+        cat("SEARCH_CPU_PROFILE diagnostic=true path=", path, "\n", sep = "")
       }
       samples <- value("window.__auiSearchTimings")
       times <- vapply(samples, `[[`, numeric(1), "elapsedMs")
@@ -314,6 +335,8 @@ main <- function() {
         repetition = rep, previews = previews == 1L, sessions = 2001L,
         samples = samples, medianMs = unname(median(times)),
         p95Ms = unname(quantile(times, 0.95)), maxMs = max(times),
+        longTasksAvailable = isTRUE(value("window.__auiSearchLongTasksAvailable")),
+        longTasks = value("window.__auiSearchLongTasks"),
         backendInputs = length(value("window.__auiSearchSent"))
       )
       evidence[[length(evidence) + 1L]] <- item
@@ -324,6 +347,13 @@ main <- function() {
       check("search never sends backend input", item$backendInputs == 0L)
       check("broad queries keep at most 101 rendered rows", all(vapply(samples, `[[`, numeric(1), "rows") <= 101L))
     }
+  }
+  for (rep in seq_len(3L)) {
+    pair <- Filter(function(item) item$repetition == rep, evidence)
+    title_rows <- Filter(function(item) !item$previews, pair)[[1L]]$samples
+    preview_rows <- Filter(function(item) item$previews, pair)[[1L]]$samples
+    check("paired search arms render exactly the same record IDs",
+      identical(lapply(title_rows, `[[`, "rowIds"), lapply(preview_rows, `[[`, "rowIds")))
   }
   title_times <- unlist(lapply(Filter(function(item) !item$previews, evidence),
     function(item) vapply(item$samples, `[[`, numeric(1), "elapsedMs")))

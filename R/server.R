@@ -337,6 +337,7 @@ assistantUIServer <- function(id, handler,
                               ide_context_provider = NULL,
                               workspace_search_provider = NULL,
                               on_action         = NULL,
+                              a2ui_action_handler = NULL,
                               on_session_load   = NULL,
                               on_feedback       = NULL,
                               on_rename         = NULL,
@@ -399,6 +400,10 @@ assistantUIServer <- function(id, handler,
     )
   )
   force(tools); force(action_items); force(on_action); force(on_session_load)
+  force(a2ui_action_handler)
+  if (!is.null(a2ui_action_handler) && !is.function(a2ui_action_handler)) {
+    stop("`a2ui_action_handler` must be a function or NULL.", call. = FALSE)
+  }
   force(ide_context_provider); force(workspace_search_provider)
   force(on_feedback); force(modal)
   force(on_rename)
@@ -588,6 +593,12 @@ assistantUIServer <- function(id, handler,
   )
   normalized_theme <- .normalize_theme(theme)
   if (!is.null(.ui_addons))       config$addons           <- .ui_addons
+  if (is.function(a2ui_action_handler)) {
+    config$a2ui <- list(
+      transportVersion = 1L, protocolVersion = "v0.9",
+      schemaVersion = 1L, experimental = TRUE
+    )
+  }
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(warming_label))    config$warming_label    <- as.character(warming_label)[[1L]]
@@ -700,6 +711,9 @@ assistantUIServer <- function(id, handler,
   # Run-scoped project snapshots keep cancellation refreshes correlated even if
   # the visible workspace changes while a run is settling.
   run_projects <- new.env(parent = emptyenv())
+  a2ui_transport <- .new_a2ui_transport(
+    session, input_id, ui_owner, a2ui_action_handler
+  )
   forget_run_project <- function(run_id) {
     if (!is.null(run_id) && exists(run_id, envir = run_projects, inherits = FALSE)) {
       rm(list = run_id, envir = run_projects)
@@ -1001,6 +1015,13 @@ assistantUIServer <- function(id, handler,
         mark_running()
         session$sendCustomMessage(paste0(input_id, ":generative-ui"),
                                   list(spec = spec, threadId = thread_id))
+      },
+      on_a2ui = function(operations, event_id = NULL, sequence = NULL) {
+        mark_running()
+        a2ui_transport$send(
+          thread_id, run_id, operations,
+          event_id = event_id, sequence = sequence
+        )
       },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
         mark_running()
@@ -1619,6 +1640,7 @@ assistantUIServer <- function(id, handler,
       on_image          = cbs$on_image,
       on_data_ui        = cbs$on_data_ui,
       on_generative_ui  = cbs$on_generative_ui,
+      on_a2ui           = cbs$on_a2ui,
       on_artifact       = cbs$on_artifact,
       on_usage          = cbs$on_usage,
       on_task           = cbs$on_task,
@@ -1896,18 +1918,25 @@ assistantUIServer <- function(id, handler,
           error = function(error) FALSE
         )
       }
-      send_thread <- function(messages, cursor = NULL, has_more = FALSE) {
+      send_thread <- function(messages, cursor = NULL, has_more = FALSE,
+                              a2ui_checkpoint = NULL) {
         messages <- prepare_lazy_history_results(messages, msg$threadId)
+        if (!is_older_history && !is.null(a2ui_checkpoint)) {
+          restored <- a2ui_transport$restore_authority(msg$threadId, messages, a2ui_checkpoint)
+          if (!isTRUE(restored)) a2ui_checkpoint <- NULL
+        }
+        payload <- list(
+          threadId = msg$threadId,
+          requestId = msg$requestId,
+          messages = messages,
+          cursor = cursor,
+          hasMore = isTRUE(has_more),
+          prepend = is_older_history
+        )
+        if (!is.null(a2ui_checkpoint)) payload$a2uiCheckpoint <- a2ui_checkpoint
         session$sendCustomMessage(
           paste0(input_id, ":load-thread"),
-          list(
-            threadId = msg$threadId,
-            requestId = msg$requestId,
-            messages = messages,
-            cursor = cursor,
-            hasMore = isTRUE(has_more),
-            prepend = is_older_history
-          )
+          payload
         )
         # History browsing is transcript-only. The saved session mapping remains
         # available, and the first explicit send lazily resumes through get_client().
@@ -1976,6 +2005,20 @@ assistantUIServer <- function(id, handler,
       msg$project,
       normalize_continuation_kind(msg$continuationKind)
     )
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  shiny::observeEvent(session$input[[paste0(input_id, "_a2ui_recovery")]], {
+    a2ui_transport$recover(session$input[[paste0(input_id, "_a2ui_recovery")]])
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  shiny::observeEvent(session$input[[paste0(input_id, "_a2ui_action")]], {
+    a2ui_transport$handle_action(session$input[[paste0(input_id, "_a2ui_action")]])
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  shiny::observeEvent(session$input[[paste0(input_id, "_a2ui_restore")]], {
+    # Browser/client restore is intentionally untrusted. Server authority is
+    # established only by send_thread(..., a2ui_checkpoint=).
+    invisible(NULL)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   # Initial blank-thread warmup remains opt-in and one-shot. History loads are
@@ -2110,6 +2153,13 @@ assistantUIServer <- function(id, handler,
   invisible(list(
     clear = function() {
       session$sendCustomMessage(paste0(input_id, ":clear"), list())
+    },
+    send_a2ui = function(operations, thread_id = "default", run_id,
+                         event_id = NULL, sequence = NULL) {
+      a2ui_transport$send(thread_id, run_id, operations, event_id, sequence)
+    },
+    a2ui_checkpoint = function(thread_id = "default") {
+      a2ui_transport$checkpoint(thread_id)
     },
     # 注意：thread_id 默认 "default"。若用户已新建/切换线程（id 为随机生成值），
     # 必须显式传入当前 thread_id，否则消息路由到不存在的 "default" 线程被静默丢弃。

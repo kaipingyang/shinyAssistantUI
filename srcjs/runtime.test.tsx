@@ -3,6 +3,7 @@ import React from "react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useShinyRuntime } from "./runtime";
+import { A2uiProtocolController } from "./a2ui/protocol";
 
 describe("confirmed file references", () => {
   it("keeps an open pending until its matching backend acknowledgement arrives", async () => {
@@ -2581,6 +2582,119 @@ describe("useShinyRuntime — live IDE context capability", () => {
     expect(backgroundText).toContain("concurrent chunk");
   });
 
+  it("queues an edit submitted during cancelled-run drain and sends it once after terminal", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("cancel then edit");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const first = inputs.find((item) => item.id === "test" && item.value.text === "cancel then edit")!;
+    await fireR("chunk", { threadId, runId: first.value.runId, text: "partial answer" });
+    const user = messages(result).find((message) => message.role === "user")!;
+
+    await act(async () => result.current.cancelRun());
+    const editor = result.current.runtime.thread.getMessageById(user.id).composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("edited after cancel");
+      await editor.send();
+    });
+
+    expect(inputs.filter((item) => item.id === "test" && item.value.text === "edited after cancel"))
+      .toHaveLength(0);
+    await fireR("done", { threadId, runId: first.value.runId, cancelled: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    const edited = inputs.filter(
+      (item) => item.id === "test" && item.value.text === "edited after cancel",
+    );
+    expect(edited).toHaveLength(1);
+    expect(messages(result).filter((message) => message.role === "user"))
+      .toHaveLength(1);
+    expect(JSON.stringify(messages(result))).toContain("edited after cancel");
+    expect(JSON.stringify(messages(result))).not.toContain("partial answer");
+  });
+
+  it("releases a cancelled-run edit after an error terminal without retaining old output", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("cancel before error");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const first = inputs.find((item) => item.id === "test" && item.value.text === "cancel before error")!;
+    await fireR("chunk", { threadId, runId: first.value.runId, text: "old partial" });
+    const user = messages(result).find((message) => message.role === "user")!;
+    await act(async () => result.current.cancelRun());
+    const editor = result.current.runtime.thread.getMessageById(user.id).composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("edited after error terminal");
+      await editor.send();
+    });
+    await fireR("error", { threadId, runId: first.value.runId, message: "cancel drain closed" });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(inputs.filter((item) => item.id === "test" && item.value.text === "edited after error terminal"))
+      .toHaveLength(1);
+    expect(JSON.stringify(messages(result))).toContain("edited after error terminal");
+    expect(JSON.stringify(messages(result))).not.toContain("old partial");
+    expect(JSON.stringify(messages(result))).not.toContain("cancel drain closed");
+  });
+
+  it("keeps a delayed cancelled-run edit bound to its original thread", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("thread A cancel");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadA = currentThreadId(result);
+    const first = inputs.find((item) => item.id === "test" && item.value.text === "thread A cancel")!;
+    const user = messages(result).find((message) => message.role === "user")!;
+    await act(async () => result.current.cancelRun());
+    const editor = result.current.runtime.thread.getMessageById(user.id).composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("thread A edited");
+      await editor.send();
+      result.current.switchToNewThread();
+    });
+    const threadB = currentThreadId(result);
+    expect(threadB).not.toBe(threadA);
+    await fireR("done", { threadId: threadA, runId: first.value.runId, cancelled: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    const edited = inputs.filter((item) => item.id === "test" && item.value.text === "thread A edited");
+    expect(edited).toHaveLength(1);
+    expect(edited[0].value.threadId).toBe(threadA);
+    expect(currentThreadId(result)).toBe(threadB);
+    expect(messages(result)).toHaveLength(0);
+  });
+
+  it("drops a queued cancelled-run edit when its thread is deleted", async () => {
+    const { result } = setup({ persistence: "server" });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("delete cancelled thread");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const first = inputs.find((item) => item.id === "test" && item.value.text === "delete cancelled thread")!;
+    const user = messages(result).find((message) => message.role === "user")!;
+    await act(async () => result.current.cancelRun());
+    const editor = result.current.runtime.thread.getMessageById(user.id).composer;
+    await act(async () => {
+      editor.beginEdit();
+      editor.setText("must not escape deleted thread");
+      await editor.send();
+      await result.current.runtime.threads.getItemById(threadId).delete();
+    });
+    await fireR("done", { threadId, runId: first.value.runId, cancelled: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(inputs.some((item) => item.id === "test" && item.value.text === "must not escape deleted thread"))
+      .toBe(false);
+  });
+
 });
 
 
@@ -3039,6 +3153,44 @@ describe("useShinyRuntime — explicit persistence modes", () => {
     const state = result.current.runtime.threads.getState();
     expect(state.threadIds).not.toContain("server-history");
     expect(state.mainThreadId).not.toBe("server-history");
+  });
+
+  it("keeps large replayed session catalogs metadata-only without formatting unused dates", async () => {
+    const { result } = setup({ persistence: "server" });
+    const selected = currentThreadId(result);
+    const formatDate = vi.spyOn(Date.prototype, "toLocaleDateString");
+    const sessions = Array.from({ length: 2001 }, (_, index) => ({
+      id: `catalog-${index}`,
+      title: `Conversation ${index}`,
+      preview: `Existing preview ${index}`,
+      createdAt: "2026-09-01T00:00:00Z",
+      archived: index === 2000,
+    }));
+
+    await fireR("sessions", { sessions });
+    const firstCustom = result.current.runtime.threads.getItemById("catalog-1999").getState().custom;
+    await fireR("sessions", { sessions });
+
+    const state = result.current.runtime.threads.getState();
+    expect(state.mainThreadId).toBe(selected);
+    expect(state.threadIds).toHaveLength(2001);
+    expect(new Set(state.threadIds).size).toBe(state.threadIds.length);
+    expect(state.archivedThreadIds).toEqual(["catalog-2000"]);
+    expect(result.current.runtime.threads.getItemById("catalog-1999").getState())
+      .toMatchObject({
+        title: "Conversation 1999",
+        custom: { preview: "Existing preview 1999" },
+      });
+    expect(inputs.filter((item) => item.value?.type === "load_session")).toHaveLength(0);
+    expect(formatDate.mock.calls.length).toBe(0);
+    expect(result.current.runtime.threads.getItemById("catalog-1999").getState().custom).toBe(firstCustom);
+
+    await act(async () => result.current.runtime.threads.switchToThread("catalog-1999"));
+    const requests = inputs.filter((item) => item.value?.type === "load_session");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].value).toMatchObject({
+      sessionId: "catalog-1999", threadId: "catalog-1999",
+    });
   });
 
   it("方案B：按 archived 标记把会话分流到 active / archived 区", async () => {
@@ -4427,5 +4579,196 @@ describe("useShinyRuntime — diagnostics committed lifecycle", () => {
       expect(json).not.toMatch(/threadId|runId|prompt|response|toolCallId|path|stack/);
     }
     vi.useRealTimers();
+  });
+});
+
+
+describe("useShinyRuntime — A2UI protocol integration", () => {
+  const createSurface = (surfaceId: string, text: string) => [
+    { version: "v0.9", createSurface: { surfaceId } },
+    { version: "v0.9", updateComponents: {
+      surfaceId,
+      components: [{ id: "root", component: "Text", text }],
+    } },
+  ];
+  const envelope = (threadId: string, runId: string, sequence: number, operations: unknown[]) => ({
+    transportVersion: 1, threadId, runId,
+    eventId: `a2ui-event-${sequence}`, sequence, operations,
+  });
+  const a2uiParts = (result: ReturnType<typeof setup>["result"]) =>
+    messages(result).flatMap((message) => (message.content as any[]).filter((part) => part?.a2ui));
+
+  it("anchors create to the active assistant message and replaces updates without duplicates", async () => {
+    const { result } = setup({ persistence: "server", a2ui: true });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("show surface");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) => item.id === "test" && item.value.text === "show surface")!.value.runId;
+    await fireR("a2ui", envelope(threadId, runId, 1, createSurface("surface-1", "first")));
+    expect(a2uiParts(result)).toHaveLength(1);
+    expect(a2uiParts(result)[0]).toMatchObject({
+      type: "generative-ui",
+      a2ui: { surfaceId: "surface-1", epoch: 1, revision: 1, anchor: { runId } },
+    });
+
+    await fireR("a2ui", envelope(threadId, runId, 2, [{
+      version: "v0.9", updateComponents: {
+        surfaceId: "surface-1",
+        components: [{ id: "root", component: "Text", text: "second" }],
+      },
+    }]));
+    expect(a2uiParts(result)).toHaveLength(1);
+    expect(a2uiParts(result)[0]).toMatchObject({
+      spec: { $type: "Markdown", value: "second" },
+      a2ui: { revision: 2, lastSequence: 2 },
+    });
+    expect(result.current.dispatchA2uiAction(threadId, a2uiParts(result)[0], {
+      type: "a2ui:action", name: "confirm", surfaceId: "surface-1",
+      sourceComponentId: "root", context: { source: "test" }, $input: { accepted: true },
+    })).toBe(true);
+    expect(inputs.find((item) => item.id === "test_a2ui_action")?.value).toMatchObject({
+      transportVersion: 1, threadId, surfaceId: "surface-1", sourceComponentId: "root",
+      name: "confirm", epoch: 1, revision: 2, input: { accepted: true },
+    });
+    const stale = { ...a2uiParts(result)[0], a2ui: { ...a2uiParts(result)[0].a2ui, revision: 1 } };
+    expect(result.current.dispatchA2uiAction(threadId, stale, {
+      type: "a2ui:action", name: "confirm", surfaceId: "surface-1", sourceComponentId: "root",
+    })).toBe(false);
+
+    await fireR("a2ui", envelope(threadId, runId, 3, [{
+      version: "v0.9", deleteSurface: { surfaceId: "surface-1" },
+    }]));
+    expect(a2uiParts(result)).toHaveLength(0);
+  });
+
+  it("requests the complete rejected range on a sequence gap without applying it", async () => {
+    const { result } = setup({ persistence: "server", a2ui: true });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("gap surface");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const runId = inputs.find((item) => item.id === "test" && item.value.text === "gap surface")!.value.runId;
+    await fireR("a2ui", envelope(threadId, runId, 2, createSurface("surface-gap", "late")));
+    expect(a2uiParts(result)).toHaveLength(0);
+    expect(inputs.find((item) => item.id === "test_a2ui_recovery")?.value).toMatchObject({
+      transportVersion: 1, threadId, expectedSequence: 1,
+      receivedSequence: 2, eventId: "a2ui-event-2",
+    });
+  });
+});
+
+
+describe("useShinyRuntime — A2UI history authority", () => {
+  const canonicalFixture = () => {
+    const controller = new A2uiProtocolController();
+    controller.activateRun("history-a2ui", "history-run", "history-message");
+    const accepted = controller.acceptEnvelope({
+      transportVersion: 1, threadId: "history-a2ui", runId: "history-run",
+      eventId: "history-event-1", sequence: 1,
+      operations: [
+        { version: "v0.9", createSurface: { surfaceId: "history-surface" } },
+        { version: "v0.9", updateComponents: { surfaceId: "history-surface", components: [
+          { id: "root", component: "Text", text: "authoritative history" },
+        ] } },
+      ],
+    });
+    expect(accepted.status).toBe("accepted");
+    return {
+      part: controller.canonicalParts("history-a2ui")[0]!,
+      checkpoint: controller.exportCheckpoint("history-a2ui")!,
+    };
+  };
+
+  it("hydrates server history from snapshot+checkpoint and enables current actions", async () => {
+    const fixture = canonicalFixture();
+    const { result } = setup({ persistence: "server", a2ui: true });
+    await fireR("sessions", { sessions: [{ id: "history-a2ui", title: "A2UI history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread("history-a2ui"));
+    const request = inputs.filter((item) => item.value?.type === "load_session").at(-1)!.value;
+    await fireR("load-thread", {
+      threadId: "history-a2ui", requestId: request.requestId,
+      messages: [{ id: "history-message", role: "assistant", content: [
+        { ...fixture.part, spec: { $type: "Image", src: "javascript:alert(1)" } },
+      ] }],
+      a2uiCheckpoint: fixture.checkpoint,
+    });
+    const restored = messages(result)[0].content[0] as any;
+    expect(restored.spec).toMatchObject({ $type: "Markdown", value: "authoritative history" });
+    expect(result.current.dispatchA2uiAction("history-a2ui", restored, {
+      type: "a2ui:action", name: "open", surfaceId: "history-surface", sourceComponentId: "root",
+    })).toBe(true);
+  });
+
+  it("keeps server history without a checkpoint unconfirmed and read-only", async () => {
+    const fixture = canonicalFixture();
+    const { result } = setup({ persistence: "server", a2ui: true });
+    await fireR("sessions", { sessions: [{ id: "history-a2ui", title: "A2UI history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread("history-a2ui"));
+    const request = inputs.filter((item) => item.value?.type === "load_session").at(-1)!.value;
+    await fireR("load-thread", {
+      threadId: "history-a2ui", requestId: request.requestId,
+      messages: [{ id: "history-message", role: "assistant", content: [fixture.part] }],
+      a2uiCheckpoint: null,
+    });
+    const restored = messages(result)[0].content[0] as any;
+    expect(result.current.dispatchA2uiAction("history-a2ui", restored, {
+      type: "a2ui:action", name: "open", surfaceId: "history-surface", sourceComponentId: "root",
+    })).toBe(false);
+  });
+});
+
+
+describe("useShinyRuntime — A2UI client checkpoint persistence", () => {
+  const createOps = [
+    { version: "v0.9", createSurface: { surfaceId: "client-surface" } },
+    { version: "v0.9", updateComponents: {
+      surfaceId: "client-surface",
+      components: [{ id: "root", component: "Text", text: "client snapshot" }],
+    } },
+  ];
+
+  it("stores a separate checkpoint and restores local surfaces read-only", async () => {
+    const first = setup({ persistence: "client", a2ui: true });
+    await act(async () => {
+      first.result.current.runtime.thread.composer.setText("client a2ui");
+      await first.result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(first.result);
+    const run = inputs.find((item) => item.id === "test" && item.value.text === "client a2ui")!.value.runId;
+    await fireR("a2ui", {
+      transportVersion: 1, threadId, runId: run, eventId: "client-event-1",
+      sequence: 1, operations: createOps,
+    });
+    const checkpointKey = `shinyAssistantUI:test:a2ui-checkpoint:${threadId}`;
+    expect(localStorage.getItem(checkpointKey)).toContain('"lastAcceptedSequence":1');
+    first.unmount();
+
+    const second = setup({ persistence: "client", a2ui: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const part = second.result.current.runtime.thread.getState().messages
+      .flatMap((message) => message.content as any[]).find((item) => item?.a2ui);
+    expect(part?.spec).toMatchObject({ $type: "Markdown", value: "client snapshot" });
+    expect(second.result.current.dispatchA2uiAction(threadId, part, {
+      type: "a2ui:action", name: "open", surfaceId: "client-surface", sourceComponentId: "root",
+    })).toBe(false);
+    expect(inputs.some((item) => item.id === "test_a2ui_restore")).toBe(true);
+  });
+
+  it("does not persist A2UI checkpoints in none mode", async () => {
+    const { result } = setup({ persistence: "none", a2ui: true });
+    await act(async () => {
+      result.current.runtime.thread.composer.setText("none a2ui");
+      await result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(result);
+    const run = inputs.find((item) => item.id === "test" && item.value.text === "none a2ui")!.value.runId;
+    await fireR("a2ui", {
+      transportVersion: 1, threadId, runId: run, eventId: "none-event-1",
+      sequence: 1, operations: createOps,
+    });
+    expect(Object.keys(localStorage).some((key) => key.includes("a2ui-checkpoint"))).toBe(false);
   });
 });

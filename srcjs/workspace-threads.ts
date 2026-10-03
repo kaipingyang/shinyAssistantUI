@@ -64,6 +64,33 @@ export function sessionsToWorkspaceThreads<T extends ThreadStatus>(
   });
 }
 
+const sameCustom = (
+  previous: Record<string, unknown> | undefined,
+  next: Record<string, unknown> | undefined,
+): boolean => previous === next || (
+  previous !== undefined && next !== undefined &&
+  Object.keys(previous).length === Object.keys(next).length &&
+  Object.entries(next).every(([key, value]) =>
+    Object.prototype.hasOwnProperty.call(previous, key) && Object.is(previous[key], value))
+);
+
+export function reuseThreadMetadata<T extends ThreadStatus>(
+  previous: ExternalStoreThreadData<T>[],
+  incoming: ExternalStoreThreadData<T>[],
+): ExternalStoreThreadData<T>[] {
+  const byId = new Map(previous.map((item) => [item.id, item]));
+  const next = incoming.map((item) => {
+    const old = byId.get(item.id);
+    if (!old || Object.keys(old).length !== Object.keys(item).length) return item;
+    const equal = Object.entries(item).every(([key, value]) => key === "custom"
+      ? sameCustom(old.custom, item.custom)
+      : Object.prototype.hasOwnProperty.call(old, key) && Object.is(Reflect.get(old, key), value));
+    return equal ? old : item;
+  });
+  return previous.length === next.length && next.every((item, index) => item === previous[index])
+    ? previous : next;
+}
+
 export function groupWorkspaceThreads(
   threadIds: readonly string[],
   itemsById: ReadonlyMap<string, WorkspaceThreadLike | undefined>,

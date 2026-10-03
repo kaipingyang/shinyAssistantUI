@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  type ComponentPropsWithoutRef,
   type FocusEventHandler,
   type FC,
   type RefObject,
@@ -16,7 +17,6 @@ import {
   useAui,
   type Unstable_DirectiveFormatter,
   type Unstable_DirectiveSegment,
-  type Unstable_TriggerAdapter,
   type Unstable_TriggerItem,
 } from "@assistant-ui/react";
 import {
@@ -35,11 +35,18 @@ import {
   COMMAND_PRIORITY_HIGH,
   KEY_TAB_COMMAND,
   PASTE_COMMAND,
+  type PasteCommandType,
 } from "lexical";
 import "@/lexical.css";
 import { useShinyConfig, type ShinyActionItem, type ShinyCommand } from "@/shiny-config-context";
 import { mentionInsertText, rankMentionItems } from "@/helpers";
 import { ComposerTriggerPopover } from "./composer-trigger-popover";
+
+type TriggerAdapter = NonNullable<
+  ComponentPropsWithoutRef<
+    typeof ComposerPrimitive.Unstable_TriggerPopover
+  >["adapter"]
+>;
 
 const escapeRegExp = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -118,7 +125,7 @@ export function createComposerDirectiveFormatter(
   };
 }
 
-function createFlatAdapter(items: readonly Unstable_TriggerItem[]): Unstable_TriggerAdapter {
+function createFlatAdapter(items: readonly Unstable_TriggerItem[]): TriggerAdapter {
   return {
     categories: () => [],
     categoryItems: () => [],
@@ -267,7 +274,7 @@ const MentionPopover: FC<{ formatter: Unstable_DirectiveFormatter }> = ({ format
     return result;
   }, [ideContext, selectionVisible, tools, workspaceMentions.items]);
 
-  const adapter = useMemo<Unstable_TriggerAdapter>(() => ({
+  const adapter = useMemo<TriggerAdapter>(() => ({
     categories: () => [],
     categoryItems: () => [],
     search: (query) => {
@@ -346,7 +353,7 @@ const PasteAttachmentPlugin: FC = () => {
     () =>
       editor.registerCommand(
         PASTE_COMMAND,
-        (event: ClipboardEvent | InputEvent) => {
+        (event: PasteCommandType) => {
           const cd = (event as ClipboardEvent).clipboardData;
           if (!cd) return false;
           let files = Array.from(cd.files ?? []);
@@ -400,12 +407,8 @@ const CommandHintPlugin: FC = () => {
   return null;
 };
 
-// After a slash-command/skill chip is inserted (completion), append a trailing
-// space so typing an argument yields "/cmd arg" (two tokens) instead of "/cmdarg"
-// (one token that never sends). Uses a mutation listener firing once on the
-// directive's "created" event (not a reactive transform), so deleting the space
-// doesn't refight. Deterministic ACTIONS (/compact, /context…, type
-// "slash-action") are left bare — they don't take args and routing trims anyway.
+// A trailing separator ends the active trigger, including slash-action chips.
+// Only handle newly created directives, so deleting the space is not undone.
 const TrailingSpacePlugin: FC = () => {
   const [editor] = useLexicalComposerContext();
   useEffect(
@@ -419,8 +422,6 @@ const TrailingSpacePlugin: FC = () => {
             const node = $getNodeByKey(key);
             if (!$isDirectiveNode(node)) continue;
             if (node.getNextSibling() !== null) continue; // only a bare trailing chip
-            // deterministic actions (/compact …) don't take args -> leave them bare
-            if (node.exportJSON().directiveType === "slash-action") continue;
             const space = $createTextNode(" ");
             node.insertAfter(space);
             space.selectEnd(); // caret after the space: "/cmd |"

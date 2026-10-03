@@ -2,7 +2,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { AssistantRuntimeProvider, useAui, useLocalRuntime } from "@assistant-ui/react";
-import { $createParagraphNode, $createTextNode, $getRoot, type LexicalEditor } from "lexical";
+import { $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection, type LexicalEditor } from "lexical";
+import { matchSlashAction } from "../../helpers";
 import { Thread } from "./thread";
 import { ShinyConfigContext, type ShinyConfigCtx } from "../../shiny-config-context";
 
@@ -169,7 +170,8 @@ describe("Lexical slash composer", () => {
     });
     expect(chip.style.backgroundColor).not.toBe("");
     expect(chip.style.color).not.toBe("");
-    await waitFor(() => expect(composerText("action-enter")).toBe("/compact"));
+    await waitFor(() => expect(composerText("action-enter")).toBe("/compact "));
+    expect(widget.querySelector(".aui-slash-popover")).toBeNull();
   });
 
   it("inserts a blue directive chip for an action selected with click", async () => {
@@ -197,7 +199,8 @@ describe("Lexical slash composer", () => {
       return element!;
     });
     expect(chip.style.backgroundColor).not.toBe("");
-    await waitFor(() => expect(composerText("action-click")).toBe("/compact"));
+    await waitFor(() => expect(composerText("action-click")).toBe("/compact "));
+    expect(widget.querySelector(".aui-slash-popover")).toBeNull();
   });
 
   it("handles Arrow keys, Enter, Tab and Escape in the current widget only, while leaving Shift+Tab alone", async () => {
@@ -245,12 +248,42 @@ describe("Lexical slash composer", () => {
     const tabAllowed = fireEvent.keyDown(editorB, { key: "Tab" });
     expect(tabAllowed).toBe(false);
     await waitFor(() => expect(widgetB.querySelector("[data-directive-id='first']")).not.toBeNull());
+    expect(composerText("b")).toBe("/first ");
     expect(widgetB.querySelector(".aui-slash-popover")).toBeNull();
 
     await setEditorText(editorB, "/se");
     await waitFor(() => expect(widgetB.querySelector(".aui-slash-popover")).not.toBeNull());
     fireEvent.keyDown(editorB, { key: "Escape" });
     await waitFor(() => expect(widgetB.querySelector(".aui-slash-popover")).toBeNull());
+  });
+
+  it("keeps a completed action separated from following arguments without changing standalone routing", async () => {
+    const action = { id: "compact", command: "compact", label: "Compact", section: "Actions" };
+    const { getByTestId } = render(
+      <Widget id="action-args" context={{ actionItems: [action] }} />,
+    );
+    const widget = getByTestId("widget-action-args");
+    const input = editorIn(widget);
+    await setEditorText(input, "/comp");
+    await waitFor(() => expect(widget.querySelector("[data-slash-action='compact']")).not.toBeNull());
+    fireEvent.keyDown(input, { key: "Tab" });
+    await waitFor(() => expect(composerText("action-args")).toBe("/compact "));
+    expect(matchSlashAction(composerText("action-args"), [action])?.id).toBe("compact");
+    expect(widget.querySelector(".aui-slash-popover")).toBeNull();
+    const editor = (input as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor!;
+    await act(async () => {
+      editor.update(() => {
+        const selection = $getSelection();
+        if (!$isRangeSelection(selection)) throw new Error("Expected a caret after action completion");
+        expect(selection.isCollapsed()).toBe(true);
+        expect(selection.anchor.getNode().getTextContent()).toBe(" ");
+        expect(selection.anchor.offset).toBe(1);
+        selection.insertText("focus on tests");
+      });
+    });
+    await waitFor(() => expect(composerText("action-args")).toBe("/compact focus on tests"));
+    expect(matchSlashAction(composerText("action-args"), [action])).toBeUndefined();
+    expect(widget.querySelector("[data-directive-id='compact']")).not.toBeNull();
   });
 
   it("keeps skill arguments literal and preserves @ mention selection", async () => {

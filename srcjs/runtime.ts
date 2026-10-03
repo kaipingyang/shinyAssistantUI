@@ -1,6 +1,4 @@
 // useShinyRuntime — ExternalStoreRuntime + 多线程 + localStorage 持久化
-// Module-level map: thread ID → formatted date string for sidebar display
-export const sessionDates = new Map<string, string>();
 
 import { useRef, useCallback, useState, useEffect, useMemo, type SetStateAction } from "react";
 import { flushSync } from "react-dom";
@@ -79,8 +77,14 @@ import {
   extractAttachments, expandSlashCommands, applyEdit, matchSlashAction,
   resolveToolFileReference,
 } from "./helpers";
+import {
+  A2uiProtocolController,
+  classifyCanonicalPart,
+  type A2uiCheckpoint,
+  type CanonicalA2uiPart,
+} from "./a2ui/protocol";
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
-import { projectLabel, sessionsToWorkspaceThreads } from "./workspace-threads";
+import { projectLabel, reuseThreadMetadata, sessionsToWorkspaceThreads } from "./workspace-threads";
 import { createLazyToolResultClient, type LazyToolResultClient } from "./lazy-tool-result";
 import { createFileReferenceClient, type FileReferenceClient, type FileReferenceView } from "./file-reference";
 import { createFileOpenClient } from "./file-open";
@@ -172,6 +176,33 @@ function deleteMessages(inputId: string, enabled: boolean, threadId: string) {
   try {
     localStorage.removeItem(storageKey(inputId, `msgs:${threadId}`));
   } catch {}
+}
+
+function loadA2uiCheckpoint(inputId: string, enabled: boolean, threadId: string): unknown {
+  if (!enabled) return undefined;
+  try {
+    const raw = localStorage.getItem(storageKey(inputId, `a2ui-checkpoint:${threadId}`));
+    return raw ? JSON.parse(raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveA2uiCheckpoint(
+  inputId: string,
+  enabled: boolean,
+  threadId: string,
+  checkpoint: A2uiCheckpoint | undefined,
+) {
+  if (!enabled || !checkpoint) return;
+  try {
+    localStorage.setItem(
+      storageKey(inputId, `a2ui-checkpoint:${threadId}`),
+      JSON.stringify(checkpoint),
+    );
+  } catch (error) {
+    console.warn(`[shinyAssistantUI] save A2UI checkpoint failed (thread ${threadId}):`, error);
+  }
 }
 
 function pruneStoredMessages(inputId: string, enabled: boolean, retainedIds: ReadonlySet<string>) {
@@ -394,7 +425,10 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const hasSessionsSnapshotRef = useRef(false);
   const runSeqRef = useRef<Record<string, number>>({});
   const historyRequestSeqRef = useRef(0);
-  const historyReplaceRequestsRef = useRef(new Map<string, { requestId: string; runSeq: number }>());
+  const a2uiGenerationRef = useRef<Record<string, number>>({});
+  const historyReplaceRequestsRef = useRef(new Map<string, {
+    requestId: string; runSeq: number; a2uiGeneration: number;
+  }>());
   const historyOlderRequestsRef = useRef(new Map<string, string>());
   const historyRequiresRequestIdRef = useRef(new Set<string>());
   const sessionLoadRetryTimers = useRef(new Map<string, number>());
@@ -443,7 +477,9 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     sessionLoadStates.current.set(threadId, "loading");
     const requestId = `history-${Date.now()}-${++historyRequestSeqRef.current}`;
     historyReplaceRequestsRef.current.set(threadId, {
-      requestId, runSeq: runSeqRef.current[threadId] ?? 0,
+      requestId,
+      runSeq: runSeqRef.current[threadId] ?? 0,
+      a2uiGeneration: a2uiGenerationRef.current[threadId] ?? 0,
     });
     updateHistoryPage(threadId, (previous) => ({
       ...previous, reading: true, hasMore: false, cursor: null, loadingOlder: false,
@@ -978,6 +1014,93 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   const [warmingResumingThreads, setWarmingResumingThreads] = useState<Set<string>>(new Set()); // 冷启动中且为"恢复历史"（非全新）
   const [serverCommandsByThread, setServerCommandsByThread] = useState<Record<string, Array<{ name: string; description?: string }>>>({});
   const streamingIdsRef = useRef<Record<string, string | null>>({});
+  const a2uiControllerRef = useRef<A2uiProtocolController | null>(null);
+  const a2uiActionSeqRef = useRef(0);
+  const a2uiInitialHydratedRef = useRef(false);
+  const a2uiRecoveryTimersRef = useRef(new Map<string, number>());
+  if (!a2uiControllerRef.current) {
+    a2uiControllerRef.current = new A2uiProtocolController({
+      allocateMessageId: (threadId, runId, generation) => {
+        const existing = streamingIdsRef.current[threadId];
+        if (existing) return existing;
+        const messageId = `a2ui-${threadId}-${runId}-${generation}`;
+        streamingIdsRef.current[threadId] = messageId;
+        return messageId;
+      },
+    });
+  }
+  const syncA2uiMessageParts = useCallback((threadId: string) => {
+    const controller = a2uiControllerRef.current!;
+    const groups = new Map<string, CanonicalA2uiPart[]>();
+    const prefix = `${threadId}\u001f`;
+    for (const [key, part] of controller.messageParts) {
+      if (!key.startsWith(prefix)) continue;
+      const fields = key.split("\u001f");
+      const messageId = fields[1];
+      if (!messageId) continue;
+      const parts = groups.get(messageId) ?? [];
+      parts.push(part);
+      groups.set(messageId, parts);
+    }
+    setMessagesMap((previous) => {
+      const original = previous[threadId] ?? [];
+      const stripped = original.flatMap((message) => {
+        const content = (message.content as unknown[]).filter((part) =>
+          !(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))
+        );
+        if (content.length === 0 && message.role === "assistant") return [];
+        return [{ ...message, content } as ThreadMessageLike];
+      });
+      const next = [...stripped];
+      for (const [messageId, parts] of groups) {
+        const index = next.findIndex((message) => message.id === messageId);
+        if (index >= 0) {
+          next[index] = {
+            ...next[index],
+            content: [...(next[index]!.content as unknown[]), ...parts],
+          } as ThreadMessageLike;
+        } else {
+          next.push({ id: messageId, role: "assistant", content: parts } as ThreadMessageLike);
+        }
+      }
+      if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, next);
+      return { ...previous, [threadId]: next };
+    });
+  }, [inputId, usesClientPersistence, setMessagesMap]);
+  const dispatchA2uiAction = useCallback((
+    threadId: string,
+    part: unknown,
+    action: unknown,
+  ): boolean => {
+    if (classifyCanonicalPart(part) !== "valid" || !action || typeof action !== "object") return false;
+    const canonical = part as CanonicalA2uiPart;
+    const marker = canonical.a2ui;
+    const value = action as Record<string, unknown>;
+    if (value.type !== "a2ui:action" || typeof value.name !== "string" ||
+        typeof value.sourceComponentId !== "string" || value.surfaceId !== marker.surfaceId ||
+        !a2uiControllerRef.current!.canDispatchAction(
+          threadId, marker.surfaceId, marker.epoch, marker.revision,
+        )) return false;
+    try {
+      const payload = {
+        transportVersion: 1 as const,
+        actionId: `a2ui-action-${Date.now()}-${++a2uiActionSeqRef.current}`,
+        threadId,
+        surfaceId: marker.surfaceId,
+        sourceComponentId: value.sourceComponentId,
+        name: value.name,
+        epoch: marker.epoch,
+        revision: marker.revision,
+        ...(value.$input !== undefined ? { input: value.$input } : {}),
+        ...(value.context !== undefined ? { context: value.context } : {}),
+      };
+      if (new TextEncoder().encode(JSON.stringify(payload)).length > 64 * 1024) return false;
+      bridge.current.sendA2uiAction(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
   const manualTitleIds  = useRef<Set<string>>(new Set()); // 用户手动重命名过的线程
   type QueuedMessage = {
     text: string;
@@ -985,6 +1108,102 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     project?: string;
     continuationKind?: AutoContinueKind;
   };
+  useEffect(() => {
+    const controller = a2uiControllerRef.current!;
+    bridge.current.onA2ui((raw) => {
+      const result = controller.acceptEnvelope(raw);
+      if (result.status === "accepted") {
+        const threadId = raw && typeof raw === "object" && "threadId" in raw
+          ? String((raw as { threadId: unknown }).threadId) : "";
+        if (threadId) {
+          a2uiGenerationRef.current[threadId] = controller.getThread(threadId)?.generation ?? 0;
+          syncA2uiMessageParts(threadId);
+          saveA2uiCheckpoint(
+            inputId, usesClientPersistence, threadId,
+            controller.exportCheckpoint(threadId),
+          );
+        }
+      } else if (result.status === "recovery-requested" && result.recovery) {
+        const threadId = raw && typeof raw === "object" && "threadId" in raw
+          ? String((raw as { threadId: unknown }).threadId) : "";
+        if (threadId) {
+          bridge.current.sendA2uiRecovery({
+            transportVersion: 1,
+            threadId,
+            expectedSequence: result.recovery.expectedSequence,
+            receivedSequence: result.recovery.receivedSequence,
+            eventId: result.recovery.eventId,
+          });
+          const previous = a2uiRecoveryTimersRef.current.get(threadId);
+          if (previous !== undefined) window.clearTimeout(previous);
+          const timer = window.setTimeout(() => {
+            a2uiRecoveryTimersRef.current.delete(threadId);
+            controller.checkRecoveryTimeouts();
+          }, 5_000);
+          a2uiRecoveryTimersRef.current.set(threadId, timer);
+        }
+      }
+    });
+    bridge.current.onA2uiRecovery((raw) => {
+      const response = raw as { threadId?: unknown };
+      if (typeof response.threadId === "string") {
+        const timer = a2uiRecoveryTimersRef.current.get(response.threadId);
+        if (timer !== undefined) window.clearTimeout(timer);
+        a2uiRecoveryTimersRef.current.delete(response.threadId);
+      }
+      const result = controller.acceptRecovery(raw);
+      if (result.status === "recovered" && typeof response.threadId === "string") {
+        a2uiGenerationRef.current[response.threadId] = controller.getThread(response.threadId)?.generation ?? 0;
+        syncA2uiMessageParts(response.threadId);
+        saveA2uiCheckpoint(
+          inputId, usesClientPersistence, response.threadId,
+          controller.exportCheckpoint(response.threadId),
+        );
+      }
+    });
+    bridge.current.onA2uiActionResult((result) => {
+      if (result.status === "error" && result.threadId) {
+        setStatusTextMap((previous) => ({
+          ...previous,
+          [result.threadId!]: result.message || "A2UI action failed.",
+        }));
+      }
+    });
+    bridge.current.onA2uiRecoveryFailed((failure) => {
+      const timer = a2uiRecoveryTimersRef.current.get(failure.threadId);
+      if (timer !== undefined) window.clearTimeout(timer);
+      a2uiRecoveryTimersRef.current.delete(failure.threadId);
+      controller.failRecovery(failure.threadId, failure.reason);
+    });
+  }, [inputId, usesClientPersistence, syncA2uiMessageParts]);
+  useEffect(() => () => {
+    for (const timer of a2uiRecoveryTimersRef.current.values()) window.clearTimeout(timer);
+    a2uiRecoveryTimersRef.current.clear();
+  }, []);
+  useEffect(() => {
+    if (a2uiInitialHydratedRef.current || !usesClientPersistence) return;
+    a2uiInitialHydratedRef.current = true;
+    const controller = a2uiControllerRef.current!;
+    for (const [threadId, threadMessages] of Object.entries(messagesMapRef.current)) {
+      const parts = threadMessages.flatMap((message) =>
+        (message.content as unknown[]).filter((part) =>
+          part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui")
+        )
+      );
+      if (parts.length === 0) continue;
+      const checkpoint = loadA2uiCheckpoint(inputId, true, threadId);
+      const hydrated = controller.hydrateThread(
+        threadId, parts, checkpoint, { authoritative: false },
+      );
+      if (hydrated.status === "recovery-failed") continue;
+      syncA2uiMessageParts(threadId);
+      bridge.current.sendA2uiRestore(
+        threadId,
+        checkpoint ?? null,
+        controller.canonicalParts(threadId).map((part) => part.a2ui),
+      );
+    }
+  }, [inputId, usesClientPersistence, syncA2uiMessageParts]);
   const messageQueueRef = useRef<Map<string, QueuedMessage[]>>(new Map()); // 每线程排队消息
   const autoContinueRunIdsRef = useRef(new Set<string>());
   type PendingSubmission = {
@@ -1003,6 +1222,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     original?: AppendMessage;
   };
   const pendingSubmissionsRef = useRef<PendingSubmission[]>([]);
+  // The UI becomes editable as soon as Stop is requested, while the old backend
+  // run remains registered until its terminal drain event. Preserve one edit
+  // intent per thread across that window instead of silently dropping Update.
+  const pendingCancelledEditsRef = useRef(new Map<string, AppendMessage>());
+  const retryPendingCancelledEditRef = useRef<(threadId: string) => void>(() => {});
   const deferredSubmissionInFlightRef = useRef(new Map<string, { id: string; runId?: string }>());
   const deferredSubmissionSeq = useRef(0);
   const messageIdSeq = useRef(0);
@@ -1694,6 +1918,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         // Ordinary Chat owns one cwd, so queued work and local threads cannot cross it.
         cancelPendingSubmissions();
         messageQueueRef.current.clear();
+        pendingCancelledEditsRef.current.clear();
         composerDraftsRef.current.clear();
         runtimeRef.current?.thread.composer.setText("");
         thisSessionThreadIds.current.clear();
@@ -1722,11 +1947,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         !deletedThreadIdsRef.current.has(session.id)
       );
       if (workspaceMode && Array.isArray(projectOrder)) {
-        setWorkspaceProjectOrder(Array.from(new Set(
+        const order = Array.from(new Set(
           projectOrder.filter((project): project is string =>
             typeof project === "string" && project.length > 0
           ),
-        )));
+        ));
+        setWorkspaceProjectOrder((previous) =>
+          previous.length === order.length && order.every((project, index) => project === previous[index])
+            ? previous : order);
       }
       // In explicit server mode even an empty snapshot is authoritative: discard
       // every previously displayed server/local thread instead of treating the
@@ -1736,6 +1964,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (persistence !== "server") return;
         cancelPendingSubmissions();
         messageQueueRef.current.clear();
+        pendingCancelledEditsRef.current.clear();
         for (const timer of sessionLoadRetryTimers.current.values()) {
           window.clearTimeout(timer);
         }
@@ -1788,18 +2017,6 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       }
       serverSessionIdsRef.current = serverIds;
 
-      // 填充日期 Map（供侧边栏展示），ISO 字符串直接传入 Date 构造函数
-      for (const s of sessions) {
-        if (s.createdAt) {
-          const d = new Date(s.createdAt);
-          if (!isNaN(d.getTime())) {
-            sessionDates.set(s.id, d.toLocaleDateString(undefined, {
-              year: "numeric", month: "short", day: "numeric",
-            }));
-          }
-        }
-      }
-
       // 每个 server session 在当前页面生命周期都必须由 R 至少 hydrate 一次。
       // localStorage 缓存只用于点击后的即时展示，不能代表本次 R/SDK 生命周期
       // 已恢复 session 映射或完成 warmup；只有 :load-thread 确认后才进入 loaded。
@@ -1830,26 +2047,31 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           (t) => !serverIds.has(t.id) && thisSessionThreadIds.current.has(t.id)
         );
         // 本地新建线程排前面，server 历史线程排后面
-        const merged = [...localNew, ...serverThreads];
-        saveThreads(inputId, usesClientPersistence, merged);
+        const merged = reuseThreadMetadata(prev, [...localNew, ...serverThreads]);
+        if (merged !== prev) saveThreads(inputId, usesClientPersistence, merged);
         return merged;
       });
 
       // 归档区完全由服务端快照决定（权威），本地不新增归档项。
-      setArchivedThreads(() => {
-        saveArchivedThreads(inputId, usesClientPersistence, serverArchived);
-        return serverArchived;
+      setArchivedThreads((previous) => {
+        const next = reuseThreadMetadata(previous, serverArchived);
+        if (next !== previous) saveArchivedThreads(inputId, usesClientPersistence, next);
+        return next;
       });
 
       setMessagesMap((prev) => {
         const patch: Record<string, ThreadMessageLike[]> = {};
+        let changed = false;
         for (const [threadId, threadMessages] of Object.entries(prev)) {
           if (knownThreadIdsRef.current.has(threadId)) patch[threadId] = threadMessages;
+          else changed = true;
         }
         for (const s of sessions) {
-          patch[s.id] = patch[s.id] ?? loadMessages(inputId, usesClientPersistence, s.id);
+          if (patch[s.id] !== undefined) continue;
+          patch[s.id] = loadMessages(inputId, usesClientPersistence, s.id);
+          changed = true;
         }
-        return patch;
+        return changed ? patch : prev;
       });
 
       for (const [threadId, buffered] of proactiveBeforeSessionsRef.current) {
@@ -1879,6 +2101,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const { threadId } = data;
       const isOlderPage = data.prepend === true;
       let requestedAtRunSeq: number | undefined;
+      let requestedAtA2uiGeneration: number | undefined;
 
       if (isOlderPage) {
         const pendingRequestId = historyOlderRequestsRef.current.get(threadId);
@@ -1895,6 +2118,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           (pending === undefined || historyRequiresRequestIdRef.current.has(threadId));
         if (legacyAmbiguous || (data.requestId && data.requestId !== pending?.requestId)) return;
         requestedAtRunSeq = pending?.runSeq;
+        requestedAtA2uiGeneration = pending?.a2uiGeneration;
         historyReplaceRequestsRef.current.delete(threadId);
         const retryTimer = sessionLoadRetryTimers.current.get(threadId);
         if (retryTimer !== undefined) window.clearTimeout(retryTimer);
@@ -1902,17 +2126,59 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         sessionLoadStates.current.set(threadId, "loaded");
       }
 
-      const replaceSuperseded = !isOlderPage &&
-        requestedAtRunSeq !== undefined &&
+      const runSuperseded = !isOlderPage && requestedAtRunSeq !== undefined &&
         (runSeqRef.current[threadId] ?? 0) !== requestedAtRunSeq;
-      if (replaceSuperseded) {
+      if (runSuperseded) {
         updateHistoryPage(threadId, (previous) => ({
           ...previous, reading: false, loadingOlder: false,
         }));
         return;
       }
+      const a2uiSuperseded = !isOlderPage && requestedAtA2uiGeneration !== undefined &&
+        (a2uiGenerationRef.current[threadId] ?? 0) !== requestedAtA2uiGeneration;
 
-      const incomingForWindow = data.messages as ThreadMessageLike[];
+      let incomingForWindow = data.messages as ThreadMessageLike[];
+      if (a2uiSuperseded) {
+        incomingForWindow = incomingForWindow.map((message) => ({
+          ...message,
+          content: (message.content as unknown[]).filter((part) =>
+            !(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))
+          ),
+        } as ThreadMessageLike));
+      }
+      if (isOlderPage) {
+        incomingForWindow = incomingForWindow.map((message) => ({
+          ...message,
+          content: (message.content as unknown[]).filter((part) => {
+            if (!(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))) return true;
+            if (classifyCanonicalPart(part) !== "valid") return true;
+            const marker = (part as CanonicalA2uiPart).a2ui;
+            return !a2uiControllerRef.current!.getThread(threadId)?.lineage.has(marker.surfaceId);
+          }),
+        } as ThreadMessageLike));
+      }
+      let hydratedA2ui = false;
+      if (!isOlderPage && !a2uiSuperseded) {
+        const canonicalParts = incomingForWindow.flatMap((message) =>
+          (message.content as unknown[]).filter((part) =>
+            part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui")
+          )
+        );
+        if (canonicalParts.length > 0 || data.a2uiCheckpoint != null) {
+          const authoritativeCheckpoint = data.a2uiCheckpoint == null
+            ? undefined : data.a2uiCheckpoint;
+          const hydrated = a2uiControllerRef.current!.hydrateThread(
+            threadId,
+            canonicalParts,
+            authoritativeCheckpoint,
+            { authoritative: authoritativeCheckpoint !== undefined },
+          );
+          hydratedA2ui = hydrated.status !== "recovery-failed";
+          if (hydratedA2ui) {
+            a2uiGenerationRef.current[threadId] = a2uiControllerRef.current!.getThread(threadId)?.generation ?? 0;
+          }
+        }
+      }
       fileReferenceClient.current.invalidate(threadId);
       const existingForWindow = messagesMapRef.current[threadId] ?? [];
       const projectedForWindow = data.prepend === true
@@ -1923,7 +2189,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const pendingActionAckIds = snapshotPendingActionAckIds(threadId);
 
       setMessagesMap((prev) => {
-        const incoming = data.messages as ThreadMessageLike[];
+        const incoming = incomingForWindow;
         let updated: ThreadMessageLike[];
         if (data.prepend === true) {
           const seen = new Set((prev[threadId] ?? []).map((message) => message.id));
@@ -1941,6 +2207,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         if (usesClientPersistence) saveMessages(inputId, usesClientPersistence, threadId, updated);
         return { ...prev, [threadId]: updated };
       });
+      if (hydratedA2ui) {
+        syncA2uiMessageParts(threadId);
+        bridge.current.sendA2uiRestore(
+          threadId,
+          data.a2uiCheckpoint ?? null,
+          a2uiControllerRef.current!.canonicalParts(threadId).map((part) => part.a2ui),
+        );
+      }
 
       updateHistoryPage(threadId, () => ({
         reading: false,
@@ -2079,6 +2353,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       runSeqRef.current[threadId] = mySeq;
       const runId = `run-${Date.now()}-${threadId}-${mySeq}`;
       activeTaskRunIdsRef.current[threadId] = runId;
+      a2uiControllerRef.current!.activateRun(threadId, runId);
       clearLatestTaskActivity(threadId);
       const isLatestRun = () => runSeqRef.current[threadId] === mySeq;
 
@@ -2089,6 +2364,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             streamingIdsRef.current[threadId] = `assistant-${Date.now()}`;
           }
           const msgId = streamingIdsRef.current[threadId];
+          a2uiControllerRef.current!.activateRun(threadId, runId, msgId);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const existing = threadMsgs.find((m) => m.id === msgId);
@@ -2131,6 +2407,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
             streamingIdsRef.current[threadId] = `assistant-${Date.now()}`;
           }
           const msgId = streamingIdsRef.current[threadId];
+          a2uiControllerRef.current!.activateRun(threadId, runId, msgId);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             const existing = threadMsgs.find((m) => m.id === msgId);
@@ -2163,6 +2440,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           // 流式工具参数：先建空壳 tool-call part，后续 onToolCallDelta 逐字追加 argsText
           const startedAt = Date.now();
           streamingIdsRef.current[threadId] = null;
+          a2uiControllerRef.current!.activateRun(threadId, runId);
           setMessagesMap((prev) => {
             const threadMsgs = prev[threadId] ?? [];
             if (threadMsgs.find((m) => m.id === `tool-${toolCallId}`)) return prev;
@@ -2336,6 +2614,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         },
         onDone: (doneSuggestions, incomingRunId, cancelled = false) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          a2uiControllerRef.current!.closeRun(threadId, runId);
           cancelled = cancelled || cancelledRunIdsRef.current[threadId] === runId;
           diagnosticsMonitorRef.current?.record("run_state", {
             phase: cancelled ? "cancelled" : "complete",
@@ -2390,9 +2669,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               commitProactiveReplacement(pendingReplacement);
             }
           }
+          queueMicrotask(() => retryPendingCancelledEditRef.current(threadId));
         },
         onError: (errMsg, incomingRunId) => {
           if (incomingRunId && incomingRunId !== runId) return;
+          a2uiControllerRef.current!.closeRun(threadId, runId);
           const cancelled = cancelledRunIdsRef.current[threadId] === runId;
           const errorNotice: ThreadMessageLike & { id: string } = {
             id: `error-${runId}`,
@@ -2443,6 +2724,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
               commitProactiveReplacement(pendingReplacement);
             }
           }
+          queueMicrotask(() => retryPendingCancelledEditRef.current(threadId));
         },
       });
 
@@ -2501,7 +2783,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [dispatchPendingSubmission]);
   drainPendingSubmissionsRef.current = drainPendingSubmissions;
   useEffect(() => {
-    if (serviceState?.status === "ready") drainPendingSubmissions();
+    if (serviceState?.status !== "ready") return;
+    drainPendingSubmissions();
+    for (const threadId of pendingCancelledEditsRef.current.keys()) {
+      queueMicrotask(() => retryPendingCancelledEditRef.current(threadId));
+    }
   }, [serviceState?.status, drainPendingSubmissions]);
 
   const advancePendingSubmissions = useCallback((threadId: string, runId: string, flushMessages: boolean) => {
@@ -2859,76 +3145,95 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
 
   // ── onEdit ───────────────────────────────────────────────────────────────
   // parentId = 被编辑 user 消息的前一条消息 ID；截断到 parentId，重新插入编辑后的
-  // user 消息并重发。parentId 陈旧时必须 fail closed，不能降级成尾部新消息。
-  const onEdit = useCallback(
-    async (message: AppendMessage) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const text = (message.content as any[])
-        .filter((p: { type: string }) => p.type === "text")
-        .map((p: { text: string }) => p.text)
-        .join("");
-      if (!text.trim()) return;
-      // This adapter is bound to the render-time thread. Using the mutable current-thread
-      // ref here can pair a newly selected ID with the previous render's adapter callbacks.
-      const threadId = currentThreadId;
-      if (blockingActionsRef.current[threadId]) return;
-      const serviceBlocked = serviceStateRef.current !== undefined &&
-        ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
-      const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
-        pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
-      if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
-      const parentId = message.parentId ?? null;
-      const { attachmentData, storedAttachments } = extractAttachments(message);
-      const sendText = expandSlashCommands(text, commands);
-      const newUserMessage: ThreadMessageLike = {
-        id: `user-${Date.now()}-${++messageIdSeq.current}`,
-        role: "user" as const,
-        content: [{ type: "text" as const, text }],
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
-      };
-
-      // Validate and replace in the same latest-state transaction. flushSync is intentional:
-      // startRun must not escape before React has executed the functional updater and proved
-      // that the parent still exists. Only the target thread key is replaced, so concurrent
-      // chunks in other threads remain intact.
-      let editedMessages: ThreadMessageLike[] | null = null;
-      flushSync(() => {
-        setMessagesMap((previous) => {
-          // sourceId identifies the exact message whose edit composer submitted this
-          // AppendMessage. It is required even when parentId is null (the first turn).
-          if (!message.sourceId || !(previous[threadId] ?? []).some(
-            (candidate) => candidate.id === message.sourceId,
-          )) return previous;
-          const edit = applyEdit(previous[threadId] ?? [], parentId, newUserMessage);
-          if (!edit.applied) return previous;
-          editedMessages = edit.messages;
-          if (usesClientPersistence) {
-            saveMessages(inputId, usesClientPersistence, threadId, edit.messages);
-          }
-          return { ...previous, [threadId]: edit.messages };
-        });
-      });
-      if (editedMessages === null) {
-        console.warn("[shinyAssistantUI] edit aborted because its parent message is stale");
-        return;
+  // user 消息并重发。显式 threadId 让取消终态即使在后台到达也不会串到当前线程。
+  const executeEdit = useCallback(async (threadId: string, message: AppendMessage) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const text = (message.content as any[])
+      .filter((p: { type: string }) => p.type === "text")
+      .map((p: { text: string }) => p.text)
+      .join("");
+    if (!text.trim() || blockingActionsRef.current[threadId]) return;
+    const serviceBlocked = serviceStateRef.current !== undefined &&
+      ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
+    const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
+      pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
+    if (activeRunsRef.current.has(threadId)) {
+      const activeRunId = activeTaskRunIdsRef.current[threadId];
+      if (activeRunId && cancelledRunIdsRef.current[threadId] === activeRunId) {
+        // Latest Update wins while the cancelled run drains. The exact source
+        // and parent are validated again against the post-terminal branch.
+        pendingCancelledEditsRef.current.set(threadId, message);
       }
-      messageQueueRef.current.delete(threadId);
-      startRun(threadId, (runId) => {
-        requestIdeContextFor(threadId);
-        bridge.current.sendUserMessage(
-          sendText, threadId,
-          attachmentData.length > 0 ? attachmentData : undefined,
-          capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
-          undefined,
-          runId,
-          undefined,
-          projectForThreadId(threadId),
-        );
+      return;
+    }
+    if (serviceBlocked || serviceBusy) return;
+    const parentId = message.parentId ?? null;
+    const { attachmentData, storedAttachments } = extractAttachments(message);
+    const sendText = expandSlashCommands(text, commands);
+    const newUserMessage: ThreadMessageLike = {
+      id: `user-${Date.now()}-${++messageIdSeq.current}`,
+      role: "user" as const,
+      content: [{ type: "text" as const, text }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...(storedAttachments.length > 0 && { attachments: storedAttachments } as any),
+    };
+
+    // Validate and replace in the same latest-state transaction. flushSync is intentional:
+    // startRun must not escape before React has executed the functional updater and proved
+    // that the source and parent still exist in this exact owning thread.
+    let editedMessages: ThreadMessageLike[] | null = null;
+    flushSync(() => {
+      setMessagesMap((previous) => {
+        if (!message.sourceId || !(previous[threadId] ?? []).some(
+          (candidate) => candidate.id === message.sourceId,
+        )) return previous;
+        const edit = applyEdit(previous[threadId] ?? [], parentId, newUserMessage);
+        if (!edit.applied) return previous;
+        editedMessages = edit.messages;
+        if (usesClientPersistence) {
+          saveMessages(inputId, usesClientPersistence, threadId, edit.messages);
+        }
+        return { ...previous, [threadId]: edit.messages };
       });
-    },
-    [inputId, startRun, commands, currentThreadId, projectForThreadId, requestIdeContextFor, capabilityContract.ide, usesClientPersistence]
+    });
+    if (editedMessages === null) {
+      pendingCancelledEditsRef.current.delete(threadId);
+      console.warn("[shinyAssistantUI] edit aborted because its parent message is stale");
+      return;
+    }
+    pendingCancelledEditsRef.current.delete(threadId);
+    messageQueueRef.current.delete(threadId);
+    if (currentThreadIdRef.current === threadId) {
+      setSubmissionRevision((revision) => revision + 1);
+    }
+    startRun(threadId, (runId) => {
+      requestIdeContextFor(threadId);
+      bridge.current.sendUserMessage(
+        sendText, threadId,
+        attachmentData.length > 0 ? attachmentData : undefined,
+        capabilityContract.ide ? { selectionVisible: selectionVisibleRef.current } : undefined,
+        undefined,
+        runId,
+        undefined,
+        projectForThreadId(threadId),
+      );
+    });
+  }, [inputId, startRun, commands, projectForThreadId, requestIdeContextFor, capabilityContract.ide, usesClientPersistence]);
+
+  const onEdit = useCallback(
+    async (message: AppendMessage) => executeEdit(currentThreadId, message),
+    [currentThreadId, executeEdit],
   );
+  retryPendingCancelledEditRef.current = (threadId: string) => {
+    const pending = pendingCancelledEditsRef.current.get(threadId);
+    if (!pending) return;
+    const serviceBlocked = serviceStateRef.current !== undefined &&
+      ["checking", "starting", "failed"].includes(serviceStateRef.current.status);
+    const serviceBusy = deferredSubmissionInFlightRef.current.has(threadId) ||
+      pendingSubmissionsRef.current.some((item) => item.threadId === threadId);
+    if (serviceBlocked || serviceBusy || activeRunsRef.current.has(threadId)) return;
+    void executeEdit(threadId, pending);
+  };
 
   // ── onReload ─────────────────────────────────────────────────────────────
   // parentId = 触发本次 assistant 回复的原 user 消息 ID。
@@ -3178,6 +3483,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     manualTitleIds.current.delete(threadId);
     bridge.current.setRunCallbacks(threadId, null);
     messageQueueRef.current.delete(threadId);
+    pendingCancelledEditsRef.current.delete(threadId);
 
     const nextPhases = omitThread(runPhaseMapRef.current);
     runPhaseMapRef.current = nextPhases;
@@ -3284,6 +3590,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         }
         cancelPendingSubmissions(threadId);
         messageQueueRef.current.delete(threadId);
+        pendingCancelledEditsRef.current.delete(threadId);
         setBlockingActionForThread(threadId);
         setThreads((prev) => {
           const target = prev.find((t) => t.id === threadId);
@@ -3537,7 +3844,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }, [currentThreadId]);
 
   return {
-    runtime, lazyToolResults: lazyToolResults.current,
+    runtime, currentThreadId, lazyToolResults: lazyToolResults.current,
+    dispatchA2uiAction,
     submissionRevision, sendToolApproval, switchToNewThread, newThreadInProject,
     renameThread, openFile, enqueueMessage,
     fileOpeningEnabled, fileReferences,

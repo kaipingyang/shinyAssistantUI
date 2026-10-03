@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   projectForThread,
+  reuseThreadMetadata,
   sessionsToWorkspaceThreads,
   groupWorkspaceThreads,
 } from "./workspace-threads";
@@ -16,6 +17,50 @@ describe("workspace thread metadata", () => {
     const threads = sessionsToWorkspaceThreads(sessions, "regular");
     expect(threads[0]?.custom).toEqual({ project: "/work/a", projectLabel: "a" });
     expect(projectForThread(threads[1], "/fallback")).toBe("/work/b");
+  });
+
+  describe("replayed session metadata", () => {
+    const sessions = [
+      { id: "one", title: "One", preview: "First preview", createdAt: "", project: "/one" },
+      { id: "two", title: "Two", preview: "Second preview", createdAt: "", project: "/two" },
+    ];
+
+    it("keeps identical catalog and custom references across a freshly decoded replay", () => {
+      const previous = sessionsToWorkspaceThreads(sessions, "regular");
+      const incoming = sessionsToWorkspaceThreads(sessions.map((item) => ({ ...item })), "regular");
+      expect(reuseThreadMetadata(previous, incoming)).toBe(previous);
+      expect(reuseThreadMetadata([], [])).toHaveLength(0);
+    });
+
+    it("applies changed previews, titles, project identity, order and removals", () => {
+      const previous = sessionsToWorkspaceThreads(sessions, "regular");
+      const renamed = reuseThreadMetadata(previous, sessionsToWorkspaceThreads([
+        sessions[0], { ...sessions[1], title: "Renamed", preview: "New preview", project: "/new" },
+      ], "regular"));
+      expect(renamed).not.toBe(previous);
+      expect(renamed[0]).toBe(previous[0]);
+      expect(renamed[1]).toMatchObject({
+        title: "Renamed", custom: { preview: "New preview", project: "/new" },
+      });
+      const reordered = reuseThreadMetadata(previous, sessionsToWorkspaceThreads(
+        [sessions[1], sessions[0]], "regular",
+      ));
+      expect(reordered).toEqual([previous[1], previous[0]]);
+      expect(reordered[0]).toBe(previous[1]);
+      const removed = reuseThreadMetadata(previous, sessionsToWorkspaceThreads([sessions[0]], "regular"));
+      expect(removed).toEqual([previous[0]]);
+    });
+
+    it("does not retain custom fields removed by an authoritative snapshot", () => {
+      const previous = sessionsToWorkspaceThreads(sessions, "archived");
+      const incoming = sessionsToWorkspaceThreads([
+        { ...sessions[0], preview: "", project: "" }, sessions[1],
+      ], "archived");
+      const next = reuseThreadMetadata(previous, incoming);
+      expect(next[0].custom).toBeUndefined();
+      expect(next[0]).not.toBe(previous[0]);
+      expect(next[1]).toBe(previous[1]);
+    });
   });
 
   it("retains searchable previews with and without a Workspace project, including archived stubs", () => {

@@ -4,13 +4,18 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
+main <- function() {
 `%||%` <- function(x, y) if (is.null(x)) y else x
-project <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"
-port <- 9188L
+project <- normalizePath(".")
+port <- httpuv::randomPort()
 failures <- character()
 source("tests/verify/owned_process_cleanup.R", local = TRUE)
-log_paths <- c("/tmp/aui-slash-context-history.out", "/tmp/aui-slash-context-history.err")
-unlink(log_paths)
+source("tests/verify/window_error_capture.R", local = TRUE)
+log_paths <- c(tempfile("aui-slash-context-out-"), tempfile("aui-slash-context-err-"))
+browser <- NULL
+installed <- normalizePath(find.package("shinyAssistantUI"))
+expected_version <- read.dcf("DESCRIPTION", fields = "Version")[1L, 1L]
+stopifnot(identical(installed, "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4/shinyAssistantUI"))
 
 check <- function(name, condition, detail = "") {
   passed <- isTRUE(condition)
@@ -20,20 +25,25 @@ check <- function(name, condition, detail = "") {
 }
 
 app <- callr::r_bg(
-  function(project, port) {
+  function(project, port, installed, expected_version) {
     setwd(project)
     suppressPackageStartupMessages(library(shiny))
+    library(shinyAssistantUI)
+    stopifnot(
+      identical(normalizePath(find.package("shinyAssistantUI")), installed),
+      as.character(packageVersion("shinyAssistantUI")) == expected_version
+    )
     shiny::runApp(
       "tests/verify/slash_context_history_app.R",
       host = "127.0.0.1", port = port, launch.browser = FALSE
     )
   },
-  args = list(project = project, port = port),
-  stdout = "/tmp/aui-slash-context-history.out",
-  stderr = "/tmp/aui-slash-context-history.err"
+  args = list(project = project, port = port, installed = installed, expected_version = expected_version),
+  stdout = log_paths[[1L]],
+  stderr = log_paths[[2L]]
 )
 cleanup <- make_verification_cleanup(
-  browser_session = function() if (exists("browser", inherits = FALSE)) browser else NULL,
+  browser_session = function() browser,
   app_process = function() app,
   paths = log_paths
 )
@@ -41,12 +51,12 @@ on.exit(cleanup(), add = TRUE)
 
 for (i in seq_len(80)) {
   if (!app$is_alive()) break
-  if (file.exists("/tmp/aui-slash-context-history.err") &&
-      any(grepl("Listening on", readLines("/tmp/aui-slash-context-history.err", warn = FALSE)))) break
+  if (file.exists(log_paths[[2L]]) &&
+      any(grepl("Listening on", readLines(log_paths[[2L]], warn = FALSE)))) break
   Sys.sleep(0.25)
 }
 if (!app$is_alive()) {
-  cat(tail(readLines("/tmp/aui-slash-context-history.err", warn = FALSE), 20), sep = "\n")
+  cat(tail(readLines(log_paths[[2L]], warn = FALSE), 20), sep = "\n")
   stop("Browser fixture failed to boot")
 }
 
@@ -55,11 +65,18 @@ chromote::set_chrome_args(unique(c(
   "--disable-dev-shm-usage", "--no-sandbox", "--disable-gpu",
   "--disable-breakpad", "--disable-crash-reporter", "--no-crash-upload"
 )))
-browser <- ChromoteSession$new()
+browser <- ChromoteSession$new(auto_events = FALSE)
 
-console_errors <- character()
+console_errors <- network_errors <- character()
 current_stage <- "boot"
-browser$Runtime$enable()
+window_errors <- capture_browser_window_errors(browser, function() current_stage)
+browser$Network$enable()
+browser$Network$loadingFailed(callback_ = function(event) {
+  if (!isTRUE(event$canceled)) network_errors <<- c(network_errors, event$errorText)
+})
+browser$Network$responseReceived(callback_ = function(event) {
+  if (event$response$status >= 400) network_errors <<- c(network_errors, event$response$url)
+})
 browser$Runtime$consoleAPICalled(callback_ = function(message) {
   if (identical(message$type, "error")) {
     text <- paste(vapply(message$args, function(arg) {
@@ -83,7 +100,7 @@ value <- function(script) {
 wait_for <- function(script, timeout = 8, interval = 0.05) {
   deadline <- Sys.time() + timeout
   repeat {
-    answer <- tryCatch(value(script), error = function(e) FALSE)
+    answer <- value(script)
     if (isTRUE(answer)) return(TRUE)
     if (Sys.time() >= deadline) return(FALSE)
     Sys.sleep(interval)
@@ -117,6 +134,7 @@ browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port))
 browser$Page$loadEventFired()
 mounted <- wait_for("!!document.querySelector('.aui-root')", 12)
 check("widget mounted", mounted)
+check("preloaded window-error capture is active", isTRUE(value("window.__auiWindowErrorProbeReady")))
 if (!mounted) {
   cat("URL:", value("location.href"), "\n")
   cat("BODY:\n", value("document.body.innerText.slice(0,2000)"), "\n")
@@ -184,7 +202,7 @@ key("ArrowDown", "ArrowDown", 40L)
 Sys.sleep(0.08)
 key("Enter", "Enter", 13L)
 check("ArrowDown and Enter select skill", wait_for("!!document.querySelector('[data-directive-type=slash][data-directive-id=yourskill]')"))
-type_text(" arrow-check")
+type_text("arrow-check")
 key("Enter", "Enter", 13L)
 check("ArrowDown-selected skill submits", wait_for("document.body.innerText.includes('ECHO[/yourskill arrow-check]')", 8))
 
@@ -229,7 +247,7 @@ key("Tab", "Tab", 9L)
 check("Tab inserts skill directive", wait_for("!!document.querySelector('[data-directive-type=slash][data-directive-id=yourskill]')"))
 chip_style <- value("(function(){const e=document.querySelector('[data-directive-type=slash][data-directive-id=yourskill]');if(!e)return '';const s=getComputedStyle(e);return s.backgroundColor+'|'+s.color})()")
 check("skill directive is visibly blue", grepl("^(oklch|rgb)\\(", chip_style) && !grepl("transparent|0, 0, 0, 0", chip_style), chip_style)
-type_text(" argument-one")
+type_text("argument-one")
 key("Enter", "Enter", 13L)
 check("skill arguments remain literal", wait_for("document.body.innerText.includes('ECHO[/yourskill argument-one]')", 8))
 
@@ -278,11 +296,15 @@ check("history continuation lazily cold-starts once", isTRUE(value("window.__con
 Sys.sleep(0.3)
 check("no browser console errors or exceptions", length(console_errors) == 0L,
       if (length(console_errors)) paste(unique(console_errors), collapse = " | ") else "0 errors")
+check("no direct window errors", length(window_errors()) == 0L)
+check("no network failures", length(network_errors) == 0L,
+      paste(unique(network_errors), collapse = " | "))
 check("widget survives full scenario", isTRUE(value("!!document.querySelector('.aui-root')")))
 
 cleanup()
-rm(browser)
 invisible(gc())
 Sys.sleep(0.3)
 if (length(failures)) stop("Chromium verification failed: ", paste(failures, collapse = ", "))
 cat("SLASH_CONTEXT_HISTORY_CHROMIUM_DONE\n")
+}
+main()

@@ -23,6 +23,8 @@ import { VirtualizedMessages, scrollViewportInstant } from "@/components/assista
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
 import { renderDataPart } from "@/generative/data-ui";
+import { A2uiRuntimeView } from "@/a2ui/render";
+import { classifyCanonicalPart, type CanonicalA2uiPart } from "@/a2ui/protocol";
 import { shinyAllowlist, GenerativeUiFallback } from "@/generative/allowlist";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
@@ -132,8 +134,8 @@ export function resolveStreamingFollow(
   explicitUpwardIntent = false,
 ): boolean {
   const bottomDistance = current.scrollHeight - current.clientHeight - current.scrollTop;
-  if (bottomDistance <= STREAMING_BOTTOM_TOLERANCE) return true;
   if (explicitUpwardIntent) return false;
+  if (bottomDistance <= STREAMING_BOTTOM_TOLERANCE) return true;
   const stableHeight = Math.abs(current.scrollHeight - previous.scrollHeight) <= 1;
   const movedUp = current.scrollTop < previous.scrollTop - 1;
   if (stableHeight && movedUp) return false;
@@ -235,10 +237,6 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const followingRef = useRef(true);
   const previousThreadIdRef = useRef(activeThreadId);
   const previousMetricsRef = useRef<StreamingViewportMetrics | null>(null);
-  const previousTailIdRef = useRef<string | null>(null);
-  const previousUserIdsRef = useRef<Set<string>>(new Set());
-  const previousUserCountRef = useRef(0);
-  const previousRunningRef = useRef(followRunning);
   const previousSubmissionRevisionRef = useRef(submissionRevision);
   const pointerActiveRef = useRef(false);
   const upwardWheelRef = useRef(false);
@@ -310,49 +308,20 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     followSubmittedTurn();
   }, [submissionRevision, followSubmittedTurn]);
 
-  // Read the message graph only after a content revision, never on composer input.
+  // Content growth follows only while the current user intent remains pinned.
+  // Message IDs and run state are transport facts, not proof of a new manual turn:
+  // authoritative history replacement and automatic continuation must preserve reading.
   useLayoutEffect(() => {
     const switchedThread = activeThreadId !== previousThreadIdRef.current;
     if (switchedThread) {
       previousThreadIdRef.current = activeThreadId;
       followingRef.current = true;
       previousMetricsRef.current = null;
-      previousTailIdRef.current = null;
-      previousUserIdsRef.current = new Set();
-      previousUserCountRef.current = 0;
-      previousRunningRef.current = false;
       pointerActiveRef.current = false;
       upwardWheelRef.current = false;
     }
     const followMessages = aui.thread().getState().messages;
-    const currentTailId = followMessages[followMessages.length - 1]?.id ?? null;
-    const sameTail = currentTailId === previousTailIdRef.current;
-    const submitted = hasAppendedUserMessage(
-      previousTailIdRef.current,
-      followMessages,
-    );
-    const newUserMessage = hasNewUserMessage(
-      previousUserIdsRef.current,
-      followMessages,
-    );
-    const currentUserIds = new Set(
-      followMessages
-        .filter((message) => message.role === "user")
-        .map((message) => message.id),
-    );
-    const currentUserCount = followMessages.filter(
-      (message) => message.role === "user",
-    ).length;
-    const userCountIncreased = currentUserCount > previousUserCountRef.current;
-    const runStarted = followRunning && !previousRunningRef.current;
-    previousTailIdRef.current = currentTailId;
-    previousUserIdsRef.current = currentUserIds;
-    previousUserCountRef.current = currentUserCount;
-    previousRunningRef.current = followRunning;
-    const explicitNewTurn = !loadingOlder && !sameTail && (newUserMessage || userCountIncreased);
-    const forceLatest = switchedThread || submitted || explicitNewTurn || runStarted;
-    if (forceLatest) followingRef.current = true;
-    if (loadingOlder && !switchedThread && !submitted && !runStarted) return undefined;
+    if (loadingOlder && !switchedThread) return undefined;
     if (!followingRef.current || (followMessages.length === 0 && !followRunning)) {
       return undefined;
     }
@@ -363,9 +332,8 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     }
     const frame = window.requestAnimationFrame(() => {
       const current = viewportRef.current;
-      if (!current || (!followingRef.current && !forceLatest)) return;
+      if (!current || !followingRef.current) return;
       scrollViewportToBottomInstant(current);
-      if (forceLatest) followingRef.current = true;
       previousMetricsRef.current = readViewportMetrics(current);
     });
     return () => window.cancelAnimationFrame(frame);
@@ -387,14 +355,23 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     >
       <ThreadPrimitive.Viewport
         ref={viewportRef}
-        autoScroll={false}
-        scrollToBottomOnInitialize={false}
+        autoScroll
+        scrollToBottomOnInitialize
         scrollToBottomOnRunStart={false}
-        scrollToBottomOnThreadSwitch={false}
+        scrollToBottomOnThreadSwitch
         style={{ overflowAnchor: "none" }}
         data-slot="aui_thread-viewport"
         onWheelCapture={(event) => {
           if (event.deltaY < 0) {
+            upwardWheelRef.current = true;
+            followingRef.current = false;
+          }
+        }}
+        onKeyDownCapture={(event) => {
+          const editing = event.target instanceof HTMLElement &&
+            Boolean(event.target.closest("input,textarea,[contenteditable=true]"));
+          if (event.key === "PageUp" || event.key === "Home" ||
+              (event.key === "ArrowUp" && !editing)) {
             upwardWheelRef.current = true;
             followingRef.current = false;
           }
@@ -1193,7 +1170,11 @@ const AssistantMessage: FC = () => {
     ToolGroup,
     ReasoningGroup,
   } = useContext(ThreadComponentsContext);
-  const { assistantTextSize = "medium" } = useShinyConfig();
+  const {
+    assistantTextSize = "medium",
+    currentThreadId,
+    dispatchA2uiAction,
+  } = useShinyConfig();
   const hasActionableText = useAuiState((s) =>
     s.message.content.some(
       (part) => part.type === "text" && part.text.trim().length > 0,
@@ -1279,15 +1260,42 @@ const AssistantMessage: FC = () => {
                 // Plan 47 A0 — R-driven Data UI: look up our own component table by
                 // the data-event name (NOT part.dataRendererUI, which needs an unwired scope).
                 return renderDataPart(part as unknown as { name?: string; data?: unknown });
-              case "generative-ui":
-                // Plan 47 A1 — model/R-composed layout from a JSON spec + our allowlist
-                // (allowlist is the security boundary; unknown names → GenerativeUiFallback).
+              case "generative-ui": {
+                const candidate = part as unknown as Record<string, unknown>;
+                if (Object.prototype.hasOwnProperty.call(candidate, "a2ui")) {
+                  if (classifyCanonicalPart(candidate) !== "valid") {
+                    return (
+                      <span data-slot="aui_a2ui_invalid" role="alert" className="text-destructive text-sm">
+                        Invalid A2UI surface
+                      </span>
+                    );
+                  }
+                  const canonical = candidate as unknown as CanonicalA2uiPart;
+                  return (
+                    <div
+                      data-slot="aui_a2ui_surface"
+                      data-surface-id={canonical.a2ui.surfaceId}
+                      data-surface-epoch={canonical.a2ui.epoch}
+                      data-surface-revision={canonical.a2ui.revision}
+                    >
+                      <A2uiRuntimeView
+                        spec={canonical.spec}
+                        surfaceId={canonical.a2ui.surfaceId}
+                        dispatch={dispatchA2uiAction && currentThreadId
+                          ? (action) => dispatchA2uiAction(currentThreadId, canonical, action)
+                          : undefined}
+                      />
+                    </div>
+                  );
+                }
+                // Legacy one-shot Generative UI keeps its original allowlist.
                 return (
                   <MessagePrimitive.GenerativeUI
                     components={shinyAllowlist as never}
                     Fallback={GenerativeUiFallback}
                   />
                 );
+              }
               case "indicator":
                 return (
                   <span

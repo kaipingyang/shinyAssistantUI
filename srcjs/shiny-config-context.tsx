@@ -77,6 +77,10 @@ export interface ShinyConfigCtx {
   onInvokeAction: (item: ShinyActionItem) => void;
   onOpenFile?: (path: string, line?: number) => void | Promise<boolean>;
   fileReferences?: FileReferenceView;
+  /** Current ExternalStore thread owner for thread-scoped UI registries. */
+  currentThreadId?: string;
+  /** Dispatch a validated A2UI action bound to its owning thread and marker. */
+  dispatchA2uiAction?: (threadId: string, part: unknown, action: unknown) => boolean;
   /** Increments whenever runtime accepts a new ordinary user submission. */
   submissionRevision?: number;
   onRunInConsole?: (code: string) => void;

@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ShinyConfigContext } from "@/shiny-config-context";
 import { ShinyToolFallback } from "@/shiny-tool-fallback";
 import { createLazyToolResultClient, type LazyToolResultDescriptor } from "@/lazy-tool-result";
-import { _clearToolCardStateForTests } from "./tool-card-frame";
+import {
+  _clearToolCardStateForTests,
+  _rememberToolScrollState,
+  _toolScrollKey,
+  _toolScrollStateCountForTests,
+} from "./tool-card-frame";
 
 const descriptor: LazyToolResultDescriptor = {
   kind: "lazy-tool-result", version: 1, handle: "lazy-ui", generation: 1,
@@ -98,5 +103,21 @@ describe("ToolCardFrame lazy result", () => {
     const view = render(<ShinyToolFallback {...props} />);
     expect(view.container.querySelector('[data-slot="tool-fallback-trigger"]')?.getAttribute("aria-expanded"))
       .toBe("true");
+  });
+
+  it("isolates scroll state keys by widget and thread", () => {
+    expect(_toolScrollKey("widget", "thread-a", "tool-1"))
+      .not.toBe(_toolScrollKey("widget", "thread-b", "tool-1"));
+    expect(_toolScrollKey("widget-a", "thread-a", "tool-1"))
+      .not.toBe(_toolScrollKey("widget-b", "thread-a", "tool-1"));
+  });
+
+  it("bounds retained tool scroll state with an LRU cap", () => {
+    for (let index = 0; index < 700; index++) {
+      _rememberToolScrollState(`state-${index}`, {
+        scrollTop: index, scrollLeft: 0, atBottom: false, atRight: true,
+      });
+    }
+    expect(_toolScrollStateCountForTests()).toBe(512);
   });
 });

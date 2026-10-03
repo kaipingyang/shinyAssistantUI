@@ -134,6 +134,31 @@ export type HistoryLoadPayload = {
   cursor?: string | number | null;
   hasMore?: boolean;
   prepend?: boolean;
+  a2uiCheckpoint?: unknown;
+};
+
+export type A2uiActionPayload = {
+  transportVersion: 1;
+  actionId: string;
+  threadId: string;
+  surfaceId: string;
+  sourceComponentId: string;
+  name: string;
+  epoch: number;
+  revision: number;
+  input?: unknown;
+  context?: unknown;
+};
+export type A2uiRecoveryRequest = {
+  transportVersion: 1;
+  threadId: string;
+  expectedSequence: number;
+  receivedSequence: number;
+  eventId: string;
+};
+export type A2uiRecoveryFailure = { threadId: string; reason: string };
+export type A2uiActionResult = {
+  actionId?: string; threadId?: string; status: "ok" | "error"; message?: string;
 };
 
 export type SessionsPayload = {
@@ -182,6 +207,13 @@ export interface ShinyBridge {
   sendLoadSessionPage: (sessionId: string, threadId: string, cursor: string | number, limit?: number, requestId?: string, project?: string) => void;
   sendFeedback: (messageId: string, type: "positive" | "negative") => void;
   sendDiagnostics: (batch: DiagnosticsBatch) => void;
+  sendA2uiAction: (payload: A2uiActionPayload) => void;
+  sendA2uiRecovery: (payload: A2uiRecoveryRequest) => void;
+  sendA2uiRestore: (threadId: string, checkpoint: unknown, surfaces: readonly unknown[]) => void;
+  onA2ui: (handler: (envelope: unknown) => void) => void;
+  onA2uiRecovery: (handler: (response: unknown) => void) => void;
+  onA2uiRecoveryFailed: (handler: (failure: A2uiRecoveryFailure) => void) => void;
+  onA2uiActionResult: (handler: (result: A2uiActionResult) => void) => void;
   sendReady: () => void;
   sendWarmup: (threadId: string, project?: string) => void;
   requestIdeContext: (requestId: string, threadId: string, project?: string) => void;
@@ -241,6 +273,10 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   type ConsoleResultData = { code: string; ok: boolean; output: string; error: string; threadId?: string; project?: string };
   let consoleResultHandler: ((data: ConsoleResultData) => void) | null = null;
   let bufferedConsoleResult: ConsoleResultData | null = null;
+  let a2uiHandler: ((envelope: unknown) => void) | null = null;
+  let a2uiRecoveryHandler: ((response: unknown) => void) | null = null;
+  let a2uiRecoveryFailedHandler: ((failure: A2uiRecoveryFailure) => void) | null = null;
+  let a2uiActionResultHandler: ((result: A2uiActionResult) => void) | null = null;
 
   // 按 threadId 取回调。缺 threadId 时：单线程场景回退到唯一回调；多线程则告警 + 放弃
   // （静默路由到"第一个"会在并发时投递到错误线程）。R 端所有消息都应带 threadId。
@@ -310,6 +346,22 @@ export function createShinyBridge(inputId: string): ShinyBridge {
   Shiny.addCustomMessageHandler(`${inputId}:generative-ui`, (data) => {
     const d = data as { spec: unknown; threadId?: string };
     routeCallback(d.threadId)?.onGenerativeUi?.({ spec: d.spec });
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:a2ui`, (data) => a2uiHandler?.(data));
+  Shiny.addCustomMessageHandler(`${inputId}:a2ui-recovery`, (data) => a2uiRecoveryHandler?.(data));
+  Shiny.addCustomMessageHandler(`${inputId}:a2ui-recovery-failed`, (data) => {
+    const failure = data as Partial<A2uiRecoveryFailure>;
+    if (typeof failure.threadId === "string" && typeof failure.reason === "string") {
+      a2uiRecoveryFailedHandler?.(failure as A2uiRecoveryFailure);
+    }
+  });
+
+  Shiny.addCustomMessageHandler(`${inputId}:a2ui-action-result`, (data) => {
+    const result = data as Partial<A2uiActionResult>;
+    if ((result.status === "ok" || result.status === "error")) {
+      a2uiActionResultHandler?.(result as A2uiActionResult);
+    }
   });
 
   Shiny.addCustomMessageHandler(`${inputId}:artifact`, (data) => {
@@ -535,6 +587,24 @@ export function createShinyBridge(inputId: string): ShinyBridge {
         { priority: "event" },
       );
     },
+
+    sendA2uiAction(payload) {
+      Shiny.setInputValue(`${inputId}_a2ui_action`, { ...payload, ts: Date.now() }, { priority: "event" });
+    },
+    sendA2uiRecovery(payload) {
+      Shiny.setInputValue(`${inputId}_a2ui_recovery`, { ...payload, ts: Date.now() }, { priority: "event" });
+    },
+    sendA2uiRestore(threadId, checkpoint, surfaces) {
+      Shiny.setInputValue(
+        `${inputId}_a2ui_restore`,
+        { transportVersion: 1, threadId, checkpoint, surfaces, ts: Date.now() },
+        { priority: "event" },
+      );
+    },
+    onA2ui(handler) { a2uiHandler = handler; },
+    onA2uiRecovery(handler) { a2uiRecoveryHandler = handler; },
+    onA2uiRecoveryFailed(handler) { a2uiRecoveryFailedHandler = handler; },
+    onA2uiActionResult(handler) { a2uiActionResultHandler = handler; },
 
     sendReady() {
       Shiny.setInputValue(

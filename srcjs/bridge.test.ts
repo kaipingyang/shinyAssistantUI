@@ -571,3 +571,58 @@ describe("bridge diagnostics telemetry", () => {
     expect(inputValues.at(-1)).toEqual({ id: "chat_telemetry", value: batch });
   });
 });
+
+
+describe("bridge A2UI transport", () => {
+  it("routes envelope, recovery and failure channels to the registered owner", () => {
+    const bridge = createShinyBridge("a2ui-chat");
+    const envelope = vi.fn();
+    const recovery = vi.fn();
+    const failure = vi.fn();
+    bridge.onA2ui(envelope);
+    bridge.onA2uiRecovery(recovery);
+    bridge.onA2uiRecoveryFailed(failure);
+
+    const event = { transportVersion: 1, threadId: "thread-1", runId: "run-1", eventId: "event-1", sequence: 1, operations: [] };
+    const replay = { transportVersion: 1, threadId: "thread-1", fromSequence: 1, toSequence: 1, envelopes: [event] };
+    handlers["a2ui-chat:a2ui"](event);
+    handlers["a2ui-chat:a2ui-recovery"](replay);
+    handlers["a2ui-chat:a2ui-recovery-failed"]({ threadId: "thread-1", reason: "missing ledger" });
+    expect(envelope).toHaveBeenCalledExactlyOnceWith(event);
+    expect(recovery).toHaveBeenCalledExactlyOnceWith(replay);
+    expect(failure).toHaveBeenCalledExactlyOnceWith({ threadId: "thread-1", reason: "missing ledger" });
+  });
+
+  it("sends action, recovery request and restore on namespaced event inputs", () => {
+    const bridge = createShinyBridge("a2ui-chat");
+    bridge.sendA2uiAction({
+      transportVersion: 1, actionId: "action-1", threadId: "thread-1",
+      surfaceId: "surface-1", sourceComponentId: "button-1", name: "confirm",
+      epoch: 1, revision: 2, input: { accepted: true },
+    });
+    bridge.sendA2uiRecovery({
+      transportVersion: 1, threadId: "thread-1", expectedSequence: 2,
+      receivedSequence: 4, eventId: "event-4",
+    });
+    bridge.sendA2uiRestore("thread-1", { transportVersion: 1 }, [
+      { surfaceId: "surface-1", epoch: 1, revision: 2 },
+    ]);
+    expect(inputValues.at(-3)?.id).toBe("a2ui-chat_a2ui_action");
+    expect(inputValues.at(-2)?.id).toBe("a2ui-chat_a2ui_recovery");
+    expect(inputValues.at(-1)?.id).toBe("a2ui-chat_a2ui_restore");
+    expect(inputValues.at(-1)?.value).toMatchObject({ threadId: "thread-1" });
+  });
+
+  it("keeps identical thread and surface ids isolated by widget prefix", () => {
+    const left = createShinyBridge("left");
+    const right = createShinyBridge("right");
+    const receiveLeft = vi.fn();
+    const receiveRight = vi.fn();
+    left.onA2ui(receiveLeft);
+    right.onA2ui(receiveRight);
+    const event = { threadId: "same", runId: "run", eventId: "event", sequence: 1, operations: [] };
+    handlers["left:a2ui"](event);
+    expect(receiveLeft).toHaveBeenCalledWith(event);
+    expect(receiveRight).not.toHaveBeenCalled();
+  });
+});

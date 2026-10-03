@@ -12,6 +12,7 @@ export default defineConfig({
     include: ["srcjs/**/*.test.{ts,tsx}"],
     // 默认 node 环境；DOM 测试文件用顶部 `// @vitest-environment jsdom` 注释覆盖
     environment: "node",
+    setupFiles: ["./srcjs/test-setup.ts"],
     css: { include: [/lexical\.css$/] },
   },
 });

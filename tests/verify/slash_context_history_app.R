@@ -49,6 +49,7 @@ attr(handler, "action_handler") <- function(id, thread_id, send_action_result) {
 }
 
 ui <- fluidPage(
+  tags$head(tags$link(rel = "icon", href = "data:,")),
   tags$style("html, body, .container-fluid { height: 100%; margin: 0; padding: 0; }"),
   assistantUIOutput("chat", height = "100vh")
 )

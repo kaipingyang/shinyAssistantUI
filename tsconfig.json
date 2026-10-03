@@ -8,8 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "baseUrl": ".",
-    "paths": { "@/*": ["srcjs/*"] }
+    "paths": { "@/*": ["./srcjs/*"] }
   },
   "include": ["srcjs"]
 }

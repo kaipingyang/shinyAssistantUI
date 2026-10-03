@@ -39,13 +39,31 @@ const _decisionRegistry = new Map<string, "approved" | "denied">();
 const _decisionOptsRegistry = new Map<string, ToolDecideOpts>();
 
 const _openRegistry = new Map<string, boolean>();
-type ToolScrollState = {
+export type ToolScrollState = {
   scrollTop: number;
   scrollLeft: number;
   atBottom: boolean;
   atRight: boolean;
 };
+const MAX_TOOL_SCROLL_STATES = 512;
 const _scrollRegistry = new Map<string, ToolScrollState>();
+
+export const _toolScrollKey = (
+  inputId: string | undefined,
+  threadId: string,
+  toolCallId: string,
+) => _regKey(inputId, `${threadId}::${toolCallId}`);
+
+export function _rememberToolScrollState(key: string, state: ToolScrollState) {
+  _scrollRegistry.delete(key);
+  _scrollRegistry.set(key, state);
+  while (_scrollRegistry.size > MAX_TOOL_SCROLL_STATES) {
+    const oldest = _scrollRegistry.keys().next().value;
+    if (oldest === undefined) break;
+    _scrollRegistry.delete(oldest);
+  }
+}
+export const _toolScrollStateCountForTests = () => _scrollRegistry.size;
 
 export function _clearToolCardStateForTests() {
   _parentRegistry.clear();
@@ -90,7 +108,14 @@ export function useToolCard(props: ToolCallMessagePartProps, options: ToolCardOp
   const isServerTool = ann?.serverTool === true;
   const isError = (status?.type === "incomplete") || ann?.isError === true;
 
-  const registryKey = _regKey(ann?.inputId as string | undefined, toolCallId);
+  const { currentThreadId } = useShinyConfig();
+  const threadId = currentThreadId ??
+    (typeof ann?.threadId === "string" ? ann.threadId : "unscoped");
+  const registryKey = _toolScrollKey(
+    ann?.inputId as string | undefined,
+    threadId,
+    toolCallId,
+  );
   const [decision, setDecision] = useState<null | "approved" | "denied">(
     () =>
       _decisionRegistry.get(registryKey) ??
@@ -195,31 +220,64 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     card.toolCallId,
   );
   const rootRef = useRef<HTMLDivElement>(null);
+  const pointerRegionRef = useRef<string | null>(null);
+  const upwardIntentRegionsRef = useRef(new Set<string>());
+  const regionTarget = (target: EventTarget | null): HTMLElement | null =>
+    target instanceof HTMLElement
+      ? target.closest<HTMLElement>("[data-tool-scroll-region]")
+      : null;
+  const suspendRegionFollow = (target: EventTarget | null) => {
+    const region = regionTarget(target);
+    const name = region?.dataset.toolScrollRegion;
+    if (!region || !name) return;
+    const key = `${registryKey}::${name}`;
+    const previous = _scrollRegistry.get(key) ?? {
+      scrollTop: region.scrollTop, scrollLeft: region.scrollLeft,
+      atBottom: true, atRight: true,
+    };
+    _rememberToolScrollState(key, { ...previous, scrollTop: region.scrollTop, atBottom: false });
+    upwardIntentRegionsRef.current.add(key);
+  };
   const captureScroll = (event: UIEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     const region = target.dataset.toolScrollRegion;
     if (!region) return;
+    const key = `${registryKey}::${region}`;
+    const previous = _scrollRegistry.get(key);
     const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
     const maxLeft = Math.max(0, target.scrollWidth - target.clientWidth);
-    _scrollRegistry.set(`${registryKey}::${region}`, {
+    const atBottomNow = maxTop - target.scrollTop <= 2;
+    const explicitUp = upwardIntentRegionsRef.current.delete(key) ||
+      (pointerRegionRef.current === key && previous !== undefined &&
+        target.scrollTop < previous.scrollTop - 1);
+    _rememberToolScrollState(key, {
       scrollTop: target.scrollTop,
       scrollLeft: target.scrollLeft,
-      atBottom: maxTop > 0 && maxTop - target.scrollTop <= 2,
-      atRight: maxLeft > 0 && maxLeft - target.scrollLeft <= 2,
+      // A delayed programmatic scroll event can arrive after content grew again.
+      // Preserve the prior follow latch unless the user explicitly moved upward;
+      // reaching the bottom always reattaches.
+      atBottom: explicitUp ? false : atBottomNow ? true : (previous?.atBottom ?? false),
+      atRight: maxLeft - target.scrollLeft <= 2,
     });
     if (region === "result" && lazyDescriptor && maxTop - target.scrollTop <= 128) {
       lazyResult.requestNext();
     }
   };
+  const liveScroll = pending || ann?.argsStreaming === true || lazyResult.snapshot.loading;
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     for (const target of root.querySelectorAll<HTMLElement>("[data-tool-scroll-region]")) {
       const region = target.dataset.toolScrollRegion;
       if (!region) continue;
-      const saved = _scrollRegistry.get(`${registryKey}::${region}`);
+      const key = `${registryKey}::${region}`;
+      let saved = _scrollRegistry.get(key);
+      if (!saved && liveScroll) {
+        saved = { scrollTop: 0, scrollLeft: 0, atBottom: true, atRight: true };
+        _rememberToolScrollState(key, saved);
+      }
       if (!saved) continue;
-      target.scrollTop = saved.atBottom
+      target.scrollTop = saved.atBottom && liveScroll
         ? Math.max(0, target.scrollHeight - target.clientHeight)
         : saved.scrollTop;
       target.scrollLeft = saved.atRight
@@ -227,6 +285,35 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
         : saved.scrollLeft;
     }
   });
+
+  // Markdown's progressive renderer can grow after this card's own layout
+  // effect has completed. Observe the real content boxes (not only the capped
+  // scroll container) so every later height step follows while pinned.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !liveScroll || typeof ResizeObserver === "undefined") return;
+    const observers: ResizeObserver[] = [];
+    for (const target of root.querySelectorAll<HTMLElement>("[data-tool-scroll-region]")) {
+      const region = target.dataset.toolScrollRegion;
+      if (!region) continue;
+      const key = `${registryKey}::${region}`;
+      if (!_scrollRegistry.has(key)) {
+        _rememberToolScrollState(key, { scrollTop: 0, scrollLeft: 0, atBottom: true, atRight: true });
+      }
+      const observer = new ResizeObserver(() => {
+        const saved = _scrollRegistry.get(key);
+        if (!saved?.atBottom) return;
+        target.scrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
+        saved.scrollTop = target.scrollTop;
+      });
+      observer.observe(target);
+      for (const child of target.children) observer.observe(child);
+      observers.push(observer);
+    }
+    return () => {
+      for (const observer of observers) observer.disconnect();
+    };
+  }, [liveScroll, registryKey]);
 
   // 审批卡只在用户原本跟随底部时主动 reveal；如果用户正在上方阅读历史，
   // 不再用无条件 scrollIntoView 把视口劫持回来。审批完成后再次滚到底，
@@ -262,6 +349,21 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     <div
       ref={rootRef}
       onScrollCapture={captureScroll}
+      onWheelCapture={(event) => {
+        if (event.deltaY < 0) suspendRegionFollow(event.target);
+      }}
+      onKeyDownCapture={(event) => {
+        if (["PageUp", "ArrowUp", "Home"].includes(event.key)) {
+          suspendRegionFollow(event.target);
+        }
+      }}
+      onPointerDownCapture={(event) => {
+        const target = regionTarget(event.target);
+        const region = target?.dataset.toolScrollRegion;
+        pointerRegionRef.current = target && region ? `${registryKey}::${region}` : null;
+      }}
+      onPointerUpCapture={() => { pointerRegionRef.current = null; }}
+      onPointerCancelCapture={() => { pointerRegionRef.current = null; }}
       className="aui-shiny-tool"
       data-tool-depth={depth}
       style={depth > 0 ? { marginInlineStart: `${Math.min(depth, 4) * 16}px` } : undefined}

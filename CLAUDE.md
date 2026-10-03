@@ -15,14 +15,14 @@ Shiny htmlwidget wrapping `@assistant-ui/react`. R package + React/TypeScript fr
 `shiny-tool-fallback.tsx` 等）。`srcjs/AssistantUI.legacy.tsx` 是**死代码**，live 树**不 import 它**
 （CI 硬约束：`srcjs` 内不得出现 legacy import）。
 
-**关键依赖实际版本（以 package.json 为准）**：`@assistant-ui/react` 0.14.27、`react-lexical` 0.2.5、
-`lexical` 0.47.0、`react`/`react-dom` 19.2.7、`react-markdown` ^0.14.5、`react-syntax-highlighter` ^0.14.2、
-`radix-ui` ^1.6.1、`vite` ^5.4.21。构建为**单 IIFE**（`vite.config.mts` `lib.formats:["iife"]` +
+**关键依赖实际版本（以 package.json 为准）**：`@assistant-ui/react` 0.15.23、`react-lexical` 0.2.15、
+`react-markdown` 0.14.18、`react-generative-ui` 0.0.22、`react-devtools` 1.2.22、
+`lexical`/host peers 0.51.0、`react`/`react-dom` 19.2.7、`radix-ui` ^1.6.1、`vite` ^5.4.21。
+构建为**单 IIFE**（`vite.config.mts` `lib.formats:["iife"]` +
 `inlineDynamicImports:true`）→ **无法代码分割**，减体积只能靠 tree-shaking / 少 import 重物。
 
-**测试规模**：JS `npx vitest run` = **9 文件 / 166 用例**；R `testthat` = 18 个 `test-*.R`（addin/context-usage/
-session-archive/session-warmup/persistence/workspace-cache/handler-permissions/ide-context/skills/theme…）。
-`tests/verify/` 有 40+ 真实 chromote 脚本（见下）。
+**测试规模**：JS **63 文件 / 740 用例**；R `testthat` **87 个 `test-*.R` / 3,538 断言**
+（另有 1 个既有 On CRAN skip）。`tests/verify/` 有 40+ 真实 chromote 脚本（见下）。
 
 **bundle 分析**：`npm run build` 产出 `inst/www/bundle-stats.html`（rollup-plugin-visualizer，gitignore）——
 想评估体积先看它。曾用它当场抓出"误用 `@assistant-ui/react-syntax-highlighter` 工厂把 ~200 语言全内联使
@@ -258,6 +258,15 @@ devtools::build()      # build tarball
 
 ## Gotchas
 
+### Slash action chip 的尾随分隔符（Plan 153）
+
+`TrailingSpacePlugin` 对新建且处于行尾的 directive 统一补空格，包括 `slash-action`。
+不要恢复 `4cc7e42` 的 action 裸 chip 特例：react-lexical 0.2.14 同步真实光标后，
+裸 `/compact` 会重新进入 slash trigger 范围，使 Tab 补全后的菜单不关闭。
+空格不是 chip 标签的一部分；`matchSlashAction()` 的 trim 保持独立命令的本地路由，
+带参数的 `/compact focus on tests` 仍传给后端。保留 created-only 处理，不在用户
+主动删除分隔符时反复补写，也不通过强制关闭菜单掩盖光标与文本不一致。
+
 ### 历史侧栏搜索与目录覆盖（Plan 151）
 
 `thread-search.ts` 只索引已加载会话标题和已有 `custom.preview`，按 NFKC、
@@ -270,6 +279,12 @@ Claude SDK 的首条提问预览约 200 字，`sessionsToWorkspaceThreads()` 必
 不能用筛选后数组的下标。Workspace 搜索仅临时展开匹配项目，清除后恢复用户的
 折叠选择；搜索全局分页不能按项目叠加成无限量 DOM。`verify_history_search.R`
 用 2,001 条合成元数据、双实例、历史工具恢复和三轮有/无预览对照验收。
+
+会话目录接收路径不再逐条格式化 `createdAt` 到无消费者的 `sessionDates`。
+该旧缓存曾在启动补发目录时占用主线程并触发 GC，拖慢搜索首键；日期分组仍使用
+运行时的 `lastMessageAt`。保留 sessions-ready 补发协议，不通过推迟可输入时机掩盖开销。
+相同目录快照复用已有 thread/custom、项目顺序和消息表引用，避免握手补发再次
+刷新整个列表；真实标题、预览、归档、项目或顺序变化仍按服务端快照更新。
 
 ### 网页链接与按钮主色分离（Plan 152）
 
@@ -363,17 +378,23 @@ JS 通过 `Shiny.setInputValue` 发送 `{ threadId, text, ... }`，R 端用 `msg
 `srcjs/tap-production.test.ts` 在独立生产进程验证回调身份稳定、状态更新可见及无开发模式重放。
 构建后仍需验证真实 `@`/slash 键盘行为。旧故障记录见 `.claude/docs/tap-production-bug.md`。
 
-### 长历史的 store 事件上下文兼容（Plan 135）
+### 长历史的 store 事件上下文兼容（Plan 135 / 153）
 
-当前 `@assistant-ui/store` 的 `useAuiRoot` 每次更新创建新的
+`@assistant-ui/store` 0.3.11 的 `useAuiRoot` 每次更新创建新的
 `{ clientRef, emit, destroySignal }` 事件上下文；所有消息的 ComposerClient 都订阅它，
 使输入时连未挂载的历史消息资源也重新计算。仅减少 DOM 数量不能解决这部分脚本成本。
+`vite.config.mts` 曾为此提供 `stabilizeAssistantStoreContext` 构建期转换。
 
-`vite.config.mts` 的 `stabilizeAssistantStoreContext` 只对已核实的 `dist/useAui.js` 形状做构建期转换，
-按上述三项输入 memoize 事件上下文，**不**固定另一个可变的 building-client 上下文。
-不修改上游目录或 `node_modules`，不改变生产模式。模块形状变化会显式中止构建，升级依赖时须复核。
-`srcjs/assistant-store-context.test.ts` 用真实生产依赖验证：输入不重算 240 条不变历史，
-单条消息更新仅重算该条，内容和事件仍正确。实际性能与交互以安装后的 Chromium 验收为准。
+**0.3.15 起上游已自行修复，本地补丁已移除。** 现在 `dist/useAui.js` 自带
+`const tapContextValue = useMemo(() => ({ clientRef, emit: notifications.emit }),
+[clientRef, notifications.emit])`，与原本地转换语义等价。不要因为读到旧 Plan 记录
+就把补丁加回来：0.3.15 传给 provider 的是**变量**而非内联对象字面量，旧正则匹配数为 0，
+恢复补丁只会让构建 fail-fast 中止。
+
+`srcjs/assistant-store-context.test.ts` 现在是**不打任何补丁**的真实生产依赖行为门禁：
+输入不重算 240 条不变历史（`typingRenders: 0`）、单条消息更新仅重算该条、内容和事件仍正确。
+若上游日后退回“每次更新新建事件上下文”，该门禁会失败——它测行为而非代码形状，
+比正则守卫更可靠。实际性能与交互仍以安装后的 Chromium 验收为准。
 
 ### 视口尺寸通知的布局反馈（Plan 145）
 

@@ -9,22 +9,6 @@ const description = readFileSync(resolve(import.meta.dirname, "DESCRIPTION"), "u
 const widgetVersion = description.match(/^Version:\s*(\S+)\s*$/m)?.[1];
 if (!widgetVersion) throw new Error("DESCRIPTION has no Version field");
 
-export function stabilizeAssistantStoreContext(code: string, id: string) {
-  if (!id.endsWith("/@assistant-ui/store/dist/useAui.js")) return null;
-  // A fresh event-context envelope invalidates every historical ComposerClient.
-  // Keep the mutable building-client context untouched; only stabilize its event inputs.
-  const context = /useAssistantTapContextProvider\(\{\s*clientRef,\s*emit:\s*notifications\.emit,\s*destroySignal\s*\},\s*function WithTapContext\(\)/g;
-  const memoImport = /import \{[^}]*\buseMemo\b[^}]*\} from "@assistant-ui\/tap\/react-shim"/;
-  if ([...code.matchAll(context)].length !== 1 || !memoImport.test(code)) {
-    throw new Error("assistant-ui store context changed; re-evaluate the stable event-context compatibility transform");
-  }
-  return {
-    code: code.replace(context,
-      "useAssistantTapContextProvider(useMemo(() => ({ clientRef, emit: notifications.emit, destroySignal }), [clientRef, notifications.emit, destroySignal]), function WithTapContext()"),
-    map: null,
-  };
-}
-
 export function deferAssistantViewportResize(
   code: string, id: string,
 ): { code: string; map: null } | null {
@@ -63,10 +47,6 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    {
-      name: "stabilize-assistant-store-context",
-      transform: stabilizeAssistantStoreContext,
-    },
     {
       name: "defer-assistant-viewport-resize",
       transform: deferAssistantViewportResize,

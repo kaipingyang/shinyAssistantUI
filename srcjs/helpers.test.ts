@@ -503,6 +503,7 @@ describe("matchSlashAction", () => {
 
   it("matches only an exact standalone slash action", () => {
     expect(matchSlashAction("/compact", actions)?.id).toBe("compact");
+    expect(matchSlashAction("/compact ", actions)?.id).toBe("compact");
     expect(matchSlashAction("  /context  ", actions)?.id).toBe("context");
     expect(matchSlashAction("/compact focus on tests", actions)).toBeUndefined();
     expect(matchSlashAction("prefix /compact", actions)).toBeUndefined();

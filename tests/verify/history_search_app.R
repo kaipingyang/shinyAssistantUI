@@ -18,7 +18,7 @@ catalog <- function() {
   items[[1999L]]$preview <- "Needle-preview in an old conversation"
   c(items, list(list(
     id = "archived-target", title = "Archived target",
-    preview = "Needle-preview in archived history",
+    preview = "Needle-preview in archived conversation",
     createdAt = "2026-08-01T00:00:00Z", project = projects[[4L]], archived = TRUE
   )))
 }

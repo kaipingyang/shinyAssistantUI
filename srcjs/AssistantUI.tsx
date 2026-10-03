@@ -60,6 +60,11 @@ const ModalButton = forwardRef<HTMLButtonElement, { "data-state"?: "open" | "clo
 );
 ModalButton.displayName = "ModalButton";
 
+const StableToolGroup = ({ children }: { children?: ReactNode }) => (
+  <div className="aui-tool-group flex flex-col gap-2">{children}</div>
+);
+StableToolGroup.displayName = "StableToolGroup";
+
 export default function AssistantUI({ inputId, config }: AssistantUIProps) {
   const rt = useShinyRuntime(inputId, config);
 
@@ -114,6 +119,8 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     actionItems,
     showTimestamps: config?.show_timestamps === true,
     workspaceMode: rt.workspaceMode,
+    currentThreadId: rt.currentThreadId,
+    dispatchA2uiAction: rt.dispatchA2uiAction,
     onEnqueue: rt.enqueueMessage,
     submissionRevision: rt.submissionRevision,
     onRename: rt.renameThread,
@@ -207,9 +214,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     <Thread
       components={{
         ToolFallback: ShinyToolFallback,
-        ToolGroup: ({ children }: { children?: ReactNode }) => (
-          <div className="aui-tool-group flex flex-col gap-2">{children}</div>
-        ),
+        ToolGroup: StableToolGroup,
       }}
     />
   );

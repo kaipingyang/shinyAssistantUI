@@ -4,6 +4,7 @@ import {
   type MessageStatus,
   type ThreadMessageLike,
 } from "@assistant-ui/core";
+import { classifyCanonicalPart } from "./a2ui/protocol";
 
 export const BROWSER_MESSAGE_WINDOW = 240;
 export const BROWSER_ALTERNATE_WINDOW = 24;
@@ -41,6 +42,18 @@ export function boundBrowserMessages(
       (message, index) => index >= start && message.role === "user",
     );
     if (nextUser >= start) start = nextUser;
+  }
+  const pinned = messages.flatMap((message, index) => {
+    const content = typeof message.content === "string" ? [] : message.content;
+    return content.some((part) =>
+      part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui") &&
+      classifyCanonicalPart(part) === "valid"
+    ) ? [index] : [];
+  }).slice(-16);
+  if (pinned.some((index) => index < start)) {
+    const keep = new Set<number>(pinned);
+    for (let index = messages.length - 1; index >= 0 && keep.size < cap; index--) keep.add(index);
+    return messages.filter((_message, index) => keep.has(index));
   }
   return messages.slice(start);
 }
