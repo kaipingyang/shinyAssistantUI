@@ -36,6 +36,15 @@ initial_components <- function() list(
   ))
 )
 
+activity_event <- function(operations, replace = NULL, message_id = "fixture-activity") {
+  event <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface",
+    messageId = message_id, content = list(a2ui_operations = operations)
+  )
+  if (!is.null(replace)) event$replace <- replace
+  event
+}
+
 history_snapshot <- list(
   list(version = "v0.9", createSurface = list(surfaceId = "history-surface")),
   list(version = "v0.9", updateComponents = list(
@@ -86,7 +95,8 @@ ui <- assistantUIPage(
     style = "display:none",
     textOutput("actions"),
     textOutput("action_context"),
-    textOutput("validation_error")
+    textOutput("validation_error"),
+    textOutput("control_error")
   )
 )
 
@@ -94,15 +104,18 @@ server <- function(input, output, session) {
   actions <- reactiveVal(0L)
   action_context <- reactiveVal("")
   validation_error <- reactiveVal("")
+  control_error <- reactiveVal("")
   output$actions <- renderText(as.character(actions()))
   output$action_context <- renderText(action_context())
   output$validation_error <- renderText(validation_error())
+  output$control_error <- renderText(control_error())
   outputOptions(output, "actions", suspendWhenHidden = FALSE)
   outputOptions(output, "action_context", suspendWhenHidden = FALSE)
   outputOptions(output, "validation_error", suspendWhenHidden = FALSE)
+  outputOptions(output, "control_error", suspendWhenHidden = FALSE)
 
-  handler <- function(message, on_a2ui, on_done, ...) {
-    on_a2ui(list(
+  handler <- function(message, thread_id, on_a2ui, on_ag_ui_activity, on_done, ...) {
+    on_ag_ui_activity(activity_event(list(
       list(version = "v0.9.1", createSurface = list(
         surfaceId = "fixture-surface", catalogId = catalog, sendDataModel = FALSE
       )),
@@ -116,8 +129,42 @@ server <- function(input, output, session) {
           items = list(list(name = "First item"), list(name = "Second item"))
         )
       ))
-    ), event_id = "fixture-event-1")
+    )), event_id = "fixture-event-1")
+    on_ag_ui_activity(activity_event(list(
+      list(version = "v0.9.1", createSurface = list(surfaceId = "stale-control-surface"))
+    ), message_id = "fixture-stale"), event_id = "fixture-stale-create")
+    on_a2ui(list(list(
+      version = "v0.9.1", deleteSurface = list(surfaceId = "stale-control-surface")
+    )), event_id = "fixture-stale-native-delete")
+    on_ag_ui_activity(activity_event(list(
+      list(version = "v0.9.1", createSurface = list(surfaceId = "fixture-surface")),
+      list(version = "v0.9.1", updateComponents = list(
+        surfaceId = "fixture-surface",
+        components = list(list(id = "root", component = "Text", text = "IGNORED ACTIVITY"))
+      ))
+    ), replace = FALSE), event_id = "fixture-event-ignored")
     on_done()
+    later::later(function() {
+      result <- tryCatch({
+        api$send_ag_ui_activity(
+          activity_event(list(list(
+            version = "v0.9", createSurface = list(surfaceId = "post-done-control-surface")
+          ))),
+          thread_id = thread_id, run_id = "post-done-control",
+          event_id = "post-done-control-event"
+        )
+        "unexpected success"
+      }, error = function(error) conditionMessage(error))
+      clear_result <- tryCatch({
+        api$send_ag_ui_activity(
+          activity_event(list(), message_id = "fixture-stale"),
+          thread_id = thread_id, run_id = "post-done-clear-stale",
+          event_id = "post-done-clear-stale-event"
+        )
+        "stale bucket cleared"
+      }, error = function(error) paste("clear failed:", conditionMessage(error)))
+      control_error(paste(result, clear_result, sep = " | "))
+    }, delay = 0.05)
   }
 
   api <- NULL
@@ -129,7 +176,7 @@ server <- function(input, output, session) {
     if (count == 1L) {
       session$sendCustomMessage("chat_input:a2ui", list(
         transportVersion = 1L, threadId = thread_id, runId = "invalid-run",
-        eventId = "invalid-event", sequence = 2,
+        eventId = "invalid-event", sequence = 5,
         operations = list(list(
           version = "v0.9.1",
           updateComponents = list(
@@ -139,9 +186,10 @@ server <- function(input, output, session) {
         ))
       ))
     } else {
-      on_a2ui(list(list(version = "v0.9.1", deleteSurface = list(
-        surfaceId = "fixture-surface"
-      ))), event_id = "fixture-event-3")
+      api$send_ag_ui_activity(
+        activity_event(list()), thread_id = thread_id,
+        run_id = "activity-delete", event_id = "fixture-event-3"
+      )
 
     }
   }
@@ -154,14 +202,23 @@ server <- function(input, output, session) {
     ), auto_unbox = TRUE)))
     if (!isolate(feedback_recovered())) {
       feedback_recovered(TRUE)
-      api$send_a2ui(list(
+      components <- initial_components()
+      components[[8L]] <- submit_component("Updated A2UI")
+      api$send_ag_ui_activity(activity_event(list(
+        list(version = "v0.9.1", createSurface = list(
+          surfaceId = "fixture-surface", catalogId = catalog, sendDataModel = FALSE
+        )),
         list(version = "v0.9.1", updateComponents = list(
-          surfaceId = "fixture-surface", components = list(submit_component("Updated A2UI"))
+          surfaceId = "fixture-surface", components = components
         )),
         list(version = "v0.9.1", updateDataModel = list(
-          surfaceId = "fixture-surface", path = "/status", value = "Server updated"
+          surfaceId = "fixture-surface", path = "/", value = list(
+            status = "Server updated",
+            form = list(name = "Grace", accepted = FALSE),
+            items = list(list(name = "First item"), list(name = "Second item"))
+          )
         ))
-      ), thread_id = thread_id, run_id = "feedback-recovery", event_id = "fixture-event-2")
+      )), thread_id = thread_id, run_id = "feedback-recovery", event_id = "fixture-event-2")
     }
   }
 

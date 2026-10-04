@@ -376,8 +376,26 @@
     state$ledger <- list()
     state$events <- new.env(hash = TRUE, parent = emptyenv())
     state$surfaces <- new.env(hash = TRUE, parent = emptyenv())
+    state$activity_buckets <- list()
+    state$activity_bucket_order <- character()
+    state$activity_owned <- character()
+    state$activity_events <- new.env(hash = TRUE, parent = emptyenv())
+    state$activity_event_order <- character()
     assign(thread_id, state, envir = threads)
     state
+  }
+
+  prune_activity_events <- function(state) {
+    ids <- ls(state$activity_events, all.names = TRUE)
+    expired <- ids[vapply(ids, function(event_id) {
+      entry <- get(event_id, envir = state$activity_events, inherits = FALSE)
+      !is.null(entry$envelope) && !exists(event_id, envir = state$events, inherits = FALSE)
+    }, logical(1))]
+    if (length(expired)) {
+      rm(list = expired, envir = state$activity_events)
+      state$activity_event_order <- setdiff(state$activity_event_order, expired)
+    }
+    invisible(TRUE)
   }
 
   apply_authority <- function(state, operations, sequence, run_id) {
@@ -478,10 +496,17 @@
     }
     if (length(live) > 16L) stop("A2UI thread exceeds 16 live surfaces.", call. = FALSE)
     if (is.null(event_id)) {
-      event_counter <<- event_counter + 1L
-      event_id <- paste0("r-a2ui-", state$last_sequence + 1, "-", event_counter)
+      repeat {
+        event_counter <<- event_counter + 1L
+        event_id <- paste0("r-a2ui-", state$last_sequence + 1, "-", event_counter)
+        if (!exists(event_id, envir = state$events, inherits = FALSE) &&
+            !exists(event_id, envir = state$activity_events, inherits = FALSE)) break
+      }
     }
     if (!.a2ui_id(event_id)) stop("A2UI event id is invalid.", call. = FALSE)
+    if (exists(event_id, envir = state$activity_events, inherits = FALSE)) {
+      stop("A2UI eventId is already owned by an AG-UI activity.", call. = FALSE)
+    }
     prior <- get0(event_id, envir = state$events, inherits = FALSE)
     if (!is.null(prior)) {
       candidate <- list(
@@ -541,8 +566,189 @@
     retained_events <- vapply(state$ledger, `[[`, "", "eventId")
     forgotten <- setdiff(ls(state$events, all.names = TRUE), retained_events)
     if (length(forgotten)) rm(list = forgotten, envir = state$events)
+    prune_activity_events(state)
     apply_authority(state, operations, sequence, run_id)
     compact_surfaces(state)
+    invisible(envelope)
+  }
+
+  send_activity <- function(thread_id, run_id, event, event_id = NULL, sequence = NULL,
+                            allow_new_surfaces = TRUE) {
+    if (!is.logical(allow_new_surfaces) || length(allow_new_surfaces) != 1L ||
+        is.na(allow_new_surfaces)) {
+      stop("AG-UI activity new-surface authorization is invalid.", call. = FALSE)
+    }
+    if (!.a2ui_id(thread_id) || !.a2ui_id(run_id)) {
+      stop("AG-UI activity thread/run id is invalid.", call. = FALSE)
+    }
+    if (!is.list(event) || is.null(names(event)) || anyDuplicated(names(event)) ||
+        !identical(event$type, "ACTIVITY_SNAPSHOT")) {
+      stop("AG-UI event must be an ACTIVITY_SNAPSHOT object.", call. = FALSE)
+    }
+    if (!identical(event$activityType, "a2ui-surface")) {
+      stop("AG-UI activityType must be a2ui-surface.", call. = FALSE)
+    }
+    if (!is.null(event$replace) && (!is.logical(event$replace) ||
+        length(event$replace) != 1L || is.na(event$replace))) {
+      stop("AG-UI activity replace must be a boolean.", call. = FALSE)
+    }
+    message_id <- event$messageId %||% "a2ui:anonymous"
+    if (!is.character(message_id) || length(message_id) != 1L || is.na(message_id) ||
+        !nzchar(message_id) || nchar(message_id, type = "bytes") > 1024L) {
+      stop("AG-UI activity messageId is invalid.", call. = FALSE)
+    }
+    content <- event$content
+    if (!is.list(content) || is.null(names(content)) || anyDuplicated(names(content)) ||
+        !"a2ui_operations" %in% names(content) ||
+        !is.list(content$a2ui_operations) || !is.null(names(content$a2ui_operations))) {
+      stop("AG-UI activity content.a2ui_operations must be an array.", call. = FALSE)
+    }
+    if (!.a2ui_json_safe(event)) {
+      stop("AG-UI activity must contain plain JSON data.", call. = FALSE)
+    }
+    event_bytes <- nchar(as.character(jsonlite::toJSON(
+      event, auto_unbox = TRUE, null = "null", digits = NA
+    )), type = "bytes")
+    if (event_bytes > 256L * 1024L) {
+      stop("AG-UI activity exceeds 256 KiB.", call. = FALSE)
+    }
+    operations <- content$a2ui_operations
+    .a2ui_validate_operations(operations)
+
+    snapshots <- list()
+    surface_order <- character()
+    live <- character()
+    for (operation in operations) {
+      kind <- .a2ui_operation_kind(operation)
+      surface_id <- operation[[kind]]$surfaceId
+      if (identical(kind, "createSurface")) {
+        was_live <- surface_id %in% live
+        live <- union(live, surface_id)
+        if (!was_live) surface_order <- c(surface_order, surface_id)
+        snapshots[[surface_id]] <- list(operation)
+      } else {
+        if (!surface_id %in% live) {
+          stop("AG-UI activity snapshot must be self-contained from createSurface.", call. = FALSE)
+        }
+        snapshots[[surface_id]] <- c(snapshots[[surface_id]], list(operation))
+        if (identical(kind, "deleteSurface")) {
+          live <- setdiff(live, surface_id)
+          surface_order <- setdiff(surface_order, surface_id)
+          snapshots[[surface_id]] <- NULL
+        }
+      }
+    }
+    if (length(live) > 16L) stop("AG-UI activity exceeds 16 live surfaces.", call. = FALSE)
+
+    state <- thread_state(thread_id)
+    activity_digest <- NULL
+    if (!is.null(event_id)) {
+      if (!.a2ui_id(event_id)) stop("AG-UI activity eventId is invalid.", call. = FALSE)
+      activity_digest <- .a2ui_digest(list(
+        threadId = thread_id, runId = run_id, eventId = event_id,
+        event = event
+      ))
+      prior_activity <- get0(event_id, envir = state$activity_events, inherits = FALSE)
+      if (!is.null(prior_activity)) {
+        if (!identical(prior_activity$digest, activity_digest)) {
+          stop("AG-UI activity eventId conflict.", call. = FALSE)
+        }
+        if (!is.null(prior_activity$envelope)) {
+          session$sendCustomMessage(paste0(input_id, ":a2ui"), prior_activity$envelope)
+        } else if (!is.null(sequence)) {
+          stop("AG-UI activity sequence requires projected A2UI operations.", call. = FALSE)
+        }
+        return(invisible(prior_activity$envelope))
+      }
+      if (exists(event_id, envir = state$events, inherits = FALSE)) {
+        stop("AG-UI activity eventId conflicts with an existing A2UI event.", call. = FALSE)
+      }
+    }
+    commit_activity_event <- function(envelope) {
+      if (is.null(event_id)) return(invisible(TRUE))
+      assign(event_id, list(digest = activity_digest, envelope = envelope),
+             envir = state$activity_events)
+      state$activity_event_order <- tail(c(state$activity_event_order, event_id), 64L)
+      forgotten <- setdiff(
+        ls(state$activity_events, all.names = TRUE), state$activity_event_order
+      )
+      if (length(forgotten)) rm(list = forgotten, envir = state$activity_events)
+      invisible(TRUE)
+    }
+    bucket_key <- .a2ui_digest(list(messageId = message_id))
+    if (is.null(bucket_key)) stop("AG-UI activity messageId digest is unavailable.", call. = FALSE)
+    existing_bucket <- !is.null(state$activity_buckets[[bucket_key]])
+    if (identical(event$replace, FALSE) && existing_bucket) {
+      if (!is.null(sequence)) {
+        stop("AG-UI activity sequence requires projected A2UI operations.", call. = FALSE)
+      }
+      commit_activity_event(NULL)
+      return(invisible(NULL))
+    }
+
+    candidate_buckets <- state$activity_buckets
+    candidate_order <- state$activity_bucket_order
+    if (existing_bucket) {
+      candidate_buckets[[bucket_key]] <- NULL
+      candidate_order <- setdiff(candidate_order, bucket_key)
+    }
+    if (!existing_bucket && length(candidate_order) >= 64L) {
+      stop("AG-UI activity exceeds 64 message buckets.", call. = FALSE)
+    }
+    candidate_buckets[[bucket_key]] <- list(
+      messageId = message_id, snapshots = snapshots, surfaceOrder = surface_order
+    )
+    candidate_order <- c(candidate_order, bucket_key)
+
+    desired <- list()
+    desired_order <- character()
+    for (key in candidate_order) {
+      bucket <- candidate_buckets[[key]]
+      for (surface_id in bucket$surfaceOrder) {
+        if (!surface_id %in% desired_order) desired_order <- c(desired_order, surface_id)
+        desired[[surface_id]] <- bucket$snapshots[[surface_id]]
+      }
+    }
+    if (length(desired_order) > 16L) {
+      stop("Merged AG-UI activity exceeds 16 live surfaces.", call. = FALSE)
+    }
+    new_surface_ids <- desired_order[vapply(desired_order, function(surface_id) {
+      surface <- get0(surface_id, envir = state$surfaces, inherits = FALSE)
+      is.null(surface) || isTRUE(surface$deleted)
+    }, logical(1))]
+    if (length(new_surface_ids) && !allow_new_surfaces) {
+      stop("Creating a new AG-UI activity surface requires the active matching run.", call. = FALSE)
+    }
+
+    delete_ids <- unique(c(state$activity_owned, desired_order))
+    delete_ids <- delete_ids[vapply(delete_ids, function(surface_id) {
+      surface <- get0(surface_id, envir = state$surfaces, inherits = FALSE)
+      !is.null(surface) && !isTRUE(surface$deleted)
+    }, logical(1))]
+    deletes <- lapply(delete_ids, function(surface_id) list(
+      version = "v0.9.1", deleteSurface = list(surfaceId = surface_id)
+    ))
+    creates <- unlist(lapply(desired_order, function(surface_id) desired[[surface_id]]), recursive = FALSE)
+    projected <- c(deletes, creates)
+    if (length(projected) > 64L) {
+      stop("Projected AG-UI activity exceeds 64 A2UI operations.", call. = FALSE)
+    }
+
+    if (length(projected)) {
+      envelope <- send(
+        thread_id, run_id, projected,
+        event_id = event_id, sequence = sequence
+      )
+    } else {
+      if (!is.null(sequence)) {
+        stop("AG-UI activity sequence requires projected A2UI operations.", call. = FALSE)
+      }
+      envelope <- NULL
+    }
+    state$activity_buckets <- candidate_buckets
+    state$activity_bucket_order <- candidate_order
+    state$activity_owned <- desired_order
+    commit_activity_event(envelope)
     invisible(envelope)
   }
 
@@ -665,6 +871,11 @@
     state$ledger <- next_ledger
     state$events <- next_events
     state$surfaces <- next_surfaces
+    state$activity_buckets <- list()
+    state$activity_bucket_order <- character()
+    state$activity_owned <- character()
+    state$activity_events <- new.env(hash = TRUE, parent = emptyenv())
+    state$activity_event_order <- character()
     invisible(TRUE)
   }
 
@@ -770,7 +981,8 @@
   }
 
   list(
-    send = send, recover = recover, checkpoint = checkpoint,
+    send = send, send_activity = send_activity,
+    recover = recover, checkpoint = checkpoint,
     restore_authority = restore_authority, handle_action = handle_action,
     has_surface = function(thread_id, surface_id) {
       state <- get0(thread_id, envir = threads, inherits = FALSE)

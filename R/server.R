@@ -1043,6 +1043,16 @@ assistantUIServer <- function(id, handler,
           event_id = event_id, sequence = sequence
         )
       },
+      on_ag_ui_activity = function(event, event_id = NULL, sequence = NULL) {
+        mark_running()
+        a2ui_transport$send_activity(
+          thread_id, run_id, event,
+          event_id = event_id, sequence = sequence,
+          allow_new_surfaces = identical(
+            get0(thread_id, envir = active_run_ids, inherits = FALSE), run_id
+          )
+        )
+      },
       on_artifact = function(id, title, content, type = "markdown", lang = NULL) {
         mark_running()
         session$sendCustomMessage(paste0(input_id, ":artifact"),
@@ -1661,6 +1671,7 @@ assistantUIServer <- function(id, handler,
       on_data_ui        = cbs$on_data_ui,
       on_generative_ui  = cbs$on_generative_ui,
       on_a2ui           = cbs$on_a2ui,
+      on_ag_ui_activity = cbs$on_ag_ui_activity,
       on_artifact       = cbs$on_artifact,
       on_usage          = cbs$on_usage,
       on_task           = cbs$on_task,
@@ -2185,6 +2196,16 @@ assistantUIServer <- function(id, handler,
     send_a2ui = function(operations, thread_id = "default", run_id,
                          event_id = NULL, sequence = NULL) {
       a2ui_transport$send(thread_id, run_id, operations, event_id, sequence)
+    },
+    send_ag_ui_activity = function(event, thread_id = "default", run_id,
+                                    event_id = NULL, sequence = NULL) {
+      active_match <- identical(
+        get0(thread_id, envir = active_run_ids, inherits = FALSE), run_id
+      )
+      a2ui_transport$send_activity(
+        thread_id, run_id, event, event_id, sequence,
+        allow_new_surfaces = active_match
+      )
     },
     a2ui_checkpoint = function(thread_id = "default") {
       a2ui_transport$checkpoint(thread_id)

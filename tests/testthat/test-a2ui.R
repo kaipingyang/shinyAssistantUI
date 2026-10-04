@@ -495,3 +495,432 @@ test_that("R A2UI history authority dual-reads legacy and standard present artif
   expect_false(transport$restore_authority("thread-history", message(poisoned), checkpoint))
   expect_equal(transport$checkpoint("thread-history")$lastAcceptedSequence, 0)
 })
+
+
+test_that("AG-UI A2UI activity snapshots adapt bucket replacement into sequenced authority", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  activity <- function(message_id, text, replace = NULL, surface_id = "activity-surface") {
+    event <- list(
+      type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface",
+      content = list(a2ui_operations = list(
+        list(version = "v0.9.1", createSurface = list(surfaceId = surface_id)),
+        list(version = "v0.9.1", updateComponents = list(
+          surfaceId = surface_id,
+          components = list(list(id = "root", component = "Text", text = text))
+        ))
+      )),
+      messageId = message_id
+    )
+    if (!is.null(replace)) event$replace <- replace
+    event
+  }
+
+  first <- transport$send_activity(
+    "thread-activity", "run-activity", activity("message-a", "first"),
+    event_id = "activity-event-1"
+  )
+  expect_equal(first$sequence, 1)
+  expect_equal(first$operations[[1L]]$createSurface$surfaceId, "activity-surface")
+
+  retry <- transport$send_activity(
+    "thread-activity", "run-activity", activity("message-a", "first"),
+    event_id = "activity-event-1", sequence = 1
+  )
+  expect_equal(retry$sequence, 1)
+  expect_equal(transport$checkpoint("thread-activity")$lastAcceptedSequence, 1)
+  expect_length(Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent), 2L)
+
+  conflict <- activity("message-conflict", "first")
+  expect_error(
+    transport$send_activity(
+      "thread-activity", "run-activity", conflict,
+      event_id = "activity-event-1"
+    ),
+    "eventId conflict"
+  )
+
+  ignored <- transport$send_activity(
+    "thread-activity", "run-activity", activity("message-a", "ignored", FALSE),
+    event_id = "activity-event-ignored"
+  )
+  expect_null(ignored)
+  expect_equal(transport$checkpoint("thread-activity")$lastAcceptedSequence, 1)
+  expect_length(Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent), 2L)
+  expect_error(
+    transport$send_activity(
+      "thread-activity", "run-activity", activity("message-a", "ignored", FALSE),
+      event_id = "activity-noop-sequence", sequence = 2
+    ),
+    "sequence.*operations"
+  )
+  reused_noop <- activity("message-reused", "reused")
+  expect_error(
+    transport$send_activity(
+      "thread-activity", "run-activity", reused_noop,
+      event_id = "activity-event-ignored"
+    ),
+    "eventId conflict"
+  )
+
+  replacement_event <- activity("message-a", "second")
+  replaced <- transport$send_activity(
+    "thread-activity", "run-activity", replacement_event,
+    event_id = "activity-event-2", sequence = 2
+  )
+  replayed_replacement <- transport$send_activity(
+    "thread-activity", "run-activity", replacement_event,
+    event_id = "activity-event-2"
+  )
+  expect_equal(replayed_replacement$sequence, 2)
+  expect_equal(replaced$sequence, 2)
+  expect_identical(
+    vapply(replaced$operations, .a2ui_operation_kind, ""),
+    c("deleteSurface", "createSurface", "updateComponents")
+  )
+  expect_identical(replaced$operations[[3L]]$updateComponents$components[[1L]]$text, "second")
+
+  second_bucket <- transport$send_activity(
+    "thread-activity", "run-activity", activity("message-b", "third"),
+    event_id = "activity-event-3"
+  )
+  expect_identical(second_bucket$operations[[3L]]$updateComponents$components[[1L]]$text, "third")
+  moved_last <- transport$send_activity(
+    "thread-activity", "run-activity", activity("message-a", "fourth"),
+    event_id = "activity-event-4"
+  )
+  expect_identical(moved_last$operations[[3L]]$updateComponents$components[[1L]]$text, "fourth")
+
+  removed <- activity("message-a", "unused")
+  removed$content$a2ui_operations <- list()
+  fallback <- transport$send_activity(
+    "thread-activity", "run-activity", removed,
+    event_id = "activity-event-5"
+  )
+  expect_equal(fallback$sequence, 5)
+  expect_identical(fallback$operations[[3L]]$updateComponents$components[[1L]]$text, "third")
+
+  removed$messageId <- "message-b"
+  deletion <- transport$send_activity(
+    "thread-activity", "run-activity", removed,
+    event_id = "activity-event-6"
+  )
+  expect_equal(deletion$sequence, 6)
+  expect_identical(vapply(deletion$operations, .a2ui_operation_kind, ""), "deleteSurface")
+
+  bad <- activity("message-c", "bad")
+  bad$type <- "STATE_SNAPSHOT"
+  expect_error(
+    transport$send_activity("thread-activity", "run-activity", bad),
+    "ACTIVITY_SNAPSHOT"
+  )
+  bad <- activity("message-c", "bad")
+  bad$activityType <- "other"
+  expect_error(
+    transport$send_activity("thread-activity", "run-activity", bad),
+    "a2ui-surface"
+  )
+})
+
+test_that("AG-UI activity snapshot resets a surface at its latest create", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  event <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "reset",
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = "reset-surface")),
+      list(version = "v0.9", updateComponents = list(
+        surfaceId = "reset-surface",
+        components = list(list(id = "old", component = "Text", text = "old"))
+      )),
+      list(version = "v0.9", createSurface = list(surfaceId = "other-surface")),
+      list(version = "v0.9.1", createSurface = list(surfaceId = "reset-surface")),
+      list(version = "v0.9.1", updateComponents = list(
+        surfaceId = "reset-surface",
+        components = list(list(id = "new", component = "Text", text = "new"))
+      ))
+    ))
+  )
+  frame <- transport$send_activity(
+    "thread-reset", "run-reset", event, event_id = "reset-event"
+  )
+  expect_identical(
+    vapply(frame$operations, .a2ui_operation_kind, ""),
+    c("createSurface", "updateComponents", "createSurface")
+  )
+  surface_ids <- vapply(frame$operations, function(operation) {
+    kind <- .a2ui_operation_kind(operation)
+    operation[[kind]]$surfaceId
+  }, "")
+  expect_identical(surface_ids, c("reset-surface", "reset-surface", "other-surface"))
+  expect_identical(
+    frame$operations[[2L]]$updateComponents$components[[1L]]$text,
+    "new"
+  )
+})
+
+test_that("AG-UI activity bucket state commits only after the A2UI send succeeds", {
+  calls <- 0L
+  session <- list(sendCustomMessage = function(...) {
+    calls <<- calls + 1L
+    stop("send failed")
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  event <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "atomic",
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = "atomic-surface"))
+    ))
+  )
+  expect_error(transport$send_activity("thread-atomic", "run-atomic", event), "send failed")
+  event$replace <- FALSE
+  expect_error(transport$send_activity("thread-atomic", "run-atomic", event), "send failed")
+  expect_equal(calls, 2L)
+  expect_equal(transport$checkpoint("thread-atomic")$lastAcceptedSequence, 0)
+})
+
+test_that("A2UI native and AG-UI activity sends share one eventId namespace", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  empty_activity <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "empty",
+    content = list(a2ui_operations = list())
+  )
+  expect_error(
+    transport$send_activity(
+      "bad thread", "run-activity", empty_activity,
+      event_id = "bad-thread-event"
+    ),
+    "thread/run id"
+  )
+  expect_error(
+    transport$send_activity(
+      "thread-events", "bad run", empty_activity,
+      event_id = "bad-run-event"
+    ),
+    "thread/run id"
+  )
+  expect_error(
+    transport$send_activity(
+      "thread-events", "run-activity", empty_activity,
+      event_id = "bad-sequence-event", sequence = 999
+    ),
+    "sequence.*operations"
+  )
+  expect_null(transport$send_activity(
+    "thread-events", "run-activity", empty_activity,
+    event_id = "r-a2ui-1-1"
+  ))
+  create <- list(list(
+    version = "v0.9", createSurface = list(surfaceId = "native-surface")
+  ))
+  expect_error(
+    transport$send(
+      "thread-events", "run-native", create,
+      event_id = "r-a2ui-1-1"
+    ),
+    "eventId.*activity"
+  )
+  generated <- transport$send("thread-events", "run-native", create)
+  expect_identical(generated$eventId, "r-a2ui-1-2")
+
+  activity <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "full",
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = "activity-surface"))
+    ))
+  )
+  frame <- transport$send_activity(
+    "thread-other", "run-activity", activity,
+    event_id = "shared-event"
+  )
+  expect_error(
+    transport$send(
+      "thread-other", "run-activity", frame$operations,
+      event_id = "shared-event"
+    ),
+    "eventId.*activity"
+  )
+})
+
+test_that("AG-UI activity replay ages with the authoritative event ledger", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  activity <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "aged",
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = "aged-surface"))
+    ))
+  )
+  first <- transport$send_activity(
+    "thread-aged", "run-aged", activity, event_id = "activity-aged"
+  )
+  expect_equal(first$sequence, 1)
+  for (index in seq_len(64L)) {
+    transport$send(
+      "thread-aged", "run-native",
+      list(list(version = "v0.9", updateDataModel = list(
+        surfaceId = "aged-surface", path = "/", contents = list(index = index)
+      ))),
+      event_id = paste0("native-aged-", index)
+    )
+  }
+  replay_after_expiry <- transport$send_activity(
+    "thread-aged", "run-aged", activity, event_id = "activity-aged"
+  )
+  expect_equal(replay_after_expiry$sequence, 66)
+  expect_identical(
+    vapply(replay_after_expiry$operations, .a2ui_operation_kind, ""),
+    c("deleteSurface", "createSurface")
+  )
+})
+
+test_that("A2UI authority restore clears stale AG-UI activity buckets", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  event <- function(message_id, surface_id) list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = message_id,
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = surface_id))
+    ))
+  )
+  transport$send_activity(
+    "thread-restore", "run-old", event("old-message", "old-surface"),
+    event_id = "old-event"
+  )
+  empty_checkpoint <- list(
+    transportVersion = 1L, protocolVersion = "v0.9", schemaVersion = 1L,
+    lastAcceptedSequence = 0, generation = 0, eventLedger = list(), lineage = list()
+  )
+  expect_true(transport$restore_authority("thread-restore", list(), empty_checkpoint))
+  fresh <- transport$send_activity(
+    "thread-restore", "run-new", event("new-message", "new-surface"),
+    event_id = "new-event"
+  )
+  surface_ids <- vapply(fresh$operations, function(operation) {
+    kind <- .a2ui_operation_kind(operation)
+    operation[[kind]]$surfaceId
+  }, "")
+  expect_identical(surface_ids, "new-surface")
+})
+
+test_that("AG-UI inactive projection rejects stale surfaces from other buckets", {
+  sent <- list()
+  session <- list(sendCustomMessage = function(type, payload) {
+    sent[[length(sent) + 1L]] <<- list(type = type, payload = payload)
+  })
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  event <- function(message_id, surface_id, with_update = FALSE) {
+    operations <- list(list(
+      version = "v0.9", createSurface = list(surfaceId = surface_id)
+    ))
+    if (with_update) operations[[2L]] <- list(
+      version = "v0.9", updateDataModel = list(
+        surfaceId = surface_id, path = "/", contents = list(value = "updated")
+      )
+    )
+    list(
+      type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = message_id,
+      content = list(a2ui_operations = operations)
+    )
+  }
+  transport$send_activity(
+    "thread-stale", "run-active", event("bucket-y", "surface-y"), event_id = "stale-1"
+  )
+  transport$send_activity(
+    "thread-stale", "run-active", event("bucket-x", "surface-x"), event_id = "stale-2"
+  )
+  transport$send(
+    "thread-stale", "run-native",
+    list(list(version = "v0.9", deleteSurface = list(surfaceId = "surface-y"))),
+    event_id = "stale-native-delete"
+  )
+  expect_error(
+    transport$send_activity(
+      "thread-stale", "run-inactive", event("bucket-x", "surface-x", TRUE),
+      event_id = "stale-control", allow_new_surfaces = FALSE
+    ),
+    "active matching run"
+  )
+  expect_equal(transport$checkpoint("thread-stale")$lastAcceptedSequence, 3)
+  expect_length(Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent), 3L)
+})
+
+test_that("assistantUIServer exposes handler and control AG-UI activity entry points", {
+  event <- list(
+    type = "ACTIVITY_SNAPSHOT", activityType = "a2ui-surface", messageId = "server-activity",
+    content = list(a2ui_operations = list(
+      list(version = "v0.9", createSurface = list(surfaceId = "server-activity-surface"))
+    ))
+  )
+  handler <- function(message, on_ag_ui_activity, on_done, ...) {
+    on_ag_ui_activity(event, event_id = "server-activity-1")
+    on_done()
+  }
+  controls <- NULL
+  shiny::testServer(function(input, output, session) {
+    controls <<- assistantUIServer("chat", handler = handler)
+  }, {
+    sent <- list()
+    session$sendCustomMessage <- function(type, message) {
+      sent[[length(sent) + 1L]] <<- list(type = type, message = message)
+    }
+    session$flushReact()
+    session$setInputs(chat_input = list(
+      text = "activity", threadId = "thread-server", runId = "run-server",
+      attachments = list(), ts = 1
+    ))
+    for (i in seq_len(100L)) {
+      later::run_now(0.01)
+      session$flushReact()
+      if (any(vapply(sent, function(frame) identical(frame$type, "chat_input:done"), logical(1)))) break
+    }
+    frames <- Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent)
+    expect_length(frames, 1L)
+    expect_equal(frames[[1L]]$message$sequence, 1)
+
+    new_surface <- event
+    new_surface$messageId <- "control-activity"
+    new_surface$content$a2ui_operations[[1L]]$createSurface$surfaceId <- "control-surface"
+    expect_error(
+      controls$send_ag_ui_activity(
+        new_surface, thread_id = "thread-server", run_id = "run-control",
+        event_id = "server-activity-rejected"
+      ),
+      "active matching run"
+    )
+    expect_equal(controls$a2ui_checkpoint("thread-server")$lastAcceptedSequence, 1)
+    frames <- Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent)
+    expect_length(frames, 1L)
+
+    replacement <- event
+    replacement$content$a2ui_operations[[2L]] <- list(
+      version = "v0.9", updateComponents = list(
+        surfaceId = "server-activity-surface",
+        components = list(list(id = "root", component = "Text", text = "control replacement"))
+      )
+    )
+    controls$send_ag_ui_activity(
+      replacement, thread_id = "thread-server", run_id = "run-control",
+      event_id = "server-activity-2"
+    )
+    frames <- Filter(function(frame) identical(frame$type, "chat_input:a2ui"), sent)
+    expect_length(frames, 2L)
+    expect_equal(frames[[2L]]$message$sequence, 2)
+  })
+})

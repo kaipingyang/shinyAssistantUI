@@ -46,6 +46,7 @@ main <- function() {
       if (!app$is_alive() || Sys.time() >= deadline) {
         if (file.exists(logs[[2]])) cat(tail(readLines(logs[[2]], warn = FALSE), 30), sep = "\n")
         cat("\nA2UI_DOM_STATE\n", tryCatch(value("document.body.innerText"), error = function(e) "<unavailable>"), "\n")
+        cat("A2UI_HIDDEN_STATE ", tryCatch(value("JSON.stringify({actions:document.getElementById('actions')?.textContent,validation:document.getElementById('validation_error')?.textContent,context:document.getElementById('action_context')?.textContent,control:document.getElementById('control_error')?.textContent})"), error = function(e) "<unavailable>"), "\n", sep = "")
         stop("Timed out: ", code, call. = FALSE)
       }
       Sys.sleep(0.05)
@@ -74,10 +75,13 @@ main <- function() {
   click(".aui-lexical-input[contenteditable=true]")
   browser$Input$insertText(text = "show a2ui")
   key()
-  wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceRevision==='1'")
+  wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceRevision==='4'")
   wait("document.querySelector('[data-aui=button]')?.textContent.includes('Confirm A2UI')")
   wait("document.querySelector('input[data-aui=input]')?.value==='Ada'")
   wait("document.body.innerText.includes('Ready A2UI')&&document.body.innerText.includes('First item')&&document.body.innerText.includes('Second item')")
+  stopifnot(!isTRUE(value("document.body.innerText.includes('IGNORED ACTIVITY')")))
+  wait("document.getElementById('control_error').textContent.includes('active matching run')&&document.getElementById('control_error').textContent.includes('stale bucket cleared')")
+  stopifnot(!isTRUE(value("!!document.querySelector('[data-surface-id=post-done-control-surface]')")))
   stopifnot(value("document.querySelectorAll('[data-slot=aui_a2ui_surface]').length") == 1)
 
 
@@ -104,9 +108,9 @@ main <- function() {
   wait("document.body.innerText.includes('Grace')")
 
   stage <- "action-update"
-  click("[data-aui=button]")
-  wait("(()=>{try{const x=JSON.parse(document.getElementById('validation_error').textContent);return x.code==='VALIDATION_FAILED'&&x.surfaceId==='fixture-surface'&&x.path==='/operations'&&x.beforeSequence===1}catch{return false}})()")
-  wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceRevision==='2'")
+  click_button("Confirm A2UI")
+  wait("(()=>{try{const x=JSON.parse(document.getElementById('validation_error').textContent);return x.code==='VALIDATION_FAILED'&&x.surfaceId==='fixture-surface'&&x.path==='/operations'&&x.beforeSequence===4}catch{return false}})()")
+  wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceRevision==='5'")
   wait("document.querySelector('[data-aui=button]')?.textContent.includes('Updated A2UI')")
   wait("document.body.innerText.includes('Server updated')")
   wait("document.querySelector('input[data-aui=input]')?.value==='Grace'")
@@ -114,7 +118,7 @@ main <- function() {
   wait("(()=>{try{const x=JSON.parse(document.getElementById('action_context').textContent);return x.formId==='fixture-form'&&x.values.name==='Grace'&&x.values.accepted===false}catch{return false}})()")
 
   stage <- "action-delete"
-  click("[data-aui=button]")
+  click_button("Updated A2UI")
   wait("!document.querySelector('[data-slot=aui_a2ui_surface]')")
   wait("document.getElementById('actions').textContent.trim()==='2'")
 
@@ -132,7 +136,7 @@ main <- function() {
 
   stopifnot(length(console_errors)==0L, length(runtime_errors)==0L,
             length(window_errors())==0L, length(network_errors)==0L)
-  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 openUrl=1 unsafeUrlBlocked=1 liveBinding=1 editedContext=1 template=1 legacyHistory=1 presentHistory=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
+  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 openUrl=1 unsafeUrlBlocked=1 agUiActivity=1 activityReplaceFalse=1 activityReplace=1 activityBucketDelete=1 postDoneControlCreateRejected=1 liveBinding=1 editedContext=1 template=1 legacyHistory=1 presentHistory=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
   cleanup()
 }
 main()

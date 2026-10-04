@@ -952,7 +952,10 @@ export function prepareEnvelopeTransaction(
       currentA2uiState(thread), envelope.operations,
     );
     if (lifecycleError) throw new Error(lifecycleError);
-    const creates = [...info.values()].some((kinds) => kinds.has("createSurface"));
+    const creates = [...info.entries()].some(([surfaceId, kinds]) =>
+      kinds.has("createSurface") &&
+      !(kinds.has("deleteSurface") && thread.surfaces.has(surfaceId))
+    );
     let activeRun = thread.activeRunId ? thread.runs.get(thread.activeRunId) : undefined;
     if (creates && (!activeRun || !activeRun.open || activeRun.runId !== envelope.runId)) {
       return { status: "rejected", error: "createSurface requires the active matching run.", diagnostics: [] };

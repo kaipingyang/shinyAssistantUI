@@ -886,3 +886,32 @@ describe("A2UI present artifact history migration", () => {
     })).toBe("invalid");
   });
 });
+
+
+describe("A2UI atomic snapshot replacement", () => {
+  it("allows delete-create replacement of an existing surface after its run closes", () => {
+    const controller = liveController();
+    expect(controller.acceptEnvelope(envelope(1)).status).toBe("accepted");
+    const original = acceptedSurface(controller);
+    controller.closeRun("thread-1", "run-1");
+
+    const result = controller.acceptEnvelope(envelope(2, [
+      remove(), create(), root("surface-1", "activity replacement"),
+    ], {
+      runId: "background-activity",
+      eventId: "activity-replace-2",
+    }));
+    expect(result.status).toBe("accepted");
+    const replaced = acceptedSurface(controller);
+    expect(replaced.part.spec).toMatchObject({
+      $type: "Markdown", value: "activity replacement",
+    });
+    expect(replaced.anchor).toEqual(original.anchor);
+    expect(replaced.epoch).toBe(2);
+
+    expect(controller.acceptEnvelope(envelope(3, [create("new-surface")], {
+      runId: "background-activity",
+      eventId: "activity-new-3",
+    })).status).toBe("rejected");
+  });
+});
