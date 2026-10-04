@@ -613,6 +613,8 @@ assistantUIServer <- function(id, handler,
         "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider",
         "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput", "Slider"
       )),
+      supportedLocalFunctions = list("openUrl"),
+      validationChecks = FALSE,
       sendDataModel = FALSE,
       schemaVersion = 1L,
       experimental = TRUE

@@ -3,7 +3,7 @@
   "$id": "urn:shinyassistantui:a2ui:catalog:v1",
   "catalogId": "urn:shinyassistantui:a2ui:catalog:v1",
   "title": "shinyAssistantUI A2UI Catalog v1",
-  "description": "Strict A2UI v0.9/v0.9.1 subset. Video, audio, tabs, modal, checks, local functions, and sendDataModel are unsupported.",
+  "description": "Strict A2UI v0.9/v0.9.1 subset. Video, audio, tabs, modal, checks, sendDataModel, and local functions other than openUrl are unsupported.",
   "$defs": {
     "id": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._:@/-]*$","maxLength":128},
     "binding": {"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":1024}},"required":["path"],"additionalProperties":false},
@@ -15,7 +15,7 @@
     "child": {"$ref":"#/$defs/id"},
     "children": {"oneOf":[{"type":"array","maxItems":500,"items":{"$ref":"#/$defs/child"}},{"type":"object","properties":{"componentId":{"$ref":"#/$defs/child"},"path":{"type":"string","minLength":1,"maxLength":1024}},"required":["componentId","path"],"additionalProperties":false}]},
     "options": {"type":"array","maxItems":100,"items":{"type":"object","properties":{"label":{"$ref":"#/$defs/dynamicString"},"value":{"type":"string","maxLength":16384}},"required":["label","value"],"additionalProperties":false}},
-    "action": {"type":"object","properties":{"event":{"type":"object","properties":{"name":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"},"context":{"type":"object"},"userMessage":{"$ref":"#/$defs/dynamicString"}},"required":["name"],"additionalProperties":false}},"required":["event"],"additionalProperties":false}
+    "action": {"type":"object","properties":{"event":{"type":"object","properties":{"name":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$"},"context":{"type":"object"},"userMessage":{"$ref":"#/$defs/dynamicString"}},"required":["name"],"additionalProperties":false},"functionCall":{"$ref":"#/functions/openUrl"}},"oneOf":[{"required":["event"]},{"required":["functionCall"]}],"additionalProperties":false}
   },
   "components": {
     "Text": {"type":"object","properties":{"id":{"$ref":"#/$defs/id"},"component":{"const":"Text"},"text":{"$ref":"#/$defs/dynamicString"},"value":{"$ref":"#/$defs/dynamicString"},"variant":{"enum":["h1","h2","h3","h4","h5","h6","caption","body"]}},"required":["id","component"],"anyOf":[{"required":["text"]},{"required":["value"]}],"additionalProperties":false},
@@ -33,5 +33,16 @@
     "DateTimeInput": {"type":"object","properties":{"id":{"$ref":"#/$defs/id"},"component":{"const":"DateTimeInput"},"label":{"$ref":"#/$defs/dynamicString"},"value":{"$ref":"#/$defs/dynamicString"},"min":{"$ref":"#/$defs/dynamicString"},"max":{"$ref":"#/$defs/dynamicString"},"enableDate":{"type":"boolean"},"enableTime":{"type":"boolean"}},"required":["id","component"],"additionalProperties":false},
     "Slider": {"type":"object","properties":{"id":{"$ref":"#/$defs/id"},"component":{"const":"Slider"},"label":{"$ref":"#/$defs/dynamicString"},"value":{"$ref":"#/$defs/dynamicNumber"},"min":{"type":"number"},"max":{"type":"number"},"steps":{"type":"integer","minimum":1}},"required":["id","component","min","max"],"additionalProperties":false}
   },
-  "functions": {}
+  "functions": {
+    "openUrl": {
+      "type": "object",
+      "properties": {
+        "call": {"const":"openUrl"},
+        "args": {"type":"object","properties":{"url":{"type":"string","format":"uri","maxLength":16384}},"required":["url"],"additionalProperties":false},
+        "returnType": {"const":"void"}
+      },
+      "required": ["call","args"],
+      "additionalProperties": false
+    }
+  }
 }

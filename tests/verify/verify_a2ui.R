@@ -61,6 +61,12 @@ main <- function() {
     browser$Input$dispatchKeyEvent(type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
     browser$Input$dispatchKeyEvent(type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13L)
   }
+  click_button <- function(label) {
+    point <- value(sprintf("(()=>{const e=[...document.querySelectorAll('[data-aui=button]')].find(x=>x.textContent.includes(%s));if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()", jsonlite::toJSON(label, auto_unbox = TRUE)))
+    stopifnot(!is.null(point))
+    browser$Input$dispatchMouseEvent(type="mousePressed", x=point$x, y=point$y, button="left", clickCount=1L)
+    browser$Input$dispatchMouseEvent(type="mouseReleased", x=point$x, y=point$y, button="left", clickCount=1L)
+  }
 
   browser$Page$navigate(sprintf("http://127.0.0.1:%d/", port)); browser$Page$loadEventFired()
   wait("!!document.querySelector('.aui-lexical-input[contenteditable=true]')")
@@ -74,6 +80,15 @@ main <- function() {
   wait("document.body.innerText.includes('Ready A2UI')&&document.body.innerText.includes('First item')&&document.body.innerText.includes('Second item')")
   stopifnot(value("document.querySelectorAll('[data-slot=aui_a2ui_surface]').length") == 1)
 
+
+  stage <- "local-open-url"
+  stopifnot(isTRUE(value("window.__a2uiOpened=[];window.open=(url,target,features)=>{window.__a2uiOpened.push({url,target,features});return null};true")))
+  click_button("Open safe URL")
+  wait("window.__a2uiOpened.length===1&&window.__a2uiOpened[0].url==='https://example.com/docs'&&window.__a2uiOpened[0].target==='_blank'&&window.__a2uiOpened[0].features==='noopener,noreferrer'")
+  click_button("Open unsafe URL")
+  Sys.sleep(0.2)
+  stopifnot(value("window.__a2uiOpened.length") == 1)
+  stopifnot(value("document.getElementById('actions').textContent.trim()") == "0")
   stage <- "local-edit"
   click("input[data-aui=input]")
   browser$Input$dispatchKeyEvent(
@@ -111,7 +126,7 @@ main <- function() {
 
   stopifnot(length(console_errors)==0L, length(runtime_errors)==0L,
             length(window_errors())==0L, length(network_errors)==0L)
-  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 liveBinding=1 editedContext=1 template=1 history=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
+  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 openUrl=1 unsafeUrlBlocked=1 liveBinding=1 editedContext=1 template=1 history=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
   cleanup()
 }
 main()

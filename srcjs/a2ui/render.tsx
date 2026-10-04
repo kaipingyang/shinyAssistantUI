@@ -66,6 +66,40 @@ const safeImage = {
   },
 };
 
+type A2uiWindowOpen = (
+  url?: string | URL,
+  target?: string,
+  features?: string,
+) => Window | null;
+
+export function openSafeA2uiUrl(
+  payload: unknown,
+  surfaceId: string,
+  open: A2uiWindowOpen = window.open.bind(window),
+  baseUrl: string = window.location.href,
+): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  const allowed = new Set(["type", "call", "surfaceId", "sourceComponentId", "args"]);
+  if (Object.keys(value).some((key) => !allowed.has(key)) ||
+      value.type !== "a2ui:functionCall" || value.call !== "openUrl" ||
+      value.surfaceId !== surfaceId || typeof value.sourceComponentId !== "string" ||
+      value.sourceComponentId.length === 0 || value.sourceComponentId.length > 128 ||
+      !value.args || typeof value.args !== "object" || Array.isArray(value.args)) return false;
+  const args = value.args as Record<string, unknown>;
+  if (Object.keys(args).length !== 1 || typeof args.url !== "string" ||
+      args.url.length === 0 || args.url.length > 16_384) return false;
+  try {
+    const url = new URL(args.url, baseUrl);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") ||
+        url.username !== "" || url.password !== "") return false;
+    open(url.href, "_blank", "noopener,noreferrer");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const a2uiRuntimeLibrary: GenerativeUILibrary = Object.fromEntries(
   RUNTIME_COMPONENTS.map((name) => {
     const entry = name === "Image" ? safeImage : defaultGenerativeUILibrary[name];
@@ -88,10 +122,11 @@ export const A2uiRuntimeView: FC<{
       library: a2uiRuntimeLibrary,
       actions: createActionRegistry({
         "a2ui:action": ({ payload }) => dispatchRef.current?.(payload),
+        "a2ui:functionCall": ({ payload }) => openSafeA2uiUrl(payload, surfaceId),
       }),
     });
     return generative.present({ display: "standalone" });
-  }, []);
+  }, [surfaceId]);
   if (filtered === null && !operations) return null;
   if (operations) {
     const Present = present.render as ToolCallMessagePartComponent<

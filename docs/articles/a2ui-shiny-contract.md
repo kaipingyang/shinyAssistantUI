@@ -21,6 +21,13 @@ supported/accepted catalog lists. Applications can provide
 `a2ui_error_handler` to receive bounded standard `VALIDATION_FAILED` feedback
 when the browser rejects a known-thread, known-surface envelope; malformed
 payloads without safe routing identity fail closed without fabricated errors.
+
+The subset catalog exposes one renderer-local function, `openUrl`. It runs only
+from a user click, accepts one credential-free HTTP(S) URL, and opens `_blank`
+with `noopener,noreferrer`; it never enters the R action channel. A2UI `checks`
+remain unadvertised because react-generative-ui 0.0.22 has no public check-result
+renderer contract; the package does not fork private upstream internals to claim
+support.
 sends operations that create, update, or delete a UI surface. Components
 come from a host-approved catalog; executable React code does not travel
 over the wire. The assistant-ui documentation demonstrates these

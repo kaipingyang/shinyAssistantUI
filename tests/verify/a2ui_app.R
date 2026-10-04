@@ -19,7 +19,7 @@ submit_component <- function(label) list(
 initial_components <- function() list(
   list(
     id = "root", component = "Column",
-    children = list("heading", "name", "mirror", "accepted", "items", "submit")
+    children = list("heading", "name", "mirror", "accepted", "items", "submit", "open-safe", "open-unsafe")
   ),
   list(id = "heading", component = "Text", text = list(path = "/status"), variant = "h3"),
   list(id = "name", component = "TextField", label = "Name", value = list(path = "/form/name")),
@@ -27,8 +27,13 @@ initial_components <- function() list(
   list(id = "accepted", component = "CheckBox", label = "Accepted", value = list(path = "/form/accepted")),
   list(id = "items", component = "List", children = list(componentId = "item", path = "/items")),
   list(id = "item", component = "Text", text = list(path = "name")),
-
-  submit_component("Confirm A2UI")
+  submit_component("Confirm A2UI"),
+  list(id = "open-safe", component = "Button", text = "Open safe URL", action = list(
+    functionCall = list(call = "openUrl", args = list(url = "https://example.com/docs"))
+  )),
+  list(id = "open-unsafe", component = "Button", text = "Open unsafe URL", action = list(
+    functionCall = list(call = "openUrl", args = list(url = "javascript:alert(1)"))
+  ))
 )
 
 history_snapshot <- list(

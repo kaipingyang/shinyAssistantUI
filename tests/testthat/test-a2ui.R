@@ -325,6 +325,7 @@ test_that("A2UI capabilities advertise the bundled subset catalog exactly", {
   expect_true("value" %in% names(catalog$components$TextField$properties))
   expect_true(all(c("min", "max", "steps") %in%
     names(catalog$components$Slider$properties)))
+  expect_identical(names(catalog$functions), "openUrl")
 })
 
 test_that("assistantUIServer validates and routes standard A2UI renderer errors", {
@@ -422,5 +423,7 @@ test_that("display-only A2UI controller still exposes renderer capabilities", {
       "urn:shinyassistantui:a2ui:catalog:v1"
     )
     expect_false(capabilities$sendDataModel)
+    expect_false(capabilities$validationChecks)
+    expect_identical(unlist(capabilities$supportedLocalFunctions), "openUrl")
   })
 })

@@ -2,7 +2,7 @@
 import React from "react";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { A2uiRuntimeView } from "./render";
+import { A2uiRuntimeView, openSafeA2uiUrl } from "./render";
 
 afterEach(cleanup);
 
@@ -144,4 +144,54 @@ it("preserves local edits across unrelated agent updates and yields on same-path
   );
   expect((view.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Agent");
   expect(view.getByText("Agent")).toBeTruthy();
+});
+
+
+describe("A2UI local openUrl function", () => {
+  it("opens only credential-free HTTP(S) URLs with isolation features", () => {
+    const open = vi.fn();
+    const payload = {
+      type: "a2ui:functionCall", call: "openUrl",
+      surfaceId: "surface-url", sourceComponentId: "open",
+      args: { url: "/docs" },
+    };
+    expect(openSafeA2uiUrl(payload, "surface-url", open, "https://example.com/chat")).toBe(true);
+    expect(open).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/docs", "_blank", "noopener,noreferrer",
+    );
+    for (const url of [
+      "javascript:alert(1)", "data:text/html,bad", "file:///tmp/x",
+      "https://user:pass@example.com/private", "http://[::1",
+    ]) {
+      expect(openSafeA2uiUrl({ ...payload, args: { url } }, "surface-url", open,
+        "https://example.com/chat")).toBe(false);
+    }
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(openSafeA2uiUrl({ ...payload, surfaceId: "other" }, "surface-url", open,
+      "https://example.com/chat")).toBe(false);
+  });
+
+  it("dispatches functionCall locally without using the R action callback", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const dispatch = vi.fn();
+    const operations = [
+      { version: "v0.9.1", createSurface: { surfaceId: "surface-url" } },
+      { version: "v0.9.1", updateComponents: {
+        surfaceId: "surface-url", components: [
+          { id: "root", component: "Button", text: "Open docs", action: {
+            functionCall: { call: "openUrl", args: { url: "https://example.com/docs" } },
+          } },
+        ],
+      } },
+    ];
+    const view = render(
+      <A2uiRuntimeView surfaceId="surface-url" spec={{}}
+        operations={operations} dispatch={dispatch} />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Open docs" }));
+    expect(open).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/docs", "_blank", "noopener,noreferrer",
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 });
