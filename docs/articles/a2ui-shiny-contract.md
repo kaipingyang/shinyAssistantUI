@@ -12,6 +12,15 @@
 > Basic Catalog.
 
 [A2UI](https://a2ui.org/) is a declarative protocol in which an agent
+
+The preferred renderer catalog is bundled at
+`inst/schema/a2ui/shinyassistantui-v1-catalog.json` and identified by
+`urn:shinyassistantui:a2ui:catalog:v1`; legacy official Basic Catalog IDs remain
+accepted only for backward compatibility. `a2ui_capabilities()` returns the exact
+supported/accepted catalog lists. Applications can provide
+`a2ui_error_handler` to receive bounded standard `VALIDATION_FAILED` feedback
+when the browser rejects a known-thread, known-surface envelope; malformed
+payloads without safe routing identity fail closed without fabricated errors.
 sends operations that create, update, or delete a UI surface. Components
 come from a host-approved catalog; executable React code does not travel
 over the wire. The assistant-ui documentation demonstrates these

@@ -80,6 +80,7 @@ import {
 import {
   A2uiProtocolController,
   classifyCanonicalPart,
+  makeA2uiValidationFeedback,
   type A2uiCheckpoint,
   type CanonicalA2uiPart,
 } from "./a2ui/protocol";
@@ -1142,6 +1143,13 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
           }, 5_000);
           a2uiRecoveryTimersRef.current.set(threadId, timer);
         }
+      } else if (result.status === "rejected" && result.error) {
+        const feedback = makeA2uiValidationFeedback(
+          raw,
+          result.error,
+          (threadId, surfaceId) => controller.getSurface(threadId, surfaceId) !== undefined,
+        );
+        if (feedback) bridge.current.sendA2uiError(feedback);
       }
     });
     bridge.current.onA2uiRecovery((raw) => {

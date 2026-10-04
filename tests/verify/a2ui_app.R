@@ -1,6 +1,6 @@
 suppressPackageStartupMessages({ library(shiny); library(shinyAssistantUI) })
 
-catalog <- "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json"
+catalog <- "urn:shinyassistantui:a2ui:catalog:v1"
 
 submit_component <- function(label) list(
   id = "submit", component = "Button", text = label,
@@ -66,17 +66,21 @@ ui <- assistantUIPage(
   div(
     style = "display:none",
     textOutput("actions"),
-    textOutput("action_context")
+    textOutput("action_context"),
+    textOutput("validation_error")
   )
 )
 
 server <- function(input, output, session) {
   actions <- reactiveVal(0L)
   action_context <- reactiveVal("")
+  validation_error <- reactiveVal("")
   output$actions <- renderText(as.character(actions()))
   output$action_context <- renderText(action_context())
+  output$validation_error <- renderText(validation_error())
   outputOptions(output, "actions", suspendWhenHidden = FALSE)
   outputOptions(output, "action_context", suspendWhenHidden = FALSE)
+  outputOptions(output, "validation_error", suspendWhenHidden = FALSE)
 
   handler <- function(message, on_a2ui, on_done, ...) {
     on_a2ui(list(
@@ -97,29 +101,55 @@ server <- function(input, output, session) {
     on_done()
   }
 
+  api <- NULL
+  feedback_recovered <- reactiveVal(FALSE)
   action_handler <- function(name, context, thread_id, on_a2ui, ...) {
     count <- isolate(actions()) + 1L
     actions(count)
     action_context(as.character(jsonlite::toJSON(context, auto_unbox = TRUE, null = "null")))
     if (count == 1L) {
-      on_a2ui(list(
+      session$sendCustomMessage("chat_input:a2ui", list(
+        transportVersion = 1L, threadId = thread_id, runId = "invalid-run",
+        eventId = "invalid-event", sequence = 2,
+        operations = list(list(
+          version = "v0.9.1",
+          updateComponents = list(
+            surfaceId = "fixture-surface",
+            components = list(list(id = "root", component = "Script"))
+          )
+        ))
+      ))
+    } else {
+      on_a2ui(list(list(version = "v0.9.1", deleteSurface = list(
+        surfaceId = "fixture-surface"
+      ))), event_id = "fixture-event-3")
+
+    }
+  }
+
+  error_handler <- function(code, thread_id, surface_id, path, message, ...) {
+    before_sequence <- api$a2ui_checkpoint(thread_id)$lastAcceptedSequence
+    validation_error(as.character(jsonlite::toJSON(list(
+      code = code, threadId = thread_id, surfaceId = surface_id,
+      path = path, message = message, beforeSequence = before_sequence
+    ), auto_unbox = TRUE)))
+    if (!isolate(feedback_recovered())) {
+      feedback_recovered(TRUE)
+      api$send_a2ui(list(
         list(version = "v0.9.1", updateComponents = list(
           surfaceId = "fixture-surface", components = list(submit_component("Updated A2UI"))
         )),
         list(version = "v0.9.1", updateDataModel = list(
           surfaceId = "fixture-surface", path = "/status", value = "Server updated"
         ))
-      ), event_id = "fixture-event-2")
-    } else {
-      on_a2ui(list(list(version = "v0.9.1", deleteSurface = list(
-        surfaceId = "fixture-surface"
-      ))), event_id = "fixture-event-3")
+      ), thread_id = thread_id, run_id = "feedback-recovery", event_id = "fixture-event-2")
     }
   }
 
   api <- assistantUIServer(
     "chat", handler = handler, persistence = "server", show_thread_list = TRUE,
     a2ui_action_handler = action_handler,
+    a2ui_error_handler = error_handler,
     on_session_load = function(session_id, thread_id, send_thread, ...) {
       if (identical(session_id, "history-a2ui")) {
         send_thread(list(history_message), a2ui_checkpoint = history_checkpoint)

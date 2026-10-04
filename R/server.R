@@ -338,6 +338,7 @@ assistantUIServer <- function(id, handler,
                               workspace_search_provider = NULL,
                               on_action         = NULL,
                               a2ui_action_handler = NULL,
+                              a2ui_error_handler = NULL,
                               on_session_load   = NULL,
                               on_feedback       = NULL,
                               on_rename         = NULL,
@@ -401,8 +402,12 @@ assistantUIServer <- function(id, handler,
   )
   force(tools); force(action_items); force(on_action); force(on_session_load)
   force(a2ui_action_handler)
+  force(a2ui_error_handler)
   if (!is.null(a2ui_action_handler) && !is.function(a2ui_action_handler)) {
     stop("`a2ui_action_handler` must be a function or NULL.", call. = FALSE)
+  }
+  if (!is.null(a2ui_error_handler) && !is.function(a2ui_error_handler)) {
+    stop("`a2ui_error_handler` must be a function or NULL.", call. = FALSE)
   }
   force(ide_context_provider); force(workspace_search_provider)
   force(on_feedback); force(modal)
@@ -593,13 +598,14 @@ assistantUIServer <- function(id, handler,
   )
   normalized_theme <- .normalize_theme(theme)
   if (!is.null(.ui_addons))       config$addons           <- .ui_addons
-  if (is.function(a2ui_action_handler)) {
-    config$a2ui <- list(
+  config$a2ui <- list(
       transportVersion = 1L,
       protocolVersion = "v0.9",
       wireVersions = list("v0.9.1", "v0.9"),
       mimeType = "application/a2ui+json",
+      supportedCatalogIds = list("urn:shinyassistantui:a2ui:catalog:v1"),
       acceptedCatalogIds = list(
+        "urn:shinyassistantui:a2ui:catalog:v1",
         "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json",
         "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
       ),
@@ -611,7 +617,6 @@ assistantUIServer <- function(id, handler,
       schemaVersion = 1L,
       experimental = TRUE
     )
-  }
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme
   if (!is.null(strings))          config$strings          <- strings
   if (!is.null(warming_label))    config$warming_label    <- as.character(warming_label)[[1L]]
@@ -2028,6 +2033,14 @@ assistantUIServer <- function(id, handler,
     a2ui_transport$handle_action(session$input[[paste0(input_id, "_a2ui_action")]])
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
+  shiny::observeEvent(session$input[[paste0(input_id, "_a2ui_error")]], {
+    .a2ui_handle_renderer_error(
+      a2ui_error_handler,
+      session$input[[paste0(input_id, "_a2ui_error")]],
+      a2ui_transport$has_surface
+    )
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
   shiny::observeEvent(session$input[[paste0(input_id, "_a2ui_restore")]], {
     # Browser/client restore is intentionally untrusted. Server authority is
     # established only by send_thread(..., a2ui_checkpoint=).
@@ -2174,6 +2187,7 @@ assistantUIServer <- function(id, handler,
     a2ui_checkpoint = function(thread_id = "default") {
       a2ui_transport$checkpoint(thread_id)
     },
+    a2ui_capabilities = function() config$a2ui %||% NULL,
     # 注意：thread_id 默认 "default"。若用户已新建/切换线程（id 为随机生成值），
     # 必须显式传入当前 thread_id，否则消息路由到不存在的 "default" 线程被静默丢弃。
     send_tool_call = function(tool_call_id, tool_name, args = list(), thread_id = "default") {

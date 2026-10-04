@@ -115,6 +115,7 @@
         stop("A2UI createSurface payload is invalid.", call. = FALSE)
       }
       catalogs <- c(
+        "urn:shinyassistantui:a2ui:catalog:v1",
         "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
         "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json"
       )
@@ -244,6 +245,35 @@
     list(ok = TRUE, value = result)
   }
   project(template, submitted)
+}
+
+.a2ui_handle_renderer_error <- function(handler, message, is_authorized) {
+  if (!is.function(handler) || !is.function(is_authorized) || !is.list(message) ||
+      !.a2ui_exact_names(message, c("transportVersion", "threadId", "version", "error")) ||
+      !identical(message$transportVersion, 1L) || !.a2ui_id(message$threadId) ||
+      !identical(message$version, "v0.9.1") || !is.list(message$error) ||
+      !.a2ui_exact_names(message$error, c("code", "surfaceId", "path", "message")) ||
+      !identical(message$error$code, "VALIDATION_FAILED") ||
+      !.a2ui_id(message$error$surfaceId) || !.a2ui_pointer_valid(message$error$path) ||
+      nchar(message$error$path, type = "bytes") > 1024L ||
+      !is.character(message$error$message) || length(message$error$message) != 1L ||
+      is.na(message$error$message) || !nzchar(message$error$message) ||
+      nchar(message$error$message, type = "bytes") > 1024L) return(invisible(FALSE))
+  authorized <- tryCatch(
+    isTRUE(is_authorized(message$threadId, message$error$surfaceId)),
+    error = function(error) FALSE
+  )
+  if (!authorized) return(invisible(FALSE))
+  tryCatch({
+    .call_compatible_callback(handler, list(
+      code = message$error$code,
+      thread_id = message$threadId,
+      surface_id = message$error$surfaceId,
+      path = message$error$path,
+      message = "A2UI envelope failed renderer validation."
+    ))
+    invisible(TRUE)
+  }, error = function(error) invisible(FALSE))
 }
 
 .a2ui_materialize_context <- function(value, model) {
@@ -713,6 +743,12 @@
   list(
     send = send, recover = recover, checkpoint = checkpoint,
     restore_authority = restore_authority, handle_action = handle_action,
+    has_surface = function(thread_id, surface_id) {
+      state <- get0(thread_id, envir = threads, inherits = FALSE)
+      if (is.null(state)) return(FALSE)
+      surface <- get0(surface_id, envir = state$surfaces, inherits = FALSE)
+      !is.null(surface) && !isTRUE(surface$deleted)
+    },
     snapshot = function(thread_id) thread_state(thread_id)
   )
 }

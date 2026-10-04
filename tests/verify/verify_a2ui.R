@@ -90,6 +90,7 @@ main <- function() {
 
   stage <- "action-update"
   click("[data-aui=button]")
+  wait("(()=>{try{const x=JSON.parse(document.getElementById('validation_error').textContent);return x.code==='VALIDATION_FAILED'&&x.surfaceId==='fixture-surface'&&x.path==='/operations'&&x.beforeSequence===1}catch{return false}})()")
   wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceRevision==='2'")
   wait("document.querySelector('[data-aui=button]')?.textContent.includes('Updated A2UI')")
   wait("document.body.innerText.includes('Server updated')")
@@ -110,7 +111,7 @@ main <- function() {
 
   stopifnot(length(console_errors)==0L, length(runtime_errors)==0L,
             length(window_errors())==0L, length(network_errors)==0L)
-  cat("A2UI_BROWSER_DONE v091=1 liveBinding=1 editedContext=1 template=1 history=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
+  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 liveBinding=1 editedContext=1 template=1 history=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
   cleanup()
 }
 main()

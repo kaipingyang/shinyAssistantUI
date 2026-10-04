@@ -160,6 +160,17 @@ export type A2uiRecoveryFailure = { threadId: string; reason: string };
 export type A2uiActionResult = {
   actionId?: string; threadId?: string; status: "ok" | "error"; message?: string;
 };
+export type A2uiValidationFeedback = {
+  transportVersion: 1;
+  threadId: string;
+  version: "v0.9.1";
+  error: {
+    code: "VALIDATION_FAILED";
+    surfaceId: string;
+    path: string;
+    message: "A2UI envelope failed renderer validation.";
+  };
+};
 
 export type SessionsPayload = {
   sessions: SessionItem[];
@@ -209,6 +220,7 @@ export interface ShinyBridge {
   sendDiagnostics: (batch: DiagnosticsBatch) => void;
   sendA2uiAction: (payload: A2uiActionPayload) => void;
   sendA2uiRecovery: (payload: A2uiRecoveryRequest) => void;
+  sendA2uiError: (payload: A2uiValidationFeedback) => void;
   sendA2uiRestore: (threadId: string, checkpoint: unknown, surfaces: readonly unknown[]) => void;
   onA2ui: (handler: (envelope: unknown) => void) => void;
   onA2uiRecovery: (handler: (response: unknown) => void) => void;
@@ -590,6 +602,9 @@ export function createShinyBridge(inputId: string): ShinyBridge {
 
     sendA2uiAction(payload) {
       Shiny.setInputValue(`${inputId}_a2ui_action`, { ...payload, ts: Date.now() }, { priority: "event" });
+    },
+    sendA2uiError(payload) {
+      Shiny.setInputValue(`${inputId}_a2ui_error`, payload, { priority: "event" });
     },
     sendA2uiRecovery(payload) {
       Shiny.setInputValue(`${inputId}_a2ui_recovery`, { ...payload, ts: Date.now() }, { priority: "event" });

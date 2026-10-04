@@ -26,7 +26,10 @@ export const A2UI_CATALOG =
   "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 export const A2UI_CATALOG_091 =
   "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json";
-const A2UI_CATALOGS = new Set([A2UI_CATALOG, A2UI_CATALOG_091]);
+export const A2UI_SUBSET_CATALOG = "urn:shinyassistantui:a2ui:catalog:v1";
+const A2UI_CATALOGS = new Set([
+  A2UI_SUBSET_CATALOG, A2UI_CATALOG, A2UI_CATALOG_091,
+]);
 const A2UI_WIRE_VERSIONS = new Set(["v0.9", "v0.9.1"]);
 
 const INPUT_COMPONENTS = new Set([
@@ -35,7 +38,8 @@ const INPUT_COMPONENTS = new Set([
 ]);
 const OUTPUT_COMPONENTS = new Set([
   "Header", "Text", "Caption", "Image", "Divider", "Button", "Select",
-  "Input", "DatePicker", "Checkbox", "RadioGroup", "Card", "Col", "Row",
+  "Input", "DatePicker", "Checkbox", "CheckboxGroup", "RadioGroup", "Slider",
+  "Card", "Col", "Row",
   "ListView", "ListViewItem", "Markdown", "Icon",
 ]);
 const UNSAFE_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
@@ -536,6 +540,49 @@ export function validateA2uiEnvelope(raw: unknown): ValidationResult {
   }
 }
 
+export function makeA2uiValidationFeedback(
+  raw: unknown,
+  _reason: string,
+  isKnownSurface: (threadId: string, surfaceId: string) => boolean,
+): {
+  transportVersion: 1;
+  threadId: string;
+  version: "v0.9.1";
+  error: {
+    code: "VALIDATION_FAILED";
+    surfaceId: string;
+    path: "/operations";
+    message: "A2UI envelope failed renderer validation.";
+  };
+} | null {
+  if (!isPlainRecord(raw) || !validIdentifier(raw.threadId) ||
+      !Array.isArray(raw.operations) || typeof isKnownSurface !== "function") return null;
+  const surfaceIds = new Set<string>();
+  for (const operation of raw.operations) {
+    if (!isPlainRecord(operation)) return null;
+    const keys = Object.keys(operation).filter((entry) => entry !== "version");
+    if (keys.length !== 1 || !OPERATION_KINDS.includes(keys[0] as OperationKind)) return null;
+    const payload = operation[keys[0]!];
+    if (!isPlainRecord(payload) || !validIdentifier(payload.surfaceId)) return null;
+    surfaceIds.add(payload.surfaceId);
+  }
+  if (surfaceIds.size !== 1) return null;
+  const surfaceId = [...surfaceIds][0]!;
+  if (!isKnownSurface(raw.threadId, surfaceId)) return null;
+  const message = "A2UI envelope failed renderer validation.";
+  return {
+    transportVersion: 1,
+    threadId: raw.threadId,
+    version: "v0.9.1",
+    error: {
+      code: "VALIDATION_FAILED",
+      surfaceId,
+      path: "/operations",
+      message,
+    },
+  };
+}
+
 const INVALID_PROP = Symbol("invalid-a2ui-prop");
 type SanitizedProp = unknown | typeof INVALID_PROP;
 type RuntimePropSchema = {
@@ -547,6 +594,7 @@ type RuntimePropSchema = {
 const TEXT_SIZES = new Set(["sm", "md", "lg", "xl", "2xl", "3xl"]);
 const WEIGHTS = new Set(["normal", "medium", "semibold", "bold"]);
 const COLORS = new Set(["emphasis", "secondary", "alpha-70", "white", "white-70", "white-50"]);
+const INPUT_TYPES = new Set(["text", "password", "number"]);
 const IMAGE_SIZES = new Set(["sm", "md", "lg"]);
 const ALIGNS = new Set(["start", "center", "end"]);
 const JUSTIFIES = new Set(["start", "center", "end", "between"]);
@@ -578,7 +626,19 @@ function dateProp(value: unknown): SanitizedProp {
   if (month < 1 || month > 12) return INVALID_PROP;
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
   return day >= 1 && day <= days[month - 1]! ? safe : INVALID_PROP;
+}
+
+function stringListProp(value: unknown): SanitizedProp {
+  if (!Array.isArray(value) || value.length > A2UI_LIMITS.templateItems) return INVALID_PROP;
+  const result: string[] = [];
+  for (const entry of value) {
+    const safe = stringProp(entry);
+    if (safe === INVALID_PROP) return INVALID_PROP;
+    result.push(safe as string);
+  }
+  return result;
 }
 
 function optionsProp(value: unknown): SanitizedProp {
@@ -618,6 +678,7 @@ const RUNTIME_PROP_SCHEMAS: Readonly<Record<string, RuntimePropSchema>> = {
   } },
   Input: { required: new Set(), props: {
     placeholder: stringProp, multiline: booleanProp, label: stringProp, name: stringProp,
+    defaultValue: stringProp, inputType: enumProp(INPUT_TYPES),
   } },
   DatePicker: { required: new Set(), props: {
     value: dateProp, min: dateProp, max: dateProp, label: stringProp, name: stringProp,
@@ -625,8 +686,16 @@ const RUNTIME_PROP_SCHEMAS: Readonly<Record<string, RuntimePropSchema>> = {
   Checkbox: { required: new Set(["label"]), props: {
     label: stringProp, name: stringProp, defaultChecked: booleanProp,
   } },
+  CheckboxGroup: { required: new Set(["options"]), props: {
+    options: optionsProp, label: stringProp, name: stringProp, defaultValue: stringListProp,
+  } },
   RadioGroup: { required: new Set(["options"]), props: {
     options: optionsProp, label: stringProp, name: stringProp, defaultValue: stringProp,
+  } },
+  Slider: { required: new Set(["min", "max"]), props: {
+    min: boundedNumberProp(-1e9, 1e9), max: boundedNumberProp(-1e9, 1e9),
+    step: boundedNumberProp(1e-12, 1e9), defaultValue: boundedNumberProp(-1e9, 1e9),
+    label: stringProp, name: stringProp, unit: stringProp,
   } },
   Card: { required: new Set(), props: { title: stringProp, padding: boundedNumberProp(0, 8) } },
   Col: { required: new Set(), props: { gap: boundedNumberProp(0, 8), align: enumProp(ALIGNS) } },

@@ -29,6 +29,7 @@ import {
   commitPreparedTransaction,
   createControllerState,
   filterA2uiSpec,
+  makeA2uiValidationFeedback,
   prepareEnvelopeTransaction,
   sha256Utf8,
   stableJsonSha256,
@@ -644,7 +645,7 @@ describe("renderer safety and transactional fault containment", () => {
     expect(optional).not.toHaveProperty("align");
     expect(optional).not.toHaveProperty("justify");
     expect(optional.children[0]).not.toHaveProperty("flush");
-    expect(optional.children[1]).toEqual({ $type: "Input" });
+    expect(optional.children[1]).toEqual({ $type: "Input", defaultValue: "not-runtime" });
     expect(optional.children[2]).toEqual({ $type: "Checkbox", label: "choice" });
     expect(optional.children[3]).toEqual({ $type: "Button", label: "go" });
   });
@@ -795,4 +796,52 @@ it("normalizes accepted v0.9.1 wire operations to v0.9 canonical snapshots", () 
   const snapshot = acceptedSurface(controller).part.a2ui.snapshot as Array<{ version?: unknown }>;
   expect(snapshot.every((operation) => operation.version === "v0.9")).toBe(true);
   expect(acceptedSurface(controller).part.a2ui.protocolVersion).toBe("v0.9");
+});
+
+
+describe("standard A2UI validation feedback", () => {
+  it("reports only bounded rejected envelopes with known thread and surface identity", () => {
+    expect(makeA2uiValidationFeedback(
+      envelope(2, [{ version: "v0.9.1", updateComponents: {
+        surfaceId: "surface-1",
+        components: [{ id: "root", component: "Script" }],
+      } }]),
+      "Unknown A2UI component.",
+      (threadId, surfaceId) => threadId === "thread-1" && surfaceId === "surface-1",
+    )).toEqual({
+      transportVersion: 1,
+      threadId: "thread-1",
+      version: "v0.9.1",
+      error: {
+        code: "VALIDATION_FAILED",
+        surfaceId: "surface-1",
+        path: "/operations",
+        message: "A2UI envelope failed renderer validation.",
+      },
+    });
+    expect(makeA2uiValidationFeedback({ bad: true }, "invalid", () => true)).toBeNull();
+    expect(makeA2uiValidationFeedback(
+      { ...envelope(1), threadId: "", operations: [create()] }, "invalid", () => true,
+    )).toBeNull();
+    expect(makeA2uiValidationFeedback(
+      envelope(1, [data(1, "unknown-surface")]), "invalid", () => false,
+    )).toBeNull();
+  });
+});
+
+
+it("retains Slider and CheckboxGroup in the bounded fallback vocabulary", () => {
+  expect(filterA2uiSpec({
+    $type: "Slider", min: 0, max: 10, step: 1,
+    defaultValue: 4, label: "Score", name: "/score",
+  }, "surface-1")).toMatchObject({
+    $type: "Slider", min: 0, max: 10, defaultValue: 4,
+  });
+  expect(filterA2uiSpec({
+    $type: "CheckboxGroup",
+    options: [{ label: "One", value: "1" }],
+    defaultValue: ["1"], label: "Choices", name: "/choices",
+  }, "surface-1")).toMatchObject({
+    $type: "CheckboxGroup", defaultValue: ["1"],
+  });
 });

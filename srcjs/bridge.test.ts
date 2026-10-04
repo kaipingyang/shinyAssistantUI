@@ -593,7 +593,7 @@ describe("bridge A2UI transport", () => {
     expect(failure).toHaveBeenCalledExactlyOnceWith({ threadId: "thread-1", reason: "missing ledger" });
   });
 
-  it("sends action, recovery request and restore on namespaced event inputs", () => {
+  it("sends action, recovery, validation error and restore on namespaced event inputs", () => {
     const bridge = createShinyBridge("a2ui-chat");
     bridge.sendA2uiAction({
       transportVersion: 1, actionId: "action-1", threadId: "thread-1",
@@ -604,11 +604,19 @@ describe("bridge A2UI transport", () => {
       transportVersion: 1, threadId: "thread-1", expectedSequence: 2,
       receivedSequence: 4, eventId: "event-4",
     });
+    bridge.sendA2uiError({
+      transportVersion: 1, threadId: "thread-1", version: "v0.9.1",
+      error: {
+        code: "VALIDATION_FAILED", surfaceId: "surface-1",
+        path: "/operations/0", message: "A2UI envelope failed renderer validation.",
+      },
+    });
     bridge.sendA2uiRestore("thread-1", { transportVersion: 1 }, [
       { surfaceId: "surface-1", epoch: 1, revision: 2 },
     ]);
-    expect(inputValues.at(-3)?.id).toBe("a2ui-chat_a2ui_action");
-    expect(inputValues.at(-2)?.id).toBe("a2ui-chat_a2ui_recovery");
+    expect(inputValues.at(-4)?.id).toBe("a2ui-chat_a2ui_action");
+    expect(inputValues.at(-3)?.id).toBe("a2ui-chat_a2ui_recovery");
+    expect(inputValues.at(-2)?.id).toBe("a2ui-chat_a2ui_error");
     expect(inputValues.at(-1)?.id).toBe("a2ui-chat_a2ui_restore");
     expect(inputValues.at(-1)?.value).toMatchObject({ threadId: "thread-1" });
   });

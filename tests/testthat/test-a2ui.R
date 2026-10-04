@@ -303,3 +303,124 @@ test_that("A2UI action function templates cannot hide undeclared client-controll
   duplicate <- structure(list("/name", "/other"), names = c("path", "path"))
   expect_false(.a2ui_project_action_context(list(value = duplicate), list(value = "x"))$ok)
 })
+
+
+test_that("A2UI capabilities advertise the bundled subset catalog exactly", {
+  catalog_path <- system.file(
+    "schema", "a2ui", "shinyassistantui-v1-catalog.json",
+    package = "shinyAssistantUI"
+  )
+  if (!nzchar(catalog_path)) catalog_path <- file.path(
+    "inst", "schema", "a2ui", "shinyassistantui-v1-catalog.json"
+  )
+  expect_true(file.exists(catalog_path))
+  catalog <- jsonlite::fromJSON(catalog_path, simplifyVector = FALSE)
+  expect_identical(catalog$catalogId, "urn:shinyassistantui:a2ui:catalog:v1")
+  expect_setequal(names(catalog$components), c(
+    "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider",
+    "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput", "Slider"
+  ))
+  expect_true("text" %in% names(catalog$components$Text$properties))
+  expect_true("action" %in% names(catalog$components$Button$properties))
+  expect_true("value" %in% names(catalog$components$TextField$properties))
+  expect_true(all(c("min", "max", "steps") %in%
+    names(catalog$components$Slider$properties)))
+})
+
+test_that("assistantUIServer validates and routes standard A2UI renderer errors", {
+  errors <- list(); controls <- NULL
+  shiny::testServer(function(input, output, session) {
+    controls <<- assistantUIServer(
+      "chat", handler = function(...) NULL,
+      a2ui_action_handler = function(...) NULL,
+      a2ui_error_handler = function(code, thread_id, surface_id, path, message, ...) {
+        errors[[length(errors) + 1L]] <<- list(
+          code = code, thread_id = thread_id, surface_id = surface_id,
+          path = path, message = message
+        )
+      }
+    )
+  }, {
+    session$flushReact()
+    capabilities <- controls$a2ui_capabilities()
+    expect_identical(
+      unlist(capabilities$supportedCatalogIds),
+      "urn:shinyassistantui:a2ui:catalog:v1"
+    )
+    controls$send_a2ui(
+      list(list(
+        version = "v0.9.1",
+        createSurface = list(
+          surfaceId = "surface-1",
+          catalogId = "urn:shinyassistantui:a2ui:catalog:v1"
+        )
+      )),
+      thread_id = "thread-1", run_id = "run-1", event_id = "create-1"
+    )
+    session$setInputs(chat_input_a2ui_error = list(
+      transportVersion = 1L, threadId = "thread-1", version = "v0.9.1",
+      error = list(
+        code = "VALIDATION_FAILED", surfaceId = "surface-1",
+        path = "/operations/0", message = "Unsupported component."
+      )
+    ))
+    session$flushReact(); later::run_now(0.01)
+    expect_length(errors, 1L)
+    expect_identical(errors[[1L]], list(
+      code = "VALIDATION_FAILED", thread_id = "thread-1",
+      surface_id = "surface-1", path = "/operations/0",
+      message = "A2UI envelope failed renderer validation."
+    ))
+    session$setInputs(chat_input_a2ui_error = list(
+      transportVersion = 1L, threadId = "thread-1", version = "v0.9.1",
+      error = list(
+        code = "VALIDATION_FAILED", surfaceId = "unknown-surface",
+        path = "/operations", message = "forged"
+      )
+    ))
+    session$flushReact(); later::run_now(0.01)
+    expect_length(errors, 1L)
+    session$setInputs(chat_input_a2ui_error = list(
+      transportVersion = 1L, threadId = "thread-1", version = "v0.9.1",
+      error = list(
+        code = "VALIDATION_FAILED", surfaceId = "surface-1",
+        path = "relative", message = "forged", extra = TRUE
+      )
+    ))
+    session$flushReact(); later::run_now(0.01)
+    expect_length(errors, 1L)
+  })
+})
+
+
+test_that("A2UI renderer error path is bounded and callback failures are isolated", {
+  message <- list(
+    transportVersion = 1L, threadId = "thread-1", version = "v0.9.1",
+    error = list(
+      code = "VALIDATION_FAILED", surfaceId = "surface-1",
+      path = paste0("/", strrep("x", 1024)), message = "Invalid surface."
+    )
+  )
+  expect_false(.a2ui_handle_renderer_error(
+    function(...) NULL, message, function(...) TRUE
+  ))
+  message$error$path <- "/operations"
+  expect_false(.a2ui_handle_renderer_error(
+    function(...) stop("callback failed"), message, function(...) TRUE
+  ))
+})
+
+
+test_that("display-only A2UI controller still exposes renderer capabilities", {
+  controls <- NULL
+  shiny::testServer(function(input, output, session) {
+    controls <<- assistantUIServer("chat", handler = function(...) NULL)
+  }, {
+    capabilities <- controls$a2ui_capabilities()
+    expect_identical(
+      unlist(capabilities$supportedCatalogIds),
+      "urn:shinyassistantui:a2ui:catalog:v1"
+    )
+    expect_false(capabilities$sendDataModel)
+  })
+})
