@@ -64,7 +64,7 @@ Assistant Cloud.
 |---:|---|---|
 | 1 | Getting Started | R installation and architecture adapted; RTL partial; CLI user workflow not applicable |
 | 2 | Guides | Core chat guides mixed: several adopted, several partial, resilience/voice gaps explicit |
-| 3 | Tools | Shiny-native tool UI adopted; Toolkit/MCP browser ecosystems not adopted; A2UI is a future plan |
+| 3 | Tools | Shiny-native tool UI adopted; experimental A2UI-over-Shiny subset adopted; Toolkit/MCP browser ecosystems not adopted |
 | 4 | Primitives | Most primitives used internally; public API remains R-level |
 | 5 | Components | Main thread/composer/tool components adopted; optional add-ons reviewed individually |
 | 6 | Runtimes | ExternalStore adopted; all named framework/protocol runtimes remain unadopted |
@@ -145,7 +145,7 @@ Assistant Cloud.
 | 8 | Generative UI on Teams | Not applicable | No Adaptive Card conversion or Teams bot action decoder is part of the package. |
 | 9 | Generative UI primitive | Adopted | `on_generative_ui(spec)` renders a JSON layout through `MessagePrimitive.GenerativeUI` and a fixed display-only allowlist. |
 | 10 | Interactable Tool UIs | Not adopted | Artifact/data views are not versioned model-editable state with companion tools. |
-| 11 | A2UI over AG-UI | **Future plan** | The [A2UI over Shiny future contract](a2ui-shiny-contract.html) evaluates an optional surface-operation converter and action bridge while retaining the Shiny transport and current Data/Generative UI paths. No current A2UI or AG-UI support is claimed. |
+| 11 | A2UI over AG-UI | **Experimental Shiny adaptation** | The [Experimental A2UI over Shiny](a2ui-shiny-contract.html) path implements a reviewed v0.9/v0.9.1 operation subset, actions, recovery, canonical present history, and the standard `ACTIVITY_SNAPSHOT`/`a2ui-surface` entry adapter while retaining Shiny transport and `ExternalStoreRuntime`. It is not a general AG-UI runtime/client/server. |
 | 12 | OpenUI | Not adopted | No OpenUI Lang renderer or transport dependency is bundled. |
 | 13 | Model Context Protocol | Partial, backend-only | Selected backends may expose MCP tools, which render as ordinary tool calls. The browser package has no general MCP client/toolkit. |
 | 14 | User-managed MCP servers | Not adopted | Browser-managed servers, connector UI, OAuth, and storage are absent. |
@@ -345,7 +345,7 @@ loaders, tool-view configuration, and plotting helpers.
 | 4 | Transport: overview, Assistant Transport, Assistant Frame | Shiny transport is custom and is not protocol-compatible with either named API. |
 | 5 | External Store: overview, message conversion, runtime | Closest internal mapping; React types/helpers are not public R objects. |
 | 6 | Voice: overview, sessions, speech/dictation | Dictation is adapted; speech UI partial; realtime sessions absent. |
-| 7 | Generative UI: overview, JSONGenerativeUI, components, actions, spec, rendering, Slack, Teams, A2UI, tokens | Local primitive/data callbacks are narrower; A2UI remains a future plan. |
+| 7 | Generative UI: overview, JSONGenerativeUI, components, actions, spec, rendering, Slack, Teams, A2UI, tokens | Local primitive/data callbacks remain narrower; a reviewed A2UI-over-Shiny subset is experimental and separately documented. |
 | 8 | Primitives: all primitive pages | Internal building blocks configured through whole-widget R options/callbacks. |
 | 9 | Hooks: overview, composer triggers, model context, primitives, runtimes, state | Internal React lifecycle/state APIs only. |
 | 10 | Adapters: overview, attachments, feedback, model, persistence, runtime, suggestions | Several needs have Shiny-native equivalents; interfaces are not R exports. |
@@ -364,15 +364,16 @@ not automatic package commitments.
 
 ## Current gaps and future plans
 
-A2UI is the explicit future protocol plan: it is not a current AG-UI or A2UI integration. True
-branching remains partial because edit/reload currently replaces the linear message tail rather than
-preserving switchable alternatives. AI SDK, LangGraph, LangChain, A2A, AG-UI, OpenCode, and the
-other named runtimes remain unadopted until their protocol and lifecycle contracts are implemented
-and verified, not merely called through a generic R handler.
+A2UI over Shiny is now an experimental protocol subset with lifecycle, actions, recovery, present
+history, and an AG-UI activity-snapshot entry adapter. This does not adopt the complete AG-UI
+runtime or A2UI v1.0. True branching remains partial because edit/reload currently replaces the
+linear message tail rather than preserving switchable alternatives. AI SDK, LangGraph, LangChain,
+A2A, the full AG-UI runtime, OpenCode, and the other named runtimes remain unadopted until their
+protocol and lifecycle contracts are implemented and verified.
 
 | Priority | Item | Current boundary |
 |---:|---|---|
-| Future plan | A2UI | Add only after a Shiny-facing contract, surface lifecycle/history, action security, optional dependency review, and browser tests exist. |
+| Experimental | A2UI over Shiny | Reviewed v0.9/v0.9.1 subset over Shiny, including standard present history and `ACTIVITY_SNAPSHOT` adapter; not A2UI v1.0 or a full AG-UI runtime. |
 | Gap | True branching | Preserve and switch alternative message/backend histories instead of truncating a linear array. |
 | Gap | Resumable streams | Resume in-flight output across disconnects; completed history reload is not sufficient. |
 | Gap | Long-thread virtualization | Avoid mounting an entire very long transcript. |

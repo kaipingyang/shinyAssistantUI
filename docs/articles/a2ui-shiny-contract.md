@@ -1,163 +1,46 @@
-# A2UI over Shiny: implementation and safety contract
+# Experimental A2UI over Shiny
 
 ## Status
 
-> **Experimental capability implemented.** `shinyAssistantUI` accepts A2UI v0.9 and
-> v0.9.1 operation streams over its native Shiny transport, canonicalizes persisted
-> snapshots/checkpoints to v0.9, and renders live surfaces through the public
-> `@assistant-ui/react-generative-ui` `JSONGenerativeUI.present()` path. The R entry
-> points are `on_a2ui()`, `send_a2ui()`, `a2ui_checkpoint()`, and
-> `a2ui_action_handler`. A2UI v1.0 remains fail-closed, `sendDataModel` is advertised
-> as unsupported, and this does not claim an AG-UI runtime or the complete official
-> Basic Catalog.
+> **Experimental capability.** `shinyAssistantUI` accepts a reviewed
+> subset of A2UI v0.9 and v0.9.1 operations over the existing Shiny
+> WebSocket transport. It is not an AG-UI runtime, client, or server,
+> and it does not replace the package’s custom `ExternalStoreRuntime`.
 
-[A2UI](https://a2ui.org/) is a declarative protocol in which an agent
-
-The preferred renderer catalog is bundled at
-`inst/schema/a2ui/shinyassistantui-v1-catalog.json` and identified by
-`urn:shinyassistantui:a2ui:catalog:v1`; legacy official Basic Catalog IDs remain
-accepted only for backward compatibility. `a2ui_capabilities()` returns the exact
-supported/accepted catalog lists. Applications can provide
-`a2ui_error_handler` to receive bounded standard `VALIDATION_FAILED` feedback
-when the browser rejects a known-thread, known-surface envelope; malformed
-payloads without safe routing identity fail closed without fabricated errors.
-
-The subset catalog exposes one renderer-local function, `openUrl`. It runs only
-from a user click, accepts one credential-free HTTP(S) URL, and opens `_blank`
-with `noopener,noreferrer`; it never enters the R action channel. A2UI `checks`
-remain unadvertised because react-generative-ui 0.0.22 has no public check-result
-renderer contract; the package does not fork private upstream internals to claim
-support.
-sends operations that create, update, or delete a UI surface. Components
-come from a host-approved catalog; executable React code does not travel
-over the wire. The assistant-ui documentation demonstrates these
-operations over AG-UI activity snapshots, but the A2UI state reducer and
-surface conversion are separable from that transport.
+[A2UI](https://a2ui.org/) is declarative: a backend sends operations
+that create, update, or delete UI surfaces from a host-approved
+component catalog. Executable React code does not travel over the wire.
+This package bundles the exact-version assistant-ui reducer/converter
+and a fixed renderer in its compiled assets; R package users do not
+install npm packages.
 
 The implemented architecture is **A2UI Core over Shiny**:
 
-  - retain the native Shiny output binding;
-  - retain the custom `ExternalStoreRuntime`;
-  - carry validated A2UI operation batches and actions through Shiny inputs and
-    custom messages;
-  - use the exact-version official A2UI reducer/converter and public live present
-    renderer as build dependencies;
-  - do not require or claim AG-UI compatibility merely to render A2UI
-    surfaces.
-
-## P0 contract freeze
-
-**Contract revision:** P0-1. **Frozen:** 2026-09-10.
-
-“Frozen” records the compatibility decisions implemented by the current experimental
-transport. Changing one requires a new documented contract revision and compatibility
-review.
-
-The following decisions are frozen for the first implementation:
-
-1.  A2UI uses the existing Shiny WebSocket transport and custom
-    `ExternalStoreRuntime`; AG-UI is not required.
-2.  The browser stores surfaces by `(threadId, surfaceId)` and permits
-    multiple surfaces in one assistant message.
-3.  The wire envelope uses `transportVersion`, `threadId`, optional
-    `runId`, stable `eventId`, and a monotonically increasing per-thread
-    `sequence`. An R helper may generate transport metadata, but retries
-    must be able to reuse `eventId`.
-4.  `createSurface` is anchored to the assistant message of an active
-    run. Updates and deletion may target that existing surface later.
-    Creating a new surface outside a run requires an explicit new
-    assistant run rather than an unowned UI message.
-5.  The proposed R entry points are `on_a2ui()` for operation batches
-    and `a2ui_action_handler` for actions. An action is not converted
-    into a user chat message.
-6.  A2UI actions use a dedicated data-bearing Shiny input, while
-    privileged tool execution continues through the existing tool-call
-    approval path.
-7.  UI history persists canonical surface snapshots; synthetic render
-    parts are excluded from normal agent tool history unless a backend
-    receives state through an explicit contract.
-8.  Existing Data UI, Generative UI, and `PromptUser` paths remain
-    backward compatible and are not replaced by A2UI.
-9.  A renderer-only proof of concept cannot change the public status
-    from **Future plan**. Lifecycle, action, recovery, security,
-    dependency, R, and installed-package browser gates are mandatory.
-
-P0-1 does not freeze the exact dependency version, numeric payload
-limits, component styling, or the internal React host used to render
-converted Generative UI. Those implementation parameters must be
-recorded and tested before code is merged; they cannot weaken the frozen
-lifecycle or security requirements.
-
-## Product reason and non-goals
-
-A2UI is not required for the package’s current chat, data cards, JSON
-layouts, tool views, or approval forms. It becomes useful when an
-application needs at least one of the following:
-
-  - interoperability with a backend that genuinely emits A2UI
-    operations;
-  - a standard, stateful surface lifecycle rather than one static JSON
-    tree;
-  - incremental component or data-model updates;
-  - portable user actions that identify their surface and source
-    component.
-
-Adoption should be driven by one of these requirements, not by the
-presence of an upstream documentation page.
-
-The first supported version would **not** imply:
-
-  - an AG-UI runtime or AG-UI backend adapter;
-  - replacement of the Shiny transport;
-  - remote or model-supplied component code;
-  - automatic permission to execute tools or destructive actions;
-  - migration or removal of the existing Data UI and Generative UI
-    paths.
-
-## Coexistence with current UI paths
-
-The paths have different contracts and should remain available together.
-
-| Path                     | Intended role                                                                     | Current or future state |
-| ------------------------ | --------------------------------------------------------------------------------- | ----------------------- |
-| Data UI                  | Small R-driven named views such as `table`, `stat`, `flow`, and `action-progress` | Supported now           |
-| Generative UI primitive  | A single JSON layout rendered through the local display allowlist                 | Supported now           |
-| Tool UI and `PromptUser` | Tool calls, results, form input, and human approval                               | Supported now           |
-| A2UI Core over Shiny     | v0.9/v0.9.1 surface operations, live data binding, actions, and persisted authority | Experimental, implemented |
-| AG-UI runtime            | AG-UI events, interrupts, state, steering, and run semantics                      | Not adopted             |
-
-A visible converted component is not proof of complete A2UI semantics.
-The package must implement the full lifecycle and restore behavior
-described below before claiming support.
-
-## Target architecture
-
 ``` text
-R backend or application handler
+R handler
   -> on_a2ui(operations, event_id, sequence)
+  -> strict R validation + per-thread sequencer/ledger
   -> Shiny custom message
-  -> thread-scoped surface store
-  -> apply validated A2UI operations
-  -> convert each surface to a safe Generative UI specification
-  -> render through a fixed host component catalog
+  -> strict browser validation + transactional reducer
+  -> standard assistant-ui present tool part
+  -> fixed local component library
 
-A2UI component action
-  -> fixed action registry
+A2UI action
   -> dedicated Shiny input
-  -> R a2ui_action_handler()
-  -> direct surface update or an application-owned agent continuation
+  -> current surface/epoch/revision/action checks
+  -> a2ui_action_handler()
+  -> optional on_a2ui() update
 ```
 
-A later AG-UI adapter could translate `ACTIVITY_SNAPSHOT` events with
-`activityType: "a2ui-surface"` into the same internal operation
-envelope. It must not require the core Shiny implementation to replace
-`ExternalStoreRuntime`.
+A standard AG-UI `ACTIVITY_SNAPSHOT` can enter the same authority
+through `on_ag_ui_activity()` or `send_ag_ui_activity()`. This is an
+event adapter only; other AG-UI run, message, state, interrupt,
+steering, HTTP, and SSE contracts are not implemented.
 
-## Proposed operation transport
+## Supported wire contract
 
-The operation objects should remain standard A2UI data. Shiny-specific
-reliability metadata belongs in an outer envelope. The following is a
-design sketch, not a currently accepted message:
+The Shiny envelope is package-owned reliability metadata around standard
+A2UI operations:
 
 ``` json
 {
@@ -168,284 +51,255 @@ design sketch, not a currently accepted message:
   "sequence": 12,
   "operations": [
     {
-      "version": "v0.9",
+      "version": "v0.9.1",
       "updateDataModel": {
         "surfaceId": "order-1",
         "path": "/total",
-        "contents": "$42"
+        "value": "$42"
       }
     }
   ]
 }
 ```
 
-The fields have distinct responsibilities:
+The browser and R server enforce the same per-thread sequence and
+recent-event contract. Exact retries reuse the accepted event;
+conflicting IDs fail closed; gaps request an inclusive recovery range.
+Create is anchored to the assistant message of the matching active run.
+Later update/delete may arrive outside that run. A background atomic
+replacement may delete and recreate an existing surface while preserving
+its message anchor, but a genuinely new or tombstoned surface still
+requires a matching active run.
 
-  - `transportVersion` versions the package’s Shiny envelope, not the
-    A2UI protocol;
-  - `threadId` isolates otherwise identical surface IDs in different
-    conversations;
-  - `runId`, when present, associates creation with the assistant
-    message being produced;
-  - `eventId` is a stable idempotency key for retry and reconnect
-    handling;
-  - `sequence` establishes deterministic order within a thread;
-  - `operations` contains unmodified A2UI operations.
+Accepted operation versions are raw `v0.9` and `v0.9.1`; persisted
+canonical snapshots use v0.9. The supported operations are
+`createSurface`, `updateComponents`, `updateDataModel`, and
+`deleteSurface`. A missing-surface update, unsupported version/catalog,
+malformed pointer, unsafe object, unknown component, or invalid
+lifecycle is rejected rather than guessed.
 
-The initial implementation should publish and test the exact A2UI
-protocol versions it accepts. The currently reviewed upstream reducer
-accepts v0.9 and v1.0 shapes, but this page does not promise that
-support before the dependency and compatibility review is complete.
+`sendDataModel`/`attachDataModel = true`, A2UI v1.0, remote catalogs,
+executable components, and model-supplied JavaScript remain unsupported.
 
-## Surface identity and lifecycle
+## R handler API
 
-A surface is keyed by `(threadId, surfaceId)`. `surfaceId` must
-therefore be stable and unique within a thread. The first successful
-`createSurface` anchors a surface part to the assistant message for the
-active run; later batches update that part in place rather than adding
-duplicate messages.
-
-Required operation behavior is:
-
-  - `createSurface` creates or deliberately resets the named surface
-    according to the selected A2UI reducer semantics;
-  - `updateComponents` upserts validated component records;
-  - `updateDataModel` applies a validated JSON Pointer update;
-  - `deleteSurface` removes the rendered part and its live state;
-  - an update for a missing surface is rejected with a diagnostic rather
-    than creating implicit state;
-  - unknown operations, unsupported versions, malformed records, and
-    unknown components fail softly without crashing the widget.
-
-For delivery reliability:
-
-  - a repeated `eventId` is a no-op;
-  - an older sequence is rejected;
-  - a sequence gap is observable and requests snapshot recovery rather
-    than being silently accepted;
-  - state is isolated when the user switches threads;
-  - reconnect restores a canonical snapshot before accepting later
-    operations.
-
-These Shiny envelope rules supplement A2UI; they do not redefine the
-operation payload itself.
-
-## R contract
-
-The implemented sender follows the existing handler callback style:
+Use `on_a2ui()` inside a normal handler. `sequence` is optional;
+normally let the server allocate it and reuse a stable `event_id` when
+retrying.
 
 ``` r
-handler <- function(message, on_chunk, on_done, on_a2ui, ...) {
-  on_a2ui(
-    operations = list(
+assistantUIServer(
+  "chat",
+  handler = function(message, on_a2ui, on_done, ...) {
+    on_a2ui(
       list(
-        version = "v0.9",
-        createSurface = list(surfaceId = "order-1")
-      ),
-      list(
-        version = "v0.9",
-        updateDataModel = list(
-          surfaceId = "order-1",
-          path = "/",
-          contents = list(total = "$42")
+        list(
+          version = "v0.9.1",
+          createSurface = list(
+            surfaceId = "order-1",
+            catalogId = "urn:shinyassistantui:a2ui:catalog:v1",
+            sendDataModel = FALSE
+          )
+        ),
+        list(
+          version = "v0.9.1",
+          updateComponents = list(
+            surfaceId = "order-1",
+            components = list(
+              list(id = "root", component = "Column", children = list("title")),
+              list(id = "title", component = "Text", text = "Order summary")
+            )
+          )
+        ),
+        list(
+          version = "v0.9.1",
+          updateDataModel = list(
+            surfaceId = "order-1", path = "/", value = list(total = "$42")
+          )
         )
-      )
+      ),
+      event_id = "order-1-create"
+    )
+    on_done()
+  }
+)
+```
+
+The invisible controller returned by `assistantUIServer()` also
+provides:
+
+``` r
+controls$send_a2ui(operations, thread_id, run_id, event_id = NULL, sequence = NULL)
+controls$send_ag_ui_activity(event, thread_id, run_id,
+                             event_id = NULL, sequence = NULL)
+controls$a2ui_checkpoint(thread_id)
+controls$a2ui_capabilities()
+```
+
+After a run ends, `send_ag_ui_activity()` may replace or delete existing
+surfaces. It rejects a complete merged activity projection that would
+create any new surface without the matching active run; this check
+includes surfaces reintroduced from another bucket.
+
+## Standard AG-UI activity adapter
+
+The accepted standard event shape is:
+
+``` json
+{
+  "type": "ACTIVITY_SNAPSHOT",
+  "activityType": "a2ui-surface",
+  "messageId": "activity-message-1",
+  "replace": true,
+  "content": {
+    "a2ui_operations": [
+      { "version": "v0.9.1", "createSurface": { "surfaceId": "order-1" } }
+    ]
+  }
+}
+```
+
+Use it from a handler:
+
+``` r
+handler <- function(message, on_ag_ui_activity, on_done, ...) {
+  on_ag_ui_activity(
+    list(
+      type = "ACTIVITY_SNAPSHOT",
+      activityType = "a2ui-surface",
+      messageId = "activity-message-1",
+      content = list(a2ui_operations = list(
+        list(version = "v0.9.1",
+             createSurface = list(surfaceId = "order-1"))
+      ))
     ),
-    event_id = "order-1-create",
-    sequence = 1
+    event_id = "activity-event-1"
   )
   on_done()
 }
 ```
 
-A2UI actions are not ordinary user chat messages. They need a separate
-server entry point so an application can update a surface without
-fabricating a user bubble, or explicitly choose to continue an agent
-run:
+Activity snapshots are reduced from empty and must be self-contained.
+Buckets are keyed by `messageId`; an absent `replace` means replace,
+while `replace = FALSE` ignores an already-known bucket. Replacing a
+bucket moves it to the latest bucket position, and the last bucket wins
+when multiple buckets contain the same surface. Repeated `createSurface`
+within one snapshot resets that surface while retaining its Map
+position; delete then recreate moves it to the end. The adapter projects
+the merged buckets atomically through the same A2UI sequencer and action
+authority.
+
+Bucket bookkeeping is live-session state. Canonical surface snapshots
+and checkpoints persist, but historical AG-UI bucket membership is not
+inferred after a new Shiny session. A later activity may replace
+matching restored surface IDs; applications should use stable
+message/surface IDs and send a complete snapshot for the resumed
+activity.
+
+## Actions and authorization
+
+Buttons may declare an A2UI event action. The server callback receives
+validated, JSON-safe fields:
 
 ``` r
 assistantUIServer(
   "chat",
   handler = handler,
   a2ui_action_handler = function(
-    action,
-    on_a2ui,
-    on_chunk,
-    on_done,
-    on_error
+    name, input, context, thread_id, surface_id,
+    source_component_id, on_a2ui, on_error, ...
   ) {
-    # Validate action$name and action$input.
-    # Return operations directly, or explicitly continue the selected backend.
+    if (!identical(name, "confirm_order")) return(on_error("Unsupported action"))
+    on_a2ui(list(
+      list(
+        version = "v0.9.1",
+        updateDataModel = list(
+          surfaceId = surface_id, path = "/status", value = "Confirmed"
+        )
+      )
+    ), event_id = "confirm-order-update")
   }
 )
 ```
 
-The action received by R should contain only JSON-safe data with a
-documented shape:
+The server checks widget owner, action ID replay, rate limit, current
+thread/surface, epoch, revision, source component, declared action name,
+and declared context bindings. Browser-provided values remain untrusted.
+
+An A2UI action is not tool approval. Shell commands, file changes,
+R-console execution, resource deletion, and other privileged work must
+still enter the normal backend tool-call and approval flow. The only
+supported local side-effect function is Basic Catalog `openUrl`: it
+accepts one HTTP(S) URL without credentials and opens `_blank` with
+`noopener,noreferrer`. `javascript:`, `data:`, `file:`, malformed,
+credential-bearing, and oversized URLs are rejected. Validation `checks`
+are not claimed because the bundled upstream public renderer does not
+expose that contract (`validationChecks = FALSE`).
+
+## Persistence and history
+
+New UI history writes use assistant-ui’s standard synthetic present tool
+part:
 
 ``` json
 {
-  "transportVersion": 1,
-  "actionId": "action-uuid",
-  "threadId": "thread-1",
-  "surfaceId": "order-1",
-  "sourceComponentId": "confirm-button",
-  "name": "confirm_order",
-  "input": {},
-  "clientRevision": 12
+  "type": "tool-call",
+  "toolName": "present",
+  "toolCallId": "a2ui:order-1",
+  "args": { "$type": "Markdown", "value": "..." },
+  "result": {},
+  "artifact": {
+    "a2ui": ["canonical v0.9 snapshot operations"],
+    "shinyA2ui": { "kind": "surface", "surfaceId": "order-1" }
+  }
 }
 ```
 
-`actionId` provides replay protection. `clientRevision` lets R reject an
-action from a stale surface. Browser-supplied timestamps, identifiers,
-component names, and input remain untrusted.
+`artifact.a2ui` must exactly match the marker snapshot. The marker
+stores schema/protocol versions, epoch, revision, last sequence, recent
+event IDs, digest, and message anchor. `args` is derived display data,
+never restore authority. History hydration rebuilds the surface from the
+snapshot and rejects poisoned or inconsistent metadata.
 
-## Actions are not approvals
-
-An A2UI action records interaction with a surface. It does not authorize
-a backend tool. Safe application actions such as changing a filter or
-requesting a refreshed calculation may update a surface directly. An
-action that would lead to a privileged tool must enter the existing
-tool-call and approval flow:
-
-``` text
-A2UI action
-  -> R/backend decides that a tool is required
-  -> normal tool call
-  -> existing approval card and policy
-  -> approved tool execution
-```
-
-The A2UI action bridge must not directly run shell commands, modify
-files, call the R console, delete resources, or bypass backend
-permission policy. This keeps `PromptUser` and tool approval as the
-single authorization path for privileged tool execution, while A2UI has
-its own data-bearing interaction path.
-
-## Persistence, history, and replay
-
-Live operation batches are useful for updates, but a replayable event
-log alone is not the preferred UI persistence format. The package should
-store a canonical, JSON-safe surface snapshot with the UI message
-history, conceptually:
-
-``` json
-{
-  "type": "a2ui-surface",
-  "surfaceId": "order-1",
-  "revision": 12,
-  "components": [],
-  "dataModel": {}
-}
-```
-
-This is a proposed internal message part, not an exported schema. It
-establishes these requirements:
-
-1.  history load can reconstruct the surface without re-running the
-    agent;
-2.  later operations continue from the restored revision;
-3.  reconnect does not apply the same batch twice;
-4.  delete removes both live state and the persisted UI part;
-5.  thread pagination and switching preserve the original message
-    anchor.
-
-UI history and agent history are different. A persisted surface is
-required to restore the browser, but a synthetic rendering part must not
-be misreported to an agent as a genuine backend tool call. If a backend
-needs current A2UI state, it should receive that state through an
-explicit backend contract rather than accidental transcript
-serialization.
+Readers permanently dual-read the earlier `{type: "generative-ui", a2ui:
+marker}` format and the standard present format; writers emit only
+present. Server, client, and disabled persistence paths keep their
+ownership rules. Tombstone-only checkpoints survive delete-all/client
+reload, live surface anchors stay pinned across the bounded browser
+message window, and older-page parts are rebuilt from their snapshots
+before rendering. Synthetic `a2ui:` present parts are UI-only and are
+not reported to the backend as genuine tool work.
 
 ## Component and security boundary
 
-The current five-component display allowlist is too narrow for the A2UI
-basic catalog. A future implementation needs a dedicated, reviewed A2UI
-component library covering the published supported subset. Unknown
-components must be dropped or replaced by a non-interactive diagnostic;
-they must never trigger dynamic imports or remote code loading.
+The fixed runtime library covers the published package subset, including
+text, media, controls, layout, list, Markdown, Slider, and CheckboxGroup
+mappings. Unsupported components/props are dropped or produce a
+contained diagnostic. Images accept reviewed HTTPS or bounded safe data
+sources; the actual `<img>` uses `referrerPolicy="no-referrer"`.
 
-At minimum, implementation review and tests must cover:
+Important limits include 256 KiB envelopes/images, 64 operations/recent
+events, 16 live surfaces, 500 components, depth 32, 100 template/option
+items, 16 KiB strings, 64 KiB action payloads, 128 tombstones, 64 live
+activity buckets, and a five-second gap-recovery timeout. Unsafe JSON
+Pointer segments (`__proto__`, `prototype`, `constructor`), non-finite
+values, duplicate object keys, unsupported fields, and cyclic/oversized
+component trees fail closed.
 
-  - no executable component or JavaScript code over the wire;
-  - no unrestricted HTML injection;
-  - sanitized Markdown and explicit URL schemes;
-  - restrictions on image source, size, and data URI types;
-  - limits for payload bytes, operations per batch, surfaces per thread,
-    component count, tree depth, template expansion, strings, and
-    data-model depth;
-  - rejection of unsafe JSON Pointer segments such as `__proto__`,
-    `prototype`, and `constructor`;
-  - validation of component props and user input on both the browser and
-    R boundaries;
-  - an allowlist of action names, replay protection, stale-revision
-    checks, and rate limiting;
-  - thread/session ownership checks before applying updates or actions;
-  - error containment so one malformed surface cannot crash the chat
-    widget.
+## What this does not claim
 
-The converter’s own traversal bounds and warnings are useful defense in
-depth, not a substitute for transport limits and application
-authorization.
+  - No general AG-UI runtime, transport, client, server, interrupts,
+    steering, shared state, or SSE.
+  - No A2UI v1.0, dynamic/remote catalog code, unrestricted HTML, or
+    executable payloads.
+  - No automatic migration or deletion of old history.
+  - No replacement of Data UI, the legacy Generative UI primitive, tool
+    UI, or `PromptUser`.
+  - No permission bypass: A2UI and activity events remain data-bearing
+    UI updates.
 
-## Dependency and AG-UI decision
-
-The preferred implementation route is to evaluate the official A2UI
-reducer/converter from `@assistant-ui/react-generative-ui`, still using
-the Shiny transport. If adopted, it must use an exact version compatible
-with the installed assistant-ui packages and pass dependency, license,
-bundle-size, clean-build, and security review. R package users would
-continue to receive compiled assets and would not install npm packages
-themselves.
-
-`@assistant-ui/react-ag-ui` is not required for this route and should
-remain absent unless a real AG-UI backend requirement is separately
-approved. Rendering A2UI operations over Shiny must not be documented as
-AG-UI wire compatibility.
-
-If the official converter cannot satisfy the package’s compatibility or
-security requirements, a local subset may be considered, but it must be
-named and documented as a subset rather than full A2UI support.
-
-## Delivery and support gates
-
-Work should advance through independently verifiable stages:
-
-1.  **Contract prototype:** freeze the envelope, R callback shape,
-    message anchoring, action boundary, snapshot format, and published
-    component subset.
-2.  **Lifecycle proof of concept:** create, update, and delete a surface
-    over Shiny without changing existing UI paths.
-3.  **Action round trip:** validate an interactive action in R, update
-    the surface, and prove that privileged work still uses tool
-    approval.
-4.  **Persistence and recovery:** save and restore canonical snapshots,
-    switch threads, reconnect, deduplicate events, and continue
-    revisions.
-5.  **Supported capability:** publish APIs only after compatibility,
-    security, and installed-package browser gates pass.
-
-Required evidence includes:
-
-  - reducer and converter unit tests for every supported operation and
-    protocol version;
-  - malformed, oversized, unknown-component, unsafe-URL, unsafe-pointer,
-    and stale-action tests;
-  - R serialization, callback validation, and handler error tests;
-  - event ordering, duplicate delivery, gap recovery, and thread
-    isolation tests;
-  - history restore followed by a new update and action;
-  - proof that synthetic surface parts are excluded from ordinary agent
-    tool history;
-  - regression tests for Data UI, the existing Generative UI primitive,
-    and `PromptUser` approval;
-  - a real Chromium test against the installed R package covering
-    create, update, action, delete, and history restore with no React
-    exception or console error;
-  - clean dependency installation, production build, bundle comparison,
-    and dependency snapshot verification.
-
-Until all supported-capability gates pass, the public status remains
-**Future plan**. A proof of concept may be described as experimental,
-but a renderer-only implementation must not be described as A2UI
-support.
+The implementation is covered by protocol, runtime, R authority,
+full-suite, installed-package Chromium, history, action, recovery,
+malformed-input, and zero-browser-error gates. It remains experimental
+so the wire subset and application ergonomics can evolve with upstream
+A2UI releases.

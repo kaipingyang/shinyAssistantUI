@@ -48,6 +48,27 @@ for custom handlers, ellmer, ClaudeAgentSDK, codeagent, RStudio addin
 prerequisites, contributor builds, and the current
 distribution/compatibility gaps.
 
+The codeagent adapter keeps synchronous turn handling outside a small
+async coroutine. The matching codeagent streaming implementation also
+uses a shared small driver; both packages must be updated to receive the
+latency improvement. Data Shield and enabled web citations still buffer
+text until their final scan/render step. Remote workers use the library
+selected by `libpath`, not automatically the host’s newly installed
+codeagent. Stream callbacks are released on errors, and closing a Shiny
+session cancels its own registered runs without clearing other sessions’
+shared ellmer history. Remote JSONL transport preserves split UTF-8
+frames and surfaces connection/callback errors instead of silently
+waiting or reporting success. The worker sleeps only when idle, not
+after every ready promise callback. Both local stream drivers wait for
+asynchronous iterator cleanup before releasing the turn, including
+callback failures and cancellation. These changes do not eliminate
+ellmer’s own per-fragment coroutine overhead: the high-rate SSE
+benchmark still exposes a throughput limit under Shiny’s default
+deep-stack domains. See `tests/verify/verify_codeagent_latency.R` and
+`tests/verify/verify_backend_handlers.R` for bounded, local-only
+regression gates; the latter’s `ellmer-direct` performance arm isolates
+the public ellmer API without using a package handler.
+
 ## Usage
 
 ``` r
@@ -150,6 +171,66 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
     `renv/library`, `.venv`, `__pycache__`, and `.Rproj.user`. The
     browser does not expand file contents.
 
+  - **History search**: use **Search history** in the sidebar to filter
+    conversation titles and existing short previews, including archived
+    sessions. Matching is literal, case-insensitive and supports Chinese
+    text; Escape or the clear button restores the list without changing
+    the current conversation. Workspace matches temporarily reveal their
+    folders, then restore your expansion choices. The Claude addins
+    include the full available metadata catalog rather than only the
+    latest 100 sessions; ordinary custom widgets search the stubs
+    supplied by their host. Lists initially render 100 rows per
+    section/folder, with **Show more**, but search covers all supplied
+    metadata before that rendering limit. Typing does not scan
+    transcripts, generate summaries or contact a model.
+
+  - **Readable web links**: assistant Markdown, tool-result Markdown and
+    URL arguments use underlined blue links, independently of the button
+    `primary` theme: `#2563EB` on light themes and `#60A5FA` on dark
+    themes. The scoped `--aui-link-color` and `--aui-link-hover-color`
+    CSS variables can override this palette. Keyboard focus remains
+    visible; host-page links and local file-reference controls are
+    unchanged.
+
+  - **Confirmed file links**: inline filenames become blue, underlined
+    links only after the backend confirms an openable target. Missing,
+    ambiguous or unconfirmed references stay gray and noninteractive,
+    including bare names mentioned only inside Bash commands. The addin
+    checks explicit paths (including `~/`), project-relative paths and
+    unique matches in its already-warm workspace index; it never scans
+    Home or guesses shell expressions. Checks are batched and cached per
+    widget/thread/project without reading file contents. Custom hosts
+    using `on_open_file` can provide `file_reference_resolver` for their
+    own navigation backend.
+
+  - **Responsive file navigation**: reference checks yield between
+    bounded R slices (at most four paths, checking an 8 ms elapsed-work
+    budget between calls), so a slow batch does not monopolize the event
+    loop. A single slow filesystem call can still exceed that budget and
+    block its slice. Previously confirmed links stay usable during
+    revalidation, avoiding a lost click when refresh begins between
+    pointer-down and click; a negative result removes the link. Explicit
+    clicks focus the file and requested line even if it is already open,
+    while automatic edit reveal remains non-disruptive. Opening feedback
+    waits for the backend acknowledgement, reports failures, and
+    coalesces duplicate pending clicks; legacy callbacks without this
+    protocol retain timed feedback.
+
+  - **File-link performance comparison**: run
+    [`benchmark_file_references.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/benchmark_file_references.R)
+    through the bounded verifier’s `browser` mode with `--timeout 180`,
+    `AUI_FILE_REFERENCE_PERF_REP=1`, then `2` and `3`, and
+    `AUI_FILE_REFERENCE_PERF_OUT` set to an evidence directory (use a
+    fresh runner state per repetition). It compares the same installed
+    package with confirmation off, real project-filesystem metadata
+    checks, and an explicitly injected 20 ms per lookup. Each repetition
+    uses a different arm order, 240 synthetic history messages, fresh
+    R/Chromium processes, browser input-frame timing and R heartbeat
+    gaps. It verifies cached typing performs no new checks, reads no
+    file contents, clears no kernel caches, and removes its uniquely
+    owned fixture directory. Slow-query results model blocking; they are
+    not measurements of actual storage latency.
+
   - **Safe by default**: file edits and shell commands are gated by the
     in-app approval card (`permission_mode = "default"`). Which tools
     prompt is decided entirely by Claude Code (working- directory
@@ -168,17 +249,150 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
 
   - **Local diagnostics and performance**: the addin shows a compact
     Performance Orb and writes privacy-filtered operational summaries to
-    `~/.claude_addin/diagnostics` by default. Logs are local only,
-    retain at most 50 MiB / 7 days, and exclude prompts, responses, file
-    paths, environment values, raw IDs, error text, and stacks. Use
-    **Settings → Save diagnostic logs** to opt out; stop the existing
-    Background Job and reopen the addin for the logging change to take
-    effect. Hiding the Orb does not disable the memory guard.
+    `~/.claude_addin/diagnostics` by default. Background Job lifecycle
+    logs include aggregate startup duration; diagnostics separate
+    cold/reused Claude connection and first-event latency, and summarize
+    transcript reconciliation attempts, stability, outcome, and unmet
+    requirement. These are one-row-per-phase aggregates rather than
+    per-poll logging. Logs are local only, retain at most 50 MiB / 7
+    days, and exclude prompts, responses, file paths, environment
+    values, raw IDs, error text, and stacks. Use **Settings → Save
+    diagnostic logs** to opt out; stop the existing Background Job and
+    reopen the addin for the logging change to take effect. Hiding the
+    Orb does not disable the memory guard. A high process-memory state
+    pauses background warmup/automatic work but keeps explicit chat
+    available while the session cgroup has safe headroom.
 
-  - Requires the
+  - **Reading session memory**: the Orb separates the plugin’s PSS/RSS
+    guard from the whole-session cgroup. **Raw total** includes file
+    pages; **Working set estimate** subtracts `inactive_file` and is
+    neither process memory nor a guaranteed allocation budget. File
+    pages include shmem and are not all immediately reclaimable.
+    Limit/OOM counters show both cumulative totals and changes between
+    actual background samples; PSI shows 10-second moving averages of
+    memory-stalled time. Missing metrics stay **Unavailable**, not zero
+    or Unlimited. Opening or Refresh reads one frozen background
+    snapshot; it does not clear caches, change guard policy, or enable
+    additional polling.
+
+  - **Reading the Performance snapshot**: **Refreshed** is when the
+    browser received a snapshot, while **Process sampled**, **Tree
+    sampled**, and **Session sampled** show the actual measurements and
+    their ages in local time. Refresh retrieves the latest background
+    sample; it does not force GC or refresh the slower tree/cgroup
+    measurements. Missing timestamps from older servers are explicitly
+    unavailable. Frame p95 and jank cover the latest 600 frame
+    intervals, not input latency; long tasks count observations while
+    the panel is open and show their availability rather than an
+    unmeasured zero. Diagnostic logging and the Orb share one long-task
+    observer. In smaller viewers the panel stays within its host and
+    scrolls instead of clipping its contents.
+
+  - **Claude handler scheduling**: synchronous message parsing stays
+    outside the small async coroutine. Each foreground turn awaits one
+    completion promise instead of creating a new await chain on every
+    idle poll. A single `later` timer processes at most 32 messages or 8
+    ms per normal batch, yields immediately for buffered work, and waits
+    50 ms for an empty queue. Approval pauses conversation dispatch,
+    while the same owner checks controls, task events, and connection
+    health once per second; terminal results stop the foreground timer.
+    Late context-usage callbacks retain only the usage snapshot, not the
+    completed turn. Cancellation, tools, history, concurrent threads,
+    Shiny promise domains, deep-stack tracing, and R JIT retain their
+    existing contracts.
+
+  - **Long tasks and recovery**: healthy background work and approvals
+    are not stopped merely because two minutes elapsed. An interruption
+    drains its terminal result before another turn can use that queue;
+    an unconfirmed drain or disconnected CLI retires the old connection
+    without replaying tools. Parent-agent messages do not wait for a
+    nonexistent top-level result. Task Stop acknowledgements mean
+    “requested”, not “stopped”; failures or missing terminal events
+    allow retry, and disconnection is reported as an unknown outcome.
+    Error replies can recover from authoritative history without hiding
+    the error or overriding a cancelled/newer request. Terminal history
+    reconciliation releases its short foreground wait and follows late
+    writes for at most 30 seconds, including replies written after an
+    initially user-only snapshot. Reopen history if synchronization
+    remains unavailable. History-only browser attachments can receive
+    newly arriving background approvals and results without sending a
+    prompt; run-scoped events from the previous browser remain isolated.
+    Memory admission still limits new work, but never suppresses
+    already-running tasks’ notifications.
+
+  - **Investigating R memory**:
+    [`tests/verify/compare_sdk_memory.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/compare_sdk_memory.R)
+    compares the installed SDK alone, the production handler, a thin
+    shinychat adapter, and the current widget in fresh processes. Run it
+    through the bounded verifier’s `browser` mode. It uses a local
+    deterministic stream-json peer, not an AI provider, while retaining
+    the real SDK subprocess/parser; records resident memory separately
+    from post-GC R heap; and checks output, restored history, browser
+    errors, and process cleanup. `AUI_MEMORY_ARMS`, `AUI_MEMORY_EVENTS`,
+    and `AUI_MEMORY_OUT` select the experiment and evidence directory.
+    `AUI_MEMORY_DEEPSTACK=0` is an isolated diagnostic control, not a
+    production fix or a change to an existing addin Job. Do not use
+    `--resume` across different environment-controlled experiments.
+
+  - **Handler regression gates**:
+    [`verify_handler_performance.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/verify_handler_performance.R)
+    enforces resident-memory and latency bounds at 1,200/2,400 events;
+    [`verify_foreground_pump.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/verify_foreground_pump.R)
+    adds 60/120-second slow streams, a 60-second quiet wait, and
+    delayed/missing context-usage replies
+    (`AUI_FOREGROUND_MODE=slow|quiet|usage`, `AUI_FOREGROUND_OUT` for
+    evidence).
+    [`verify_handler_protocol.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/verify_handler_protocol.R)
+    drives restored tool history, real SDK approvals, Stop, and two
+    concurrent threads through Chromium. All use the installed
+    production handler, default deep-stack tracing, and local synthetic
+    CLI peers; they never execute tools or contact an AI provider. Run
+    through the bounded verifier’s `browser` mode, with `--timeout 240`
+    for the foreground-pump gates. `AUI_MEMORY_PROFILE=1` on the
+    comparison script records separate CPU/allocation profiles for
+    diagnosis; profiled timings are not the performance-gate
+    measurements.
+
+  - **Long-task regression gate**:
+    [`verify_long_task_lifecycle.R`](https://kaipingyang.github.io/shinyAssistantUI/tests/verify/verify_long_task_lifecycle.R)
+    uses the installed SDK and widget with real isolated JSONL history.
+    One Chromium instance exercises a 125-second background task,
+    foreground/background approvals held for 125 seconds, Stop
+    rejection/retry, parented-only completion, delayed error replies,
+    EOF recovery, history paging during a live approval, and new
+    approvals arriving after a full browser reload without another
+    foreground prompt. Run with the bounded verifier’s `browser
+    --timeout 240`; `AUI_LONG_TASK_OUT` preserves evidence.
+    `AUI_LONG_TASK_MODE=smoke` is a short fixture check, not evidence of
+    the long-duration gate.
+
+  - **Long-history rendering**: threads with more than 60 retained
+    messages use a measured virtual window, keeping nearby messages, the
+    latest tail, and active editors/focused controls mounted. History
+    paging and streaming retain their scroll anchors without keeping
+    every message component subscribed while you type. The existing
+    history-retention limit is unchanged. Browser Find (Ctrl+F) and
+    cross-message text selection cover only currently mounted content;
+    scroll to older messages to render them.
+
+  - **Independent session startup**: foreground turns use the SDK’s
+    asynchronous initialization handshake, so connecting a second
+    history session does not freeze the first session’s stream or Shiny
+    inputs. Stop during initialization cancels only that connection,
+    before sending a prompt; cancellation never falls back to a fresh
+    conversation. The normal addin admits two concurrent histories (four
+    in Workspace), while each history remains FIFO.
+    `verify_addin_session_independence.R` checks delayed cold startup,
+    warm streams, approval, cancellation, queued admission, and reload
+    through the installed addin.
+
+  - Requires
     [`ClaudeAgentSDK`](https://github.com/kaipingyang/ClaudeAgentSDK)
-    package and a working `claude` CLI. Runs in the browser if called
-    outside RStudio.
+    `>= 0.2.5.9001` and a working `claude` CLI. Update both packages and
+    restart the existing addin Background Job: an already-running R
+    process does not reload either package automatically. Runs in the
+    browser if called outside RStudio. The CLI’s own tool limits are
+    unchanged.
 
 ### Claude Code slash commands and skills
 
@@ -264,6 +478,37 @@ handler = function(message, on_chunk, on_done,
   on_done()
 }
 ```
+
+### Experimental A2UI over Shiny
+
+Handlers may emit a reviewed A2UI v0.9/v0.9.1 subset without replacing
+the Shiny transport or custom runtime:
+
+``` r
+handler = function(message, on_a2ui, on_done, ...) {
+  on_a2ui(list(
+    list(version = "v0.9.1", createSurface = list(surfaceId = "summary")),
+    list(version = "v0.9.1", updateComponents = list(
+      surfaceId = "summary",
+      components = list(list(id = "root", component = "Text", text = "Ready"))
+    ))
+  ), event_id = "summary-create")
+  on_done()
+}
+```
+
+The same authority accepts standard AG-UI A2UI activity events through
+`on_ag_ui_activity(event, event_id=)` or the returned controller’s
+`send_ag_ui_activity()`. This is only an
+`ACTIVITY_SNAPSHOT`/`a2ui-surface` adapter, not a general AG-UI runtime,
+client, server, HTTP or SSE implementation. New history uses standard
+synthetic `present` tool parts with `artifact.a2ui`; old `generative-ui`
+A2UI history remains readable. Creating a new surface requires the
+matching active run, while later updates, deletes and atomic replacement
+of an existing surface may be server-driven. A2UI actions remain data
+events and never bypass normal tool approval. See the pkgdown
+[Experimental A2UI
+contract](https://kaipingyang.github.io/shinyAssistantUI/articles/a2ui-shiny-contract.html).
 
 `plot_data_uri(expr, width, height, res)` renders a plotting expression
 (base graphics, or a ggplot2/lattice object — auto-printed) to a PNG
@@ -441,5 +686,5 @@ Customize appearance and render tool or plot output.
 
   - [Upstream documentation
     alignment](https://kaipingyang.github.io/shinyAssistantUI/articles/upstream-alignment.md):
-  - [A2UI over Shiny: future design
-    contract](https://kaipingyang.github.io/shinyAssistantUI/articles/a2ui-shiny-contract.md):
+  - [Experimental A2UI over
+    Shiny](https://kaipingyang.github.io/shinyAssistantUI/articles/a2ui-shiny-contract.md):

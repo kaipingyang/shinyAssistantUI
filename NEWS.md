@@ -1,3 +1,10 @@
+# shinyAssistantUI 0.5.7.9016
+
+- **实验 A2UI over Shiny**：在现有 Shiny WebSocket 与 `ExternalStoreRuntime` 上接入经过审查的 A2UI v0.9/v0.9.1 子集，支持 surface create/update/delete、数据绑定、动作、严格双端校验、逐线程 sequence/event ledger、gap recovery、checkpoint 与 installed-package Chromium 门禁；不引入或宣称完整 AG-UI runtime、HTTP/SSE、A2UI v1.0、远程 catalog 或动态组件代码。
+- **标准 present history**：新写入使用 assistant-ui synthetic `present` tool part 与 `artifact.a2ui`，项目 marker 保存在 `artifact.shinyA2ui`；旧 `generative-ui + a2ui` 历史永久双读。恢复以 snapshot/checkpoint 为 authority，不信任派生 args；delete-all tombstone、older-page、超过 240 消息的 surface pin、client/server/none persistence 均有回归覆盖，synthetic present 不作为真实 backend tool 回传。
+- **AG-UI A2UI activity adapter**：handler 新增 `on_ag_ui_activity()`，server controller 新增 `send_ag_ui_activity()`，接受标准 `ACTIVITY_SNAPSHOT` / `activityType="a2ui-surface"` / `content.a2ui_operations`。按 message bucket 实现 replace、`replace=false`、last-bucket-wins 与 repeated-create reset，并原子复用现有 A2UI authority、eventId/recovery/action 安全边界；这只是 activity event 入口，不是通用 AG-UI client/server/runtime。
+- **A2UI 安全收口**：真实 Image renderer 强制 `referrerPolicy="no-referrer"`；canonical marker 精确字段校验；本地 `openUrl` 仅允许无凭据 HTTP(S) 并使用 `noopener,noreferrer`。后台只能原子替换或删除已有 surface；任何完整 activity projection 若会新建 surface，仍要求 matching active run，不能借 stale bucket 绕过。
+
 # shinyAssistantUI 0.5.7.9005
 
 - **AskUserQuestion 提交后可靠收起**：提交或跳过答案时，先保存工具卡的收起状态，再分发审批更新；消息更新导致卡片重新挂载时也不再遗失收起动作，之后仍可手动展开查看答案。普通工具的展开策略不变，审批决策仍不代表工具执行完成。

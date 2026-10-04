@@ -12,15 +12,16 @@ The package is backend-agnostic. You can supply a small R handler, use
 one of the packaged integrations, or build a handler around another
 service.
 
-| assistant-ui concept                   | shinyAssistantUI implementation                       |
-| -------------------------------------- | ----------------------------------------------------- |
-| Surface                                | React Web inside a native Shiny output binding        |
-| Runtime                                | A custom `ExternalStoreRuntime` owned by the widget   |
-| Transport                              | Shiny inputs and custom messages over its WebSocket   |
-| Server/runtime                         | A backend-agnostic R handler                          |
-| Included integrations                  | ClaudeAgentSDK, ellmer, and custom/codeagent handlers |
-| Native or terminal surfaces            | Outside this package’s Shiny Web scope                |
-| A2UI, AG-UI, or other runtime adapters | Not required or installed                             |
+| assistant-ui concept            | shinyAssistantUI implementation                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------- |
+| Surface                         | React Web inside a native Shiny output binding                                        |
+| Runtime                         | A custom `ExternalStoreRuntime` owned by the widget                                   |
+| Transport                       | Shiny inputs and custom messages over its WebSocket                                   |
+| Server/runtime                  | A backend-agnostic R handler                                                          |
+| Included integrations           | ClaudeAgentSDK, ellmer, and custom/codeagent handlers                                 |
+| Native or terminal surfaces     | Outside this package’s Shiny Web scope                                                |
+| Experimental A2UI               | Reviewed v0.9/v0.9.1 subset over Shiny; compiled reducer/renderer included            |
+| AG-UI or other runtime adapters | Not required or installed; only the A2UI activity-snapshot event adapter is available |
 
 This is the project’s mapping of the first assistant-ui Getting Started
 page, **Documentation**. It is a positioning guide rather than a
@@ -91,9 +92,12 @@ callbacks into incremental UI updates.
 assistant-ui also documents React Native, terminal surfaces, hosted
 transports, and several runtime adapters. They are valid choices for
 other applications, but they are not prerequisites for this package’s
-React Web + Shiny architecture. In particular, this documentation
-foundation does not install A2UI or AG-UI packages and does not replace
-the existing custom runtime.
+React Web + Shiny architecture. The optional experimental A2UI path
+bundles a reviewed `@assistant-ui/react-generative-ui` reducer/renderer
+but keeps the existing Shiny transport and custom runtime. It does not
+install or claim the `@assistant-ui/react-ag-ui` runtime; the standard
+`ACTIVITY_SNAPSHOT` entry is only an adapter into the Shiny A2UI
+authority.
 
 For the ordered review record and deferred pages, see [Upstream
 documentation

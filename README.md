@@ -255,6 +255,34 @@ handler = function(message, on_chunk, on_done,
 }
 ```
 
+### Experimental A2UI over Shiny
+
+Handlers may emit a reviewed A2UI v0.9/v0.9.1 subset without replacing the Shiny transport or
+custom runtime:
+
+```r
+handler = function(message, on_a2ui, on_done, ...) {
+  on_a2ui(list(
+    list(version = "v0.9.1", createSurface = list(surfaceId = "summary")),
+    list(version = "v0.9.1", updateComponents = list(
+      surfaceId = "summary",
+      components = list(list(id = "root", component = "Text", text = "Ready"))
+    ))
+  ), event_id = "summary-create")
+  on_done()
+}
+```
+
+The same authority accepts standard AG-UI A2UI activity events through
+`on_ag_ui_activity(event, event_id=)` or the returned controller's
+`send_ag_ui_activity()`. This is only an `ACTIVITY_SNAPSHOT`/`a2ui-surface` adapter, not a general
+AG-UI runtime, client, server, HTTP or SSE implementation. New history uses standard synthetic
+`present` tool parts with `artifact.a2ui`; old `generative-ui` A2UI history remains readable.
+Creating a new surface requires the matching active run, while later updates, deletes and atomic
+replacement of an existing surface may be server-driven. A2UI actions remain data events and never
+bypass normal tool approval. See the pkgdown
+[Experimental A2UI contract](https://kaipingyang.github.io/shinyAssistantUI/articles/a2ui-shiny-contract.html).
+
 `plot_data_uri(expr, width, height, res)` renders a plotting expression (base graphics, or a
 ggplot2/lattice object — auto-printed) to a PNG `data:` URI for `on_image()`, so charts show inline
 using R's own plotting (no client-side charting library is bundled). Interactive charts can go

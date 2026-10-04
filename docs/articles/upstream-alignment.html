@@ -20,7 +20,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">shinyAssistantUI</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Released version">0.5.7.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Released version">0.5.7.9016</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -136,7 +136,7 @@
 <tr class="odd">
 <td align="right">3</td>
 <td>Tools</td>
-<td>Shiny-native tool UI adopted; Toolkit/MCP browser ecosystems not adopted; A2UI is a future plan</td>
+<td>Shiny-native tool UI adopted; experimental A2UI-over-Shiny subset adopted; Toolkit/MCP browser ecosystems not adopted</td>
 </tr>
 <tr class="even">
 <td align="right">4</td>
@@ -557,8 +557,8 @@
 <tr class="odd">
 <td align="right">11</td>
 <td>A2UI over AG-UI</td>
-<td><strong>Future plan</strong></td>
-<td>The <a href="a2ui-shiny-contract.html">A2UI over Shiny future contract</a> evaluates an optional surface-operation converter and action bridge while retaining the Shiny transport and current Data/Generative UI paths. No current A2UI or AG-UI support is claimed.</td>
+<td><strong>Experimental Shiny adaptation</strong></td>
+<td>The <a href="a2ui-shiny-contract.html">Experimental A2UI over Shiny</a> path implements a reviewed v0.9/v0.9.1 operation subset, actions, recovery, canonical present history, and the standard <code>ACTIVITY_SNAPSHOT</code>/<code>a2ui-surface</code> entry adapter while retaining Shiny transport and <code>ExternalStoreRuntime</code>. It is not a general AG-UI runtime/client/server.</td>
 </tr>
 <tr class="even">
 <td align="right">12</td>
@@ -1530,7 +1530,7 @@
 <tr class="odd">
 <td align="right">7</td>
 <td>Generative UI: overview, JSONGenerativeUI, components, actions, spec, rendering, Slack, Teams, A2UI, tokens</td>
-<td>Local primitive/data callbacks are narrower; A2UI remains a future plan.</td>
+<td>Local primitive/data callbacks remain narrower; a reviewed A2UI-over-Shiny subset is experimental and separately documented.</td>
 </tr>
 <tr class="even">
 <td align="right">8</td>
@@ -1578,7 +1578,7 @@
 <div class="section level2">
 <h2 id="current-gaps-and-future-plans">Current gaps and future plans<a class="anchor" aria-label="anchor" href="#current-gaps-and-future-plans"></a>
 </h2>
-<p>A2UI is the explicit future protocol plan: it is not a current AG-UI or A2UI integration. True branching remains partial because edit/reload currently replaces the linear message tail rather than preserving switchable alternatives. AI SDK, LangGraph, LangChain, A2A, AG-UI, OpenCode, and the other named runtimes remain unadopted until their protocol and lifecycle contracts are implemented and verified, not merely called through a generic R handler.</p>
+<p>A2UI over Shiny is now an experimental protocol subset with lifecycle, actions, recovery, present history, and an AG-UI activity-snapshot entry adapter. This does not adopt the complete AG-UI runtime or A2UI v1.0. True branching remains partial because edit/reload currently replaces the linear message tail rather than preserving switchable alternatives. AI SDK, LangGraph, LangChain, A2A, the full AG-UI runtime, OpenCode, and the other named runtimes remain unadopted until their protocol and lifecycle contracts are implemented and verified.</p>
 <table class="table">
 <colgroup>
 <col width="40%">
@@ -1592,9 +1592,9 @@
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td align="right">Future plan</td>
-<td>A2UI</td>
-<td>Add only after a Shiny-facing contract, surface lifecycle/history, action security, optional dependency review, and browser tests exist.</td>
+<td align="right">Experimental</td>
+<td>A2UI over Shiny</td>
+<td>Reviewed v0.9/v0.9.1 subset over Shiny, including standard present history and <code>ACTIVITY_SNAPSHOT</code> adapter; not A2UI v1.0 or a full AG-UI runtime.</td>
 </tr>
 <tr class="even">
 <td align="right">Gap</td>

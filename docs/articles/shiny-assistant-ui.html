@@ -20,7 +20,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">shinyAssistantUI</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Released version">0.5.7.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Released version">0.5.7.9016</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -109,8 +109,12 @@
 <td>Outside this package’s Shiny Web scope</td>
 </tr>
 <tr class="odd">
-<td>A2UI, AG-UI, or other runtime adapters</td>
-<td>Not required or installed</td>
+<td>Experimental A2UI</td>
+<td>Reviewed v0.9/v0.9.1 subset over Shiny; compiled reducer/renderer included</td>
+</tr>
+<tr class="even">
+<td>AG-UI or other runtime adapters</td>
+<td>Not required or installed; only the A2UI activity-snapshot event adapter is available</td>
 </tr>
 </tbody>
 </table>
@@ -169,7 +173,7 @@
 <div class="section level2">
 <h2 id="scope-decisions">Scope decisions<a class="anchor" aria-label="anchor" href="#scope-decisions"></a>
 </h2>
-<p>assistant-ui also documents React Native, terminal surfaces, hosted transports, and several runtime adapters. They are valid choices for other applications, but they are not prerequisites for this package’s React Web + Shiny architecture. In particular, this documentation foundation does not install A2UI or AG-UI packages and does not replace the existing custom runtime.</p>
+<p>assistant-ui also documents React Native, terminal surfaces, hosted transports, and several runtime adapters. They are valid choices for other applications, but they are not prerequisites for this package’s React Web + Shiny architecture. The optional experimental A2UI path bundles a reviewed <code>@assistant-ui/react-generative-ui</code> reducer/renderer but keeps the existing Shiny transport and custom runtime. It does not install or claim the <code>@assistant-ui/react-ag-ui</code> runtime; the standard <code>ACTIVITY_SNAPSHOT</code> entry is only an adapter into the Shiny A2UI authority.</p>
 <p>For the ordered review record and deferred pages, see <a href="upstream-alignment.html">Upstream documentation alignment</a>.</p>
 </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
