@@ -4,6 +4,15 @@ export const DIAGNOSTICS_EVENT_SPEC = {
   frontend_mount: {}, frontend_unmount: {}, shiny_connected: {}, shiny_disconnected: {},
   run_state: { phase: ["queued", "connecting", "running", "complete", "error", "cancelled"] },
   run_stage: { stage: ["streaming", "finalizing"] },
+  claude_startup_summary: {
+    outcome: ["success", "error", "cancelled"], connectionKind: ["cold", "reused"],
+    durationUs: "safe-int", connectDurationUs: "safe-int", postConnectDurationUs: "safe-int",
+  },
+  history_reconciliation_summary: {
+    outcome: ["success", "timeout", "stale", "publish_error"],
+    durationUs: "safe-int", attemptCount: "safe-int", readErrorCount: "safe-int",
+    stableReadCount: "safe-int", requirement: ["none", "stable", "observed", "advanced"],
+  },
   chunk_summary: { count: "safe-int", bytes: "safe-int" },
   tool_delta_summary: { count: "safe-int", bytes: "safe-int", toolCount: "safe-int" },
   tool_summary: { count: "safe-int", durationUs: "safe-int", outcome: ["success", "error", "cancelled", "denied", "unknown"] },

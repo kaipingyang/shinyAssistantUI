@@ -2583,7 +2583,8 @@ make_ellmer_session_loader <- function(store) {
     quiet_delay = 0.1,
     deadline = 2,
     retry_timeout = 30,
-    on_deferred = NULL) {
+    on_deferred = NULL,
+    on_summary = NULL) {
   states <- new.env(parent = emptyenv())
   jobs <- new.env(parent = emptyenv())
   generation <- 0L
@@ -2648,6 +2649,37 @@ make_ellmer_session_loader <- function(store) {
     synchronized <- FALSE
     pending_timer <- NULL
     retry_delay <- quiet_delay
+    attempt_count <- 0
+    read_error_count <- 0
+    stable_read_count <- 0
+    last_stable <- FALSE
+    last_observed <- is.null(observed_message_id)
+    last_advanced <- !isTRUE(must_advance)
+    summarized <- FALSE
+    duration_us <- function() {
+      value <- elapsed(started) * 1e6
+      if (length(value) != 1L || !is.finite(value) || value < 0) value <- 0
+      as.numeric(min(2^53 - 1, round(value)))
+    }
+    unmet_requirement <- function() {
+      if (!isTRUE(last_stable)) return("stable")
+      if (!isTRUE(last_observed)) return("observed")
+      if (!isTRUE(last_advanced)) return("advanced")
+      "none"
+    }
+    summarize <- function(outcome, requirement = unmet_requirement()) {
+      if (summarized) return(invisible(FALSE))
+      summarized <<- TRUE
+      if (is.function(on_summary)) tryCatch(on_summary(list(
+        outcome = outcome,
+        durationUs = duration_us(),
+        attemptCount = as.numeric(attempt_count),
+        readErrorCount = as.numeric(read_error_count),
+        stableReadCount = as.numeric(stable_read_count),
+        requirement = requirement
+      )), error = function(error) NULL)
+      invisible(TRUE)
+    }
     deferred <- function(status, reason = NULL) {
       if (is.function(on_deferred)) {
         on_deferred(thread_id, after_run_id, status, reason)
@@ -2663,8 +2695,10 @@ make_ellmer_session_loader <- function(store) {
       invisible(TRUE)
     }
 
-    finish <- function(ok, reason = NULL, notify_deferred = TRUE) {
+    finish <- function(ok, reason = NULL, notify_deferred = TRUE,
+                       outcome = if (ok) "success" else "stale") {
       if (settled) return(invisible(FALSE))
+      if (!isTRUE(ok)) summarize(outcome)
       settled <<- TRUE
       candidate_fingerprint <<- NULL
       if (is.function(pending_timer)) pending_timer()
@@ -2691,6 +2725,7 @@ make_ellmer_session_loader <- function(store) {
       invisible(TRUE)
     }
     synchronize <- function() {
+      summarize("success", "none")
       if (!isTRUE(watch_updates)) return(finish(TRUE))
       was_synchronized <- synchronized
       synchronized <<- TRUE
@@ -2713,7 +2748,7 @@ make_ellmer_session_loader <- function(store) {
         }
         finish(FALSE, simpleError(
           "History synchronization is still unavailable. Reopen the conversation history to retry."
-        ))
+        ), outcome = "timeout")
         return(invisible(NULL))
       }
       if (!notified && elapsed(started) >= deadline) {
@@ -2725,11 +2760,14 @@ make_ellmer_session_loader <- function(store) {
         deferred("pending", reason)
       }
 
+      attempt_count <<- attempt_count + 1
       snapshot <- tryCatch(
         read_snapshot(thread_id, session_id, project) %||% list(),
         error = function(error) error
       )
       if (inherits(snapshot, "error")) {
+        read_error_count <<- read_error_count + 1
+        last_stable <<- FALSE
         candidate_fingerprint <<- NULL
         if (!notified) {
           reason <- structure(snapshot, class = unique(c("claude_history_pending", class(snapshot))))
@@ -2747,10 +2785,15 @@ make_ellmer_session_loader <- function(store) {
       observed <- is.null(observed_message_id) || any(vapply(snapshot, function(message) {
         is.list(message) && identical(message$id, observed_message_id)
       }, logical(1)))
+      last_stable <<- stable
+      last_observed <<- observed
+      if (stable) stable_read_count <<- stable_read_count + 1
 
       if (stable && observed) {
         state <- state_for(key)
         advanced <- !identical(current_fingerprint, state$fingerprint)
+        last_advanced <<- advanced || (!synchronized && !is.null(observed_message_id)) ||
+          !isTRUE(must_advance)
         if (advanced || (!synchronized && !is.null(observed_message_id))) {
           if (!identical(token, generation) || !isTRUE(is_current())) {
             finish(FALSE, simpleError("Transcript reconciliation is stale"))
@@ -2762,7 +2805,7 @@ make_ellmer_session_loader <- function(store) {
             NULL
           }, error = function(error) error)
           if (inherits(publish_error, "error")) {
-            finish(FALSE, publish_error)
+            finish(FALSE, publish_error, outcome = "publish_error")
             return(invisible(NULL))
           }
           assign(
@@ -3991,6 +4034,16 @@ make_claude_handler <- function(options       = NULL,
         route$on_status(
           if (identical(status, "complete")) "idle" else if (identical(status, "error")) "proactive-error" else "history-sync",
           text = text
+        )
+        invisible(NULL)
+      },
+      on_summary = function(metrics) {
+        callback <- route_for(thread_id)$on_diagnostics
+        if (is.function(callback)) tryCatch(
+          .call_compatible_callback(callback, list(
+            event = "history_reconciliation_summary", metrics = metrics
+          )),
+          error = function(error) NULL
         )
         invisible(NULL)
       }
@@ -5259,6 +5312,34 @@ make_claude_handler <- function(options       = NULL,
     pending_approval <- NULL
     pending_decision <- NULL
     halted <- FALSE
+    startup_started <- NULL
+    startup_connected <- NULL
+    startup_reported <- FALSE
+    startup_duration_us <- function(from, to = proc.time()[["elapsed"]]) {
+      value <- (to - from) * 1e6
+      if (length(value) != 1L || !is.finite(value) || value < 0) value <- 0
+      as.numeric(min(2^53 - 1, round(value)))
+    }
+    report_startup <- function(outcome) {
+      if (startup_reported || is.null(startup_started)) return(invisible(FALSE))
+      startup_reported <<- TRUE
+      finished <- proc.time()[["elapsed"]]
+      connected_at <- startup_connected %||% finished
+      metrics <- list(
+        outcome = outcome,
+        connectionKind = if (isTRUE(cold)) "cold" else "reused",
+        durationUs = startup_duration_us(startup_started, finished),
+        connectDurationUs = startup_duration_us(startup_started, connected_at),
+        postConnectDurationUs = startup_duration_us(connected_at, finished)
+      )
+      if (is.function(on_diagnostics)) tryCatch(
+        .call_compatible_callback(on_diagnostics, list(
+          event = "claude_startup_summary", metrics = metrics
+        )),
+        error = function(error) NULL
+      )
+      invisible(TRUE)
+    }
     expire_approval <- function(reason) {
       current <- pending_approval
       promise <- pending_decision
@@ -5290,6 +5371,9 @@ make_claude_handler <- function(options       = NULL,
         record$coordinator$retire(simpleError(
           "Claude turn ended without a confirmed terminal result; the connection was closed for safe recovery."
         ))
+      }
+      if (!startup_reported && !is.null(startup_started)) {
+        report_startup(if (cancel_requested || isTRUE(is_cancelled())) "cancelled" else "error")
       }
       active_turns[[thread_id]] <<- NULL
       if (identical(active_turn_owners[[thread_id]], ui_owner)) {
@@ -5326,7 +5410,9 @@ make_claude_handler <- function(options       = NULL,
       switch_state$promise
     }
     warming <- function() {
-      cold <<- is.null(clients[[thread_id]])
+      existing_client <- clients[[thread_id]]
+      cold <<- is.null(existing_client) ||
+        (is.function(existing_client$is_alive) && !isTRUE(existing_client$is_alive()))
       if (cold) emit_run_phase("cold-connect")
       if (cold && !is.null(on_warming)) {
         on_warming(TRUE, !is.null(read_session_id(thread_id)))
@@ -5335,13 +5421,17 @@ make_claude_handler <- function(options       = NULL,
       FALSE
     }
     connect <- function() {
+      if (is.null(startup_started)) startup_started <<- proc.time()[["elapsed"]]
       failed <- function(error) {
+        if (is.null(startup_connected)) startup_connected <<- proc.time()[["elapsed"]]
+        report_startup(if (cancel_requested || isTRUE(is_cancelled()) || closed) "cancelled" else "error")
         if (cold && !is.null(on_warming)) on_warming(FALSE)
         if (!finish_cancelled_before_send()) on_error(conditionMessage(error))
         FALSE
       }
       connected <- function(value) {
         client <<- value
+        startup_connected <<- proc.time()[["elapsed"]]
         if (cold && !is.null(on_warming)) on_warming(FALSE)
         !is.null(client)
       }
@@ -5601,6 +5691,11 @@ make_claude_handler <- function(options       = NULL,
         return("done")
       }
       if (is.null(next_message)) return("idle")
+      report_startup(if (interrupted || cancel_requested || isTRUE(is_cancelled())) {
+        "cancelled"
+      } else {
+        "success"
+      })
       if (interrupted) {
         if (.claude_passive_message(next_message)) process_message(next_message)
         if (inherits(next_message, "PermissionRequestMessage")) {

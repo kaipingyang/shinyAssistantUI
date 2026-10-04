@@ -1477,6 +1477,7 @@ test_that("make_claude_handler routes owned background approval and reconciles d
   proactive <- list()
   statuses <- character()
   events <- character()
+  diagnostics <- list()
   approval_resolve <- NULL
   done <- FALSE
   error <- NULL
@@ -1509,6 +1510,9 @@ test_that("make_claude_handler routes owned background approval and reconciles d
     on_proactive_status = function(status, text = NULL, ...) {
       events <<- c(events, "status")
       statuses <<- c(statuses, text %||% status)
+    },
+    on_diagnostics = function(event, metrics) {
+      diagnostics[[length(diagnostics) + 1L]] <<- list(event = event, metrics = metrics)
     },
     is_cancelled = function() FALSE,
     wait_for_approval = function(tool_call_id) promises::promise(function(resolve, reject) {
@@ -1563,6 +1567,16 @@ test_that("make_claude_handler routes owned background approval and reconciles d
   expect_true(any(grepl("Reply persisted after associated approval", vapply(
     proactive, function(messages) as.character(messages[[1L]]$content), character(1)
   ), fixed = TRUE)))
+  reconciliation_diagnostics <- Filter(
+    function(value) identical(value$event, "history_reconciliation_summary"),
+    diagnostics
+  )
+  expect_length(reconciliation_diagnostics, 1L)
+  expect_identical(reconciliation_diagnostics[[1L]]$metrics$outcome, "success")
+  expect_named(reconciliation_diagnostics[[1L]]$metrics, c(
+    "outcome", "durationUs", "attemptCount", "readErrorCount",
+    "stableReadCount", "requirement"
+  ))
 
   transcript <- list(list(
     id = "detached-reply", role = "assistant",
@@ -1706,4 +1720,114 @@ test_that("idle coordinator state does not block hard GC settle", {
   expect_true(shinyAssistantUI:::.memory_guard_coordinator_blocks_gc(list(
     owner = "idle", waiters = 1L, buffered_messages = 0L, idle_open = TRUE
   )))
+})
+
+
+test_that("transcript reconciliation emits one aggregate success summary", {
+  scheduler <- plan91_scheduler()
+  old <- list(list(id = "old", role = "assistant", content = "old"))
+  fresh <- list(list(id = "new", role = "assistant", content = "new"))
+  reads <- list(old, fresh, fresh)
+  summaries <- list()
+  reconciler <- shinyAssistantUI:::.new_claude_transcript_reconciler(
+    read_snapshot = function(...) { value <- reads[[1L]]; reads <<- reads[-1L]; value },
+    publish = function(...) invisible(NULL),
+    schedule = scheduler$schedule, now = function() 1,
+    quiet_delay = 0, deadline = 2, retry_timeout = 30,
+    on_summary = function(metrics) summaries[[length(summaries) + 1L]] <<- metrics
+  )
+  reconciler$baseline("thread", "session", "/project")
+  reconciler$reconcile(
+    "thread", "session", "/project", "run", must_advance = TRUE,
+    is_current = function() TRUE, on_complete = function(...) invisible(NULL)
+  )
+  scheduler$run_all()
+  expect_length(summaries, 1L)
+  expect_identical(summaries[[1L]]$outcome, "success")
+  expect_identical(summaries[[1L]]$attemptCount, 2)
+  expect_identical(summaries[[1L]]$readErrorCount, 0)
+  expect_identical(summaries[[1L]]$stableReadCount, 1)
+  expect_identical(summaries[[1L]]$requirement, "none")
+})
+
+test_that("transcript reconciliation aggregates timeout requirements and read failures", {
+  scheduler <- plan91_scheduler()
+  clock <- 0
+  snapshot <- list(list(id = "old", role = "assistant", content = "old"))
+  mode <- "baseline"
+  summaries <- list()
+  reconciler <- shinyAssistantUI:::.new_claude_transcript_reconciler(
+    read_snapshot = function(...) {
+      if (identical(mode, "error")) stop("PRIVATE transcript read detail")
+      snapshot
+    },
+    publish = function(...) invisible(NULL),
+    schedule = scheduler$schedule, now = function() clock,
+    quiet_delay = 0, deadline = 2, retry_timeout = 30,
+    on_summary = function(metrics) summaries[[length(summaries) + 1L]] <<- metrics
+  )
+  reconciler$baseline("thread", "session", "/project")
+  mode <- "error"
+  reconciler$reconcile(
+    "thread", "session", "/project", "run", must_advance = TRUE,
+    is_current = function() TRUE, on_complete = function(...) invisible(NULL)
+  )
+  clock <- 3
+  scheduler$run_next()
+  scheduler$run_next()
+  clock <- 31
+  scheduler$run_all()
+  expect_length(summaries, 1L)
+  expect_identical(summaries[[1L]]$outcome, "timeout")
+  expect_gte(summaries[[1L]]$attemptCount, 2)
+  expect_gte(summaries[[1L]]$readErrorCount, 2)
+  expect_identical(summaries[[1L]]$stableReadCount, 0)
+  expect_identical(summaries[[1L]]$requirement, "stable")
+  expect_false(any(grepl("PRIVATE", unlist(summaries), fixed = TRUE)))
+})
+
+
+test_that("reconciliation watcher does not duplicate summaries and publish errors are classified", {
+  scheduler <- plan91_scheduler()
+  old <- list(list(id = "old", role = "assistant", content = "old"))
+  fresh <- list(list(id = "new", role = "assistant", content = "new"))
+  reads <- list(old, fresh, fresh)
+  summaries <- list()
+  reconciler <- shinyAssistantUI:::.new_claude_transcript_reconciler(
+    read_snapshot = function(...) { value <- reads[[1L]]; reads <<- reads[-1L]; value },
+    publish = function(...) invisible(NULL), schedule = scheduler$schedule,
+    now = function() 1, quiet_delay = 0, deadline = 2, retry_timeout = 30,
+    on_summary = function(metrics) summaries[[length(summaries) + 1L]] <<- metrics
+  )
+  reconciler$baseline("thread", "session", "/project")
+  reconciler$reconcile(
+    "thread", "session", "/project", "run", must_advance = TRUE,
+    is_current = function() TRUE, on_complete = function(...) invisible(NULL),
+    watch_updates = TRUE
+  )
+  scheduler$run_next(); scheduler$run_next()
+  expect_length(summaries, 1L)
+  expect_identical(summaries[[1L]]$outcome, "success")
+  reconciler$invalidate()
+  scheduler$run_all()
+  expect_length(summaries, 1L)
+
+  scheduler <- plan91_scheduler()
+  reads <- list(old, fresh, fresh)
+  failures <- list()
+  broken <- shinyAssistantUI:::.new_claude_transcript_reconciler(
+    read_snapshot = function(...) { value <- reads[[1L]]; reads <<- reads[-1L]; value },
+    publish = function(...) stop("PRIVATE publish detail"), schedule = scheduler$schedule,
+    now = function() 2, quiet_delay = 0, deadline = 2, retry_timeout = 30,
+    on_summary = function(metrics) failures[[length(failures) + 1L]] <<- metrics
+  )
+  broken$baseline("thread", "session", "/project")
+  broken$reconcile(
+    "thread", "session", "/project", "run", must_advance = TRUE,
+    is_current = function() TRUE, on_complete = function(...) invisible(NULL)
+  )
+  scheduler$run_all()
+  expect_length(failures, 1L)
+  expect_identical(failures[[1L]]$outcome, "publish_error")
+  expect_false(any(grepl("PRIVATE", unlist(failures), fixed = TRUE)))
 })

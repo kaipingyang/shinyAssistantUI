@@ -42,6 +42,24 @@ describe("diagnostics v2 event-driven transport", () => {
     });
     expect(sanitizeDiagnosticsEvent("chunk_summary", { count: 1 }, 10)).toBeNull();
     expect(sanitizeDiagnosticsEvent("chunk_summary", { count: 1, bytes: 2, text: "secret" }, 10)).toBeNull();
+    expect(sanitizeDiagnosticsEvent("claude_startup_summary", {
+      outcome: "success", connectionKind: "cold", durationUs: 10,
+      connectDurationUs: 7, postConnectDurationUs: 3,
+    }, 10)?.metrics).toEqual({
+      outcome: "success", connectionKind: "cold", durationUs: 10,
+      connectDurationUs: 7, postConnectDurationUs: 3,
+    });
+    expect(sanitizeDiagnosticsEvent("history_reconciliation_summary", {
+      outcome: "timeout", durationUs: 30, attemptCount: 4,
+      readErrorCount: 1, stableReadCount: 0, requirement: "stable",
+    }, 10)?.metrics).toEqual({
+      outcome: "timeout", durationUs: 30, attemptCount: 4,
+      readErrorCount: 1, stableReadCount: 0, requirement: "stable",
+    });
+    expect(sanitizeDiagnosticsEvent("claude_startup_summary", {
+      outcome: "error", connectionKind: "cold", durationUs: 10,
+      connectDurationUs: 10, postConnectDurationUs: 0, path: "/private",
+    }, 10)).toBeNull();
     expect(sanitizeDiagnosticsEvent("owned_markdown_preprocess_summary", {
       count: 2, durationUs: 30, maxUs: 20,
     }, 10)?.event).toBe("owned_markdown_preprocess_summary");

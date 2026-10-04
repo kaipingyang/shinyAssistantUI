@@ -345,6 +345,40 @@ run_addin_session_independence <- function() {
   print(report)
   saveRDS(report, file.path(output, "independence-report.rds"))
   if (length(errors)) saveRDS(errors, file.path(output, "browser-errors.rds"))
+  diagnostics_dir <- file.path(root, ".claude_addin", "diagnostics")
+  diagnostics_files <- list.files(
+    diagnostics_dir, pattern = "^diag-v1-.*\\.jsonl$", full.names = TRUE
+  )
+  diagnostics_lines <- unlist(lapply(
+    diagnostics_files, readLines, warn = FALSE
+  ), use.names = FALSE)
+  diagnostics_rows <- Filter(Negate(is.null), lapply(diagnostics_lines, function(line) {
+    tryCatch(jsonlite::fromJSON(line, simplifyVector = FALSE), error = function(error) NULL)
+  }))
+  startup_rows <- Filter(function(row) identical(row$event, "claude_startup_summary"), diagnostics_rows)
+  expected_count <- if (identical(mode, "cancel")) 5L else 4L
+  expected_cancelled <- if (identical(mode, "cancel")) 1L else 0L
+  expected_cold <- if (identical(mode, "cancel")) 4L else 3L
+  stopifnot(
+    length(startup_rows) == expected_count,
+    all(vapply(startup_rows, function(row) identical(
+      names(row$metrics),
+      c("outcome", "connectionKind", "durationUs", "connectDurationUs", "postConnectDurationUs")
+    ), logical(1))),
+    sum(vapply(startup_rows, function(row) identical(row$metrics$outcome, "success"), logical(1))) == 4L,
+    sum(vapply(startup_rows, function(row) identical(row$metrics$outcome, "cancelled"), logical(1))) == expected_cancelled,
+    sum(vapply(startup_rows, function(row) identical(row$metrics$connectionKind, "cold"), logical(1))) == expected_cold,
+    sum(vapply(startup_rows, function(row) identical(row$metrics$connectionKind, "reused"), logical(1))) == 1L,
+    all(vapply(Filter(function(row) identical(row$metrics$outcome, "cancelled"), startup_rows),
+               function(row) identical(row$metrics$connectionKind, "cold"), logical(1)))
+  )
+  writeLines(
+    diagnostics_lines[vapply(diagnostics_rows, function(row) identical(
+      row$event, "claude_startup_summary"
+    ), logical(1))],
+    file.path(output, "diagnostic-summaries.jsonl")
+  )
+  cat("[PASS] installed diagnostics contain exact startup summaries\n")
   cleanup()
   browser <- NULL
   stopifnot(

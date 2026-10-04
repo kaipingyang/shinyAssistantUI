@@ -1009,7 +1009,13 @@
 # Explicit allowlisted lifecycle logger. Never redirect global output and never
 # record specs, environment values, condition text, prompts, or responses.
 .claude_bg_log_event <- function(path, event, mode = NULL, generation = NULL,
-                                 nonce = NULL, port = NULL, condition = NULL) {
+                                 nonce = NULL, port = NULL, condition = NULL,
+                                 duration_ms = NULL) {
+  if (!is.numeric(duration_ms) || length(duration_ms) != 1L ||
+      is.na(duration_ms) || !is.finite(duration_ms) || duration_ms < 0 ||
+      duration_ms != floor(duration_ms) || duration_ms > 2^53 - 1) {
+    duration_ms <- NULL
+  }
   tryCatch({
     if (is.null(path) || !length(path) || is.na(path[[1L]]) || !nzchar(path[[1L]]))
       return(invisible(NULL))
@@ -1022,6 +1028,7 @@
       generation = generation,
       nonce = nonce,
       port = port,
+      duration_ms = duration_ms,
       package_version = tryCatch(
         as.character(utils::packageVersion("shinyAssistantUI")),
         error = function(e) "unknown"
@@ -1588,6 +1595,12 @@
     "Claude Code Chat"
   })[[1L]]
 
+  launch_started <- proc.time()[["elapsed"]]
+  launch_duration_ms <- function() {
+    value <- (proc.time()[["elapsed"]] - launch_started) * 1000
+    if (!is.finite(value) || value < 0) value <- 0
+    as.numeric(min(2^53 - 1, round(value)))
+  }
   .claude_bg_log_event(record$log_path, "submitting", mode = mode,
                        generation = generation, nonce = record$nonce,
                        port = record$port)
@@ -1598,7 +1611,8 @@
     error = function(e) {
       .claude_bg_log_event(record$log_path, "submission_failed", mode = mode,
                            generation = generation, nonce = record$nonce,
-                           port = record$port, condition = e)
+                           port = record$port, condition = e,
+                           duration_ms = launch_duration_ms())
       rollback()
       unlink(c(record$spec_path, record$script))
       .claude_bg_remove_startup_dir(record$startup_dir)
@@ -1638,7 +1652,7 @@
     assign(key, record, envir = registry)
     .claude_bg_log_event(record$log_path, "ready", mode = mode,
                          generation = generation, nonce = record$nonce,
-                         port = record$port)
+                         port = record$port, duration_ms = launch_duration_ms())
     open_viewer(record$url)
     return(.claude_bg_result(record, ready = TRUE, reused = FALSE))
   }
@@ -1647,7 +1661,8 @@
   assign(key, record, envir = registry)
   .claude_bg_log_event(record$log_path, "timeout", mode = mode,
                        generation = generation, nonce = record$nonce,
-                       port = record$port, condition = waited$condition)
+                       port = record$port, condition = waited$condition,
+                       duration_ms = launch_duration_ms())
   stop(.claude_bg_startup_error(record, waited$state, existing = FALSE), call. = FALSE)
 }
 

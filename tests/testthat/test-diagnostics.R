@@ -56,6 +56,10 @@ test_that("frontend transport limits are generated from the canonical R artifact
     warn = FALSE
   )
   expect_true(declaration %in% generated)
+  expect_true(all(vapply(
+    c("claude_startup_summary", "history_reconciliation_summary"),
+    function(event) any(grepl(event, generated, fixed = TRUE)), logical(1)
+  )))
 })
 
 test_that("global memory observations deduplicate sinks without merging independent callbacks", {
@@ -340,4 +344,42 @@ test_that("Claude diagnostics wrapper never adds a poll and hides content", {
     poller, function(...) stop("telemetry failure")
   ), messages)
   expect_identical(polls, 1L)
+})
+
+
+test_that("startup and reconciliation summaries have exact privacy-safe schemas", {
+  startup <- shinyAssistantUI:::.diagnostics_canonical_row(
+    "claude_startup_summary",
+    list(
+      outcome = "success", connectionKind = "cold",
+      durationUs = 1200000, connectDurationUs = 800000,
+      postConnectDurationUs = 400000
+    ),
+    now = function() 11
+  )
+  expect_named(startup$metrics, c(
+    "outcome", "connectionKind", "durationUs",
+    "connectDurationUs", "postConnectDurationUs"
+  ))
+  reconciliation <- shinyAssistantUI:::.diagnostics_canonical_row(
+    "history_reconciliation_summary",
+    list(
+      outcome = "timeout", durationUs = 30000000,
+      attemptCount = 12, readErrorCount = 2, stableReadCount = 4,
+      requirement = "advanced"
+    ),
+    now = function() 12
+  )
+  expect_named(reconciliation$metrics, c(
+    "outcome", "durationUs", "attemptCount", "readErrorCount",
+    "stableReadCount", "requirement"
+  ))
+  expect_null(shinyAssistantUI:::.diagnostics_canonical_row(
+    "claude_startup_summary",
+    c(startup$metrics, list(path = "/private", errorText = "secret"))
+  ))
+  expect_null(shinyAssistantUI:::.diagnostics_canonical_row(
+    "history_reconciliation_summary",
+    within(reconciliation$metrics, outcome <- "raw-error-text")
+  ))
 })

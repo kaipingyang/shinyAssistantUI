@@ -398,3 +398,122 @@ test_that("a human decision cancels its pending heartbeat before resuming the pu
   expect_identical(timer$state$max_pending, 1L)
   expect_length(timer$state$queue, 0L)
 })
+
+
+test_that("foreground turn emits one aggregate startup summary at first SDK event", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  state <- new.env(parent = emptyenv())
+  state$queue <- list(ClaudeAgentSDK::ResultMessage(
+    subtype = "success", duration_ms = 1, duration_api_ms = 1,
+    is_error = FALSE, num_turns = 1, session_id = "startup-summary-session",
+    result = "Complete.", total_cost_usd = 0, usage = list()
+  ))
+  state$diagnostics <- list()
+  client <- new.env(parent = emptyenv())
+  client$connect <- function() invisible(NULL)
+  client$disconnect <- function() invisible(NULL)
+  client$send <- function(content) invisible(NULL)
+  client$poll_messages <- function() {
+    value <- state$queue
+    state$queue <- list()
+    value
+  }
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = function(options) client,
+    .package = "shinyAssistantUI"
+  )
+  handler <- make_claude_handler(session_map_path = tempfile(fileext = ".rds"))
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  noop <- function(...) invisible(NULL)
+  result <- foreground_pump_observe(handler(
+    message = "Synthetic turn", thread_id = "startup-summary", attachments = list(),
+    on_chunk = noop, on_done = noop, on_error = function(message) stop(message),
+    on_tool_call = noop, on_tool_result = noop, on_thinking = noop,
+    is_cancelled = function() FALSE,
+    wait_for_approval = function(...) stop("Unexpected approval"),
+    on_diagnostics = function(event, metrics) {
+      state$diagnostics[[length(state$diagnostics) + 1L]] <- list(
+        event = event, metrics = metrics
+      )
+    }
+  ))
+  foreground_pump_drain(function() result$settled == 1L)
+  startup <- Filter(
+    function(value) identical(value$event, "claude_startup_summary"),
+    state$diagnostics
+  )
+  expect_length(startup, 1L)
+  expect_identical(startup[[1L]]$metrics$outcome, "success")
+  expect_identical(startup[[1L]]$metrics$connectionKind, "cold")
+  expect_true(all(vapply(
+    startup[[1L]]$metrics[c("durationUs", "connectDurationUs", "postConnectDurationUs")],
+    function(value) is.numeric(value) && length(value) == 1L && value >= 0,
+    logical(1)
+  )))
+})
+
+
+test_that("startup summary distinguishes reused clients from dead-client cold reconnects", {
+  skip_if_not_installed("ClaudeAgentSDK")
+  queue <- list()
+  clients <- list()
+  factory <- function(options) {
+    client <- new.env(parent = emptyenv())
+    client$alive <- FALSE
+    client$connect <- function() client$alive <- TRUE
+    client$is_alive <- function() client$alive
+    client$disconnect <- function() client$alive <- FALSE
+    client$send <- function(content) invisible(NULL)
+    client$interrupt <- function() invisible(NULL)
+    client$get_server_info <- function() list()
+    client$poll_messages <- function() {
+      value <- queue
+      queue <<- list()
+      value
+    }
+    clients[[length(clients) + 1L]] <<- client
+    client
+  }
+  local_mocked_bindings(
+    .new_claude_options = function(...) list(...),
+    .new_claude_client = factory,
+    .claude_idle_start_delay_seconds = function() 3600,
+    .package = "shinyAssistantUI"
+  )
+  handler <- make_claude_handler(session_map_path = tempfile(fileext = ".rds"))
+  on.exit(attr(handler, "cleanup")(), add = TRUE)
+  summaries <- list()
+  noop <- function(...) invisible(NULL)
+  run_turn <- function(index) {
+    queue <<- list(ClaudeAgentSDK::ResultMessage(
+      subtype = "success", duration_ms = 1, duration_api_ms = 1,
+      is_error = FALSE, num_turns = 1, session_id = "startup-kind-session",
+      result = paste("Complete", index), total_cost_usd = 0, usage = list()
+    ))
+    observed <- foreground_pump_observe(handler(
+      message = paste("turn", index), thread_id = "startup-kind", attachments = list(),
+      on_chunk = noop, on_done = noop, on_error = function(message) stop(message),
+      on_tool_call = noop, on_tool_result = noop, on_thinking = noop,
+      is_cancelled = function() FALSE,
+      wait_for_approval = function(...) stop("Unexpected approval"),
+      on_diagnostics = function(event, metrics) {
+        if (identical(event, "claude_startup_summary")) {
+          summaries[[length(summaries) + 1L]] <<- metrics
+        }
+      }
+    ))
+    foreground_pump_drain(function() observed$settled == 1L)
+    expect_null(observed$error)
+  }
+
+  run_turn(1L)
+  run_turn(2L)
+  clients[[1L]]$alive <- FALSE
+  run_turn(3L)
+
+  expect_identical(vapply(summaries, `[[`, "", "connectionKind"), c(
+    "cold", "reused", "cold"
+  ))
+  expect_length(clients, 2L)
+})

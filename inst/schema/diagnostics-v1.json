@@ -8,6 +8,8 @@
     "shiny_disconnected": {},
     "run_state": {"phase": {"type": "enum", "values": ["queued", "connecting", "running", "complete", "error", "cancelled"]}},
     "run_stage": {"stage": {"type": "enum", "values": ["streaming", "finalizing"]}},
+    "claude_startup_summary": {"outcome": {"type": "enum", "values": ["success", "error", "cancelled"]}, "connectionKind": {"type": "enum", "values": ["cold", "reused"]}, "durationUs": {"type": "safe-int"}, "connectDurationUs": {"type": "safe-int"}, "postConnectDurationUs": {"type": "safe-int"}},
+    "history_reconciliation_summary": {"outcome": {"type": "enum", "values": ["success", "timeout", "stale", "publish_error"]}, "durationUs": {"type": "safe-int"}, "attemptCount": {"type": "safe-int"}, "readErrorCount": {"type": "safe-int"}, "stableReadCount": {"type": "safe-int"}, "requirement": {"type": "enum", "values": ["none", "stable", "observed", "advanced"]}},
     "chunk_summary": {"count": {"type": "safe-int"}, "bytes": {"type": "safe-int"}},
     "tool_delta_summary": {"count": {"type": "safe-int"}, "bytes": {"type": "safe-int"}, "toolCount": {"type": "safe-int"}},
     "tool_summary": {"count": {"type": "safe-int"}, "durationUs": {"type": "safe-int"}, "outcome": {"type": "enum", "values": ["success", "error", "cancelled", "denied", "unknown"]}},

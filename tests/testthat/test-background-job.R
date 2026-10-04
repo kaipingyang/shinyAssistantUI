@@ -127,13 +127,14 @@ test_that("first launch captures Job ID, lifecycle record, and legacy return fie
   seen <- new.env(parent = emptyenv())
   registry <- .bg_registry()
   startup <- tempfile("neutral-job-")
+  lifecycle_log <- tempfile(fileext = ".log")
   res <- shinyAssistantUI:::.run_claude_bg_job(
     spec, host = "127.0.0.1", port = 4321L, libpaths = c("/lib/x"),
     registry = registry,
     nonce_factory = function() "chat-nonce",
     startup_dir_factory = function(...) { dir.create(startup, mode = "0700"); startup },
     package_identity = list(path = "/lib/x/shinyAssistantUI", version = "9.8.7"),
-    log_path = "/tmp/chat-lifecycle.log",
+    log_path = lifecycle_log,
     job_run = function(path, name, workingDir) {
       seen$path <- path; seen$name <- name; seen$wd <- workingDir
       "JOB-CHAT-1"
@@ -169,6 +170,10 @@ test_that("first launch captures Job ID, lifecycle record, and legacy return fie
   expect_identical(record$status, "ready")
   expect_identical(record$generation, 1L)
   expect_identical(record$startup_dir, startup)
+  lifecycle <- readLines(lifecycle_log, warn = FALSE)
+  ready <- lifecycle[grepl("event=ready", lifecycle, fixed = TRUE)]
+  expect_length(ready, 1L)
+  expect_match(ready, "duration_ms=[0-9]+", perl = TRUE)
 })
 
 test_that("healthy identical Chat and Workspace reopen without duplicate launch", {
@@ -726,4 +731,19 @@ test_that("v2 Background Job child never re-reads changed diagnostics environmen
     diagnostics = explicit
   )
   expect_identical(captured$diagnostics, explicit)
+})
+
+
+test_that("lifecycle log records only an allowlisted aggregate duration", {
+  path <- tempfile(fileext = ".log")
+  secret <- "DO_NOT_LOG_duration_secret"
+  expect_silent(shinyAssistantUI:::.claude_bg_log_event(
+    path, "ready", mode = "chat", generation = 1L,
+    nonce = "safe-nonce", port = 5001L, duration_ms = 4812L,
+    condition = simpleError(secret)
+  ))
+  text <- paste(readLines(path, warn = FALSE), collapse = "\n")
+  expect_match(text, "event=ready", fixed = TRUE)
+  expect_match(text, "duration_ms=4812", fixed = TRUE)
+  expect_false(grepl(secret, text, fixed = TRUE))
 })
