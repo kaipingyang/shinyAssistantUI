@@ -2,7 +2,26 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
-import { deferAssistantViewportResize } from "../vite.config.mts";
+import {
+  deferAssistantViewportResize,
+  inlineGenerativeUiNodeEnv,
+} from "../vite.config.mts";
+
+describe("react-generative-ui browser environment compatibility", () => {
+  it("inlines bracket NODE_ENV only inside the verified upstream package", () => {
+    const source = 'if (process.env["NODE_ENV"] !== "production") warn();\n' +
+      "if (process.env['NODE_ENV'] !== 'production') warn();";
+    expect(inlineGenerativeUiNodeEnv(source, "/srcjs/runtime.ts")).toBeNull();
+    const result = inlineGenerativeUiNodeEnv(
+      source,
+      "/node_modules/@assistant-ui/react-generative-ui/dist/actionRegistry.js",
+    );
+    expect(result?.code).not.toContain("process.env");
+    expect(result?.code).toContain('if ("production" !== "production")');
+    expect(result?.code).toContain("if (\"production\" !== 'production')");
+  });
+});
+
 
 const moduleId = "/node_modules/@assistant-ui/react/dist/utils/hooks/useOnResizeContent.js";
 

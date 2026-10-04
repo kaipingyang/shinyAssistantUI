@@ -57,3 +57,91 @@ describe("A2UI runtime renderer safety", () => {
     });
   });
 });
+
+
+it("keeps A2UI inputs, sibling bindings, and action context on one live local model", () => {
+  const dispatch = vi.fn();
+  const operations = [
+    { version: "v0.9", createSurface: { surfaceId: "surface-form" } },
+    { version: "v0.9", updateComponents: {
+      surfaceId: "surface-form",
+      components: [
+        { id: "root", component: "Column", children: ["field", "mirror", "submit"] },
+        { id: "field", component: "TextField", label: "Name", value: { path: "/name" } },
+        { id: "mirror", component: "Text", text: { path: "/name" } },
+        { id: "submit", component: "Button", text: "Submit", action: {
+          event: { name: "submit", context: { name: { path: "/name" } } },
+        } },
+      ],
+    } },
+    { version: "v0.9", updateDataModel: {
+      surfaceId: "surface-form", path: "/", contents: { name: "Ada" },
+    } },
+  ];
+  const view = render(
+    <A2uiRuntimeView
+      surfaceId="surface-form"
+      spec={{ $type: "Text", value: "fallback" }}
+      operations={operations}
+      dispatch={dispatch}
+    />,
+  );
+  const input = view.getByRole("textbox", { name: "Name" }) as HTMLInputElement;
+  expect(input.value).toBe("Ada");
+  expect(view.getByText("Ada")).toBeTruthy();
+  fireEvent.change(input, { target: { value: "Grace" } });
+  expect(input.value).toBe("Grace");
+  expect(view.getByText("Grace")).toBeTruthy();
+  fireEvent.click(view.getByRole("button", { name: "Submit" }));
+  expect(dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    type: "a2ui:action", name: "submit", surfaceId: "surface-form",
+    sourceComponentId: "submit", context: { name: "Grace" },
+  }));
+});
+
+
+it("preserves local edits across unrelated agent updates and yields on same-path updates", () => {
+  const operations = (name: string, status: string) => [
+    { version: "v0.9", createSurface: { surfaceId: "surface-reconcile" } },
+    { version: "v0.9", updateComponents: {
+      surfaceId: "surface-reconcile",
+      components: [
+        { id: "root", component: "Column", children: ["field", "mirror", "status"] },
+        { id: "field", component: "TextField", label: "Name", value: { path: "/name" } },
+        { id: "mirror", component: "Text", text: { path: "/name" } },
+        { id: "status", component: "Text", text: { path: "/status" } },
+      ],
+    } },
+    { version: "v0.9", updateDataModel: {
+      surfaceId: "surface-reconcile", path: "/", contents: { name, status },
+    } },
+  ];
+  const view = render(
+    <A2uiRuntimeView
+      surfaceId="surface-reconcile" spec={{}}
+      operations={operations("Ada", "first")}
+    />,
+  );
+  const input = view.getByRole("textbox", { name: "Name" }) as HTMLInputElement;
+  fireEvent.change(input, { target: { value: "Grace" } });
+  expect(input.value).toBe("Grace");
+
+  view.rerender(
+    <A2uiRuntimeView
+      surfaceId="surface-reconcile" spec={{}}
+      operations={operations("Ada", "second")}
+    />,
+  );
+  expect((view.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Grace");
+  expect(view.getByText("Grace")).toBeTruthy();
+  expect(view.getByText("second")).toBeTruthy();
+
+  view.rerender(
+    <A2uiRuntimeView
+      surfaceId="surface-reconcile" spec={{}}
+      operations={operations("Agent", "third")}
+    />,
+  );
+  expect((view.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Agent");
+  expect(view.getByText("Agent")).toBeTruthy();
+});

@@ -44,6 +44,7 @@ import {
 } from "@assistant-ui/react-generative-ui/a2ui";
 
 const CATALOG = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
+const CATALOG_091 = "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json";
 
 const create = (surfaceId = "surface-1") => ({
   version: "v0.9" as const,
@@ -105,11 +106,17 @@ describe("stable JSON SHA-256", () => {
   });
 });
 
-describe("strict envelope and raw-v0.9 validation", () => {
+describe("strict envelope and v0.9-family validation", () => {
   it("accepts only the exact transport envelope and canonical catalog", () => {
     expect(validateA2uiEnvelope(envelope(1)).ok).toBe(true);
     expect(validateA2uiEnvelope(envelope(1, [
       { version: "v0.9", createSurface: { surfaceId: "s", catalogId: CATALOG } },
+    ])).ok).toBe(true);
+
+    expect(validateA2uiEnvelope(envelope(1, [
+      { version: "v0.9.1", createSurface: {
+        surfaceId: "s", catalogId: CATALOG_091, sendDataModel: false,
+      } },
     ])).ok).toBe(true);
 
     const cases: unknown[] = [
@@ -117,8 +124,10 @@ describe("strict envelope and raw-v0.9 validation", () => {
       { ...envelope(1), extra: true },
       { ...envelope(1), sequence: 0 },
       { ...envelope(1), eventId: "" },
-      envelope(1, [{ version: "v0.9.1", createSurface: { surfaceId: "s" } }]),
       envelope(1, [{ version: "v1.0", createSurface: { surfaceId: "s" } }]),
+      envelope(1, [{ version: "v0.9.1", createSurface: {
+        surfaceId: "s", catalogId: CATALOG_091, sendDataModel: true,
+      } }]),
       envelope(1, [{ version: "v0.9", createSurface: { surfaceId: "s", catalogId: `${CATALOG}/` } }]),
       envelope(1, [{ version: "v0.9", createSurface: { surfaceId: "s", catalogId: `${CATALOG}?x=1` } }]),
       envelope(1, [{ version: "v0.9", createSurface: { surfaceId: "s" }, deleteSurface: { surfaceId: "s" } }]),
@@ -135,6 +144,24 @@ describe("strict envelope and raw-v0.9 validation", () => {
       } }]),
     ];
     for (const candidate of cases) expect(validateA2uiEnvelope(candidate).ok).toBe(false);
+  });
+
+  it("accepts standard child and direct template relative bindings", () => {
+    const operations = [
+      { version: "v0.9.1", createSurface: { surfaceId: "s", catalogId: CATALOG_091 } },
+      { version: "v0.9.1", updateComponents: {
+        surfaceId: "s",
+        components: [
+          { id: "root", component: "Card", child: "list" },
+          { id: "list", component: "List", children: { componentId: "row", path: "/items" } },
+          { id: "row", component: "Text", text: { path: "name" } },
+        ],
+      } },
+      { version: "v0.9.1", updateDataModel: {
+        surfaceId: "s", path: "/", value: { items: [{ name: "Ada" }] },
+      } },
+    ];
+    expect(validateA2uiEnvelope(envelope(1, operations)).ok).toBe(true);
   });
 
   it("enforces operation, surface, component, string, depth, and envelope limits", () => {
@@ -168,7 +195,7 @@ describe("strict envelope and raw-v0.9 validation", () => {
 });
 
 describe("synchronous prepare and commit state machine", () => {
-  it("uses the published 0.0.21 reducer, converter and snapshot functions by default", () => {
+  it("uses the published 0.0.22 reducer, converter and snapshot functions by default", () => {
     upstreamSpies.reducer.mockClear();
     upstreamSpies.converter.mockClear();
     upstreamSpies.snapshot.mockClear();
@@ -214,13 +241,13 @@ describe("synchronous prepare and commit state machine", () => {
     expect(sequenceConflict.getThread("thread-1")?.lastAcceptedSequence).toBe(1);
   });
 
-  it("does not consume invalid batches, but consumes reducer missing-surface no-ops", () => {
+  it("does not consume invalid batches or missing-surface updates", () => {
     const controller = liveController();
     const invalid = envelope(1, [{ version: "v1.0", deleteSurface: { surfaceId: "missing" } }]);
     expect(controller.acceptEnvelope(invalid).status).toBe("rejected");
     expect(controller.getThread("thread-1")?.lastAcceptedSequence ?? 0).toBe(0);
-    expect(controller.acceptEnvelope(envelope(1, [data(1, "missing")])).status).toBe("accepted");
-    expect(controller.getThread("thread-1")?.lastAcceptedSequence).toBe(1);
+    expect(controller.acceptEnvelope(envelope(1, [data(1, "missing")])).status).toBe("rejected");
+    expect(controller.getThread("thread-1")?.lastAcceptedSequence ?? 0).toBe(0);
   });
 
   it("enforces active run create preconditions while allowing later update/delete", () => {
@@ -234,20 +261,25 @@ describe("synchronous prepare and commit state machine", () => {
     expect(controller.getSurface("thread-1", "late")).toBeUndefined();
   });
 
-  it("creates, updates, deletes, and resets an incarnation while preserving its anchor", () => {
+  it("rejects active duplicate create and allows delete-then-recreate", () => {
     const controller = liveController();
     controller.acceptEnvelope(envelope(1));
     expect(acceptedSurface(controller)).toMatchObject({
       epoch: 1, revision: 1, anchor: { runId: "run-1", messageId: "message-1" },
     });
-    controller.acceptEnvelope(envelope(2, [create(), root("surface-1", "reset")], { eventId: "reset" }));
-    expect(acceptedSurface(controller)).toMatchObject({
-      epoch: 2, revision: 2, anchor: { runId: "run-1", messageId: "message-1" },
-    });
-    expect(controller.acceptEnvelope(envelope(3, [remove()]))).toMatchObject({ status: "accepted" });
-    expect(controller.getSurface("thread-1", "surface-1")).toBeUndefined();
+    expect(controller.acceptEnvelope(envelope(2, [create(), root("surface-1", "reset")], {
+      eventId: "duplicate-create",
+    })).status).toBe("rejected");
+    expect(controller.getThread("thread-1")?.lastAcceptedSequence).toBe(1);
+    expect(controller.acceptEnvelope(envelope(2, [remove()]))).toMatchObject({ status: "accepted" });
     expect(controller.getThread("thread-1")?.lineage.get("surface-1")).toMatchObject({
-      epoch: 2, revision: 3, deletedAtSequence: 3,
+      epoch: 1, revision: 2, deletedAtSequence: 2,
+    });
+    expect(controller.acceptEnvelope(envelope(3, [create(), root("surface-1", "recreated")], {
+      eventId: "recreate",
+    })).status).toBe("accepted");
+    expect(acceptedSurface(controller)).toMatchObject({
+      epoch: 3, revision: 3, anchor: { runId: "run-1", messageId: "message-1" },
     });
   });
 
@@ -748,4 +780,19 @@ describe("renderer safety and transactional fault containment", () => {
     expect(ref.current.threads.get("thread-1")?.lastAcceptedSequence).toBe(1);
     expect(committed.messages.size).toBeGreaterThan(0);
   });
+});
+
+
+it("normalizes accepted v0.9.1 wire operations to v0.9 canonical snapshots", () => {
+  const controller = liveController();
+  const operations = [
+    { version: "v0.9.1", createSurface: { surfaceId: "surface-1", catalogId: CATALOG_091 } },
+    { version: "v0.9.1", updateComponents: {
+      surfaceId: "surface-1", components: [{ id: "root", component: "Text", text: "v091" }],
+    } },
+  ];
+  expect(controller.acceptEnvelope(envelope(1, operations)).status).toBe("accepted");
+  const snapshot = acceptedSurface(controller).part.a2ui.snapshot as Array<{ version?: unknown }>;
+  expect(snapshot.every((operation) => operation.version === "v0.9")).toBe(true);
+  expect(acceptedSurface(controller).part.a2ui.protocolVersion).toBe("v0.9");
 });

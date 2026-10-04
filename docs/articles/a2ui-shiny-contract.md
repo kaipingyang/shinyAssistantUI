@@ -1,12 +1,15 @@
-# A2UI over Shiny: future design contract
+# A2UI over Shiny: implementation and safety contract
 
 ## Status
 
-> **Future design, not a supported capability.** `shinyAssistantUI` does
-> not currently implement A2UI or AG-UI, does not export the proposed R
-> callbacks on this page, and does not install an A2UI or AG-UI adapter.
-> This contract records the requirements that must be implemented and
-> verified before the public status can change.
+> **Experimental capability implemented.** `shinyAssistantUI` accepts A2UI v0.9 and
+> v0.9.1 operation streams over its native Shiny transport, canonicalizes persisted
+> snapshots/checkpoints to v0.9, and renders live surfaces through the public
+> `@assistant-ui/react-generative-ui` `JSONGenerativeUI.present()` path. The R entry
+> points are `on_a2ui()`, `send_a2ui()`, `a2ui_checkpoint()`, and
+> `a2ui_action_handler`. A2UI v1.0 remains fail-closed, `sendDataModel` is advertised
+> as unsupported, and this does not claim an AG-UI runtime or the complete official
+> Basic Catalog.
 
 [A2UI](https://a2ui.org/) is a declarative protocol in which an agent
 sends operations that create, update, or delete a UI surface. Components
@@ -15,15 +18,14 @@ over the wire. The assistant-ui documentation demonstrates these
 operations over AG-UI activity snapshots, but the A2UI state reducer and
 surface conversion are separable from that transport.
 
-The selected future direction for this package is therefore **A2UI Core
-over Shiny**:
+The implemented architecture is **A2UI Core over Shiny**:
 
   - retain the native Shiny output binding;
   - retain the custom `ExternalStoreRuntime`;
-  - carry A2UI operation batches and actions through Shiny inputs and
+  - carry validated A2UI operation batches and actions through Shiny inputs and
     custom messages;
-  - evaluate the official A2UI reducer/converter as an exact-version
-    build dependency;
+  - use the exact-version official A2UI reducer/converter and public live present
+    renderer as build dependencies;
   - do not require or claim AG-UI compatibility merely to render A2UI
     surfaces.
 
@@ -31,10 +33,9 @@ over Shiny**:
 
 **Contract revision:** P0-1. **Frozen:** 2026-09-10.
 
-“Frozen” means that implementation work may rely on the decisions below.
-Changing one requires a new documented contract revision and
-compatibility review. It does not mean that A2UI is implemented or
-supported.
+“Frozen” records the compatibility decisions implemented by the current experimental
+transport. Changing one requires a new documented contract revision and compatibility
+review.
 
 The following decisions are frozen for the first implementation:
 
@@ -106,7 +107,7 @@ The paths have different contracts and should remain available together.
 | Data UI                  | Small R-driven named views such as `table`, `stat`, `flow`, and `action-progress` | Supported now           |
 | Generative UI primitive  | A single JSON layout rendered through the local display allowlist                 | Supported now           |
 | Tool UI and `PromptUser` | Tool calls, results, form input, and human approval                               | Supported now           |
-| A2UI Core over Shiny     | Standard surface operations, data binding, actions, and persisted surface state   | Future design           |
+| A2UI Core over Shiny     | v0.9/v0.9.1 surface operations, live data binding, actions, and persisted authority | Experimental, implemented |
 | AG-UI runtime            | AG-UI events, interrupts, state, steering, and run semantics                      | Not adopted             |
 
 A visible converted component is not proof of complete A2UI semantics.
@@ -117,7 +118,7 @@ described below before claiming support.
 
 ``` text
 R backend or application handler
-  -> proposed on_a2ui(operations, event_id, sequence)
+  -> on_a2ui(operations, event_id, sequence)
   -> Shiny custom message
   -> thread-scoped surface store
   -> apply validated A2UI operations
@@ -127,7 +128,7 @@ R backend or application handler
 A2UI component action
   -> fixed action registry
   -> dedicated Shiny input
-  -> proposed R a2ui_action_handler()
+  -> R a2ui_action_handler()
   -> direct surface update or an application-owned agent continuation
 ```
 
@@ -213,11 +214,9 @@ For delivery reliability:
 These Shiny envelope rules supplement A2UI; they do not redefine the
 operation payload itself.
 
-## Proposed R contract
+## R contract
 
-An ergonomic sender can follow the existing handler callback style. The
-names below are reserved only by this design document and are not
-current exports:
+The implemented sender follows the existing handler callback style:
 
 ``` r
 handler <- function(message, on_chunk, on_done, on_a2ui, ...) {

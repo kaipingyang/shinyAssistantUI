@@ -1,4 +1,5 @@
-# Experimental A2UI raw-v0.9-token transport over the existing Shiny socket.
+# Experimental A2UI v0.9-family transport over the existing Shiny socket.
+# Wire input accepts v0.9/v0.9.1; persisted snapshots/checkpoints remain canonical v0.9.
 
 .a2ui_id <- function(value) {
   is.character(value) && length(value) == 1L && !is.na(value) &&
@@ -19,7 +20,7 @@
 }
 
 .a2ui_operation_kind <- function(operation) {
-  if (!is.list(operation) || !identical(operation$version, "v0.9")) return(NULL)
+  if (!is.list(operation) || !operation$version %in% c("v0.9", "v0.9.1")) return(NULL)
   keys <- setdiff(names(operation), "version")
   if (length(names(operation)) != 2L || length(keys) != 1L ||
       !keys %in% c("createSurface", "updateComponents", "updateDataModel", "deleteSurface")) return(NULL)
@@ -33,8 +34,12 @@
     all(names(value) %in% allowed) && all(required %in% names(value))
 }
 
-.a2ui_pointer_valid <- function(value) {
-  if (!is.character(value) || length(value) != 1L || is.na(value) || !startsWith(value, "/")) return(FALSE)
+.a2ui_pointer_valid <- function(value, allow_relative = FALSE) {
+  if (!is.character(value) || length(value) != 1L || is.na(value)) return(FALSE)
+  if (!startsWith(value, "/")) {
+    if (!isTRUE(allow_relative) || !nzchar(value)) return(FALSE)
+    value <- paste0("/", value)
+  }
   if (identical(value, "/")) return(TRUE)
   raw <- strsplit(substring(value, 2L), "/", fixed = TRUE)[[1L]]
   if (any(grepl("~([^01]|$)", raw, perl = TRUE))) return(FALSE)
@@ -47,7 +52,7 @@
   nms <- names(value)
   for (i in seq_along(value)) {
     if (!is.null(nms) && identical(nms[[i]], "path")) {
-      if (!.a2ui_pointer_valid(value[[i]])) return(FALSE)
+      if (!.a2ui_pointer_valid(value[[i]], allow_relative = TRUE)) return(FALSE)
     } else if (!.a2ui_embedded_pointers_valid(value[[i]])) return(FALSE)
   }
   TRUE
@@ -55,8 +60,10 @@
 
 .a2ui_validate_components <- function(components) {
   allowed <- c("Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider",
-               "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput")
-  if (!is.list(components) || length(components) > 500L) stop("A2UI components are invalid.", call. = FALSE)
+               "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput", "Slider")
+  if (!is.list(components) || !is.null(names(components)) || length(components) > 500L) {
+    stop("A2UI components are invalid.", call. = FALSE)
+  }
   ids <- character()
   for (component in components) {
     if (!is.list(component) || !.a2ui_id(component$id) ||
@@ -69,14 +76,17 @@
   if (anyDuplicated(ids)) stop("A2UI component ids must be unique.", call. = FALSE)
   by_id <- setNames(components, ids)
   references <- function(component) {
+    result <- character()
+    if (.a2ui_id(component$child)) result <- c(result, component$child)
     children <- component$children
-    if (is.list(children) && is.list(children$template) && .a2ui_id(children$template$componentId)) {
-      return(children$template$componentId)
+    if (is.list(children) && !is.null(names(children))) {
+      template <- if (is.list(children$template)) children$template else children
+      if (.a2ui_id(template$componentId)) result <- c(result, template$componentId)
     }
     if (is.list(children) && is.null(names(children))) {
-      return(vapply(Filter(.a2ui_id, children), as.character, ""))
+      result <- c(result, vapply(Filter(.a2ui_id, children), as.character, ""))
     }
-    character()
+    result
   }
   visit <- function(id, active = character(), depth = 0L) {
     if (depth > 32L) stop("A2UI component tree exceeds depth 32.", call. = FALSE)
@@ -90,17 +100,32 @@
   invisible(TRUE)
 }
 .a2ui_validate_operations <- function(operations) {
-  if (!is.list(operations) || length(operations) > 64L || !.a2ui_json_safe(operations)) {
+  if (!is.list(operations) || !is.null(names(operations)) ||
+      length(operations) > 64L || !.a2ui_json_safe(operations)) {
     stop("A2UI operations must be bounded plain JSON.", call. = FALSE)
   }
   kinds <- vapply(operations, function(operation) {
     kind <- .a2ui_operation_kind(operation)
-    if (is.null(kind)) stop("A2UI operation must contain exact raw v0.9 and one standard key.", call. = FALSE)
+    if (is.null(kind)) stop("A2UI operation must contain v0.9/v0.9.1 and one standard key.", call. = FALSE)
     payload <- operation[[kind]]
     if (identical(kind, "createSurface")) {
-      if (!.a2ui_exact_names(payload, c("surfaceId", "catalogId", "theme", "attachDataModel"), "surfaceId") ||
-          ("catalogId" %in% names(payload) && !identical(payload$catalogId, "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"))) {
+      if (!.a2ui_exact_names(payload, c(
+            "surfaceId", "catalogId", "theme", "attachDataModel", "sendDataModel"
+          ), "surfaceId")) {
         stop("A2UI createSurface payload is invalid.", call. = FALSE)
+      }
+      catalogs <- c(
+        "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+        "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json"
+      )
+      catalog_valid <- !("catalogId" %in% names(payload)) ||
+        (is.character(payload$catalogId) && length(payload$catalogId) == 1L &&
+         !is.na(payload$catalogId) && payload$catalogId %in% catalogs)
+      if (!catalog_valid ||
+          isTRUE(payload$sendDataModel) || isTRUE(payload$attachDataModel) ||
+          ("sendDataModel" %in% names(payload) && !identical(payload$sendDataModel, FALSE)) ||
+          ("attachDataModel" %in% names(payload) && !identical(payload$attachDataModel, FALSE))) {
+        stop("A2UI sendDataModel is unsupported or catalogId is invalid.", call. = FALSE)
       }
     } else if (identical(kind, "updateComponents")) {
       if (!.a2ui_exact_names(payload, c("surfaceId", "components"))) stop("A2UI updateComponents payload is invalid.", call. = FALSE)
@@ -177,6 +202,48 @@
     value
   }
   set_at(model, parts)
+}
+
+.a2ui_project_action_context <- function(template, submitted) {
+  project <- function(expected, actual, depth = 0L) {
+    if (depth > 32L || (is.list(expected) && !is.null(names(expected)) && anyDuplicated(names(expected)))) {
+      return(list(ok = FALSE, value = NULL))
+    }
+    dynamic_path <- is.list(expected) && identical(names(expected), "path") &&
+      .a2ui_pointer_valid(expected$path, allow_relative = TRUE)
+    dynamic_call <- is.list(expected) &&
+      .a2ui_exact_names(expected, c("call", "args", "returnType", "catalogId"), "call") &&
+      is.character(expected$call) && length(expected$call) == 1L &&
+      !is.na(expected$call) && nzchar(expected$call) &&
+      (is.null(expected$args) || (is.list(expected$args) && !is.null(names(expected$args))))
+    if (dynamic_path || dynamic_call) {
+      return(list(ok = .a2ui_json_safe(actual), value = actual))
+    }
+    if (!is.list(expected)) return(list(ok = TRUE, value = expected))
+    if (!is.list(actual)) return(list(ok = FALSE, value = NULL))
+    expected_names <- names(expected)
+    actual_names <- names(actual)
+    if (is.null(expected_names) != is.null(actual_names)) {
+      return(list(ok = FALSE, value = NULL))
+    }
+    if (is.null(expected_names)) {
+      if (length(expected) != length(actual)) return(list(ok = FALSE, value = NULL))
+      values <- Map(function(left, right) project(left, right, depth + 1L), expected, actual)
+      if (!all(vapply(values, `[[`, logical(1), "ok"))) return(list(ok = FALSE, value = NULL))
+      return(list(ok = TRUE, value = lapply(values, `[[`, "value")))
+    }
+    if (anyDuplicated(actual_names) || !setequal(expected_names, actual_names)) {
+      return(list(ok = FALSE, value = NULL))
+    }
+    values <- lapply(expected_names, function(name) {
+      project(expected[[name]], actual[[name]], depth + 1L)
+    })
+    if (!all(vapply(values, `[[`, logical(1), "ok"))) return(list(ok = FALSE, value = NULL))
+    result <- lapply(values, `[[`, "value")
+    names(result) <- expected_names
+    list(ok = TRUE, value = result)
+  }
+  project(template, submitted)
 }
 
 .a2ui_materialize_context <- function(value, model) {
@@ -293,6 +360,26 @@
     }
   }
 
+  validate_lifecycle <- function(state, operations) {
+    ids <- ls(state$surfaces, all.names = TRUE)
+    live <- ids[vapply(ids, function(id) {
+      !isTRUE(get(id, envir = state$surfaces, inherits = FALSE)$deleted)
+    }, logical(1))]
+    for (index in seq_along(operations)) {
+      operation <- operations[[index]]
+      kind <- .a2ui_operation_kind(operation)
+      id <- operation[[kind]]$surfaceId
+      if (identical(kind, "createSurface")) {
+        if (id %in% live) stop("A2UI surface is already active.", call. = FALSE)
+        live <- union(live, id)
+      } else {
+        if (!id %in% live) stop("A2UI operation references a missing surface.", call. = FALSE)
+        if (identical(kind, "deleteSurface")) live <- setdiff(live, id)
+      }
+    }
+    invisible(TRUE)
+  }
+
   checkpoint <- function(thread_id) {
     state <- thread_state(thread_id)
     lineage <- lapply(ls(state$surfaces, all.names = TRUE), function(surface_id) {
@@ -356,6 +443,7 @@
     if (length(sequence) != 1L || !is.finite(sequence) || sequence != expected || sequence %% 1 != 0) {
       stop("A2UI sequence must equal the next authoritative sequence.", call. = FALSE)
     }
+    validate_lifecycle(state, operations)
     tombstone_ids <- ls(state$surfaces, all.names = TRUE)
     known_ids <- tombstone_ids
     tombstones <- setNames(vapply(tombstone_ids, function(id) {
@@ -572,6 +660,10 @@
         !identical(action$name, message$name)) {
       return(reject("Stale or unauthorized A2UI action."))
     }
+    projected_context <- .a2ui_project_action_context(action$context, message$context)
+    if (!isTRUE(projected_context$ok)) {
+      return(reject("A2UI action context does not match its declaration."))
+    }
     rate_key <- paste(ui_owner, message$threadId, message$surfaceId, sep = "\u001f")
     recent <- get0(rate_key, envir = action_times, inherits = FALSE) %||% numeric()
     recent <- recent[recent >= now() - 10]
@@ -599,7 +691,7 @@
     result <- tryCatch(
       .call_compatible_callback(action_handler, list(
         name = message$name, input = message$input,
-        context = .a2ui_materialize_context(action$context, surface$dataModel),
+        context = projected_context$value,
         thread_id = message$threadId, surface_id = message$surfaceId,
         source_component_id = message$sourceComponentId,
         on_a2ui = on_a2ui, on_error = on_error

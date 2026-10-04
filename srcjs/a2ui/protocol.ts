@@ -24,10 +24,14 @@ export const A2UI_LIMITS = Object.freeze({
 
 export const A2UI_CATALOG =
   "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
+export const A2UI_CATALOG_091 =
+  "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json";
+const A2UI_CATALOGS = new Set([A2UI_CATALOG, A2UI_CATALOG_091]);
+const A2UI_WIRE_VERSIONS = new Set(["v0.9", "v0.9.1"]);
 
 const INPUT_COMPONENTS = new Set([
   "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider",
-  "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput",
+  "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput", "Slider",
 ]);
 const OUTPUT_COMPONENTS = new Set([
   "Header", "Text", "Caption", "Image", "Divider", "Button", "Select",
@@ -367,10 +371,13 @@ function decodePointer(path: string): string[] | undefined {
   return result;
 }
 
-function validatePointer(path: unknown): string | undefined {
+function validatePointer(path: unknown, allowRelative = false): string | undefined {
   if (typeof path !== "string") return "JSON Pointer must be a string.";
-  const segments = decodePointer(path);
-  if (!segments) return "JSON Pointer must be a standard absolute path.";
+  const normalized = allowRelative && !path.startsWith("/") ? `/${path}` : path;
+  const segments = decodePointer(normalized);
+  if (!segments) return allowRelative
+    ? "Data binding path is malformed."
+    : "JSON Pointer must be a standard absolute path.";
   if (segments.some((segment) => UNSAFE_SEGMENTS.has(segment))) return "JSON Pointer contains an unsafe segment.";
   return undefined;
 }
@@ -384,7 +391,7 @@ function validateEmbeddedPointers(value: unknown): string | undefined {
   } else if (isPlainRecord(value)) {
     for (const [key, entry] of Object.entries(value)) {
       if (key === "path") {
-        const error = validatePointer(entry);
+        const error = validatePointer(entry, true);
         if (error) return error;
       } else {
         const error = validateEmbeddedPointers(entry);
@@ -397,10 +404,14 @@ function validateEmbeddedPointers(value: unknown): string | undefined {
 
 function componentReferences(component: Record<string, unknown>): string[] {
   const refs: string[] = [];
+  if (typeof component.child === "string") refs.push(component.child);
   if (Array.isArray(component.children)) {
     for (const child of component.children) if (typeof child === "string") refs.push(child);
-  } else if (isPlainRecord(component.children) && isPlainRecord(component.children.template)) {
-    const id = component.children.template.componentId;
+  } else if (isPlainRecord(component.children)) {
+    const template = isPlainRecord(component.children.template)
+      ? component.children.template
+      : component.children;
+    const id = template.componentId;
     if (typeof id === "string") refs.push(id);
   }
   return refs;
@@ -449,7 +460,10 @@ function validateOperations(operations: unknown, snapshot = false): { error?: st
   const kinds = new Map<string, Set<OperationKind>>();
   for (let index = 0; index < operations.length; index++) {
     const operation = operations[index];
-    if (!isPlainRecord(operation) || operation.version !== "v0.9") return { error: `Operation ${index} must use exact raw v0.9.` };
+    if (!isPlainRecord(operation) || typeof operation.version !== "string" ||
+        !A2UI_WIRE_VERSIONS.has(operation.version)) {
+      return { error: `Operation ${index} must use v0.9 or v0.9.1.` };
+    }
     const operationKeys = Object.keys(operation).filter((key) => key !== "version");
     if (Object.keys(operation).length !== 2 || operationKeys.length !== 1 || !OPERATION_KINDS.includes(operationKeys[0] as OperationKind)) {
       return { error: `Operation ${index} must contain exactly one standard operation key.` };
@@ -463,8 +477,22 @@ function validateOperations(operations: unknown, snapshot = false): { error?: st
     touched.add(kind);
     kinds.set(surfaceId, touched);
     if (kind === "createSurface") {
-      if (!exactKeys(payload, ["surfaceId", "catalogId", "theme", "attachDataModel"], ["surfaceId"])) return { error: "createSurface has unsupported fields." };
-      if (payload.catalogId !== undefined && payload.catalogId !== A2UI_CATALOG) return { error: "catalogId is not the canonical v0.9 catalog." };
+      if (!exactKeys(payload, [
+        "surfaceId", "catalogId", "theme", "attachDataModel", "sendDataModel",
+      ], ["surfaceId"])) return { error: "createSurface has unsupported fields." };
+      if (payload.catalogId !== undefined &&
+          (typeof payload.catalogId !== "string" || !A2UI_CATALOGS.has(payload.catalogId))) {
+        return { error: "catalogId is not a supported A2UI basic catalog." };
+      }
+      if (payload.sendDataModel === true || payload.attachDataModel === true) {
+        return { error: "sendDataModel is not supported by this renderer." };
+      }
+      if (payload.sendDataModel !== undefined && payload.sendDataModel !== false) {
+        return { error: "sendDataModel must be false when provided." };
+      }
+      if (payload.attachDataModel !== undefined && payload.attachDataModel !== false) {
+        return { error: "attachDataModel must be false when provided." };
+      }
     } else if (kind === "updateComponents") {
       if (!exactKeys(payload, ["surfaceId", "components"])) return { error: "updateComponents has unsupported fields." };
       const error = validateComponents(payload.components);
@@ -776,6 +804,32 @@ function canonicalPart(
   };
 }
 
+function validateSurfaceLifecycle(
+  state: A2uiState,
+  operations: readonly unknown[],
+): string | undefined {
+  const live = new Set(state.keys());
+  for (let index = 0; index < operations.length; index++) {
+    const operation = operations[index];
+    if (!isPlainRecord(operation)) return `Operation ${index} is malformed.`;
+    const key = Object.keys(operation).find((entry) => entry !== "version") as OperationKind | undefined;
+    if (!key || !OPERATION_KINDS.includes(key)) return `Operation ${index} is malformed.`;
+    const payload = operation[key];
+    if (!isPlainRecord(payload) || typeof payload.surfaceId !== "string") {
+      return `Operation ${index} has an invalid surfaceId.`;
+    }
+    const id = payload.surfaceId;
+    if (key === "createSurface") {
+      if (live.has(id)) return `Surface "${id}" is already active.`;
+      live.add(id);
+    } else {
+      if (!live.has(id)) return `Operation ${index} references missing surface "${id}".`;
+      if (key === "deleteSurface") live.delete(id);
+    }
+  }
+  return undefined;
+}
+
 export function prepareEnvelopeTransaction(
   current: A2uiControllerState,
   rawEnvelope: unknown,
@@ -812,6 +866,10 @@ export function prepareEnvelopeTransaction(
     const deps = dependencies(options.dependencies);
     let thread = cloneThread(original);
     const info = operationInfo(envelope.operations);
+    const lifecycleError = validateSurfaceLifecycle(
+      currentA2uiState(thread), envelope.operations,
+    );
+    if (lifecycleError) throw new Error(lifecycleError);
     const creates = [...info.values()].some((kinds) => kinds.has("createSurface"));
     let activeRun = thread.activeRunId ? thread.runs.get(thread.activeRunId) : undefined;
     if (creates && (!activeRun || !activeRun.open || activeRun.runId !== envelope.runId)) {
@@ -829,6 +887,7 @@ export function prepareEnvelopeTransaction(
     }
 
     const reduced = deps.reducer(currentA2uiState(thread), envelope.operations);
+    if (reduced.warnings.length > 0) throw new Error(reduced.warnings[0]);
     if (reduced.state.size > A2UI_LIMITS.surfaces) throw new Error(`Thread exceeds ${A2UI_LIMITS.surfaces} surfaces.`);
     for (const surface of reduced.state.values()) {
       if (surface.components.size > A2UI_LIMITS.components) throw new Error(`Surface exceeds ${A2UI_LIMITS.components} components.`);

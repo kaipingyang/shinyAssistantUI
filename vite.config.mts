@@ -40,6 +40,16 @@ export function deferAssistantViewportResize(
   };
 }
 
+export function inlineGenerativeUiNodeEnv(
+  code: string, id: string,
+): { code: string; map: null } | null {
+  if (!id.includes("/node_modules/@assistant-ui/react-generative-ui/")) return null;
+  const next = code
+    .replaceAll('process.env["NODE_ENV"]', '"production"')
+    .replaceAll("process.env['NODE_ENV']", '"production"');
+  return next === code ? null : { code: next, map: null };
+}
+
 export default defineConfig({
   resolve: {
     alias: { "@": resolve(import.meta.dirname, "srcjs") },
@@ -47,6 +57,10 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    {
+      name: "inline-generative-ui-node-env",
+      transform: inlineGenerativeUiNodeEnv,
+    },
     {
       name: "defer-assistant-viewport-resize",
       transform: deferAssistantViewportResize,

@@ -595,8 +595,21 @@ assistantUIServer <- function(id, handler,
   if (!is.null(.ui_addons))       config$addons           <- .ui_addons
   if (is.function(a2ui_action_handler)) {
     config$a2ui <- list(
-      transportVersion = 1L, protocolVersion = "v0.9",
-      schemaVersion = 1L, experimental = TRUE
+      transportVersion = 1L,
+      protocolVersion = "v0.9",
+      wireVersions = list("v0.9.1", "v0.9"),
+      mimeType = "application/a2ui+json",
+      acceptedCatalogIds = list(
+        "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json",
+        "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
+      ),
+      supportedComponents = as.list(c(
+        "Text", "Image", "Icon", "Row", "Column", "List", "Card", "Divider",
+        "Button", "TextField", "CheckBox", "ChoicePicker", "DateTimeInput", "Slider"
+      )),
+      sendDataModel = FALSE,
+      schemaVersion = 1L,
+      experimental = TRUE
     )
   }
   if (!is.null(normalized_theme))  config$theme            <- normalized_theme

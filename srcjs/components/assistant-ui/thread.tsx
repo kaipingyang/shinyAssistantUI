@@ -1281,6 +1281,7 @@ const AssistantMessage: FC = () => {
                       <A2uiRuntimeView
                         spec={canonical.spec}
                         surfaceId={canonical.a2ui.surfaceId}
+                        operations={canonical.a2ui.snapshot}
                         dispatch={dispatchA2uiAction && currentThreadId
                           ? (action) => dispatchA2uiAction(currentThreadId, canonical, action)
                           : undefined}

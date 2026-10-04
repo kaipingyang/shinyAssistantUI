@@ -1,5 +1,16 @@
-import { Component, type CSSProperties, type FC, type ReactNode } from "react";
+import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
+type A2uiRenderJson =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly A2uiRenderJson[]
+  | { readonly [key: string]: A2uiRenderJson };
+type A2uiRenderObject = { readonly [key: string]: A2uiRenderJson };
+import { Component, useMemo, useRef, type CSSProperties, type FC, type ReactNode } from "react";
 import {
+  JSONGenerativeUI,
+  createActionRegistry,
   defaultGenerativeUILibrary,
   renderGenerativeUI,
   type GenerativeUIDispatch,
@@ -19,7 +30,8 @@ class A2uiSurfaceBoundary extends Component<{ children: ReactNode }, { failed: b
 }
 const RUNTIME_COMPONENTS = [
   "Header", "Text", "Caption", "Image", "Divider", "Button", "Select",
-  "Input", "DatePicker", "Checkbox", "RadioGroup", "Card", "Col", "Row",
+  "Input", "DatePicker", "Checkbox", "CheckboxGroup", "RadioGroup", "Slider",
+  "Card", "Col", "Row",
   "ListView", "ListViewItem", "Markdown", "Icon",
 ] as const;
 
@@ -65,10 +77,45 @@ export const a2uiRuntimeLibrary: GenerativeUILibrary = Object.fromEntries(
 export const A2uiRuntimeView: FC<{
   spec: unknown;
   surfaceId: string;
+  operations?: readonly unknown[];
   dispatch?: GenerativeUIDispatch;
-}> = ({ spec, surfaceId, dispatch }) => {
+}> = ({ spec, surfaceId, operations, dispatch }) => {
   const filtered = filterA2uiSpec(spec, surfaceId);
-  if (filtered === null) return null;
+  const dispatchRef = useRef(dispatch);
+  dispatchRef.current = dispatch;
+  const present = useMemo(() => {
+    const generative = new JSONGenerativeUI({
+      library: a2uiRuntimeLibrary,
+      actions: createActionRegistry({
+        "a2ui:action": ({ payload }) => dispatchRef.current?.(payload),
+      }),
+    });
+    return generative.present({ display: "standalone" });
+  }, []);
+  if (filtered === null && !operations) return null;
+  if (operations) {
+    const Present = present.render as ToolCallMessagePartComponent<
+      A2uiRenderObject,
+      unknown
+    >;
+    return (
+      <A2uiSurfaceBoundary>
+        <Present
+          type="tool-call"
+          toolCallId={`a2ui:${surfaceId}`}
+          toolName="present"
+          args={(filtered ?? {}) as A2uiRenderObject}
+          argsText={JSON.stringify(filtered ?? {})}
+          result={{}}
+          artifact={{ a2ui: operations }}
+          status={{ type: "complete" }}
+          addResult={() => undefined}
+          resume={() => undefined}
+          respondToApproval={async () => undefined}
+        />
+      </A2uiSurfaceBoundary>
+    );
+  }
   return (
     <A2uiSurfaceBoundary>
       {renderGenerativeUI(filtered, a2uiRuntimeLibrary, {

@@ -1,3 +1,4 @@
+import { classifyCanonicalPart } from "@/a2ui/protocol";
 "use client";
 
 import {
@@ -43,6 +44,7 @@ type WindowProps = {
 const MessageContext = createContext<{
   Message: ComponentType;
   pinEditing: (id: string, editing: boolean) => void;
+  pinA2ui: (id: string, pinned: boolean) => void;
 } | null>(null);
 
 const WindowMessage = () => {
@@ -50,11 +52,17 @@ const WindowMessage = () => {
   if (!context) throw new Error("WindowMessage requires a message window");
   const id = useAuiState((s) => s.message.id);
   const editing = useAuiState((s) => s.message.composer.isEditing);
-  const { Message, pinEditing } = context;
+  const hasA2ui = useAuiState((s) =>
+    s.message.content.some((part) => classifyCanonicalPart(part) === "valid"),
+  );
+  const { Message, pinEditing, pinA2ui } = context;
   useLayoutEffect(() => {
     pinEditing(id, editing);
     return () => pinEditing(id, false);
   }, [id, editing, pinEditing]);
+  useLayoutEffect(() => {
+    pinA2ui(id, hasA2ui);
+  }, [hasA2ui, id, pinA2ui]);
   return <Message />;
 };
 const MESSAGE_COMPONENTS = { Message: WindowMessage };
@@ -102,6 +110,7 @@ const MessageWindow = memo(({
   const [heightRevision, setHeightRevision] = useState(0);
   const [view, setView] = useState({ top: 0, height: 600 });
   const [editingIds, setEditingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [a2uiIds, setA2uiIds] = useState<ReadonlySet<string>>(() => new Set());
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const layout = useMemo(
     () => buildMessageLayout(ids, heightsRef.current, 120, MESSAGE_GAP),
@@ -112,6 +121,7 @@ const MessageWindow = memo(({
   const windowTop = restoreMessageAnchor(layout, anchor) ?? view.top;
   const items = useMemo(() => {
     const pinnedIds = new Set(editingIds);
+    for (const id of a2uiIds) pinnedIds.add(id);
     if (focusedId) pinnedIds.add(focusedId);
     // Select the corrected window before React can unmount the reading anchor.
     if (anchor) pinnedIds.add(anchor.id);
@@ -121,7 +131,7 @@ const MessageWindow = memo(({
       tail: TAIL_MOUNTED,
       pinnedIds,
     });
-  }, [layout, windowTop, view.height, ids.length, editingIds, focusedId, anchor]);
+  }, [layout, windowTop, view.height, ids.length, editingIds, a2uiIds, focusedId, anchor]);
 
   const pinEditing = useCallback((id: string, editing: boolean) => {
     setEditingIds((previous) => {
@@ -132,7 +142,28 @@ const MessageWindow = memo(({
       return next;
     });
   }, []);
-  const context = useMemo(() => ({ Message, pinEditing }), [Message, pinEditing]);
+  const pinA2ui = useCallback((id: string, pinned: boolean) => {
+    setA2uiIds((previous) => {
+      if (previous.has(id) === pinned) return previous;
+      const next = new Set(previous);
+      if (pinned) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    const present = new Set(ids);
+    setA2uiIds((previous) => {
+      const next = new Set([...previous].filter((id) => present.has(id)));
+      return next.size === previous.size && [...next].every((id) => previous.has(id))
+        ? previous
+        : next;
+    });
+  }, [ids]);
+  const context = useMemo(
+    () => ({ Message, pinEditing, pinA2ui }),
+    [Message, pinEditing, pinA2ui],
+  );
 
   const updateViewport = useCallback(() => {
     const viewport = viewportRef.current;

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { stableJsonSha256 } from "@/a2ui/protocol";
 import { useRef } from "react";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +22,32 @@ const messages: ThreadMessageLike[] = Array.from({ length: 240 }, (_, i) => ({
   content: [{ type: "text", text: `Message ${i}` }],
 }));
 
+
+const withA2uiMessage = (): ThreadMessageLike[] => {
+  const snapshot = [
+    { version: "v0.9", createSurface: { surfaceId: "pinned-surface" } },
+    { version: "v0.9", updateComponents: {
+      surfaceId: "pinned-surface",
+      components: [{ id: "root", component: "Text", text: "Pinned surface" }],
+    } },
+  ];
+  return messages.map((message, index) => index !== 200 ? message : {
+    id: "m200",
+    role: "assistant",
+    content: [{
+      type: "generative-ui",
+      spec: { $type: "Markdown", value: "Pinned surface" },
+      a2ui: {
+        kind: "surface", schemaVersion: 1, transportVersion: 1,
+        protocolVersion: "v0.9", surfaceId: "pinned-surface",
+        epoch: 1, revision: 1, lastSequence: 1,
+        recentEventIds: ["event-1"], snapshot,
+        snapshotDigest: stableJsonSha256(snapshot),
+        anchor: { runId: "run-1", messageId: "m200" },
+      },
+    } as never],
+  });
+};
 class TestResizeObserver implements ResizeObserver {
   observe(element: Element) { observed(element); }
   unobserve() {}
@@ -128,6 +155,7 @@ describe("virtualized messages use the real assistant-ui runtime", () => {
   it("does not transiently unmount the reading window while prepending history", async () => {
     const original = messages.slice(0, 90);
     const view = render(<Harness items={original} />);
+
     fireEvent.scroll(view.getByTestId("viewport"), { target: { scrollTop: 6000 } });
     await waitFor(() => expect(view.getByTestId("m42")).toBeTruthy());
     const readingNode = view.getByTestId("m42");
@@ -138,6 +166,17 @@ describe("virtualized messages use the real assistant-ui runtime", () => {
     await waitFor(() => expect(view.getByTestId("m42")).toBeTruthy());
     expect(view.getByTestId("m42")).toBe(readingNode);
     expect(readingNode.isConnected).toBe(true);
+  });
+
+  it("pins a mounted A2UI surface across virtual-window scrolls", async () => {
+    const view = render(<Harness items={withA2uiMessage()} />);
+    fireEvent.scroll(view.getByTestId("viewport"), { target: { scrollTop: 28800 } });
+    await waitFor(() => expect(view.getByTestId("m200")).toBeTruthy());
+    const surfaceMessage = view.getByTestId("m200");
+    fireEvent.scroll(view.getByTestId("viewport"), { target: { scrollTop: 5000 } });
+    await waitFor(() => expect(view.getByTestId("m42")).toBeTruthy());
+    expect(view.getByTestId("m200")).toBe(surfaceMessage);
+    expect(surfaceMessage.isConnected).toBe(true);
   });
 
   it("drops removed IDs on history replacement without stale message providers", async () => {
