@@ -3,7 +3,12 @@ import React from "react";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useShinyRuntime } from "./runtime";
-import { A2uiProtocolController } from "./a2ui/protocol";
+import {
+  A2uiProtocolController,
+  classifyCanonicalPart,
+  getCanonicalA2uiMarker,
+  toPresentA2uiPart,
+} from "./a2ui/protocol";
 
 describe("confirmed file references", () => {
   it("keeps an open pending until its matching backend acknowledgement arrives", async () => {
@@ -4596,7 +4601,9 @@ describe("useShinyRuntime — A2UI protocol integration", () => {
     eventId: `a2ui-event-${sequence}`, sequence, operations,
   });
   const a2uiParts = (result: ReturnType<typeof setup>["result"]) =>
-    messages(result).flatMap((message) => (message.content as any[]).filter((part) => part?.a2ui));
+    messages(result).flatMap((message) => (message.content as any[]).filter(
+      (part) => classifyCanonicalPart(part) === "valid",
+    ));
 
   it("anchors create to the active assistant message and replaces updates without duplicates", async () => {
     const { result } = setup({ persistence: "server", a2ui: true });
@@ -4609,8 +4616,11 @@ describe("useShinyRuntime — A2UI protocol integration", () => {
     await fireR("a2ui", envelope(threadId, runId, 1, createSurface("surface-1", "first")));
     expect(a2uiParts(result)).toHaveLength(1);
     expect(a2uiParts(result)[0]).toMatchObject({
-      type: "generative-ui",
-      a2ui: { surfaceId: "surface-1", epoch: 1, revision: 1, anchor: { runId } },
+      type: "tool-call", toolName: "present", toolCallId: "a2ui:surface-1",
+      artifact: {
+        a2ui: expect.any(Array),
+        shinyA2ui: { surfaceId: "surface-1", epoch: 1, revision: 1, anchor: { runId } },
+      },
     });
 
     await fireR("a2ui", envelope(threadId, runId, 2, [{
@@ -4621,8 +4631,8 @@ describe("useShinyRuntime — A2UI protocol integration", () => {
     }]));
     expect(a2uiParts(result)).toHaveLength(1);
     expect(a2uiParts(result)[0]).toMatchObject({
-      spec: { $type: "Markdown", value: "second" },
-      a2ui: { revision: 2, lastSequence: 2 },
+      args: { $type: "Markdown", value: "second" },
+      artifact: { shinyA2ui: { revision: 2, lastSequence: 2 } },
     });
     expect(result.current.dispatchA2uiAction(threadId, a2uiParts(result)[0], {
       type: "a2ui:action", name: "confirm", surfaceId: "surface-1",
@@ -4632,7 +4642,15 @@ describe("useShinyRuntime — A2UI protocol integration", () => {
       transportVersion: 1, threadId, surfaceId: "surface-1", sourceComponentId: "root",
       name: "confirm", epoch: 1, revision: 2, input: { accepted: true },
     });
-    const stale = { ...a2uiParts(result)[0], a2ui: { ...a2uiParts(result)[0].a2ui, revision: 1 } };
+    const currentPart = a2uiParts(result)[0];
+    const currentMarker = getCanonicalA2uiMarker(currentPart)!;
+    const stale = {
+      ...currentPart,
+      artifact: {
+        ...currentPart.artifact,
+        shinyA2ui: { ...currentMarker, revision: 1 },
+      },
+    };
     expect(result.current.dispatchA2uiAction(threadId, stale, {
       type: "a2ui:action", name: "confirm", surfaceId: "surface-1", sourceComponentId: "root",
     })).toBe(false);
@@ -4696,7 +4714,10 @@ describe("useShinyRuntime — A2UI history authority", () => {
       a2uiCheckpoint: fixture.checkpoint,
     });
     const restored = messages(result)[0].content[0] as any;
-    expect(restored.spec).toMatchObject({ $type: "Markdown", value: "authoritative history" });
+    expect(restored).toMatchObject({
+      type: "tool-call", toolName: "present", toolCallId: "a2ui:history-surface",
+      args: { $type: "Markdown", value: "authoritative history" },
+    });
     expect(result.current.dispatchA2uiAction("history-a2ui", restored, {
       type: "a2ui:action", name: "open", surfaceId: "history-surface", sourceComponentId: "root",
     })).toBe(true);
@@ -4710,13 +4731,42 @@ describe("useShinyRuntime — A2UI history authority", () => {
     const request = inputs.filter((item) => item.value?.type === "load_session").at(-1)!.value;
     await fireR("load-thread", {
       threadId: "history-a2ui", requestId: request.requestId,
-      messages: [{ id: "history-message", role: "assistant", content: [fixture.part] }],
+      messages: [{ id: "history-message", role: "assistant", content: [
+        toPresentA2uiPart(fixture.part),
+      ] }],
       a2uiCheckpoint: null,
     });
     const restored = messages(result)[0].content[0] as any;
     expect(result.current.dispatchA2uiAction("history-a2ui", restored, {
       type: "a2ui:action", name: "open", surfaceId: "history-surface", sourceComponentId: "root",
     })).toBe(false);
+  });
+
+  it("rebuilds older-page present args from the authoritative snapshot", async () => {
+    const fixture = canonicalFixture();
+    const { result } = setup({ persistence: "server", a2ui: true });
+    await fireR("sessions", { sessions: [{ id: "history-a2ui", title: "A2UI history" }] });
+    await act(async () => result.current.runtime.threads.switchToThread("history-a2ui"));
+    await fireR("load-thread", {
+      threadId: "history-a2ui",
+      messages: [{ id: "newer-message", role: "user", content: [{ type: "text", text: "newer" }] }],
+      cursor: 1, hasMore: true, prepend: false,
+    });
+    await act(async () => result.current.loadOlderHistory());
+    const poisoned = {
+      ...toPresentA2uiPart(fixture.part),
+      args: { $type: "Markdown", value: "POISONED OLDER PAGE ARGS" },
+    };
+    await fireR("load-thread", {
+      threadId: "history-a2ui",
+      messages: [{ id: "history-message", role: "assistant", content: [poisoned] }],
+      cursor: null, hasMore: false, prepend: true,
+    });
+    const restored = messages(result)[0].content[0] as any;
+    expect(restored).toMatchObject({
+      type: "tool-call", toolName: "present",
+      args: { $type: "Markdown", value: "authoritative history" },
+    });
   });
 });
 
@@ -4749,12 +4799,53 @@ describe("useShinyRuntime — A2UI client checkpoint persistence", () => {
     const second = setup({ persistence: "client", a2ui: true });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     const part = second.result.current.runtime.thread.getState().messages
-      .flatMap((message) => message.content as any[]).find((item) => item?.a2ui);
-    expect(part?.spec).toMatchObject({ $type: "Markdown", value: "client snapshot" });
+      .flatMap((message) => message.content as any[])
+      .find((item) => classifyCanonicalPart(item) === "valid");
+    expect(part).toMatchObject({
+      type: "tool-call", toolName: "present",
+      args: { $type: "Markdown", value: "client snapshot" },
+    });
     expect(second.result.current.dispatchA2uiAction(threadId, part, {
       type: "a2ui:action", name: "open", surfaceId: "client-surface", sourceComponentId: "root",
     })).toBe(false);
     expect(inputs.some((item) => item.id === "test_a2ui_restore")).toBe(true);
+  });
+
+  it("restores a tombstone-only checkpoint after the last surface is deleted", async () => {
+    const first = setup({ persistence: "client", a2ui: true });
+    await act(async () => {
+      first.result.current.runtime.thread.composer.setText("client tombstone");
+      await first.result.current.runtime.thread.composer.send();
+    });
+    const threadId = currentThreadId(first.result);
+    const runId = inputs.find((item) => item.id === "test" && item.value.text === "client tombstone")!.value.runId;
+    await fireR("a2ui", {
+      transportVersion: 1, threadId, runId, eventId: "client-create",
+      sequence: 1, operations: createOps,
+    });
+    await fireR("a2ui", {
+      transportVersion: 1, threadId, runId, eventId: "client-delete",
+      sequence: 2, operations: [
+        { version: "v0.9", deleteSurface: { surfaceId: "client-surface" } },
+      ],
+    });
+    expect(messages(first.result).flatMap((message) => message.content as any[])
+      .some((part) => classifyCanonicalPart(part) === "valid")).toBe(false);
+    first.unmount();
+    inputs.length = 0;
+
+    setup({ persistence: "client", a2ui: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(inputs.find((item) => item.id === "test_a2ui_restore")?.value).toMatchObject({
+      threadId,
+      checkpoint: {
+        lastAcceptedSequence: 2,
+        lineage: [{
+          surfaceId: "client-surface", epoch: 1, revision: 2, deletedAtSequence: 2,
+        }],
+      },
+      surfaces: [],
+    });
   });
 
   it("does not persist A2UI checkpoints in none mode", async () => {

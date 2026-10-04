@@ -43,21 +43,35 @@ history_snapshot <- list(
     components = list(list(id = "root", component = "Text", text = "Historical A2UI from snapshot"))
   ))
 )
-history_part <- list(
-  type = "generative-ui",
-  spec = list(`$type` = "Markdown", value = "POISONED DERIVED SPEC"),
-  a2ui = list(
-    kind = "surface", schemaVersion = 1L, transportVersion = 1L,
-    protocolVersion = "v0.9", surfaceId = "history-surface",
-    epoch = 1, revision = 1, lastSequence = 1,
-    recentEventIds = list(), snapshot = history_snapshot,
-    snapshotDigest = shinyAssistantUI:::.a2ui_digest(history_snapshot),
-    anchor = list(runId = "history-run", messageId = "history-a2ui-message")
-  )
+history_marker <- function(message_id) list(
+  kind = "surface", schemaVersion = 1L, transportVersion = 1L,
+  protocolVersion = "v0.9", surfaceId = "history-surface",
+  epoch = 1, revision = 1, lastSequence = 1,
+  recentEventIds = list(), snapshot = history_snapshot,
+  snapshotDigest = shinyAssistantUI:::.a2ui_digest(history_snapshot),
+  anchor = list(runId = "history-run", messageId = message_id)
 )
-history_message <- list(
-  id = "history-a2ui-message", role = "assistant",
-  content = list(history_part), createdAt = "2026-10-04T00:00:00Z"
+legacy_history_message <- list(
+  id = "history-a2ui-legacy", role = "assistant",
+  content = list(list(
+    type = "generative-ui",
+    spec = list(`$type` = "Markdown", value = "POISONED LEGACY DERIVED SPEC"),
+    a2ui = history_marker("history-a2ui-legacy")
+  )),
+  createdAt = "2026-10-04T00:00:00Z"
+)
+present_history_message <- list(
+  id = "history-a2ui-present", role = "assistant",
+  content = list(list(
+    type = "tool-call", toolCallId = "a2ui:history-surface", toolName = "present",
+    args = list(`$type` = "Markdown", value = "POISONED PRESENT DERIVED SPEC"),
+    argsText = "{}", result = list(),
+    artifact = list(
+      a2ui = history_snapshot,
+      shinyA2ui = history_marker("history-a2ui-present")
+    )
+  )),
+  createdAt = "2026-10-04T00:00:01Z"
 )
 history_checkpoint <- list(
   transportVersion = 1L, protocolVersion = "v0.9", schemaVersion = 1L,
@@ -156,17 +170,20 @@ server <- function(input, output, session) {
     a2ui_action_handler = action_handler,
     a2ui_error_handler = error_handler,
     on_session_load = function(session_id, thread_id, send_thread, ...) {
-      if (identical(session_id, "history-a2ui")) {
-        send_thread(list(history_message), a2ui_checkpoint = history_checkpoint)
+      if (identical(session_id, "history-a2ui-legacy")) {
+        send_thread(list(legacy_history_message), a2ui_checkpoint = history_checkpoint)
+      } else if (identical(session_id, "history-a2ui-present")) {
+        send_thread(list(present_history_message), a2ui_checkpoint = history_checkpoint)
       } else {
         send_thread(list())
       }
     }
   )
   session$onFlushed(function() {
-    api$send_sessions(list(sessions = list(list(
-      id = "history-a2ui", title = "A2UI History"
-    ))))
+    api$send_sessions(list(sessions = list(
+      list(id = "history-a2ui-legacy", title = "A2UI Legacy History"),
+      list(id = "history-a2ui-present", title = "A2UI Present History")
+    )))
   }, once = TRUE)
 }
 

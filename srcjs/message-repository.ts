@@ -45,10 +45,9 @@ export function boundBrowserMessages(
   }
   const pinned = messages.flatMap((message, index) => {
     const content = typeof message.content === "string" ? [] : message.content;
-    return content.some((part) =>
-      part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui") &&
-      classifyCanonicalPart(part) === "valid"
-    ) ? [index] : [];
+    return content.some((part) => classifyCanonicalPart(part) === "valid")
+      ? [index]
+      : [];
   }).slice(-16);
   if (pinned.some((index) => index < start)) {
     const keep = new Set<number>(pinned);

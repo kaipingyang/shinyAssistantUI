@@ -118,15 +118,21 @@ main <- function() {
   wait("!document.querySelector('[data-slot=aui_a2ui_surface]')")
   wait("document.getElementById('actions').textContent.trim()==='2'")
 
-  stage <- "history-load"
-  stopifnot(isTRUE(value("(()=>{const r=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')].find(x=>x.innerText.includes('A2UI History'));const b=r?.querySelector('[data-slot=aui_thread-list-item-trigger]');if(!b)return false;b.click();return true})()")))
+  stage <- "legacy-history-load"
+  stopifnot(isTRUE(value("(()=>{const r=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')].find(x=>x.innerText.includes('A2UI Legacy History'));const b=r?.querySelector('[data-slot=aui_thread-list-item-trigger]');if(!b)return false;b.click();return true})()")))
   wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceId==='history-surface'")
   wait("document.body.innerText.includes('Historical A2UI from snapshot')")
-  stopifnot(!isTRUE(value("document.body.innerText.includes('POISONED DERIVED SPEC')")))
+  stopifnot(!isTRUE(value("document.body.innerText.includes('POISONED LEGACY DERIVED SPEC')")))
+
+  stage <- "present-history-load"
+  stopifnot(isTRUE(value("(()=>{const r=[...document.querySelectorAll('[data-slot=aui_thread-list-item]')].find(x=>x.innerText.includes('A2UI Present History'));const b=r?.querySelector('[data-slot=aui_thread-list-item-trigger]');if(!b)return false;b.click();return true})()")))
+  wait("document.querySelector('[data-slot=aui_a2ui_surface]')?.dataset.surfaceId==='history-surface'")
+  wait("document.body.innerText.includes('Historical A2UI from snapshot')")
+  stopifnot(!isTRUE(value("document.body.innerText.includes('POISONED PRESENT DERIVED SPEC')")))
 
   stopifnot(length(console_errors)==0L, length(runtime_errors)==0L,
             length(window_errors())==0L, length(network_errors)==0L)
-  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 openUrl=1 unsafeUrlBlocked=1 liveBinding=1 editedContext=1 template=1 history=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
+  cat("A2UI_BROWSER_DONE v091=1 subsetCatalog=1 validationError=1 openUrl=1 unsafeUrlBlocked=1 liveBinding=1 editedContext=1 template=1 legacyHistory=1 presentHistory=1 snapshotAuthority=1 create=1 update=2 delete=3 actions=2 console=0 runtime=0 window=0 network=0\n")
   cleanup()
 }
 main()

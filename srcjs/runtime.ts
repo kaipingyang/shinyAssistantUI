@@ -80,9 +80,11 @@ import {
 import {
   A2uiProtocolController,
   classifyCanonicalPart,
+  getCanonicalA2uiMarker,
   makeA2uiValidationFeedback,
+  normalizeCanonicalA2uiPart,
+  toPresentA2uiPart,
   type A2uiCheckpoint,
-  type CanonicalA2uiPart,
 } from "./a2ui/protocol";
 import { projectPartialWriteArgs } from "./tool-views/partial-tool-args";
 import { projectLabel, reuseThreadMetadata, sessionsToWorkspaceThreads } from "./workspace-threads";
@@ -1032,7 +1034,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
   }
   const syncA2uiMessageParts = useCallback((threadId: string) => {
     const controller = a2uiControllerRef.current!;
-    const groups = new Map<string, CanonicalA2uiPart[]>();
+    const groups = new Map<string, ReturnType<typeof toPresentA2uiPart>[]>();
     const prefix = `${threadId}\u001f`;
     for (const [key, part] of controller.messageParts) {
       if (!key.startsWith(prefix)) continue;
@@ -1040,14 +1042,14 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       const messageId = fields[1];
       if (!messageId) continue;
       const parts = groups.get(messageId) ?? [];
-      parts.push(part);
+      parts.push(toPresentA2uiPart(part));
       groups.set(messageId, parts);
     }
     setMessagesMap((previous) => {
       const original = previous[threadId] ?? [];
       const stripped = original.flatMap((message) => {
         const content = (message.content as unknown[]).filter((part) =>
-          !(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))
+          classifyCanonicalPart(part) === "legacy"
         );
         if (content.length === 0 && message.role === "assistant") return [];
         return [{ ...message, content } as ThreadMessageLike];
@@ -1073,8 +1075,8 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     part: unknown,
     action: unknown,
   ): boolean => {
-    if (classifyCanonicalPart(part) !== "valid" || !action || typeof action !== "object") return false;
-    const canonical = part as CanonicalA2uiPart;
+    const canonical = normalizeCanonicalA2uiPart(part);
+    if (!canonical || !action || typeof action !== "object") return false;
     const marker = canonical.a2ui;
     const value = action as Record<string, unknown>;
     if (value.type !== "a2ui:action" || typeof value.name !== "string" ||
@@ -1195,11 +1197,11 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     for (const [threadId, threadMessages] of Object.entries(messagesMapRef.current)) {
       const parts = threadMessages.flatMap((message) =>
         (message.content as unknown[]).filter((part) =>
-          part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui")
+          classifyCanonicalPart(part) !== "legacy"
         )
       );
-      if (parts.length === 0) continue;
       const checkpoint = loadA2uiCheckpoint(inputId, true, threadId);
+      if (parts.length === 0 && checkpoint == null) continue;
       const hydrated = controller.hydrateThread(
         threadId, parts, checkpoint, { authoritative: false },
       );
@@ -2150,18 +2152,25 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
         incomingForWindow = incomingForWindow.map((message) => ({
           ...message,
           content: (message.content as unknown[]).filter((part) =>
-            !(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))
+            classifyCanonicalPart(part) === "legacy"
           ),
         } as ThreadMessageLike));
       }
       if (isOlderPage) {
         incomingForWindow = incomingForWindow.map((message) => ({
           ...message,
-          content: (message.content as unknown[]).filter((part) => {
-            if (!(part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui"))) return true;
-            if (classifyCanonicalPart(part) !== "valid") return true;
-            const marker = (part as CanonicalA2uiPart).a2ui;
-            return !a2uiControllerRef.current!.getThread(threadId)?.lineage.has(marker.surfaceId);
+          content: (message.content as unknown[]).flatMap((part) => {
+            const classification = classifyCanonicalPart(part);
+            if (classification === "legacy" || classification === "invalid") return [part];
+            const marker = getCanonicalA2uiMarker(part)!;
+            if (a2uiControllerRef.current!.getThread(threadId)?.lineage.has(marker.surfaceId)) return [];
+            const reader = new A2uiProtocolController();
+            const hydrated = reader.hydrateThread(threadId, [part]);
+            if (hydrated.status === "recovery-failed") return [];
+            const rebuilt = reader.canonicalParts(threadId).find(
+              (candidate) => candidate.a2ui.surfaceId === marker.surfaceId,
+            );
+            return rebuilt ? [toPresentA2uiPart(rebuilt)] : [];
           }),
         } as ThreadMessageLike));
       }
@@ -2169,7 +2178,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       if (!isOlderPage && !a2uiSuperseded) {
         const canonicalParts = incomingForWindow.flatMap((message) =>
           (message.content as unknown[]).filter((part) =>
-            part && typeof part === "object" && Object.prototype.hasOwnProperty.call(part, "a2ui")
+            classifyCanonicalPart(part) !== "legacy"
           )
         );
         if (canonicalParts.length > 0 || data.a2uiCheckpoint != null) {

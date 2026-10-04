@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadMessageLike } from "@assistant-ui/core";
-import { A2uiProtocolController } from "./a2ui/protocol";
+import { A2uiProtocolController, toPresentA2uiPart } from "./a2ui/protocol";
 import {
   AppMessageRepository,
   BROWSER_MESSAGE_WINDOW,
@@ -152,7 +152,7 @@ describe("AppMessageRepository", () => {
 
 
 describe("A2UI browser window pins", () => {
-  it("retains a live surface anchor while keeping the hard 240-message cap", () => {
+  it("retains legacy and present live surface anchors within the hard 240-message cap", () => {
     const controller = new A2uiProtocolController();
     controller.activateRun("thread-pin", "run-pin", "a2ui-anchor");
     expect(controller.acceptEnvelope({
@@ -165,14 +165,18 @@ describe("A2UI browser window pins", () => {
         ] } },
       ],
     }).status).toBe("accepted");
-    const anchor: ThreadMessageLike = {
-      id: "a2ui-anchor", role: "assistant", content: [controller.canonicalParts("thread-pin")[0] as never],
-    };
-    const messages = [anchor, ...Array.from({ length: 300 }, (_, index) =>
-      index % 2 ? assistant(`tail-a-${index}`) : user(`tail-u-${index}`))];
-    const bounded = boundBrowserMessages(messages);
-    expect(bounded).toHaveLength(BROWSER_MESSAGE_WINDOW);
-    expect(bounded.some((message) => message.id === "a2ui-anchor")).toBe(true);
-    expect(bounded.at(-1)?.id).toBe("tail-a-299");
+    const legacy = controller.canonicalParts("thread-pin")[0]!;
+
+    for (const part of [legacy, toPresentA2uiPart(legacy)]) {
+      const anchor: ThreadMessageLike = {
+        id: "a2ui-anchor", role: "assistant", content: [part as never],
+      };
+      const messages = [anchor, ...Array.from({ length: 300 }, (_, index) =>
+        index % 2 ? assistant(`tail-a-${index}`) : user(`tail-u-${index}`))];
+      const bounded = boundBrowserMessages(messages);
+      expect(bounded).toHaveLength(BROWSER_MESSAGE_WINDOW);
+      expect(bounded.some((message) => message.id === "a2ui-anchor")).toBe(true);
+      expect(bounded.at(-1)?.id).toBe("tail-a-299");
+    }
   });
 });

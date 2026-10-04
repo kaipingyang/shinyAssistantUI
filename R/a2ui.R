@@ -306,9 +306,34 @@
   action_replay <- new.env(hash = TRUE, parent = emptyenv())
   action_times <- new.env(hash = TRUE, parent = emptyenv())
 
+.a2ui_part_candidate <- function(part) {
+  if (!is.list(part)) return(FALSE)
+  if ("a2ui" %in% (names(part) %||% character())) return(TRUE)
+  artifact <- if (is.list(part$artifact)) part$artifact else NULL
+  identical(part$type, "tool-call") && (
+    (is.character(part$toolCallId) && length(part$toolCallId) == 1L &&
+       !is.na(part$toolCallId) && startsWith(part$toolCallId, "a2ui:")) ||
+    (is.list(artifact) && "shinyA2ui" %in% (names(artifact) %||% character()))
+  )
+}
+
+.a2ui_marker_from_part <- function(part) {
+  if (!is.list(part)) return(NULL)
+  if (identical(part$type, "generative-ui") && is.list(part$a2ui)) return(part$a2ui)
+  artifact <- part$artifact
+  marker <- if (is.list(artifact)) artifact$shinyA2ui else NULL
+  operations <- if (is.list(artifact)) artifact$a2ui else NULL
+  if (!identical(part$type, "tool-call") || !identical(part$toolName, "present") ||
+      !is.list(part$args) || is.null(names(part$args)) || anyDuplicated(names(part$args)) ||
+      !is.list(marker) || !is.list(operations) ||
+      !identical(part$toolCallId, paste0("a2ui:", marker$surfaceId %||% "")) ||
+      !identical(.a2ui_digest(operations), .a2ui_digest(marker$snapshot))) return(NULL)
+  marker
+}
+
 .a2ui_valid_marker <- function(part) {
-  if (!is.list(part) || !identical(part$type, "generative-ui") || !is.list(part$a2ui)) return(FALSE)
-  marker <- part$a2ui
+  marker <- .a2ui_marker_from_part(part)
+  if (!is.list(marker)) return(FALSE)
   marker_names <- c(
     "kind", "schemaVersion", "transportVersion", "protocolVersion", "surfaceId",
     "epoch", "revision", "lastSequence", "recentEventIds", "snapshot", "snapshotDigest", "anchor"
@@ -602,9 +627,13 @@
     }
     seen_live <- character()
     for (message in messages %||% list()) for (part in message$content %||% list()) {
-      if (!is.list(part) || is.null(part$a2ui)) next
+      candidate <- .a2ui_part_candidate(part)
+      marker <- .a2ui_marker_from_part(part)
+      if (is.null(marker)) {
+        if (candidate) return(invisible(FALSE))
+        next
+      }
       if (!.a2ui_valid_marker(part)) return(invisible(FALSE))
-      marker <- part$a2ui
       surface <- get0(marker$surfaceId, envir = next_surfaces, inherits = FALSE)
       if (is.null(surface)) return(invisible(FALSE))
       if (isTRUE(surface$deleted)) {

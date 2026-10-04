@@ -427,3 +427,71 @@ test_that("display-only A2UI controller still exposes renderer capabilities", {
     expect_identical(unlist(capabilities$supportedLocalFunctions), "openUrl")
   })
 })
+
+
+test_that("R A2UI history authority dual-reads legacy and standard present artifacts", {
+  snapshot <- list(
+    list(version = "v0.9", createSurface = list(surfaceId = "history-surface")),
+    list(version = "v0.9", updateComponents = list(
+      surfaceId = "history-surface",
+      components = list(list(id = "root", component = "Text", text = "history"))
+    ))
+  )
+  marker <- list(
+    kind = "surface", schemaVersion = 1L, transportVersion = 1L,
+    protocolVersion = "v0.9", surfaceId = "history-surface",
+    epoch = 1, revision = 1, lastSequence = 1,
+    recentEventIds = list(), snapshot = snapshot,
+    snapshotDigest = .a2ui_digest(snapshot),
+    anchor = list(runId = "history-run", messageId = "history-message")
+  )
+  checkpoint <- list(
+    transportVersion = 1L, protocolVersion = "v0.9", schemaVersion = 1L,
+    lastAcceptedSequence = 1, generation = 1, eventLedger = list(),
+    lineage = list(list(surfaceId = "history-surface", epoch = 1, revision = 1))
+  )
+  legacy <- list(
+    type = "generative-ui", spec = list(`$type` = "Markdown", value = "derived"),
+    a2ui = marker
+  )
+  present <- list(
+    type = "tool-call", toolCallId = "a2ui:history-surface", toolName = "present",
+    args = list(`$type` = "Markdown", value = "derived"), argsText = "{}", result = list(),
+    artifact = list(a2ui = snapshot, shinyA2ui = marker)
+  )
+  session <- list(sendCustomMessage = function(...) NULL)
+  message <- function(part) list(list(
+    id = "history-message", role = "assistant", content = list(part)
+  ))
+
+  for (part in list(legacy, present)) {
+    transport <- .new_a2ui_transport(session, "chat_input", "owner")
+    expect_true(transport$restore_authority("thread-history", message(part), checkpoint))
+    expect_equal(transport$checkpoint("thread-history")$lineage, checkpoint$lineage)
+  }
+
+  missing_args <- present
+  missing_args$args <- NULL
+  unnamed_args <- present
+  unnamed_args$args <- list("not", "an", "object")
+  for (invalid in list(missing_args, unnamed_args)) {
+    transport <- .new_a2ui_transport(session, "chat_input", "owner")
+    expect_false(transport$restore_authority("thread-history", message(invalid), checkpoint))
+    expect_equal(transport$checkpoint("thread-history")$lastAcceptedSequence, 0)
+  }
+
+  mixed_message <- list(list(
+    id = "history-message", role = "assistant", content = list(present, missing_args)
+  ))
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  expect_false(transport$restore_authority("thread-history", mixed_message, checkpoint))
+  expect_equal(transport$checkpoint("thread-history")$lastAcceptedSequence, 0)
+
+  poisoned <- present
+  poisoned$artifact$a2ui <- list(list(
+    version = "v0.9", deleteSurface = list(surfaceId = "history-surface")
+  ))
+  transport <- .new_a2ui_transport(session, "chat_input", "owner")
+  expect_false(transport$restore_authority("thread-history", message(poisoned), checkpoint))
+  expect_equal(transport$checkpoint("thread-history")$lastAcceptedSequence, 0)
+})

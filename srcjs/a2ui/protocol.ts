@@ -100,6 +100,19 @@ export interface CanonicalA2uiPart {
   readonly a2ui: CanonicalA2uiMarker;
 }
 
+export interface CanonicalA2uiPresentPart {
+  readonly type: "tool-call";
+  readonly toolCallId: string;
+  readonly toolName: "present";
+  readonly args: Record<string, unknown>;
+  readonly argsText: string;
+  readonly result: Record<string, never>;
+  readonly artifact: {
+    readonly a2ui: readonly unknown[];
+    readonly shinyA2ui: CanonicalA2uiMarker;
+  };
+}
+
 export interface SurfaceRecord {
   readonly surfaceId: string;
   readonly epoch: number;
@@ -1087,10 +1100,55 @@ function validateMarker(value: unknown): value is CanonicalA2uiMarker {
   }
 }
 
+export function normalizeCanonicalA2uiPart(part: unknown): CanonicalA2uiPart | null {
+  if (!isPlainRecord(part)) return null;
+  if (part.type === "generative-ui" && validateMarker(part.a2ui)) {
+    return part as unknown as CanonicalA2uiPart;
+  }
+  const artifact = isPlainRecord(part.artifact) ? part.artifact : undefined;
+  const marker = artifact?.shinyA2ui;
+  if (part.type !== "tool-call" || part.toolName !== "present" ||
+      typeof part.toolCallId !== "string" || !validateMarker(marker) ||
+      part.toolCallId !== `a2ui:${marker.surfaceId}` ||
+      !Array.isArray(artifact?.a2ui) ||
+      stableSerialize(artifact.a2ui) !== stableSerialize(marker.snapshot) ||
+      !isPlainRecord(part.args)) return null;
+  return {
+    type: "generative-ui",
+    spec: cloneJson(part.args),
+    a2ui: cloneJson(marker),
+  };
+}
+
+export function getCanonicalA2uiMarker(part: unknown): CanonicalA2uiMarker | undefined {
+  return normalizeCanonicalA2uiPart(part)?.a2ui;
+}
+
+export function toPresentA2uiPart(part: CanonicalA2uiPart): CanonicalA2uiPresentPart {
+  if (!validateMarker(part.a2ui)) throw new Error("Canonical A2UI marker is invalid.");
+  const args = isPlainRecord(part.spec) ? cloneJson(part.spec) : {};
+  const snapshot = cloneJson(part.a2ui.snapshot);
+  const marker = cloneJson(part.a2ui);
+  return {
+    type: "tool-call",
+    toolCallId: `a2ui:${marker.surfaceId}`,
+    toolName: "present",
+    args,
+    argsText: stableSerialize(args),
+    result: {},
+    artifact: { a2ui: snapshot, shinyA2ui: marker },
+  };
+}
+
 export function classifyCanonicalPart(part: unknown): "legacy" | "valid" | "invalid" {
-  if (!isPlainRecord(part) || !Object.prototype.hasOwnProperty.call(part, "a2ui")) return "legacy";
-  if (part.type !== "generative-ui" || !validateMarker(part.a2ui)) return "invalid";
-  return "valid";
+  if (!isPlainRecord(part)) return "legacy";
+  const artifact = isPlainRecord(part.artifact) ? part.artifact : undefined;
+  const candidate = Object.prototype.hasOwnProperty.call(part, "a2ui") ||
+    (part.type === "tool-call" &&
+      ((typeof part.toolCallId === "string" && part.toolCallId.startsWith("a2ui:")) ||
+       Object.prototype.hasOwnProperty.call(artifact ?? {}, "shinyA2ui")));
+  if (!candidate) return "legacy";
+  return normalizeCanonicalA2uiPart(part) ? "valid" : "invalid";
 }
 
 export interface RecoveryResponse {
@@ -1311,8 +1369,8 @@ export class A2uiProtocolController {
       : new Map(this.messageParts);
     try {
       for (const rawPart of parts) {
-        if (classifyCanonicalPart(rawPart) !== "valid") throw new Error("Canonical A2UI marker or snapshot is invalid.");
-        const part = rawPart as CanonicalA2uiPart;
+        const part = normalizeCanonicalA2uiPart(rawPart);
+        if (!part) throw new Error("Canonical A2UI marker or snapshot is invalid.");
         const marker = part.a2ui;
         const checkpointLineage = lineage.get(marker.surfaceId);
         if (authoritative) {

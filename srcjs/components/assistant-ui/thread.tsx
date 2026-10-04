@@ -24,7 +24,10 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
 import { renderDataPart } from "@/generative/data-ui";
 import { A2uiRuntimeView } from "@/a2ui/render";
-import { classifyCanonicalPart, type CanonicalA2uiPart } from "@/a2ui/protocol";
+import {
+  classifyCanonicalPart,
+  normalizeCanonicalA2uiPart,
+} from "@/a2ui/protocol";
 import { shinyAllowlist, GenerativeUiFallback } from "@/generative/allowlist";
 import { PermissionModeControl, ModelPickerDialog } from "@/components/assistant-ui/settings-controls";
 import { ShinyContextDisplay } from "@/components/assistant-ui/context-display";
@@ -86,6 +89,7 @@ import {
   type ComponentType,
   type FC,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
@@ -1188,6 +1192,37 @@ const AssistantMessage: FC = () => {
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
 
+  const renderCanonicalA2ui = (candidate: unknown): ReactNode | undefined => {
+    const classification = classifyCanonicalPart(candidate);
+    if (classification === "legacy") return undefined;
+    const canonical = normalizeCanonicalA2uiPart(candidate);
+    if (classification !== "valid" || !canonical) {
+      return (
+        <span data-slot="aui_a2ui_invalid" role="alert" className="text-destructive text-sm">
+          Invalid A2UI surface
+        </span>
+      );
+    }
+    const marker = canonical.a2ui;
+    return (
+      <div
+        data-slot="aui_a2ui_surface"
+        data-surface-id={marker.surfaceId}
+        data-surface-epoch={marker.epoch}
+        data-surface-revision={marker.revision}
+      >
+        <A2uiRuntimeView
+          spec={canonical.spec}
+          surfaceId={marker.surfaceId}
+          operations={marker.snapshot}
+          dispatch={dispatchA2uiAction && currentThreadId
+            ? (action) => dispatchA2uiAction(currentThreadId, canonical, action)
+            : undefined}
+        />
+      </div>
+    );
+  };
+
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -1205,6 +1240,7 @@ const AssistantMessage: FC = () => {
         <MessagePrimitive.GroupedParts
           groupBy={groupPartByType({
             reasoning: ["group-chainOfThought", "group-reasoning"],
+            "tool-call:present": [],
             "tool-call": ["group-chainOfThought", "group-tool"],
             "standalone-tool-call": [],
           })}
@@ -1254,41 +1290,17 @@ const AssistantMessage: FC = () => {
                 );
               case "reasoning":
                 return <Reasoning {...part} />;
-              case "tool-call":
-                return part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
+              case "tool-call": {
+                const a2ui = renderCanonicalA2ui(part);
+                return a2ui ?? part.toolUI ?? renderToolPart(part, ToolFallbackComponent);
+              }
               case "data":
                 // Plan 47 A0 — R-driven Data UI: look up our own component table by
                 // the data-event name (NOT part.dataRendererUI, which needs an unwired scope).
                 return renderDataPart(part as unknown as { name?: string; data?: unknown });
               case "generative-ui": {
-                const candidate = part as unknown as Record<string, unknown>;
-                if (Object.prototype.hasOwnProperty.call(candidate, "a2ui")) {
-                  if (classifyCanonicalPart(candidate) !== "valid") {
-                    return (
-                      <span data-slot="aui_a2ui_invalid" role="alert" className="text-destructive text-sm">
-                        Invalid A2UI surface
-                      </span>
-                    );
-                  }
-                  const canonical = candidate as unknown as CanonicalA2uiPart;
-                  return (
-                    <div
-                      data-slot="aui_a2ui_surface"
-                      data-surface-id={canonical.a2ui.surfaceId}
-                      data-surface-epoch={canonical.a2ui.epoch}
-                      data-surface-revision={canonical.a2ui.revision}
-                    >
-                      <A2uiRuntimeView
-                        spec={canonical.spec}
-                        surfaceId={canonical.a2ui.surfaceId}
-                        operations={canonical.a2ui.snapshot}
-                        dispatch={dispatchA2uiAction && currentThreadId
-                          ? (action) => dispatchA2uiAction(currentThreadId, canonical, action)
-                          : undefined}
-                      />
-                    </div>
-                  );
-                }
+                const a2ui = renderCanonicalA2ui(part);
+                if (a2ui) return a2ui;
                 // Legacy one-shot Generative UI keeps its original allowlist.
                 return (
                   <MessagePrimitive.GenerativeUI

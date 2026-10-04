@@ -29,8 +29,11 @@ import {
   commitPreparedTransaction,
   createControllerState,
   filterA2uiSpec,
+  getCanonicalA2uiMarker,
   makeA2uiValidationFeedback,
+  normalizeCanonicalA2uiPart,
   prepareEnvelopeTransaction,
+  toPresentA2uiPart,
   sha256Utf8,
   stableJsonSha256,
   validateA2uiEnvelope,
@@ -843,5 +846,43 @@ it("retains Slider and CheckboxGroup in the bounded fallback vocabulary", () => 
     defaultValue: ["1"], label: "Choices", name: "/choices",
   }, "surface-1")).toMatchObject({
     $type: "CheckboxGroup", defaultValue: ["1"],
+  });
+});
+
+
+describe("A2UI present artifact history migration", () => {
+  it("writes standard present artifacts and reads both formats from snapshot authority", () => {
+    const controller = liveController();
+    controller.acceptEnvelope(envelope(1));
+    const legacy = controller.canonicalParts("thread-1")[0]!;
+    const present = toPresentA2uiPart(legacy);
+    expect(present).toMatchObject({
+      type: "tool-call", toolCallId: "a2ui:surface-1", toolName: "present",
+      result: {},
+      artifact: {
+        a2ui: expect.any(Array),
+        shinyA2ui: { surfaceId: "surface-1", epoch: 1, revision: 1 },
+      },
+    });
+    expect(classifyCanonicalPart(legacy)).toBe("valid");
+    expect(classifyCanonicalPart(present)).toBe("valid");
+    expect(getCanonicalA2uiMarker(present)).toMatchObject({ surfaceId: "surface-1" });
+    expect(normalizeCanonicalA2uiPart(present)?.a2ui.snapshotDigest)
+      .toBe(legacy.a2ui.snapshotDigest);
+
+    const poisoned = { ...present, args: { $type: "Image", src: "javascript:alert(1)" } };
+    const restored = new A2uiProtocolController();
+    expect(restored.hydrateThread(
+      "thread-1", [poisoned], controller.exportCheckpoint("thread-1"),
+      { authoritative: true },
+    ).status).toBe("hydrated");
+    expect(restored.getSurface("thread-1", "surface-1")?.part.spec).toMatchObject({
+      $type: "Markdown", value: "hello",
+    });
+
+    expect(classifyCanonicalPart({
+      ...present,
+      artifact: { ...present.artifact, a2ui: [remove("surface-1")] },
+    })).toBe("invalid");
   });
 });
