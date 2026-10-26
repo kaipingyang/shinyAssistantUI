@@ -71,3 +71,38 @@ test_that(".addin_console_service_once on a closed socket returns NULL (no throw
   # closed socket -> nanonext::context() would error; must be swallowed to NULL
   expect_null(.addin_console_service_once(sock, timeout = 50))
 })
+
+# ── Plan 163: MCP result carries partial output together with the error ──────
+load_run_r_script <- function(remote) {
+  script <- system.file("mcp", "run_r_server.R", package = "shinyAssistantUI")
+  if (!nzchar(script)) script <- "../../inst/mcp/run_r_server.R"
+  skip_if_not(file.exists(script))
+  skip_if_not(sdk_has_stdio_mcp())
+  withr::local_envvar(SHINY_ASSISTANT_UI_RUN_R_NO_SERVE = "1")
+  env <- new.env(parent = globalenv())
+  sys.source(script, envir = env)
+  env$.run_remote <- remote
+  env
+}
+
+test_that("run_r MCP error result includes output printed before the error", {
+  env <- load_run_r_script(function(url, code, timeout = 60000) {
+    list(ok = FALSE, output = "[1] 1", error = "line 2 (`prin(2)`): could not find function \"prin\"")
+  })
+  res <- env$.run_r_result("print(1)\nprin(2)")
+  expect_true(isTRUE(res$isError))
+  text <- res$content[[1]]$text
+  expect_match(text, "[1] 1", fixed = TRUE)
+  expect_match(text, "Error: line 2", fixed = TRUE)
+  expect_lt(regexpr("[1] 1", text, fixed = TRUE), regexpr("Error:", text, fixed = TRUE))
+})
+
+test_that("run_r MCP success result returns full output or a no-output marker", {
+  env <- load_run_r_script(function(url, code, timeout = 60000) {
+    list(ok = TRUE, output = if (grepl("a", code)) "[1] 1\n[1] 2" else "", error = NULL)
+  })
+  res <- env$.run_r_result("a\nb")
+  expect_null(res$isError)
+  expect_identical(res$content[[1]]$text, "[1] 1\n[1] 2")
+  expect_identical(env$.run_r_result("x <- 1")$content[[1]]$text, "(no visible output)")
+})

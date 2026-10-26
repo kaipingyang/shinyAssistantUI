@@ -34,32 +34,38 @@ console_url <- Sys.getenv("CLAUDE_ADDIN_CONSOLE_URL", "")
   res
 }
 
+# Build the MCP tool result. Output printed before an error is returned together
+# with the error (Plan 163), so Claude sees every intermediate result.
+.run_r_result <- function(code) {
+  cap <- .run_remote(console_url, code)
+  out <- as.character(cap$output %||% "")
+  if (!isTRUE(cap$ok)) {
+    err <- paste0("Error: ", cap$error %||% "unknown error")
+    text <- if (nzchar(out)) paste0(out, "\n", err) else err
+    return(list(content = list(list(type = "text", text = text)), isError = TRUE))
+  }
+  if (!nzchar(out)) out <- "(no visible output)"
+  list(content = list(list(type = "text", text = out)))
+}
+
 run_r <- sdk_mcp_tool(
   name = "run_r",
   description = paste(
     "Execute R code in the user's LIVE R session (.GlobalEnv).",
     "Use this to inspect or use their real data, objects and loaded packages.",
-    "Output and errors are returned as text (no images)."
+    "Output and errors are returned as text (no images): every printed or visible",
+    "top-level result in order, plus output produced before an error."
   ),
   input_schema = list(code = list(
     type = "string",
     description = "R code to run in the user's live R session (.GlobalEnv)."
   )),
-  handler = function(args) {
-    cap <- .run_remote(console_url, args$code %||% "")
-    if (!isTRUE(cap$ok)) {
-      return(list(
-        content = list(list(type = "text",
-                            text = paste0("Error: ", cap$error %||% "unknown error"))),
-        isError = TRUE
-      ))
-    }
-    out <- cap$output %||% ""
-    if (!nzchar(out)) out <- "(no visible output)"
-    list(content = list(list(type = "text", text = out)))
-  }
+  handler = function(args) .run_r_result(args$code %||% "")
 )
 
-ClaudeAgentSDK::mcp_serve_stdio(
-  ClaudeAgentSDK::create_sdk_mcp_server("r_session", tools = list(run_r))
-)
+# Tests source this script to exercise .run_r_result without starting stdio.
+if (!identical(Sys.getenv("SHINY_ASSISTANT_UI_RUN_R_NO_SERVE"), "1")) {
+  ClaudeAgentSDK::mcp_serve_stdio(
+    ClaudeAgentSDK::create_sdk_mcp_server("r_session", tools = list(run_r))
+  )
+}

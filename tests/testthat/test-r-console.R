@@ -153,3 +153,66 @@ test_that("inactive package-owned console server restarts on its original URL", 
   expect_identical(actual, "ipc:///tmp/restart-same.sock")
   expect_identical(attempted, "ipc:///tmp/restart-same.sock")
 })
+
+# ── Plan 163: intermediate output must reach Claude, like the R console ───────
+capture <- function(code) shinyAssistantUI:::.addin_run_r_capture(code, envir = new.env(parent = globalenv()))
+
+test_that("explicit prints of several expressions are all returned", {
+  r <- capture("a = 1\nprint(a)\nb = 2\nprint(b)")
+  expect_true(r$ok)
+  expect_identical(r$output, "[1] 1\n[1] 2")
+})
+
+test_that("each visible top-level value is auto-printed, not only the last", {
+  r <- capture("a = 1\na\nb = 2\nb")
+  expect_identical(r$output, "[1] 1\n[1] 2")
+  r <- capture("x <- 1:3; x; invisible(5); length(x)")
+  expect_identical(r$output, "[1] 1 2 3\n[1] 3")
+})
+
+test_that("output produced before an error is kept and the failing line is reported", {
+  r <- capture("print(1)\nprin(2)\nprint(3)")
+  expect_false(r$ok)
+  expect_identical(r$output, "[1] 1")
+  expect_match(r$error, "line 2", fixed = TRUE)
+  expect_match(r$error, "prin(2)", fixed = TRUE)
+  expect_match(r$error, "could not find function", fixed = TRUE)
+  # execution stops at the first error, like sourcing a script
+  e <- new.env(parent = globalenv())
+  shinyAssistantUI:::.addin_run_r_capture("u <- 1\nstop('x')\nu <- 2", envir = e)
+  expect_identical(get("u", envir = e), 1)
+})
+
+test_that("a single failing expression keeps the plain error message", {
+  r <- capture("{ cat('partial\\n'); stop('boom') }")
+  expect_false(r$ok)
+  expect_identical(r$output, "partial")
+  expect_identical(r$error, "boom")
+})
+
+test_that("messages and warnings stay in execution order", {
+  r <- capture("print(1)\nmessage('m')\nprint(2)\nwarning('w')\n3")
+  expect_true(r$ok)
+  expect_identical(r$output, "[1] 1\nMessage: m\n[1] 2\nWarning: w\n[1] 3")
+})
+
+test_that("parse errors are reported without running anything", {
+  e <- new.env(parent = globalenv())
+  r <- shinyAssistantUI:::.addin_run_r_capture("ran <- TRUE\nprint(", envir = e)
+  expect_false(r$ok)
+  expect_identical(r$output, "")
+  expect_match(r$error, "^Parse error: ")
+  expect_false(exists("ran", envir = e, inherits = FALSE))
+})
+
+test_that("console echo shows partial output before the error", {
+  lines <- shinyAssistantUI:::.addin_console_echo_lines(
+    "print(1)\nstop('x')", list(ok = FALSE, output = "[1] 1", error = "line 2: x")
+  )
+  if (requireNamespace("cli", quietly = TRUE)) lines <- cli::ansi_strip(lines)
+  out_at <- match("[1] 1", lines)
+  err_at <- grep("^Error: line 2: x$", lines)
+  expect_false(is.na(out_at))
+  expect_length(err_at, 1L)
+  expect_lt(out_at, err_at)
+})

@@ -5,42 +5,66 @@
 # `%||%` 见 handlers.R。
 
 # ── 捕获执行（纯函数，可测）──────────────────────────────────────────────────
-# 在 envir 里 eval code,收集 message/warning/error 与（可见的）返回值,组装成文本。
+# Plan 163: run like the R console — each top-level expression is evaluated in turn,
+# visible values are auto-printed, messages/warnings appear where they happen, and an
+# error stops execution while keeping everything printed before it.
 # 返回 list(ok, output, error)。
 .addin_run_r_capture <- function(code, envir = globalenv()) {
   code_str <- paste(as.character(code), collapse = "\n")
   if (!nzchar(trimws(code_str))) return(list(ok = TRUE, output = "", error = NULL))
-  messages <- character(); warnings <- character(); error_msg <- NULL
-  # box 用引用型环境接住 withVisible 结果:capture.output 在 parent.frame() 里求值,
-  # 用 `<<-`/`<-` 都无法把值可靠地写回本函数的局部变量(作用域问题),改用环境按引用回写。
+  exprs <- tryCatch(parse(text = code_str, keep.source = TRUE), error = function(e) e)
+  if (inherits(exprs, "error")) {
+    return(list(ok = FALSE, output = "",
+                error = paste0("Parse error: ", conditionMessage(exprs))))
+  }
+  srcrefs <- attr(exprs, "srcref")
+  out <- character()
+  error_msg <- NULL
+  # Reference box: the expression passed to capture.output() is a promise, so its
+  # result is written here instead of relying on local assignment semantics.
   box <- new.env(parent = emptyenv())
-  # 关键:用 capture.output 包住 eval,捕获 cat()/print() 等写到 stdout 的输出
-  # (之前只取 withVisible 的可见返回值 → cat 直接进了真实 console,Claude 收到空 → 显示
-  #  "(no visible output)" 并重试,看起来像"慢一拍/不执行")。
-  printed <- tryCatch(
-    utils::capture.output(
-      box$vis <- withCallingHandlers(
-        withVisible(eval(parse(text = code_str), envir = envir)),
+  for (i in seq_along(exprs)) {
+    box$error <- NULL
+    # The error is caught INSIDE capture.output(), so output printed by this
+    # expression before it failed is kept rather than discarded with the sink.
+    printed <- utils::capture.output(invisible(
+      tryCatch(
+        withCallingHandlers({
+          vis <- withVisible(eval(exprs[[i]], envir = envir))
+          if (isTRUE(vis$visible)) {
+            if (isS4(vis$value)) methods::show(vis$value) else print(vis$value)
+          }
+          NULL
+        },
         message = function(m) {
-          messages <<- c(messages, sub("\n$", "", conditionMessage(m))); invokeRestart("muffleMessage")
+          cat("Message: ", sub("\n$", "", conditionMessage(m)), "\n", sep = "")
+          invokeRestart("muffleMessage")
         },
         warning = function(w) {
-          warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
-        }
+          cat("Warning: ", conditionMessage(w), "\n", sep = "")
+          invokeRestart("muffleWarning")
+        }),
+        error = function(e) box$error <- conditionMessage(e)
       )
-    ),
-    error = function(e) { error_msg <<- conditionMessage(e); character() }
-  )
-  if (!is.null(error_msg)) return(list(ok = FALSE, output = paste(printed, collapse = "\n"), error = error_msg))
-  out <- printed
-  vis <- box$vis
-  # 可见返回值(且未被上面的 print 自动打印过——eval 不会自动打印,故这里补印)。
-  if (is.list(vis) && isTRUE(vis$visible) && !is.null(vis$value)) {
-    out <- c(out, utils::capture.output(print(vis$value)))
+    ))
+    out <- c(out, printed)
+    if (!is.null(box$error)) {
+      error_msg <- box$error
+      if (length(exprs) > 1L) {
+        ref <- if (length(srcrefs) >= i) srcrefs[[i]] else NULL
+        line <- if (is.null(ref)) i else ref[[1L]]
+        src <- if (is.null(ref)) "" else paste(trimws(as.character(ref)), collapse = " ")
+        if (nchar(src) > 80L) src <- paste0(substr(src, 1L, 77L), "...")
+        error_msg <- if (nzchar(src)) {
+          sprintf("line %d (`%s`): %s", line, src, error_msg)
+        } else {
+          sprintf("line %d: %s", line, error_msg)
+        }
+      }
+      break
+    }
   }
-  if (length(messages)) out <- c(out, paste0("Message: ", messages))
-  if (length(warnings)) out <- c(out, paste0("Warning: ", warnings))
-  list(ok = TRUE, output = paste(out, collapse = "\n"), error = NULL)
+  list(ok = is.null(error_msg), output = paste(out, collapse = "\n"), error = error_msg)
 }
 
 # ── nanonext 环境服务器（主会话；later 轮询，console 空闲时服务）──────────────
@@ -93,11 +117,11 @@
     cli::col_cyan(paste0("\u2500\u2500 Claude ran in console ", strrep("\u2500", 24L)))
   else "\u2500\u2500 Claude ran in console \u2500\u2500"
   lines <- c(header, .addin_console_prompt_code(code))
+  # Output printed before an error is shown first, matching the R console.
+  if (nzchar(cap$output %||% "")) lines <- c(lines, cap$output)
   if (!is.null(cap$error)) {
     e <- paste0("Error: ", cap$error)
     lines <- c(lines, if (requireNamespace("cli", quietly = TRUE)) cli::col_red(e) else e)
-  } else if (nzchar(cap$output %||% "")) {
-    lines <- c(lines, cap$output)
   }
   lines
 }
