@@ -39,6 +39,7 @@ import {
 } from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
+import { RunROutputReviewPanel } from "@/components/assistant-ui/run-r-review-panel";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -446,6 +447,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <ShinyStatusPanels />
             <ShinyServiceStatus />
             <ShinyChecklistPanel />
+            <RunROutputReviewPanel />
             {/* Plan 48B: 动态 follow-up 建议 chip(自带 !isEmpty && !isRunning && 有建议 门禁)*/}
             <ThreadFollowupSuggestions />
             <div data-slot="aui_composer-stack" className="flex flex-col gap-1">

@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 import type { IdeContextMeta, WorkspaceMentionItem } from "./bridge";
 import type { CopilotServiceState } from "./copilot-service-addon";
+import type { RunRReviewBridge } from "./run-r-review-addon";
 import type {
   MemoryGuardState,
   MemoryMonitorFrame,
@@ -120,6 +121,8 @@ export interface ShinyConfigCtx {
   rateLimit?: { status?: string; resetsAt?: string; utilization?: number; type?: string } | null;
   statusText?: string | null;
   serviceState?: CopilotServiceState;
+  /** Plan 163: pending R output reviews (addin only). */
+  runROutputReview?: RunRReviewBridge;
   memoryMonitor?: {
     state: MemoryGuardState | "waiting";
     sample: MemoryMonitorSample | null;

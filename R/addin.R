@@ -305,6 +305,20 @@
   # 工具注入 options$mcp_servers,让 Claude 能在你的活 .GlobalEnv 执行 R(经角度 A
   # env-server,可见)。gadget 模式无 console_url → run_r_server 为 NULL,不注册。
   run_r_server <- if (!is.null(console_url)) .addin_run_r_server(console_url) else NULL
+  # Plan 163: run_r output is reviewed in the browser before it reaches Claude.
+  # The URL is always passed: if the endpoint cannot start, requests fail and the
+  # subprocess declines to share the output (fail closed).
+  run_r_review_service <- NULL
+  run_r_review_server <- NULL
+  if (!is.null(run_r_server)) {
+    run_r_review_service <- .new_run_r_review_service(
+      enabled = function() .read_run_r_output_review_enabled()
+    )
+    review_url <- paste0("ipc://", tempfile("claude-addin-review-", fileext = ".sock"))
+    run_r_review_server <- .start_run_r_review_server(review_url, run_r_review_service)
+    run_r_server <- .addin_run_r_review_env(run_r_server, review_url)
+  }
+  run_r_review_bindings <- new.env(parent = emptyenv())
   if (!is.null(run_r_server)) {
     ms <- options$mcp_servers %||% list()
     ms[["r_session"]] <- run_r_server
@@ -499,6 +513,26 @@
       ui_addons$diagnosticsSettings <- settings_binding$config
     }
     if (!is.null(memory_binding)) ui_addons$memoryMonitor <- memory_binding$config
+    if (!is.null(run_r_review_service)) {
+      review_key <- paste0("review-", .diagnostics_hex_token())
+      review_binding <- .bind_run_r_review(
+        run_r_review_service, session, "chat_input",
+        on_enabled_changed = function(enabled) {
+          for (key in ls(run_r_review_bindings, all.names = TRUE)) {
+            binding <- get0(key, envir = run_r_review_bindings, inherits = FALSE)
+            if (!is.null(binding)) tryCatch(binding$broadcast_enabled(enabled),
+                                            error = function(e) NULL)
+          }
+        }
+      )
+      assign(review_key, review_binding, envir = run_r_review_bindings)
+      session$onSessionEnded(function() {
+        if (exists(review_key, envir = run_r_review_bindings, inherits = FALSE)) {
+          rm(list = review_key, envir = run_r_review_bindings)
+        }
+      })
+      ui_addons$runROutputReview <- review_binding$config
+    }
     captured_diagnostics <- launch_contract$captured_addin$diagnostics %||% list()
     ui_addons$diagnosticsLaunch <- .addin_diagnostics_launch_config(
       launch_values = launch_values,
@@ -772,6 +806,11 @@
     if (app_cleaned) return(invisible(FALSE))
     app_cleaned <<- TRUE
     tryCatch(settings_coordinator$dispose(), error = function(error) NULL)
+    if (!is.null(run_r_review_server)) {
+      tryCatch(run_r_review_server$close(), error = function(error) NULL)
+    } else if (!is.null(run_r_review_service)) {
+      tryCatch(run_r_review_service$close(), error = function(error) NULL)
+    }
     if (!is.null(memory_monitor_plugin)) {
       tryCatch(memory_monitor_plugin$dispose(), error = function(error) NULL)
     }

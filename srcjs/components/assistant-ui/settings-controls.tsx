@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDownIcon, SettingsIcon, XIcon } from "lucide-react";
 import { useShinyConfig } from "../../shiny-config-context";
 import { ModelSelector } from "@/components/assistant-ui/model-selector";
+import { RunROutputReviewToggle } from "@/components/assistant-ui/run-r-review-panel";
 import type {
   AssistantTextSize,
   PermissionModeOption,
@@ -435,6 +436,7 @@ export function SidebarSettings() {
     memoryMonitor,
     diagnosticsLogging,
     showPerformanceOrb,
+    runROutputReview,
   } = useShinyConfig();
   const [open, setOpen] = useState(false);
   const dialogId = useId();
@@ -448,7 +450,8 @@ export function SidebarSettings() {
   if (!permissionMode && !thinking && composerDensity === undefined &&
       assistantTextSize === undefined && autoStartCopilotApi === undefined &&
       showClaudeEditsInRStudio === undefined && memoryMonitor === undefined &&
-      diagnosticsLogging === undefined && showPerformanceOrb === undefined) return null;
+      diagnosticsLogging === undefined && showPerformanceOrb === undefined &&
+      runROutputReview === undefined) return null;
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
@@ -492,6 +495,7 @@ export function SidebarSettings() {
           <ComposerDensityControl />
           <AssistantTextSizeControl />
           <RunRToggle />
+          <RunROutputReviewToggle />
           <ShowClaudeEditsInRStudioToggle />
           <CopilotAutoStartToggle />
           <DiagnosticsControls />

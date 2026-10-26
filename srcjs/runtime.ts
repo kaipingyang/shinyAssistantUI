@@ -44,6 +44,11 @@ import {
   type MemoryMonitorSample,
 } from "./memory-monitor-addon";
 import {
+  createRunRReviewBridge,
+  parseRunRReviewAddon,
+  type RunRReviewBridge,
+} from "./run-r-review-addon";
+import {
   createDiagnosticsSettingsBridge,
   parseDiagnosticsSettingsAddon,
   parseDiagnosticsLaunchConfig,
@@ -380,6 +385,16 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     ? [memoryMonitorConfig.version, memoryMonitorConfig.ownerSeed, memoryMonitorConfig.lastRevision].join("|")
     : "";
   const memoryMonitorBridgeRef = useRef<MemoryMonitorBridge | null>(null);
+  // Plan 163: one review bridge per widget; created when the addin advertises it.
+  const runRReviewConfig = useMemo(() => parseRunRReviewAddon(config), [config]);
+  const runRReviewBridgeRef = useRef<RunRReviewBridge | null>(null);
+  if (runRReviewConfig && !runRReviewBridgeRef.current) {
+    runRReviewBridgeRef.current = createRunRReviewBridge(inputId, runRReviewConfig);
+  }
+  useEffect(() => () => {
+    runRReviewBridgeRef.current?.dispose();
+    runRReviewBridgeRef.current = null;
+  }, [inputId]);
   const diagnosticsSettingsConfig = useMemo(() => parseDiagnosticsSettingsAddon(config), [config]);
   const diagnosticsLaunchConfig = useMemo(() => parseDiagnosticsLaunchConfig(config), [config]);
   const diagnosticsSettingsKey = diagnosticsSettingsConfig
@@ -1846,20 +1861,33 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
       });
     });
     // "Run in Console" 结果回流：自动提交一条消息把代码+输出报告给 Claude(Plan 21/A)。
+    // Plan 163: when output review is available the user confirms (or edits) first.
     bridge.current.onConsoleResult((d) => {
       const threadId = d.threadId ?? currentThreadIdRef.current;
       const code = String(d?.code ?? "");
       const ok = d?.ok === true;
+      const output = String(d?.output ?? "").trim();
       const body = ok
-        ? (String(d?.output ?? "").trim() || "(no visible output)")
-        : `Error: ${String(d?.error ?? "").trim()}`;
-      const text = [
-        "I ran this in my R console:",
-        "```r", code, "```",
-        ok ? "Output:" : "It errored:",
-        "```", body, "```",
-      ].join("\n");
-      deliverTextRef.current?.(text, threadId, d.project ?? projectForThreadId(threadId));
+        ? (output || "(no visible output)")
+        : [output, `Error: ${String(d?.error ?? "").trim()}`].filter(Boolean).join("\n");
+      const project = d.project ?? projectForThreadId(threadId);
+      const deliver = (shared: string) => {
+        const text = [
+          "I ran this in my R console:",
+          "```r", code, "```",
+          ok ? "Output:" : "It errored:",
+          "```", shared, "```",
+        ].join("\n");
+        deliverTextRef.current?.(text, threadId, project);
+      };
+      const review = runRReviewBridgeRef.current;
+      if (review) {
+        review.reviewLocal({ threadId, code, text: body, isError: !ok }, (shared) => {
+          if (shared !== null) deliver(shared);
+        });
+      } else {
+        deliver(body);
+      }
     });
     // 本地 skills 热更新(切换工作目录时 R 重载该项目 .claude 的 skills 并经 :commands 下发)。
     bridge.current.onCommands((d) => {
@@ -3961,6 +3989,7 @@ export function useShinyRuntime(inputId: string, config: Record<string, unknown>
     pendingServiceSubmissions,
     retryService: copilotBridge.current ? () => copilotBridge.current?.retry() : undefined,
     cancelPendingSubmissions,
+    runROutputReview: runRReviewBridgeRef.current ?? undefined,
     memoryMonitor: memoryMonitorView ? {
       ...memoryMonitorView,
       setVisible: setMemoryMonitorVisible,

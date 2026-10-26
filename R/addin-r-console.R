@@ -221,9 +221,28 @@
 }
 
 # run_r 开关(Plan 45):关掉时从连接选项的 mcp_servers 摘除 r_session(纯函数,可测)。
-.filter_run_r_mcp <- function(mcp_servers, enabled) {
-  if (!isTRUE(enabled) && is.list(mcp_servers) && "r_session" %in% names(mcp_servers))
+# Plan 163: each thread's run_r subprocess also learns its thread id so output review
+# is shown in the right conversation.
+.filter_run_r_mcp <- function(mcp_servers, enabled, thread_id = NULL) {
+  if (!is.list(mcp_servers) || !"r_session" %in% names(mcp_servers)) return(mcp_servers)
+  if (!isTRUE(enabled)) {
     mcp_servers[["r_session"]] <- NULL
+  } else if (is.character(thread_id) && length(thread_id) == 1L && !is.na(thread_id) &&
+             nzchar(thread_id) && is.list(mcp_servers$r_session)) {
+    env <- mcp_servers$r_session$env
+    review_url <- if ((is.list(env) || is.character(env)) &&
+                      "CLAUDE_ADDIN_REVIEW_URL" %in% names(env)) {
+      env[["CLAUDE_ADDIN_REVIEW_URL"]]
+    } else NULL
+    # Only the addin-owned, reviewed server needs the thread; user servers that
+    # happen to be called r_session are left untouched.
+    if (is.character(review_url) && length(review_url) == 1L && !is.na(review_url) &&
+        nzchar(review_url)) {
+      if (is.list(env)) env$CLAUDE_ADDIN_THREAD_ID <- thread_id
+      else env <- c(env, CLAUDE_ADDIN_THREAD_ID = thread_id)
+      mcp_servers$r_session$env <- env
+    }
+  }
   mcp_servers
 }
 

@@ -156,6 +156,7 @@ export default function AssistantUI({ inputId, config }: AssistantUIProps) {
     rateLimit: rt.rateLimit,
     statusText: rt.statusText,
     serviceState: rt.serviceState,
+    runROutputReview: rt.runROutputReview,
     memoryMonitor: rt.memoryMonitor,
     diagnosticsLogging: rt.diagnosticsLogging,
     showPerformanceOrb: rt.showPerformanceOrb,

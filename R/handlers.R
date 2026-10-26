@@ -4127,7 +4127,8 @@ make_claude_handler <- function(options       = NULL,
       thinking                    = internal_thinking() %||% (if (is.function(thinking_provider)) thinking_provider() else NULL) %||% options$thinking,
       model                       = internal_model(thread_id) %||% options$model,
       settings                    = if (.ask_all) '{"permissions":{"ask":["*"]}}' else options$settings,
-      mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled),
+      mcp_servers                 = .filter_run_r_mcp(options$mcp_servers, run_r_state$enabled,
+                                                      thread_id = thread_id),
       allowed_tools               = .addin_run_r_allowed_tools(
         isTRUE(autorun_state$on) && isTRUE(run_r_state$enabled) &&
           ("r_session" %in% names(options$mcp_servers)),

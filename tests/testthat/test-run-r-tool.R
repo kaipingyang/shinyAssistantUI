@@ -106,3 +106,88 @@ test_that("run_r MCP success result returns full output or a no-output marker", 
   expect_identical(res$content[[1]]$text, "[1] 1\n[1] 2")
   expect_identical(env$.run_r_result("x <- 1")$content[[1]]$text, "(no visible output)")
 })
+
+# ── Plan 163 batch 2: output review before returning to Claude ──────────────
+load_review_script <- function(review, cap = list(ok = TRUE, output = "secret", error = NULL)) {
+  withr::local_envvar(
+    CLAUDE_ADDIN_REVIEW_URL = "ipc:///tmp/review-test.sock",
+    CLAUDE_ADDIN_THREAD_ID = "thread-9",
+    .local_envir = parent.frame()
+  )
+  env <- load_run_r_script(function(url, code, timeout = 60000) cap)
+  env$.review_remote <- review
+  env
+}
+
+test_that("approved output is returned unchanged and the request carries the thread", {
+  seen <- NULL
+  env <- load_review_script(function(url, payload, timeout) {
+    seen <<- payload
+    list(decision = "approve", text = payload$text, request_id = payload$request_id)
+  })
+  res <- env$.run_r_result("secret_value")
+  expect_identical(res$content[[1]]$text, "secret")
+  expect_null(res$isError)
+  expect_identical(seen$type, "run_r_output_review")
+  expect_identical(seen$thread_id, "thread-9")
+  expect_identical(seen$code, "secret_value")
+  expect_identical(seen$text, "secret")
+  expect_false(seen$is_error)
+})
+
+test_that("edited output replaces the original and is marked as edited", {
+  env <- load_review_script(function(url, payload, timeout) {
+    list(decision = "edit", text = "redacted", request_id = payload$request_id)
+  })
+  text <- env$.run_r_result("x")$content[[1]]$text
+  expect_match(text, "redacted", fixed = TRUE)
+  expect_match(text, "edited", ignore.case = TRUE)
+  expect_false(grepl("secret", text, fixed = TRUE))
+})
+
+test_that("rejection, timeout and malformed replies never leak the output", {
+  replies <- list(
+    list(decision = "reject", reason = "user"),
+    list(decision = "reject", reason = "timeout"),
+    NULL,
+    list(decision = "edit", text = 5),
+    list(decision = "approve", text = "different")
+  )
+  for (reply in replies) {
+    env <- load_review_script(function(url, payload, timeout) {
+      if (is.list(reply)) reply$request_id <- payload$request_id
+      reply
+    })
+    res <- env$.run_r_result("x")
+    text <- res$content[[1]]$text
+    if (identical(reply$decision, "approve")) {
+      # approve always sends the reviewed original, never reply-supplied text
+      expect_identical(text, "secret")
+    } else {
+      expect_true(isTRUE(res$isError))
+      expect_false(grepl("secret", text, fixed = TRUE))
+      expect_match(text, "did not approve", fixed = TRUE)
+      expect_match(text, "already ran", fixed = TRUE)
+    }
+  }
+})
+
+test_that("review covers error output too", {
+  env <- load_review_script(
+    function(url, payload, timeout) list(decision = "reject", reason = "user",
+                                         request_id = payload$request_id),
+    cap = list(ok = FALSE, output = "secret", error = "boom")
+  )
+  res <- env$.run_r_result("x")
+  expect_true(isTRUE(res$isError))
+  expect_false(grepl("secret|boom", res$content[[1]]$text))
+})
+
+test_that("an approval for a different request never releases this output", {
+  env <- load_review_script(function(url, payload, timeout) {
+    list(decision = "approve", text = payload$text, request_id = "someone-else")
+  })
+  res <- env$.run_r_result("x")
+  expect_true(isTRUE(res$isError))
+  expect_false(grepl("secret", res$content[[1]]$text, fixed = TRUE))
+})
