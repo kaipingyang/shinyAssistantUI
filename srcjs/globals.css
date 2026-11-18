@@ -279,3 +279,58 @@
 ) {
   font-size: 0.875em !important;
 }
+
+/* Plan 166: the assistant-ui A2UI vocabulary renders unstyled markup; give every
+   A2UI surface (AskUserForm and others) a readable, theme-aware layout. */
+[data-slot="aui_a2ui_surface"] {
+  margin-block: 0.5rem;
+  max-width: 40rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-background);
+  padding: 0.875rem 1rem;
+  font-size: 0.875rem;
+}
+[data-slot="aui_a2ui_surface"] [data-aui="col"] { display: flex; flex-direction: column; gap: 0.5rem; }
+[data-slot="aui_a2ui_surface"] [data-aui="row"] { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+[data-slot="aui_a2ui_surface"] [data-aui="header"] { font-size: 1rem; font-weight: 600; margin: 0 0 0.25rem; }
+[data-slot="aui_a2ui_surface"] [data-aui="caption"] { margin: 0; font-size: 0.75rem; color: var(--color-muted-foreground); }
+[data-slot="aui_a2ui_surface"] [data-aui="markdown"] { white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-slot="aui_a2ui_surface"] [data-aui="markdown"]:empty { display: none; }
+[data-slot="aui_a2ui_surface"] :is([data-aui="input"], [data-aui="datepicker"], [data-aui="select"]) {
+  width: 100%;
+  max-width: 28rem;
+  border: 1px solid var(--color-input);
+  border-radius: 0.375rem;
+  background: var(--color-background);
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+}
+[data-slot="aui_a2ui_surface"] [data-aui="input"][data-aui-multiline="true"] { min-height: 4rem; resize: vertical; }
+[data-slot="aui_a2ui_surface"] :is([data-aui="input"], [data-aui="datepicker"], [data-aui="select"]):focus-visible,
+[data-slot="aui_a2ui_surface"] [data-aui="button"]:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 1px;
+}
+[data-slot="aui_a2ui_surface"] :is([data-aui="radiogroup"], [data-aui="checkboxgroup"]) {
+  display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; border: 0; margin: 0; padding: 0;
+}
+[data-slot="aui_a2ui_surface"] :is([data-aui="radiogroup-option"], [data-aui="checkboxgroup-option"], [data-aui="checkbox"]) {
+  display: inline-flex; align-items: center; gap: 0.375rem; cursor: pointer;
+}
+[data-slot="aui_a2ui_surface"] [data-aui="button"] {
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-background);
+  padding: 0.3rem 0.875rem;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+[data-slot="aui_a2ui_surface"] [data-aui="row"] > [data-aui="button"]:first-child {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+[data-slot="aui_a2ui_surface"] [data-aui="button"]:hover { filter: brightness(0.96); }
+[data-slot="aui_a2ui_surface"] [data-aui="divider"] { border: 0; border-top: 1px solid var(--color-border); }

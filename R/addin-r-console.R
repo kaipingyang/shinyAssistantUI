@@ -224,24 +224,27 @@
 # Plan 163: each thread's run_r subprocess also learns its thread id so output review
 # is shown in the right conversation.
 .filter_run_r_mcp <- function(mcp_servers, enabled, thread_id = NULL) {
-  if (!is.list(mcp_servers) || !"r_session" %in% names(mcp_servers)) return(mcp_servers)
-  if (!isTRUE(enabled)) {
+  if (!is.list(mcp_servers)) return(mcp_servers)
+  if (!isTRUE(enabled) && "r_session" %in% names(mcp_servers)) {
     mcp_servers[["r_session"]] <- NULL
-  } else if (is.character(thread_id) && length(thread_id) == 1L && !is.na(thread_id) &&
-             nzchar(thread_id) && is.list(mcp_servers$r_session)) {
-    env <- mcp_servers$r_session$env
-    review_url <- if ((is.list(env) || is.character(env)) &&
-                      "CLAUDE_ADDIN_REVIEW_URL" %in% names(env)) {
-      env[["CLAUDE_ADDIN_REVIEW_URL"]]
-    } else NULL
-    # Only the addin-owned, reviewed server needs the thread; user servers that
-    # happen to be called r_session are left untouched.
-    if (is.character(review_url) && length(review_url) == 1L && !is.na(review_url) &&
-        nzchar(review_url)) {
-      if (is.list(env)) env$CLAUDE_ADDIN_THREAD_ID <- thread_id
-      else env <- c(env, CLAUDE_ADDIN_THREAD_ID = thread_id)
-      mcp_servers$r_session$env <- env
-    }
+  }
+  if (!(is.character(thread_id) && length(thread_id) == 1L && !is.na(thread_id) &&
+        nzchar(thread_id))) return(mcp_servers)
+  # Servers carrying an addin endpoint marker (review/form URL) need the thread id;
+  # other servers are left untouched. The id is routing data, not a permission.
+  markers <- c("CLAUDE_ADDIN_REVIEW_URL", "CLAUDE_ADDIN_FORM_URL")
+  for (name in names(mcp_servers)) {
+    server <- mcp_servers[[name]]
+    env <- if (is.list(server)) server$env else NULL
+    if (!(is.list(env) || is.character(env))) next
+    marked <- any(vapply(markers, function(key) {
+      key %in% names(env) && is.character(env[[key]]) && length(env[[key]]) == 1L &&
+        !is.na(env[[key]]) && nzchar(env[[key]])
+    }, logical(1)))
+    if (!marked) next
+    if (is.list(env)) env$CLAUDE_ADDIN_THREAD_ID <- thread_id
+    else env <- c(env[names(env) != "CLAUDE_ADDIN_THREAD_ID"], CLAUDE_ADDIN_THREAD_ID = thread_id)
+    mcp_servers[[name]]$env <- env
   }
   mcp_servers
 }
@@ -268,6 +271,8 @@
     env     = list(
       CLAUDE_ADDIN_CONSOLE_URL = console_url,
       R_LIBS                   = paste(.libPaths(), collapse = .Platform$path.sep)
-    )
+    ),
+    # Per-server CLI tool-call limit (ms): long enough for output review (Plan 163/166).
+    timeout = 690000L
   )
 }

@@ -166,6 +166,11 @@ shinyAssistantUI::claude_addin(viewer = "pane") # dock in the Viewer pane
   ```
 
   `ask` rules also accept per-tool / per-path patterns such as `"Bash(rm*)"` or `"Read(/tmp/**)"`.
+- **Forms instead of chat questions**: Claude can call `AskUserForm` to collect several values at
+  once (text, long text, numbers, single/multiple choice, checkbox, dates, with defaults and
+  required fields). The form appears in the conversation as an A2UI card; Claude receives only
+  validated values after you press its submit button, and Cancel, Stop, timeouts or closing the
+  browser return "not submitted".
 - **R output review (on by default)**: after `run_r` runs code in your session, its output (every
   printed/visible result, plus anything printed before an error) appears above the composer. Send
   it, edit it first, or decline; Claude only receives what you confirm. Declining, Stop, a

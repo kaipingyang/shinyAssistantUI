@@ -324,6 +324,29 @@
     ms[["r_session"]] <- run_r_server
     options$mcp_servers <- ms
   }
+  # Plan 166: AskUserForm — Claude-callable form rendered as an A2UI surface.
+  ask_form_emitters <- .new_ask_form_emitters()
+  ask_form_service <- NULL
+  ask_form_endpoint <- NULL
+  form_url <- paste0("ipc://", tempfile("claude-addin-form-", fileext = ".sock"))
+  ask_form_config <- .addin_ask_form_server(form_url)
+  if (!is.null(ask_form_config) && "ui" %in% names(options$mcp_servers)) {
+    # Never replace a user-configured server named "ui"; the form tool stays off.
+    message("[shinyAssistantUI] An MCP server named 'ui' is already configured; AskUserForm is disabled.")
+    ask_form_config <- NULL
+  }
+  if (!is.null(ask_form_config)) {
+    ask_form_service <- .new_ask_form_service(ask_form_emitters)
+    ask_form_endpoint <- .start_run_r_review_server(form_url, ask_form_service)
+    if (is.null(ask_form_endpoint)) {
+      ask_form_service <- NULL
+    } else {
+      ms <- options$mcp_servers %||% list()
+      ms[["ui"]] <- ask_form_config
+      options$mcp_servers <- ms
+      options$allowed_tools <- .addin_form_allowed_tools(options$allowed_tools)
+    }
+  }
   effective_memory_guard_config <- .normalize_memory_guard_config(
     memory_guard_config %||% list(enabled = FALSE)
   )
@@ -395,6 +418,11 @@
     )
   }
   server <- function(input, output, session) {
+    # Plan 166: forms shown by runs of this browser session belong to it.
+    ask_form_owner <- paste0("session-", .diagnostics_hex_token())
+    if (!is.null(ask_form_service)) {
+      .bind_ask_form(ask_form_service, session, "chat_input", ask_form_owner)
+    }
     # runGadget(stopOnCancel = TRUE) implements cancellation by deliberately
     # raising "User cancel". Shiny invokes options(shiny.error) before an outer
     # tryCatch can catch that error, which opens RStudio's debugger. Handle the
@@ -440,7 +468,23 @@
       handler_params <- names(formals(handler))
       call_args <- if ("..." %in% handler_params) args
                    else args[names(args) %in% handler_params]
-      result <- do.call(handler, call_args)
+      # Plan 166: while this foreground run executes, AskUserForm may show its
+      # A2UI surface through the run's own on_a2ui (active-run authority).
+      release_form_emitter <- if (!is.null(ask_form_service) && is.function(args$on_a2ui)) {
+        ask_form_emitters$register(args$thread_id, args$run_id, args$on_a2ui,
+                                   owner = ask_form_owner)
+      } else NULL
+      result <- tryCatch(do.call(handler, call_args), error = function(error) {
+        if (is.function(release_form_emitter)) release_form_emitter()
+        stop(error)
+      })
+      if (is.function(release_form_emitter)) {
+        if (inherits(result, "promise")) {
+          result <- promises::finally(result, release_form_emitter)
+        } else {
+          release_form_emitter()
+        }
+      }
       if (!identical(args$message, "/reload-skills")) return(result)
       refresh_local <- function(value = NULL) {
         ctrl$send_commands(tryCatch(
@@ -565,6 +609,12 @@
 
     ctrl <- assistantUIServer(
       "chat", handler = server_handler,
+      a2ui_action_handler = if (!is.null(ask_form_service)) {
+        function(name, context, thread_id, surface_id, on_a2ui, on_error) {
+          ask_form_service$handle_action(name, context, thread_id, surface_id, on_error, on_a2ui,
+                                         owner = ask_form_owner)
+        }
+      } else NULL,
       show_thread_list = TRUE,
       persistence      = "server",
       latex            = TRUE,   # Claude Code 常输出数学公式 → 默认启用 KaTeX 渲染
@@ -806,6 +856,9 @@
     if (app_cleaned) return(invisible(FALSE))
     app_cleaned <<- TRUE
     tryCatch(settings_coordinator$dispose(), error = function(error) NULL)
+    if (!is.null(ask_form_endpoint)) {
+      tryCatch(ask_form_endpoint$close(), error = function(error) NULL)
+    }
     if (!is.null(run_r_review_server)) {
       tryCatch(run_r_review_server$close(), error = function(error) NULL)
     } else if (!is.null(run_r_review_service)) {
