@@ -200,3 +200,43 @@
                     " prefer paths relative to the project root."))
   paste(lines, collapse = "\n")
 }
+
+# Plan 167: whenever Claude needs the user's input or decision, it should use the
+# interactive cards instead of a plain-text question. PURE.
+.addin_ui_first_guidance <- function(form_available = TRUE) {
+  lines <- c(
+    "Asking the user: whenever you need the user's input, a decision, a confirmation, or want them to choose between your proposals, ask through the UI instead of writing a plain-text question and stopping.",
+    "- Use AskUserQuestion for 1-4 short questions with 2-4 choices each (it also supports kind \"text\" for an open answer and kind \"number\" with min/max). When you suggest options or recommend an approach, offer them as choices and mark your recommendation in its label or description."
+  )
+  if (isTRUE(form_available)) {
+    lines <- c(lines,
+      "- Use AskUserForm to collect or confirm several related values at once: analysis parameters, dates, numbers, longer text, more than four options, or required fields. Pre-fill `default` with your best guess so the user mostly confirms.",
+      "- If AskUserForm returns submitted=false, do not proceed with the action that needed it."
+    )
+  }
+  lines <- c(lines,
+    "- Do not use these tools for tool permissions; those prompts appear automatically.",
+    "- Only fall back to a plain-text question when the answer cannot be expressed through these cards."
+  )
+  paste(lines, collapse = "\n")
+}
+
+# Append text to a system prompt without replacing it; idempotent. PURE.
+.addin_append_system_prompt <- function(system_prompt, text) {
+  if (!is.character(text) || length(text) != 1L || !nzchar(text)) return(system_prompt)
+  join <- function(base) {
+    base <- if (is.character(base) && length(base) == 1L && !is.na(base)) base else ""
+    if (nzchar(base) && grepl(text, base, fixed = TRUE)) return(base)
+    if (nzchar(base)) paste0(base, "\n\n", text) else text
+  }
+  if (is.null(system_prompt)) {
+    if (!requireNamespace("ClaudeAgentSDK", quietly = TRUE)) return(text)
+    return(ClaudeAgentSDK::SystemPromptPreset(append = text))
+  }
+  if (inherits(system_prompt, "SystemPromptPreset")) {
+    system_prompt$append <- join(system_prompt$append)
+    return(system_prompt)
+  }
+  if (is.character(system_prompt) && length(system_prompt) == 1L) return(join(system_prompt))
+  system_prompt
+}

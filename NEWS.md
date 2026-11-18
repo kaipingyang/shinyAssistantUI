@@ -1,5 +1,7 @@
 # shinyAssistantUI 0.5.7.9016
 
+- **UI 优先询问**：Claude Code addin 在系统提示末尾（不覆盖原有内容）加入规则：需要用户输入、决定、确认或在方案中选择时，优先用 AskUserQuestion（1-4 个简短问题，支持 text/number）或 AskUserForm（多个参数、日期、长文本、超过 4 个选项或必填项），只有卡片无法表达时才用纯文本提问；表单未提交时不得继续执行。表单服务不可用时只提示 AskUserQuestion。真实 Claude CLI 对照实验中，加入规则后两个测试场景都通过界面卡片询问（基线有一个场景用纯文本提问）。
+
 - **AskUserForm（Claude addin，真正的 A2UI 交互）**：Claude 可调用 MCP 工具 `mcp__ui__AskUserForm`（参数与结果契约与 codeagent 的 AskUserForm 一致：`title`、最多 20 个 `fields`，类型 text/textarea/number/select/multiselect/checkbox/date，支持 `default`/`required`/`help`；结果为 `{"submitted": true|false, "values": {...}}`）。表单由服务端生成 A2UI surface，经当前 run 的 `on_a2ui` 显示在对话中，用户提交/取消通过 A2UI action 回传；服务端按声明校验必填、数字、日期与选项，错误显示在表单内，成功后表单变为只读摘要。Stop、10 分钟超时、该 run 结束、浏览器断开或关闭时一律以“未提交”返回。每个对话最多 12 个未完成表单；只有拥有该 run 的浏览器会话可以作答。仅当 addin 自己成功安装表单服务时才把该工具加入免审批列表，已有名为 `ui` 的 MCP server 时不覆盖并关闭此功能。A2UI surface 新增作用域样式；stdio MCP 配置增加 CLI 工具超时，避免长时间审阅/表单被截断。
 
 - **AskUserQuestion 新题型兼容（Claude Code 2.1.3xx）**：交互卡与历史摘要支持顶部 `title`、每题 `description`、`kind = "text"`（多行文本框与 placeholder）和 `kind = "number"`（数字输入、单位、`min`/`max`/`step`/`defaultValue`，越界或不符合步长时禁用提交）。答案仍以问题文字为键、值为字符串，SDK 与审批回传不变。显式带 `kind` 的问题按 CLI schema 严格校验；不带 `kind` 的旧格式保持原行为。历史中逗号拼接的多选答案按 CLI 语法正确高亮。选择题使用 `fieldset`/`legend` 分组，数字错误关联到输入框。

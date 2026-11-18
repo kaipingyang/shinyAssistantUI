@@ -347,6 +347,10 @@
       options$allowed_tools <- .addin_form_allowed_tools(options$allowed_tools)
     }
   }
+  # Plan 167: prefer UI cards whenever Claude needs the user's input.
+  options$system_prompt <- .addin_append_system_prompt(
+    options$system_prompt, .addin_ui_first_guidance(form_available = !is.null(ask_form_service))
+  )
   effective_memory_guard_config <- .normalize_memory_guard_config(
     memory_guard_config %||% list(enabled = FALSE)
   )
