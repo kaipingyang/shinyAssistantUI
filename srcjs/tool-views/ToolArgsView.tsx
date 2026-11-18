@@ -4,6 +4,7 @@
 import { useState, type FC } from "react";
 import { TextMessagePartProvider } from "@assistant-ui/react";
 import type { ToolView } from "./types";
+import { splitMultiSelectAnswer } from "./ask-user-question-args";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { CheckIcon, CopyIcon } from "lucide-react";
@@ -261,10 +262,12 @@ export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view
         data-slot="tool-fallback-args"
         className="aui-tool-questions bg-muted/50 mt-1 flex flex-col gap-2 rounded-md p-2.5 text-xs"
       >
+        {view.title && <p data-question-title className="text-foreground font-semibold">{view.title}</p>}
         {view.items.map((q, i) => (
           <div
             key={i}
-            data-question-kind={q.multiSelect ? "multiple" : "single"}
+            data-question-kind={q.kind === "text" || q.kind === "number"
+              ? q.kind : q.multiSelect ? "multiple" : "single"}
             className="flex flex-col gap-1"
           >
             <div className="flex flex-wrap items-center gap-1.5">
@@ -272,16 +275,21 @@ export const ToolArgsView: FC<{ view: ToolView; isRunning?: boolean }> = ({ view
                 {q.header || `Question ${i + 1}`}
               </span>
               <span className="bg-background text-muted-foreground rounded-full border px-1.5 py-0.5 text-[10px]">
-                {q.multiSelect ? "Multiple choice" : "Single choice"}
+                {q.kind === "text" ? "Text answer"
+                  : q.kind === "number" ? `Number ${q.min} – ${q.max}${q.unit ? ` ${q.unit}` : ""}`
+                    : q.multiSelect ? "Multiple choice" : "Single choice"}
               </span>
             </div>
             <p className="text-foreground font-medium">{q.question}</p>
+            {q.description && <p className="text-muted-foreground">{q.description}</p>}
             {q.options.length > 0 && (
               <ul className="flex flex-col gap-0.5 ps-1">
                 {q.options.map((option, oi) => {
                   const answers = q.answer === undefined
                     ? []
-                    : Array.isArray(q.answer) ? q.answer : [q.answer];
+                    : q.multiSelect
+                      ? splitMultiSelectAnswer(q.answer)
+                      : Array.isArray(q.answer) ? q.answer : [q.answer];
                   const selected = answers.includes(option.label);
                   return (
                     <li

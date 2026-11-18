@@ -5,7 +5,7 @@ import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { useToolCard, ToolCardFrame } from "./tool-card-frame";
 import { AskQuestionCard } from "@/ask-question-card";
 import { Button } from "@/components/ui/button";
-import { parseAskUserQuestionArgs } from "@/tool-views/ask-user-question-args";
+import { parseAskUserQuestionInput } from "@/tool-views/ask-user-question-args";
 
 export const AskUserQuestionToolUI: ToolCallMessagePartComponent = (props) => {
   const card = useToolCard(props, {
@@ -13,9 +13,11 @@ export const AskUserQuestionToolUI: ToolCallMessagePartComponent = (props) => {
     completedDefaultOpen: false,
     pendingDefaultOpen: false,
   });
-  const questions = parseAskUserQuestionArgs(props.args);
+  const input = parseAskUserQuestionInput(props.args);
+  const questions = input?.items ?? null;
   const approvalBody = questions ? (
     <AskQuestionCard
+      title={input?.title}
       questions={questions}
       onSubmit={(answers) => card.decide(true, { answers })}
       onSkip={() => card.decide(false, { customMessage: "Skipped" })}

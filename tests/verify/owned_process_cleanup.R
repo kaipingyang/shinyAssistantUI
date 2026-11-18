@@ -15,8 +15,10 @@
 
   proc_children <- function(pid) {
     path <- file.path("/proc", pid, "task", pid, "children")
+    # The process can exit between the check and the read; treat that as no children.
     if (!file.exists(path)) return(integer())
-    scan(path, what = integer(), quiet = TRUE)
+    tryCatch(suppressWarnings(scan(path, what = integer(), quiet = TRUE)),
+             error = function(error) integer())
   }
   owned <- function() {
     seen <- integer()

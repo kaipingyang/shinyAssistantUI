@@ -4,11 +4,21 @@
 export type TodoItem = { content: string; status: string; activeForm?: string };
 export type QueryField = { label: string; value: string; href?: string };
 export type QuestionOptionSummary = { label: string; description?: string; preview?: string };
+export type QuestionKind = "choice" | "text" | "number";
 export type QuestionSummary = {
   question: string;
   header?: string;
+  /** Claude Code ≥ 2.1.3xx; "choice" when omitted. */
+  kind: QuestionKind;
+  description?: string;
   multiSelect: boolean;
   options: QuestionOptionSummary[];
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  defaultValue?: number;
+  unit?: string;
   answer?: string | string[];
 };
 
@@ -35,7 +45,7 @@ export type ToolView =
     }
   | { kind: "todos"; items: TodoItem[] }
   | { kind: "query"; fields: QueryField[] }
-  | { kind: "questions"; items: QuestionSummary[] }
+  | { kind: "questions"; title?: string; items: QuestionSummary[] }
   // json 兜底保留原 raw/json 双态:object/array → 缩进 JSON;标量/非 JSON → 原样 pre。
   | { kind: "json"; text: string; raw: boolean };
 

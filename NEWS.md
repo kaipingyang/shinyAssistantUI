@@ -1,5 +1,6 @@
 # shinyAssistantUI 0.5.7.9016
 
+- **AskUserQuestion 新题型兼容（Claude Code 2.1.3xx）**：交互卡与历史摘要支持顶部 `title`、每题 `description`、`kind = "text"`（多行文本框与 placeholder）和 `kind = "number"`（数字输入、单位、`min`/`max`/`step`/`defaultValue`，越界或不符合步长时禁用提交）。答案仍以问题文字为键、值为字符串，SDK 与审批回传不变。显式带 `kind` 的问题按 CLI schema 严格校验；不带 `kind` 的旧格式保持原行为。历史中逗号拼接的多选答案按 CLI 语法正确高亮。选择题使用 `fieldset`/`legend` 分组，数字错误关联到输入框。
 - **run_r 回传完整中间输出**：`run_r` MCP 与 Run in Console 现在像 R console 一样逐个顶层表达式执行：每个可见值都会自动打印，`message`/`warning` 保持实际顺序；出错时保留之前已打印的输出，停止后续表达式，并在多表达式代码中标出出错行与代码。语法错误以 `Parse error:` 返回且不执行任何代码。MCP 错误结果同时包含部分输出与错误。
 - **run_r 输出审阅（默认开启）**：Claude Code addin 中 `run_r` 执行完成后，输出先显示在输入框上方的审阅卡片中；用户可“Send output”、编辑后“Send edited output”或“Don't send”，只有确认的文本才会返回给 Claude。拒绝、10 分钟超时、Stop、无已连接浏览器、端点不可用或回复异常时一律不回传输出，并告知 Claude 代码已运行、不要为取得输出而重跑。其它对话的待审阅项会提示数量，页面重载后自动恢复。Run in Console 的结果在自动作为消息发送前也经过同一审阅。Settings 中可关闭“Review R output before sending to Claude”，该选择保存在 `~/.claude_addin/run_r_output_review.json`（缺失或损坏时视为开启），不改变 settings v2 文件，因此旧版本仍可读取原设置。审阅只控制回传，不控制执行；执行前审批保持不变。
 - **实验 A2UI over Shiny**：在现有 Shiny WebSocket 与 `ExternalStoreRuntime` 上接入经过审查的 A2UI v0.9/v0.9.1 子集，支持 surface create/update/delete、数据绑定、动作、严格双端校验、逐线程 sequence/event ledger、gap recovery、checkpoint 与 installed-package Chromium 门禁；不引入或宣称完整 AG-UI runtime、HTTP/SSE、A2UI v1.0、远程 catalog 或动态组件代码。
