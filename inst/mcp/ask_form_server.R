@@ -12,9 +12,23 @@ form_thread <- Sys.getenv("CLAUDE_ADDIN_THREAD_ID", "")
 form_timeout <- suppressWarnings(as.numeric(Sys.getenv("CLAUDE_ADDIN_FORM_TIMEOUT_MS", "630000")))
 if (!is.finite(form_timeout) || form_timeout <= 0) form_timeout <- 630000
 
+# nanonext REQ sockets resend an unanswered request every 60 s by default. These
+# requests wait for a person or for long R code, so a resend would show the form
+# again or run the code twice. 0 disables resending (NNG guidance for
+# non-idempotent requests).
+.req_socket <- function(url) {
+  sock <- nanonext::socket("req", dial = url)
+  ok <- tryCatch({ nanonext::opt(sock, "req:resend-time") <- 0L; TRUE }, error = function(e) FALSE)
+  if (!ok) {
+    try(close(sock), silent = TRUE)
+    stop("cannot disable request resend")
+  }
+  sock
+}
+
 .form_remote <- function(url, payload, timeout) {
   if (!nzchar(url) || !requireNamespace("nanonext", quietly = TRUE)) return(NULL)
-  sock <- tryCatch(nanonext::socket("req", dial = url), error = function(e) NULL)
+  sock <- tryCatch(.req_socket(url), error = function(e) NULL)
   if (is.null(sock)) return(NULL)
   on.exit(try(close(sock), silent = TRUE), add = TRUE)
   aio <- tryCatch(nanonext::request(nanonext::context(sock), data = payload, timeout = timeout),

@@ -16,12 +16,26 @@ suppressPackageStartupMessages(library(ClaudeAgentSDK))
 
 console_url <- Sys.getenv("CLAUDE_ADDIN_CONSOLE_URL", "")
 
+# nanonext REQ sockets resend an unanswered request every 60 s by default. These
+# requests wait for a person or for long R code, so a resend would show the form
+# again or run the code twice. 0 disables resending (NNG guidance for
+# non-idempotent requests).
+.req_socket <- function(url) {
+  sock <- nanonext::socket("req", dial = url)
+  ok <- tryCatch({ nanonext::opt(sock, "req:resend-time") <- 0L; TRUE }, error = function(e) FALSE)
+  if (!ok) {
+    try(close(sock), silent = TRUE)
+    stop("cannot disable request resend")
+  }
+  sock
+}
+
 # Minimal nanonext request to the main-session env-server (mirrors
 # shinyAssistantUI:::.addin_run_r_remote, inlined to keep this subprocess lean).
 .run_remote <- function(url, code, timeout = 60000) {
   if (!nzchar(url) || !requireNamespace("nanonext", quietly = TRUE))
     return(list(ok = FALSE, output = "", error = "R console server unavailable"))
-  sock <- tryCatch(nanonext::socket("req", dial = url), error = function(e) NULL)
+  sock <- tryCatch(.req_socket(url), error = function(e) NULL)
   if (is.null(sock)) return(list(ok = FALSE, output = "", error = "cannot reach R console server"))
   on.exit(try(close(sock), silent = TRUE), add = TRUE)
   ctx <- nanonext::context(sock)
@@ -30,7 +44,13 @@ console_url <- Sys.getenv("CLAUDE_ADDIN_CONSOLE_URL", "")
   if (is.null(aio)) return(list(ok = FALSE, output = "", error = "request failed"))
   nanonext::call_aio(aio)
   res <- aio$data
-  if (!is.list(res)) return(list(ok = FALSE, output = "", error = "console server timeout"))
+  if (!is.list(res)) {
+    return(list(ok = FALSE, output = "", error = paste0(
+      "No result within ", round(timeout / 1000), " s (console server timeout). The code may ",
+      "still be running in the user's R session and its side effects may still happen; ",
+      "do not run it again automatically. Ask the user to check the R console."
+    )))
+  }
   res
 }
 
@@ -56,7 +76,7 @@ if (!is.finite(review_timeout) || review_timeout <= 0) review_timeout <- 630000
 
 .review_remote <- function(url, payload, timeout) {
   if (!requireNamespace("nanonext", quietly = TRUE)) return(NULL)
-  sock <- tryCatch(nanonext::socket("req", dial = url), error = function(e) NULL)
+  sock <- tryCatch(.req_socket(url), error = function(e) NULL)
   if (is.null(sock)) return(NULL)
   on.exit(try(close(sock), silent = TRUE), add = TRUE)
   aio <- tryCatch(nanonext::request(nanonext::context(sock), data = payload, timeout = timeout),

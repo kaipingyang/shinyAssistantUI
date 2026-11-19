@@ -113,6 +113,17 @@
       safe(respond, list(decision = "approve", text = req$text, request_id = req$request_id))
       return(invisible(TRUE))
     }
+    # A repeated delivery of the same request keeps the pending review and
+    # answers on the newest channel.
+    for (open_id in order) {
+      open_entry <- get0(open_id, envir = pending, inherits = FALSE)
+      if (!is.null(open_entry) && identical(open_entry$request_id, req$request_id) &&
+          identical(open_entry$review$threadId, req$thread_id)) {
+        open_entry$respond <- respond
+        assign(open_id, open_entry, envir = pending)
+        return(invisible(TRUE))
+      }
+    }
     if (!length(ls(sinks, all.names = TRUE))) {
       return(reject_now(respond, "no_reviewer", req$request_id))
     }

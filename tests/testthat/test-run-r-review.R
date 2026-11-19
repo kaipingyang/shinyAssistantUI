@@ -176,8 +176,8 @@ test_that("timeout, Stop and shutdown reject pending reviews", {
   expect_identical(r2$box$calls, 1L)
 
   r4 <- capture_response()
-  s$service$request(review_request(), r4$respond)
-  s$service$request(review_request(), r3$respond)
+  s$service$request(review_request(request_id = "req-4"), r4$respond)
+  s$service$request(review_request(request_id = "req-3"), r3$respond)
   s$service$close()
   expect_identical(r3$box$response$reason, "shutdown")
   expect_identical(r4$box$response$reason, "shutdown")

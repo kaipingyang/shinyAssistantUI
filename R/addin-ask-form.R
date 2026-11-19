@@ -376,6 +376,17 @@
       return(invisible(reply(status = "invalid",
                              message = "The form is too large; use fewer or shorter fields.")))
     }
+    # A repeated delivery of the same request keeps the open form and answers on
+    # the newest channel (the old one may no longer be read).
+    for (open_id in ls(pending)) {
+      open_entry <- get0(open_id, envir = pending, inherits = FALSE)
+      if (!is.null(open_entry) && identical(open_entry$request_id, request_id) &&
+          identical(open_entry$thread_id, req$thread_id)) {
+        open_entry$respond <- respond
+        assign(open_id, open_entry, envir = pending)
+        return(invisible(TRUE))
+      }
+    }
     spec <- .ask_form_validate_fields(req$fields)
     if (is.character(spec)) return(invisible(reply(status = "invalid", message = spec)))
     title <- substr(req$title, 1L, 200L)

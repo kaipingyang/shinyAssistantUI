@@ -187,11 +187,25 @@
   if (started) replacement else NULL
 }
 
+# nanonext REQ sockets resend an unanswered request every 60 s by default. These
+# requests wait for a person or for long R code, so a resend would show the form
+# again or run the code twice. 0 disables resending (NNG guidance for
+# non-idempotent requests).
+.addin_req_socket <- function(url) {
+  sock <- nanonext::socket("req", dial = url)
+  ok <- tryCatch({ nanonext::opt(sock, "req:resend-time") <- 0L; TRUE }, error = function(e) FALSE)
+  if (!ok) {
+    try(close(sock), silent = TRUE)
+    stop("cannot disable request resend")
+  }
+  sock
+}
+
 # ── 客户端（background job 侧）：发代码,同步取回捕获结果 ─────────────────────
 .addin_run_r_remote <- function(url, code, timeout = 15000) {
   if (!requireNamespace("nanonext", quietly = TRUE))
     return(list(ok = FALSE, output = "", error = "nanonext unavailable"))
-  sock <- tryCatch(nanonext::socket("req", dial = url), error = function(e) NULL)
+  sock <- tryCatch(.addin_req_socket(url), error = function(e) NULL)
   if (is.null(sock)) return(list(ok = FALSE, output = "", error = "cannot reach R console server"))
   on.exit(try(close(sock), silent = TRUE), add = TRUE)
   ctx <- nanonext::context(sock)
