@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 suppressMessages({ library(chromote); library(callr) })
 PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"; PORT <- 8994
 proc <- callr::r_bg(function(proj, port) {

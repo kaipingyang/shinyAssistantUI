@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 # Plan 48B e2e (headless): after an assistant reply, R-pushed follow-up chips (via
 # on_suggestions) render BELOW the latest reply; clicking one replaces the composer and
 # sends it (autoSend). Echo fixture (GOT[<message>]) so the click's send is observable.

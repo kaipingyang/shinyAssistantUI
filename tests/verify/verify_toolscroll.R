@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 # Bug2/3 验证:tool 调用 + 流式时 viewport 自动滚到底(auto_200px containment 修复)。
 suppressMessages({library(chromote); library(callr)})
 `%||%`<-function(x,y) if(is.null(x))y else x

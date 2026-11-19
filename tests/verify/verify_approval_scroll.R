@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 # Issue 1 验证:连续审批时,每个新审批框自动滚进视口(无需手动下滑)。
 suppressMessages({library(chromote); library(callr)})
 `%||%`<-function(x,y) if(is.null(x))y else x

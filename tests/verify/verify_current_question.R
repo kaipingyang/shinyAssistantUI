@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 suppressPackageStartupMessages({
   library(callr)
   library(chromote)

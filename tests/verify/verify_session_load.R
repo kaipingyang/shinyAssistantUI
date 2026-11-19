@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 # 复现/验证 React #31:历史会话含 file_path 工具时,加载渲染是否崩。
 suppressMessages({library(chromote);library(callr)})
 `%||%`<-function(x,y)if(is.null(x))y else x

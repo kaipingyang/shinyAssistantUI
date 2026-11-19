@@ -84,3 +84,19 @@ make_verification_cleanup <- function(browser_session, app_process, paths = char
     invisible(NULL)
   }
 }
+
+# One-line opt-in for older scripts that start their own app/browser (Plan 9 task):
+# on any exit (normal end, quit(), uncaught error) synchronously stop and confirm
+# every runner-owned descendant (callr supervisors, apps, Chrome, CLI children).
+register_owned_process_cleanup <- function(envir = globalenv()) {
+  if (isTRUE(get0(".owned_cleanup_registered", envir = envir, inherits = FALSE))) {
+    return(invisible(FALSE))
+  }
+  assign(".owned_cleanup_registered", TRUE, envir = envir)
+  guard <- new.env(parent = emptyenv())
+  assign(".owned_cleanup_guard", guard, envir = envir)
+  reg.finalizer(guard, function(e) {
+    tryCatch(.cleanup_runner_owned_descendants(), error = function(error) NULL)
+  }, onexit = TRUE)
+  invisible(TRUE)
+}

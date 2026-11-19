@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 suppressMessages({ library(chromote); library(callr) })
 `%||%` <- function(x, y) if (is.null(x)) y else x
 PROJ <- "/usrfiles/shared-projects/users/kaiping_yang/shinyAssistantUI"

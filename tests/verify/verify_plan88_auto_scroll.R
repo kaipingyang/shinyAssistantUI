@@ -1,3 +1,4 @@
+source("tests/verify/owned_process_cleanup.R"); register_owned_process_cleanup()
 .libPaths(c(
   "/home/kaiping.yang/R/x86_64-pc-linux-gnu-library/4.4",
   "/posit_share/site_library_u/4.4.3",
