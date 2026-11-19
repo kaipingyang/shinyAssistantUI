@@ -300,6 +300,16 @@
   border-radius: 0.5rem;
   padding: 0.75rem;
 }
+/* A long AskUserForm keeps its button row visible at the bottom of the chat viewport. */
+[data-slot="aui_a2ui_surface"][data-surface-id^="ask-form-"] [data-aui="col"] > [data-aui="row"]:last-child:has(> [data-aui="button"]) {
+  position: sticky;
+  /* Stop above the sticky composer footer (published by useFooterHeightVar). */
+  bottom: var(--aui-thread-footer-height, 0px);
+  z-index: 1;
+  background: var(--color-background);
+  padding-block: 0.5rem;
+  border-top: 1px solid var(--color-border);
+}
 /* Inside a section or a side-by-side cell, inputs line up with the full width. */
 [data-slot="aui_a2ui_surface"] :is([data-aui="card"], [data-aui="row"] > [data-aui="col"])
   :is([data-aui="input"], [data-aui="datepicker"], [data-aui="select"]) { max-width: none; }

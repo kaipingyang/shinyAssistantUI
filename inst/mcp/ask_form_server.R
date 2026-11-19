@@ -86,8 +86,8 @@ field_schema <- list(
                 description = "Machine name (letters, digits, underscore); the key in the result."),
     label = list(type = "string", maxLength = 200, description = "Label shown to the user."),
     type = list(type = "string", enum = list("text", "textarea", "number", "select",
-                                             "multiselect", "checkbox", "date"),
-                description = "Input type. select/multiselect need `choices`."),
+                                             "multiselect", "checkbox", "date", "path"),
+                description = "Input type. select/multiselect need `choices`. path is checked on the server when submitted (absolute or ~/ paths)."),
     choices = list(type = "array", items = list(type = "string", maxLength = 200), maxItems = 50,
                    description = "Options for select / multiselect."),
     default = list(type = "string", maxLength = 2000, description = paste(
@@ -109,6 +109,12 @@ field_schema <- list(
     width = list(type = "string", enum = list("full", "half"), description = paste(
       "\"half\" puts two consecutive half fields of the same section side by side;",
       "use it for short inputs such as dates, numbers and short choices.")),
+    kind = list(type = "string", enum = list("any", "file", "dir"),
+                description = "path: what the path must point to (default any)."),
+    must_exist = list(type = "boolean",
+                      description = "path: the path must already exist (default true). If false, its parent folder must exist."),
+    extensions = list(type = "array", items = list(type = "string", maxLength = 16), maxItems = 20,
+                      description = "path: allowed file extensions such as [\"docx\"]."),
     allow_other = list(type = "boolean",
                        description = "select: also offer a free-text input for a value not in `choices`."),
     help = list(type = "string", maxLength = 500, description = "Short hint under the field.")

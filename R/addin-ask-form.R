@@ -7,7 +7,7 @@
 # A2UI action arrives. Every failure path resolves as cancelled, never as submitted.
 
 .ASK_FORM_FIELD_TYPES <- c("text", "textarea", "number", "select", "multiselect",
-                           "checkbox", "date")
+                           "checkbox", "date", "path")
 .ASK_FORM_MAX_FIELDS <- 20L
 # Submitted text stays below the A2UI authority's 16 KiB-per-string limit.
 .ASK_FORM_MAX_TEXT <- 4000L
@@ -181,9 +181,25 @@
     placeholder <- as.character(.ask_form_scalar(f$placeholder, ""))
     if (is.na(placeholder)) placeholder <- ""
     if (nchar(placeholder) > 200L) return(sprintf("Field `%s`: `placeholder` must be at most 200 characters.", name))
-    if (nzchar(placeholder) && !type %in% c("text", "textarea", "number")) {
-      return(sprintf("Field `%s`: `placeholder` applies only to text, textarea and number fields.", name))
+    if (nzchar(placeholder) && !type %in% c("text", "textarea", "number", "path")) {
+      return(sprintf("Field `%s`: `placeholder` applies only to text, textarea, number and path fields.", name))
     }
+    kind <- as.character(.ask_form_scalar(f$kind, "any"))
+    extensions <- tolower(sub("^\\.", "", as.character(unlist(f$extensions %||% character(0), use.names = FALSE))))
+    extensions <- unique(extensions[!is.na(extensions) & nzchar(extensions)])
+    if (!identical(type, "path") && (!is.null(f$kind) || length(extensions) || !is.null(f$must_exist))) {
+      return(sprintf("Field `%s`: `kind`, `must_exist` and `extensions` apply only to path fields.", name))
+    }
+    if (is.na(kind) || !kind %in% c("any", "file", "dir")) {
+      return(sprintf("Field `%s`: `kind` must be \"any\", \"file\" or \"dir\".", name))
+    }
+    if (length(extensions) > 20L || any(!grepl("^[a-z0-9_+-]{1,16}$", extensions))) {
+      return(sprintf("Field `%s`: `extensions` must be at most 20 short names such as \"docx\".", name))
+    }
+    if (length(extensions) && identical(kind, "dir")) {
+      return(sprintf("Field `%s`: `extensions` cannot be used with kind \"dir\".", name))
+    }
+    must_exist <- if (is.null(f$must_exist)) TRUE else isTRUE(as.logical(.ask_form_scalar(f$must_exist, TRUE)))
     section <- as.character(.ask_form_scalar(f$section, ""))
     if (is.na(section)) section <- ""
     if (nchar(section) > 80L) return(sprintf("Field `%s`: `section` must be at most 80 characters.", name))
@@ -208,7 +224,8 @@
       pattern = pattern,
       pattern_hint = substr(as.character(.ask_form_scalar(f$pattern_hint, "")), 1L, 200L),
       allow_other = allow_other,
-      section = section, width = width
+      section = section, width = width,
+      kind = kind, extensions = extensions, must_exist = must_exist
     )
   }
   names_ <- vapply(out, `[[`, character(1L), "name")
@@ -248,6 +265,7 @@
     binding <- list(path = path_of(field))
     component <- switch(field$type,
       text = list(id = id, component = "TextField", label = label_of(field), value = binding),
+      path = list(id = id, component = "TextField", label = label_of(field), value = binding),
       textarea = list(id = id, component = "TextField", label = label_of(field), value = binding,
                       variant = "longText"),
       number = list(id = id, component = "TextField", label = label_of(field), value = binding,
@@ -393,6 +411,44 @@
   )
 }
 
+# Expanded, absolute path without a trailing separator. Only metadata is read.
+.ask_form_clean_path <- function(text) {
+  path <- path.expand(text)
+  path <- gsub("/+", "/", path)
+  if (nchar(path) > 1L) path <- sub("/$", "", path)
+  path
+}
+
+.ask_form_file_ext <- function(path) {
+  base <- basename(path)
+  if (!grepl(".", base, fixed = TRUE) || startsWith(base, ".") && !grepl(".", substring(base, 2L), fixed = TRUE)) {
+    return("")
+  }
+  tolower(sub(".*\\.", "", base))
+}
+
+# NULL when the submitted path satisfies the field, otherwise the problem text.
+.ask_form_path_problem <- function(text, field) {
+  if (nchar(text) > 4096L) return("is too long")
+  # Only "/...", "~" and "~/..." are accepted; "~user" would reach other accounts' homes.
+  if (!(startsWith(text, "/") || identical(text, "~") || startsWith(text, "~/"))) {
+    return("must be an absolute path (starting with / or ~/)")
+  }
+  path <- .ask_form_clean_path(text)
+  is_dir <- dir.exists(path)
+  exists <- is_dir || file.exists(path)
+  if (isTRUE(field$must_exist) && !exists) return("does not exist")
+  if (exists && is_dir && (identical(field$kind, "file") || length(field$extensions))) {
+    return("must be a file, not a folder")
+  }
+  if (exists && identical(field$kind, "dir") && !is_dir) return("must be a folder")
+  if (!exists && !dir.exists(dirname(path))) return("cannot be created: its parent folder does not exist")
+  if (length(field$extensions) && !(.ask_form_file_ext(path) %in% field$extensions)) {
+    return(sprintf("must be a %s file", paste0(".", field$extensions, collapse = " or ")))
+  }
+  NULL
+}
+
 # Coerce and validate submitted values. Returns list(values=, problems=). PURE.
 .ask_form_collect <- function(spec, raw, other = list()) {
   raw <- if (is.list(raw)) raw else list()
@@ -454,6 +510,16 @@
         else if (nzchar(pick) && !pick %in% field$choices) {
           problems <- c(problems, sprintf("%s has an unknown choice.", field$label)); ""
         } else pick
+      },
+      path = {
+        text <- trimws(text_of(value))
+        if (!nzchar(text)) NULL
+        else {
+          problem <- .ask_form_path_problem(text, field)
+          if (!is.null(problem)) {
+            problems <- c(problems, sprintf("%s %s.", field$label, problem)); NULL
+          } else .ask_form_clean_path(text)
+        }
       },
       date = {
         text <- trimws(text_of(value))

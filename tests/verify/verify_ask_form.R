@@ -318,6 +318,47 @@ main <- function() {
             identical(as.numeric(result$values$prior), 14), identical(result$values$cutoff, "2026-06-30"))
   checks <- c(checks, "sectioned_form_submits")
 
+  # 1d) Path fields are checked on the server; a long form keeps its buttons visible.
+  stage <- "path"
+  path_root <- normalizePath(tempfile("ask-form-paths-"), mustWork = FALSE)
+  dir.create(file.path(path_root, "tools"), recursive = TRUE)
+  writeLines("x", file.path(path_root, "protocol.docx"))
+  writeLines("x", file.path(path_root, "notes.txt"))
+  on.exit(unlink(path_root, recursive = TRUE), add = TRUE)
+  filler <- lapply(seq_len(14), function(i) list(name = paste0("extra", i), label = paste("Extra", i),
+                                                 type = "textarea", default = paste("value", i)))
+  id <- ask(mcp, list(title = "Paths", submit_label = "Check", fields = c(list(
+    list(name = "tools", label = "Tools folder", type = "path", kind = "dir", required = TRUE),
+    list(name = "protocol", label = "Protocol", type = "path", kind = "file", extensions = list("docx"))
+  ), filler)))
+  wait(sprintf("(%s)?.innerText.includes('Paths') && !!%s", surf, button("Check")))
+  wait(sprintf("(%s).querySelectorAll('textarea').length===14 && (%s).getBoundingClientRect().height > document.querySelector('[data-slot=aui_thread-viewport]').getBoundingClientRect().height", surf, surf))
+  # Scroll until the form top is in view (the thread may still be settling its follow).
+  wait(sprintf("(()=>{const s=%s;const v=document.querySelector('[data-slot=aui_thread-viewport]');s.scrollIntoView({block:'start',behavior:'instant'});const r=s.getBoundingClientRect(),w=v.getBoundingClientRect();return r.top>=w.top-2&&r.top<=w.top+60&&r.bottom>w.bottom})()", surf))
+  Sys.sleep(0.4)
+  sticky <- value(sprintf("(()=>{const s=%s;const r=s.getBoundingClientRect();const b=%s.getBoundingClientRect();
+    const v=document.querySelector('[data-slot=aui_thread-viewport]').getBoundingClientRect();
+    const f=document.querySelector('[data-slot=aui_thread-viewport-footer]').getBoundingClientRect();
+    return {formTaller: r.bottom > v.bottom, buttonVisible: b.top >= v.top && b.bottom <= f.top + 1}})()", surf, button("Check")))
+  stopifnot(isTRUE(sticky$formTaller), isTRUE(sticky$buttonVisible))
+  checks <- c(checks, "long_form_keeps_buttons_visible")
+  shot("form-long-sticky")
+  type_into(control("tools"), file.path(path_root, "protocol.docx"))
+  type_into(control("protocol"), file.path(path_root, "notes.txt"))
+  mouse_click(button("Check"))
+  wait(sprintf("(%s).innerText.includes('Tools folder must be a folder') && (%s).innerText.includes('Protocol must be a .docx file')", surf, surf))
+  stopifnot(is.null(poll_rpc(mcp, id)))
+  checks <- c(checks, "path_kind_and_extension_errors_block_submit")
+  shot("form-path-errors")
+  type_into(control("tools"), paste0(file.path(path_root, "tools"), "/"))
+  type_into(control("protocol"), file.path(path_root, "protocol.docx"))
+  mouse_click(button("Check"))
+  msg <- await_rpc(mcp, id, 20)
+  result <- result_json(msg)
+  stopifnot(isTRUE(result$submitted), identical(result$values$tools, file.path(path_root, "tools")),
+            identical(result$values$protocol, file.path(path_root, "protocol.docx")))
+  checks <- c(checks, "valid_paths_submit")
+
   # 2) Cancel button.
   stage <- "cancel"
   id <- ask(mcp, list(title = "Confirm delete", fields = list(list(name = "ok", type = "checkbox"))))

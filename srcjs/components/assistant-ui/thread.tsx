@@ -24,6 +24,7 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { renderToolPart } from "@/tool-ui/registry";
 import { renderDataPart } from "@/generative/data-ui";
 import { A2uiRuntimeView } from "@/a2ui/render";
+import { useFooterHeightVar } from "@/footer-height-var";
 import {
   classifyCanonicalPart,
   normalizeCanonicalA2uiPart,
@@ -225,6 +226,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     composerDensity,
   } = useShinyConfig();
   const viewportRef = useRef<HTMLDivElement>(null);
+  useFooterHeightVar(viewportRef);
   const contentRef = useRef<HTMLDivElement>(null);
   const activeThreadId = useAuiState((state) => state.threads.mainThreadId);
   const followMessageRevision = useAuiState((state) => {
