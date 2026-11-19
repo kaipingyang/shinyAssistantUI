@@ -12,6 +12,7 @@ import {
   hasNewUserMessage,
   resolveStreamingFollow,
   ShinyStatusPanels,
+  isAwayFromNativeBottom,
 } from "./thread";
 
 const startedAt = Date.parse("2026-01-01T00:00:05.000Z");
@@ -60,6 +61,20 @@ describe("ShinyStatusPanels active task heartbeat", () => {
   });
 });
 
+
+describe("app-owned scroll-to-bottom visibility", () => {
+  it("uses the native bottom and the same tolerance as follow, ignoring the footer inset", () => {
+    expect(isAwayFromNativeBottom({ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 })).toBe(false);
+    expect(isAwayFromNativeBottom({ scrollTop: 593, scrollHeight: 1000, clientHeight: 400 })).toBe(false);
+    // 120 px above native bottom is still "away", even if a 200 px sticky footer covers it.
+    expect(isAwayFromNativeBottom({ scrollTop: 480, scrollHeight: 1000, clientHeight: 400 })).toBe(true);
+    expect(resolveStreamingFollow(
+      { scrollTop: 480, scrollHeight: 1000, clientHeight: 400 },
+      { scrollTop: 480, scrollHeight: 1000, clientHeight: 400 }, false,
+    )).toBe(false);
+    expect(isAwayFromNativeBottom({ scrollTop: 0, scrollHeight: 300, clientHeight: 400 })).toBe(false);
+  });
+});
 
 describe("streaming viewport follow intent", () => {
   const bottom = { scrollTop: 600, scrollHeight: 1000, clientHeight: 400 };

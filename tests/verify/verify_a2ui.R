@@ -14,7 +14,7 @@ main <- function() {
   app <- callr::r_bg(function(project, home, port) {
     .libPaths(c(home, .libPaths())); setwd(project)
     library(shinyAssistantUI, lib.loc = home)
-    stopifnot(packageVersion("shinyAssistantUI") == "0.5.7.9016")
+    stopifnot(packageVersion("shinyAssistantUI") >= "0.5.7.9016")
     shiny::runApp("tests/verify/a2ui_app.R", host = "127.0.0.1", port = port, launch.browser = FALSE)
   }, args = list(project = project, home = home, port = port),
   stdout = logs[[1]], stderr = logs[[2]], user_profile = FALSE, system_profile = FALSE)

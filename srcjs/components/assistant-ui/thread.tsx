@@ -41,6 +41,9 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { Button } from "@/components/ui/button";
 import { RunROutputReviewPanel } from "@/components/assistant-ui/run-r-review-panel";
 import { cn } from "@/lib/utils";
+import { isAwayFromNativeBottom, nativeBottomDistance, STREAMING_BOTTOM_TOLERANCE } from "@/viewport-bottom";
+
+export { isAwayFromNativeBottom };
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -130,7 +133,6 @@ type FollowMessage = {
   role: string;
 };
 
-const STREAMING_BOTTOM_TOLERANCE = 8;
 
 export function resolveStreamingFollow(
   previous: StreamingViewportMetrics,
@@ -138,7 +140,7 @@ export function resolveStreamingFollow(
   wasFollowing: boolean,
   explicitUpwardIntent = false,
 ): boolean {
-  const bottomDistance = current.scrollHeight - current.clientHeight - current.scrollTop;
+  const bottomDistance = nativeBottomDistance(current);
   if (explicitUpwardIntent) return false;
   if (bottomDistance <= STREAMING_BOTTOM_TOLERANCE) return true;
   const stableHeight = Math.abs(current.scrollHeight - previous.scrollHeight) <= 1;
@@ -265,8 +267,12 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     );
   }, [aui]);
 
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
   const updateCorrectedMetrics = useCallback(() => {
-    if (viewportRef.current) previousMetricsRef.current = readViewportMetrics(viewportRef.current);
+    if (viewportRef.current) {
+      previousMetricsRef.current = readViewportMetrics(viewportRef.current);
+      setAwayFromBottom(isAwayFromNativeBottom(previousMetricsRef.current));
+    }
   }, []);
 
   useEffect(() => {
@@ -403,6 +409,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
           );
           upwardWheelRef.current = false;
           previousMetricsRef.current = current;
+          setAwayFromBottom(isAwayFromNativeBottom(current));
           if (current.scrollTop <= 120) requestOlder();
         }}
         className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-scroll scroll-smooth"
@@ -443,7 +450,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
-            <ThreadScrollToBottom />
+            <ThreadScrollToBottom visible={awayFromBottom} onClick={followSubmittedTurn} />
             <ShinyStatusPanels />
             <ShinyServiceStatus />
             <ShinyChecklistPanel />
@@ -507,17 +514,19 @@ const ThreadMessage: FC = () => {
   return <AssistantMessageComponent />;
 };
 
-const ThreadScrollToBottom: FC = () => {
+// App-owned: visibility follows this thread's native-bottom rule and the click
+// resumes the same follow state the streaming logic uses (one scroll owner).
+const ThreadScrollToBottom: FC<{ visible: boolean; onClick: () => void }> = ({ visible, onClick }) => {
   return (
-    <ThreadPrimitive.ScrollToBottom asChild>
-      <TooltipIconButton
-        tooltip="Scroll to bottom"
-        variant="outline"
-        className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
-      >
-        <ArrowDownIcon />
-      </TooltipIconButton>
-    </ThreadPrimitive.ScrollToBottom>
+    <TooltipIconButton
+      tooltip="Scroll to bottom"
+      variant="outline"
+      disabled={!visible}
+      onClick={onClick}
+      className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
+    >
+      <ArrowDownIcon />
+    </TooltipIconButton>
   );
 };
 

@@ -12,30 +12,33 @@ if (!widgetVersion) throw new Error("DESCRIPTION has no Version field");
 export function deferAssistantViewportResize(
   code: string, id: string,
 ): { code: string; map: null } | null {
-  if (!id.endsWith("/@assistant-ui/react/dist/utils/hooks/useOnResizeContent.js")) return null;
-  const resize = /const resizeObserver = new ResizeObserver\(\(\) => \{\s*callbackRef\(\);\s*\}\);/g;
-  const cleanup = /return \(\) => \{\s*resizeObserver\.disconnect\(\);\s*mutationObserver\.disconnect\(\);\s*\};/g;
+  // assistant-ui >= 0.15.30 moved viewport content observation into
+  // @assistant-ui/store's observeContentResize (shared auto-scroll controller).
+  if (!id.endsWith("/@assistant-ui/store/dist/utils/viewport-scroll.js")) return null;
+  const resize = /const resizeObserver = typeof ResizeObserver !== "undefined" \? new ResizeObserver\(\(\) => callback\(\)\) : null;/g;
+  const cleanup = /return \(\) => \{\s*for \(const dispose of disposers\) dispose\(\);\s*\};/g;
   if ([...code.matchAll(resize)].length !== 1 || [...code.matchAll(cleanup)].length !== 1 ||
       /\bresizeFrame\b/.test(code)) {
     throw new Error("assistant-ui viewport resize hook changed; re-evaluate the deferred resize compatibility transform");
   }
-  // Viewport state changes must not resize observed ancestors in the same delivery cycle.
+  // Viewport state changes must not resize observed ancestors in the same delivery
+  // cycle (Plan 145). Only ResizeObserver work is coalesced into one frame; the
+  // MutationObserver branch and its style-only filter stay synchronous.
   return {
     code: code.replace(resize, `let resizeFrame = null;
-      const resizeObserver = new ResizeObserver(() => {
-        if (resizeFrame !== null) return;
-        resizeFrame = requestAnimationFrame(() => {
-          resizeFrame = null;
-          callbackRef();
-        });
-      });`).replace(cleanup, `return () => {
-        resizeObserver.disconnect();
-        mutationObserver.disconnect();
-        if (resizeFrame !== null) {
-          cancelAnimationFrame(resizeFrame);
-          resizeFrame = null;
-        }
-      };`),
+\tconst resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => {
+\t\tif (resizeFrame !== null) return;
+\t\tresizeFrame = requestAnimationFrame(() => {
+\t\t\tresizeFrame = null;
+\t\t\tcallback();
+\t\t});
+\t}) : null;`).replace(cleanup, `return () => {
+\t\tfor (const dispose of disposers) dispose();
+\t\tif (resizeFrame !== null) {
+\t\t\tcancelAnimationFrame(resizeFrame);
+\t\t\tresizeFrame = null;
+\t\t}
+\t};`),
     map: null,
   };
 }

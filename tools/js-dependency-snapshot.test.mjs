@@ -46,10 +46,10 @@ test("the assistant-ui dependency set is exact and selects one A2UI route", () =
   const packageJson = JSON.parse(readFileSync(resolve(repositoryRoot, "package.json"), "utf8"));
   const snapshot = createSnapshot(repositoryRoot);
   const expectedRuntime = {
-    "@assistant-ui/react": "0.15.23",
-    "@assistant-ui/react-generative-ui": "0.0.22",
-    "@assistant-ui/react-lexical": "0.2.15",
-    "@assistant-ui/react-markdown": "0.14.18",
+    "@assistant-ui/react": "0.15.37",
+    "@assistant-ui/react-generative-ui": "0.1.11",
+    "@assistant-ui/react-lexical": "0.2.24",
+    "@assistant-ui/react-markdown": "0.14.26",
     "@lexical/history": "0.51.0",
     "@lexical/plain-text": "0.51.0",
     "@lexical/react": "0.51.0",
@@ -65,11 +65,11 @@ test("the assistant-ui dependency set is exact and selects one A2UI route", () =
   }
   assert.equal(
     snapshot.devDependencies["@assistant-ui/react-devtools"]?.declared,
-    "1.2.22",
+    "1.2.27",
   );
   assert.equal(
     snapshot.devDependencies["@assistant-ui/react-devtools"]?.resolved,
-    "1.2.22",
+    "1.2.27",
   );
 
   for (const name of [

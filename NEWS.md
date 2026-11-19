@@ -1,3 +1,10 @@
+# shinyAssistantUI 0.5.7.9017
+
+- **assistant-ui 升级**：`@assistant-ui/react` 0.15.23 → 0.15.37、`react-generative-ui` 0.0.22 → 0.1.11（新增传递依赖 `@assistant-ui/generative-ui` 0.0.12）、`react-lexical` 0.2.15 → 0.2.24、`react-markdown` 0.14.18 → 0.14.26、`react-devtools` 1.2.22 → 1.2.27，精确锁定；`radix-ui` 随之升到 1.8.1。依赖快照为 `dependency-snapshots/js-0.5.7.9017.json`。
+- **单一滚动 owner**：新版 assistant-ui 把粘性 footer 高度计入"已在底部"。滚动到底按钮与审批卡自动滚动改为使用本线程自己的原生底部判断（与流式跟随相同的 8 px 容差），按钮点击恢复同一跟随状态；不再依赖上游 `isAtBottom`。
+- **ResizeObserver 推迟补丁迁移**：上游把视口内容观察移到 `@assistant-ui/store` 的 `observeContentResize`；Plan 145 的单帧合并补丁改为作用于该模块，形状变化时构建失败。
+- 自动续写时，工具卡在新版中保持挂载（稳定 part key），展开状态与滚动位置不受影响。
+
 # shinyAssistantUI 0.5.7.9016
 
 - **UI 优先询问**：Claude Code addin 在系统提示末尾（不覆盖原有内容）加入规则：需要用户输入、决定、确认或在方案中选择时，优先用 AskUserQuestion（1-4 个简短问题，支持 text/number）或 AskUserForm（多个参数、日期、长文本、超过 4 个选项或必填项），只有卡片无法表达时才用纯文本提问；表单未提交时不得继续执行。表单服务不可用时只提示 AskUserQuestion。真实 Claude CLI 对照实验中，加入规则后两个测试场景都通过界面卡片询问（基线有一个场景用纯文本提问）。

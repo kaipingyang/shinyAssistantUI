@@ -111,7 +111,14 @@ check("automatic continuation reached final visible reply", wait_for(
   "(document.body.innerText||'').includes('FINAL RESPONSE AFTER AUTOMATIC CONTINUATION')", 20
 ))
 after <- fromJSON(value("(()=>{const s=document.querySelector('[data-markdown-preview=true]'),c=s.closest('.aui-shiny-tool'),m=c.closest('[data-slot=aui_assistant-message-root]'),t=c.querySelector('[data-slot=tool-fallback-trigger]');return JSON.stringify({top:s.scrollTop,max:s.scrollHeight-s.clientHeight,expanded:t.getAttribute('aria-expanded'),scrollSame:s===window.__p88s,cardSame:c===window.__p88c,messageSame:m===window.__p88m,oldConnected:window.__p88s.isConnected,cards:document.querySelectorAll('.aui-shiny-tool').length})})()"))
-check("exact card subtree really remounted", !after$scrollSame && !after$cardSame && after$messageSame && !after$oldConnected)
+# assistant-ui >= 0.15.30 keys message parts by identity, so the card may now be
+# preserved instead of remounted. Either way the same message must keep exactly
+# one card, still expanded and still at the bottom (checked below).
+remounted <- !after$scrollSame && !after$cardSame && !after$oldConnected
+preserved <- after$scrollSame && after$cardSame && after$oldConnected
+check("card subtree is either preserved or cleanly remounted in the same message",
+      after$messageSame && (remounted || preserved),
+      if (preserved) "preserved (stable part keys)" else "remounted")
 check("Write card remained expanded after remount", identical(after$expanded, "true"))
 check("remounted Markdown preview restored to bottom", after$top == after$max && after$max > 0,
       sprintf("top=%s max=%s", after$top, after$max))

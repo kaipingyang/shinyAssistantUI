@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useOpeningFile } from "@/hooks/use-opening-file";
+import { isAwayFromNativeBottom } from "@/viewport-bottom";
 import { isLazyToolResultDescriptor, useLazyToolResult } from "@/lazy-tool-result";
 
 // annotations.icon(lucide 名)→ 组件,对齐 v0.1.0 的 per-tool 图标。
@@ -327,7 +328,6 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     : status;
   const approvalRef = useRef<HTMLDivElement>(null);
   const viewport = useThreadViewport({ optional: true });
-  const isAtBottom = viewport?.isAtBottom ?? false;
   const scrollToBottom = viewport?.scrollToBottom;
   const previousShowApprovalRef = useRef(false);
   const approvalWasFollowingRef = useRef(false);
@@ -335,15 +335,19 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     const justOpened = showApproval && !previousShowApprovalRef.current;
     const justSettled = !showApproval && previousShowApprovalRef.current && decision !== null;
     previousShowApprovalRef.current = showApproval;
-    if (justOpened) approvalWasFollowingRef.current = isAtBottom;
-    if (!((justOpened && isAtBottom) || (justSettled && approvalWasFollowingRef.current))) return;
+    // Native bottom, same rule as the thread's follow logic: assistant-ui >= 0.15.30
+    // counts the sticky footer as "at bottom", which would pull a reader down.
+    const outer = rootRef.current?.closest<HTMLElement>("[data-slot=aui_thread-viewport]");
+    const atNativeBottom = outer ? !isAwayFromNativeBottom(outer) : false;
+    if (justOpened) approvalWasFollowingRef.current = atNativeBottom;
+    if (!((justOpened && atNativeBottom) || (justSettled && approvalWasFollowingRef.current))) return;
     if (!scrollToBottom) return;
     const scroll = scrollToBottom;
     const id = window.setTimeout(() => {
       scroll({ behavior: "smooth" });
     }, 50);
     return () => window.clearTimeout(id);
-  }, [showApproval, decision, isAtBottom, scrollToBottom]);
+  }, [showApproval, decision, scrollToBottom]);
 
   return (
     <div
