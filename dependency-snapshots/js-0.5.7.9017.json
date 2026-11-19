@@ -15,10 +15,10 @@
   "artifacts": {
     "packageJsonSha256": "9939a0d0359273b29b495dd44beba1a29e419fd173a0104d80379e8e9669c08f",
     "packageLockSha256": "74da7b4848beb7c481884b551de7e43b9039554948e5ce5721c50c5cf6baa49d",
-    "bundleSha256": "2ccb683357598b097f11f00653789511cff822c004600b826a0a5ba7a73f184f",
+    "bundleSha256": "64d29e59c225abf9bcd3ccacd387ea762cadf36d09f822cb63153b2756379736",
     "stylesheetSha256": "118790361e9e507a88a3b9489f663c52c19b83dedc46c7727c24e1494a8b1662",
     "webAssetFiles": 23,
-    "webAssetTreeSha256": "1031b54cbdb45803755dc9f5f859547bb9916222287c977b10f02365af61d66a"
+    "webAssetTreeSha256": "7187bd37400a7daf96fefcd6efea929e4e8244712a8009e8022ad1fe5b4d4e71"
   },
   "dependencies": {
     "@assistant-ui/react": {

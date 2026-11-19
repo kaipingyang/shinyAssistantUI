@@ -95,6 +95,23 @@ describe("ToolCardFrame lazy result", () => {
     expect(Number.parseFloat(spacer?.style.height ?? "0")).toBeGreaterThan(0);
   });
 
+  it("stays pinned to the bottom when a requested chunk arrives and loading ends together", () => {
+    const view = renderLazy(true);
+    const first = view.send.mock.calls[0][0];
+    act(() => view.client.accept({ ...first, text: "first chunk\n", nextOffset: 12, done: false }));
+    const viewport = view.container.querySelector<HTMLElement>('[data-slot="tool-result-scroll"]')!;
+    let height = 1000;
+    Object.defineProperty(viewport, "scrollHeight", { configurable: true, get: () => height });
+    Object.defineProperty(viewport, "clientHeight", { configurable: true, value: 100 });
+    viewport.scrollTop = 900;                 // reader at the bottom requests more
+    fireEvent.scroll(viewport);
+    expect(view.send).toHaveBeenCalledTimes(2);
+    const second = view.send.mock.calls[1][0];
+    height = 1600;                            // the chunk lands in the same render as loading=false
+    act(() => view.client.accept({ ...second, text: "second chunk\n", nextOffset: 25, done: false }));
+    expect(viewport.scrollTop).toBe(1500);
+  });
+
   it.each(["Write", "Edit", "MultiEdit"])("keeps %s default-open", (toolName) => {
     const props = {
       toolName, toolCallId: `open-${toolName}`, args: {}, argsText: "{}",

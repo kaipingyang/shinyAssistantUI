@@ -196,6 +196,9 @@ main <- function() {
     if (scene == "canonical-replace") wait("window.followProbe.snapshot().fixturePhase==='canonical-replaced'")
     Sys.sleep(0.7)
     result <- js("window.followProbe.stop()")
+    # Reasoning disclosures auto-collapse once streaming ends (reasoning.tsx), which
+    # unmounts their tail; record it so the final-visibility rule applies only while open.
+    result$reasoning_open <- isTRUE(js("(()=>{const r=[...document.querySelectorAll('[data-slot=reasoning-root]')].at(-1);return !!r&&(r.getAttribute('data-state')==='open'||r.hasAttribute('data-open'))})()"))
     result$version <- version
     result$scene <- scene
     result$before <- before
@@ -232,9 +235,10 @@ main <- function() {
         result$final$anchorTop - reading_anchor$top else NULL
     )
     if (scene %in% c("text-auto", "reasoning-auto", "thinking-to-text")) {
+      collapsed_reasoning <- identical(scene, "reasoning-auto") && !isTRUE(result$reasoning_open)
       stopifnot(summary$stable_auto_samples > 0L,
                 summary$stable_auto_invisible == 0L,
-                isTRUE(summary$final$visible), summary$final$outerGap <= 8)
+                collapsed_reasoning || isTRUE(summary$final$visible), summary$final$outerGap <= 8)
     }
     if (identical(scene, "tool-markdown")) {
       tool_nodes <- unique(vapply(Filter(function(row) !is.null(row$tool$node), samples),

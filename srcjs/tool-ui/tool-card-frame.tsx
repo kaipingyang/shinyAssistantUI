@@ -265,8 +265,13 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
     }
   };
   const liveScroll = pending || ann?.argsStreaming === true || lazyResult.snapshot.loading;
+  // The render that ends a live phase also carries its final content (e.g. a lazy
+  // chunk lands as loading flips false), so it must still honour the bottom latch.
+  const wasLiveRef = useRef(liveScroll);
   useLayoutEffect(() => {
     const root = rootRef.current;
+    const follow = liveScroll || wasLiveRef.current;
+    wasLiveRef.current = liveScroll;
     if (!root) return;
     for (const target of root.querySelectorAll<HTMLElement>("[data-tool-scroll-region]")) {
       const region = target.dataset.toolScrollRegion;
@@ -278,7 +283,7 @@ export function ToolCardFrame({ card, approvalBody }: { card: ToolCard; approval
         _rememberToolScrollState(key, saved);
       }
       if (!saved) continue;
-      target.scrollTop = saved.atBottom && liveScroll
+      target.scrollTop = saved.atBottom && follow
         ? Math.max(0, target.scrollHeight - target.clientHeight)
         : saved.scrollTop;
       target.scrollLeft = saved.atRight
