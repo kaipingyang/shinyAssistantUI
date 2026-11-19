@@ -204,14 +204,16 @@
 # Plan 167: whenever Claude needs the user's input or decision, it should use the
 # interactive cards instead of a plain-text question. PURE.
 .addin_ui_first_guidance <- function(form_available = TRUE) {
-  lines <- c(
-    "Asking the user: whenever you need the user's input, a decision, a confirmation, or want them to choose between your proposals, ask through the UI instead of writing a plain-text question and stopping.",
-    "- Use AskUserQuestion for 1-4 short questions with 2-4 choices each (it also supports kind \"text\" for an open answer and kind \"number\" with min/max). When you suggest options or recommend an approach, offer them as choices and mark your recommendation in its label or description."
-  )
+  lines <- "Asking the user: whenever you need the user's input, a decision, a confirmation, or want them to choose between your proposals, ask through the UI instead of writing a plain-text question and stopping."
   if (isTRUE(form_available)) {
     lines <- c(lines,
-      "- Use AskUserForm to collect or confirm several related values at once: analysis parameters, dates, numbers, longer text, more than four options, or required fields. Pre-fill `default` with your best guess so the user mostly confirms.",
+      "- Use AskUserQuestion for 1-2 single-choice questions with 2 to at most 4 options each, such as a quick confirmation or picking one of your proposals. Mark your recommendation in the option label or description.",
+      "- Use AskUserForm for everything else: 3 or more questions at once, any question that needs multiple selection or more than 4 options, and any text, numbers, dates or required fields. Pre-fill `default` with your best guess and list the full set of options rather than merging them into groups.",
       "- If AskUserForm returns submitted=false, do not proceed with the action that needed it."
+    )
+  } else {
+    lines <- c(lines,
+      "- Use AskUserQuestion for every question: at most 4 questions per call with 2-4 choices each. Split larger sets across calls, pick the most useful options when there are more than 4, and rely on its Other answer for free text or numbers. Mark your recommendation in the option label or description."
     )
   }
   lines <- c(lines,

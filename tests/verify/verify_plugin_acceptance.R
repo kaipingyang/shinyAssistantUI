@@ -199,9 +199,13 @@ main <- function() {
     approve_tool_cards()
   }, done = function() q_done || !running())
   record("AskUserQuestion card rendered without fallback", q_seen && !q_invalid, paste("kinds:", paste(q_kinds, collapse = ",")))
-  record("newer text/number kinds rendered", all(c("number", "text") %in% q_kinds),
-         if (all(c("number", "text") %in% q_kinds)) "" else "CLI/model used choice questions")
   reply <- last_assistant()
+  # CLI 2.1.328 does not expose `kind` to the model; the renderer for those kinds is
+  # covered by fixture tests, so only a CLI that offers the field must render it.
+  no_kind <- grepl("NO_KIND_FIELD", reply, fixed = TRUE)
+  record("newer text/number kinds rendered (when the CLI offers them)",
+         no_kind || all(c("number", "text") %in% q_kinds),
+         if (no_kind) "not offered by this CLI" else paste("kinds:", paste(q_kinds, collapse = ",")))
   record("Claude received the answers", finished && q_done && nzchar(reply), substr(gsub("\n", " ", reply), 1, 120))
   shot("ask-question-reply")
 

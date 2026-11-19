@@ -103,11 +103,12 @@ ask_user_form <- sdk_mcp_tool(
   name = "AskUserForm",
   description = paste0(
     "Show the user a small form in the chat and wait for them to submit or cancel it. ",
-    "Use it to collect or confirm several related values at once before acting (the ",
-    "parameters of an analysis, options to apply, dates, numbers, longer text, or a ",
-    "choice among more than four options). Pre-fill `default` with your best guess so ",
-    "the user mostly confirms. For one to four short multiple-choice questions use ",
-    "AskUserQuestion instead. Do NOT use it for permission requests. The result is JSON: ",
+    "Use AskUserQuestion for 1-2 single-choice questions with 2 to at most 4 options each; ",
+    "use this form for everything else: 3 or more questions at once, any question that ",
+    "needs multiple selection or more than 4 options, and any text, numbers, dates or ",
+    "required fields (for example the parameters of an analysis). Pre-fill `default` with ",
+    "your best guess so the user mostly confirms, and list the full set of options. ",
+    "Do NOT use it for permission requests. The result is JSON: ",
     "{\"submitted\": true|false, \"values\": {name: value}}; if submitted is false the ",
     "user cancelled, so do not proceed with the action."
   ),
