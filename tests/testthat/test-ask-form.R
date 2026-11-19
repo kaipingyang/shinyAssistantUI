@@ -310,21 +310,21 @@ test_that("cancelled, invalid, mismatched and missing replies are explicit", {
     reply
   })
   reply <- list(status = "cancelled", reason = "user")
-  cancelled <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list()))$content[[1]]$text)
+  cancelled <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list(list(name = "a", type = "text"))))$content[[1]]$text)
   expect_false(cancelled$submitted)
   expect_identical(cancelled$reason, "user")
 
   reply <- list(status = "invalid", message = "Field 1: bad name")
-  invalid <- env$.ask_form_result(list(title = "T", fields = list()))
+  invalid <- env$.ask_form_result(list(title = "T", fields = list(list(name = "a", type = "text"))))
   expect_true(isTRUE(invalid$isError))
   expect_match(invalid$content[[1]]$text, "bad name", fixed = TRUE)
 
   reply <- list(status = "submitted", values = list(a = 1), request_id = "someone-else")
-  wrong <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list()))$content[[1]]$text)
+  wrong <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list(list(name = "a", type = "text"))))$content[[1]]$text)
   expect_false(wrong$submitted)
 
   reply <- NULL
-  none <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list()))$content[[1]]$text)
+  none <- jsonlite::fromJSON(env$.ask_form_result(list(title = "T", fields = list(list(name = "a", type = "text"))))$content[[1]]$text)
   expect_false(none$submitted)
 })
 

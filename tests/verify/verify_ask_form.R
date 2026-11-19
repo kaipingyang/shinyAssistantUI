@@ -44,8 +44,12 @@ main <- function() {
   if (!app$is_alive()) stop(paste(tail(readLines(logs[[2]], warn = FALSE), 30), collapse = "\n"))
 
   script <- system.file("mcp", "ask_form_server.R", package = "shinyAssistantUI", lib.loc = home_lib)
+  form_project <- normalizePath(tempfile("ask-form-project-"), mustWork = FALSE)
+  dir.create(file.path(form_project, ".claude", "forms"), recursive = TRUE)
+  on.exit(unlink(form_project, recursive = TRUE), add = TRUE)
   start_mcp <- function(thread_id) {
     env <- c(Sys.getenv(), CLAUDE_ADDIN_FORM_URL = form_url, CLAUDE_ADDIN_THREAD_ID = thread_id,
+             CLAUDE_PROJECT_DIR = form_project,
              CLAUDE_ADDIN_FORM_TIMEOUT_MS = "120000", R_LIBS = paste(.libPaths(), collapse = ":"))
     p <- processx::process$new(file.path(R.home("bin"), "Rscript"), c("--vanilla", script),
                                stdin = "|", stdout = "|", stderr = "|", env = env)
@@ -358,6 +362,30 @@ main <- function() {
   stopifnot(isTRUE(result$submitted), identical(result$values$tools, file.path(path_root, "tools")),
             identical(result$values$protocol, file.path(path_root, "protocol.docx")))
   checks <- c(checks, "valid_paths_submit")
+
+  # 1e) A form definition file with defaults, loaded by the real MCP process.
+  stage <- "form-file"
+  outside_file <- file.path(path_root, "outside-form.json")
+  writeLines('{"title":"Outside","fields":[{"name":"a","type":"text"}]}', outside_file)
+  outside <- await_rpc(mcp, ask(mcp, list(form_file = outside_file)), 20)
+  stopifnot(isTRUE(outside$result$isError),
+            grepl(".claude directory", outside$result$content[[1]]$text, fixed = TRUE))
+  checks <- c(checks, "form_file_outside_claude_refused")
+  form_file <- file.path(form_project, ".claude", "forms", "setup-form.json")
+  writeLines(jsonlite::toJSON(list(title = "From file", submit_label = "Use", fields = list(
+    list(name = "study_id", label = "Study id", type = "text", section = "Study"),
+    list(name = "domains", label = "Domains", type = "multiselect", choices = list("adsl", "adae", "adcm"),
+         section = "Study")
+  )), auto_unbox = TRUE), form_file)
+  id <- ask(mcp, list(form_file = form_file, defaults = list(study_id = "bgb_x_101", domains = list("adsl", "adcm"))))
+  wait(sprintf("(%s)?.innerText.includes('From file') && !!%s", surf, button("Use")))
+  stopifnot(isTRUE(value(sprintf("(%s).value==='bgb_x_101'", control("study_id")))),
+            isTRUE(value(sprintf("(%s).checked && !(%s).checked", option("domains", "adcm"), option("domains", "adae")))))
+  mouse_click(button("Use"))
+  result <- result_json(await_rpc(mcp, id, 20))
+  stopifnot(isTRUE(result$submitted), identical(result$values$study_id, "bgb_x_101"),
+            setequal(unlist(result$values$domains), c("adsl", "adcm")))
+  checks <- c(checks, "form_file_with_defaults")
 
   # 2) Cancel button.
   stage <- "cancel"
