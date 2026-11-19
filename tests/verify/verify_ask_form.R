@@ -287,6 +287,37 @@ main <- function() {
   checks <- c(checks, "dropdown_and_other_value_submit")
   shot("form-field-options-submitted")
 
+  # 1c) Layout: sections render as cards; half-width fields share one row.
+  stage <- "layout"
+  id <- ask(mcp, list(title = "Study setup", submit_label = "Apply", fields = list(
+    list(name = "study", label = "Study id", type = "text", section = "Study", default = "bgb_x_101"),
+    list(name = "cutoff", label = "Cutoff date", type = "date", section = "Study", width = "half",
+         default = "2026-06-30"),
+    list(name = "role", label = "Role", type = "select", choices = list("dev", "qc"), section = "Study",
+         width = "half", default = "dev"),
+    list(name = "cycle", label = "Cycle days", type = "number", section = "Attributes", width = "half",
+         default = "28"),
+    list(name = "prior", label = "Prior interval", type = "number", section = "Attributes", width = "half",
+         default = "14")
+  )))
+  wait(sprintf("(%s)?.innerText.includes('Study setup') && !!%s", surf, button("Apply")))
+  layout <- value(sprintf("(()=>{const s=%s;const cards=[...s.querySelectorAll('[data-aui=card]')];
+    const top=n=>s.querySelector('[name=\"/values/'+n+'\"],[data-aui-field-name=\"/values/'+n+'\"]')?.closest('[data-aui=col]')?.getBoundingClientRect();
+    const a=top('cutoff'), b=top('role'), c=top('cycle'), d=top('prior');
+    return {cards:cards.length, titles:cards.map(c=>c.innerText.split('\\n')[0]),
+      pairSameRow: !!a && !!b && Math.abs(a.top-b.top)<4 && b.left>a.right,
+      pair2SameRow: !!c && !!d && Math.abs(c.top-d.top)<4 && d.left>c.right}})()", surf))
+  stopifnot(identical(layout$cards, 2L), identical(unlist(layout$titles), c("Study", "Attributes")),
+            isTRUE(layout$pairSameRow), isTRUE(layout$pair2SameRow))
+  checks <- c(checks, "sections_render_as_cards_with_side_by_side_fields")
+  shot("form-layout")
+  mouse_click(button("Apply"))
+  msg <- await_rpc(mcp, id, 20)
+  result <- result_json(msg)
+  stopifnot(isTRUE(result$submitted), identical(result$values$role, "dev"),
+            identical(as.numeric(result$values$prior), 14), identical(result$values$cutoff, "2026-06-30"))
+  checks <- c(checks, "sectioned_form_submits")
+
   # 2) Cancel button.
   stage <- "cancel"
   id <- ask(mcp, list(title = "Confirm delete", fields = list(list(name = "ok", type = "checkbox"))))

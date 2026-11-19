@@ -103,6 +103,12 @@ field_schema <- list(
                    description = "text/textarea: POSIX extended regular expression the answer must match (\\d, \\w, {n} and | work; anchor with ^ and $; no lookaround or backreferences; at most 200 characters, 19 `|`, {n} up to 50 and nested {} expanding to at most 100; answers up to 500 characters)."),
     pattern_hint = list(type = "string", maxLength = 200,
                         description = "How the expected format is described to the user, e.g. \"yyyymmdd\"."),
+    section = list(type = "string", maxLength = 80, description = paste(
+      "Group heading. Fields with the same section are shown together in one card,",
+      "placed where the section's first field is.")),
+    width = list(type = "string", enum = list("full", "half"), description = paste(
+      "\"half\" puts two consecutive half fields of the same section side by side;",
+      "use it for short inputs such as dates, numbers and short choices.")),
     allow_other = list(type = "boolean",
                        description = "select: also offer a free-text input for a value not in `choices`."),
     help = list(type = "string", maxLength = 500, description = "Short hint under the field.")

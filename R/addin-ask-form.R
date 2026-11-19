@@ -184,6 +184,13 @@
     if (nzchar(placeholder) && !type %in% c("text", "textarea", "number")) {
       return(sprintf("Field `%s`: `placeholder` applies only to text, textarea and number fields.", name))
     }
+    section <- as.character(.ask_form_scalar(f$section, ""))
+    if (is.na(section)) section <- ""
+    if (nchar(section) > 80L) return(sprintf("Field `%s`: `section` must be at most 80 characters.", name))
+    width <- as.character(.ask_form_scalar(f$width, "full"))
+    if (is.na(width) || !width %in% c("full", "half")) {
+      return(sprintf("Field `%s`: `width` must be \"full\" or \"half\".", name))
+    }
     default <- unlist(f$default, use.names = FALSE)
     default <- default[!is.na(default)]
     default <- if (!length(default)) "" else paste(as.character(default), collapse = ",")
@@ -200,7 +207,8 @@
       min = bounds$min, max = bounds$max, step = bounds$step,
       pattern = pattern,
       pattern_hint = substr(as.character(.ask_form_scalar(f$pattern_hint, "")), 1L, 200L),
-      allow_other = allow_other
+      allow_other = allow_other,
+      section = section, width = width
     )
   }
   names_ <- vapply(out, `[[`, character(1L), "name")
@@ -232,9 +240,10 @@
 .ask_form_surface_ops <- function(form_id, title, spec, submit_label = "Submit") {
   label_of <- function(field) if (isTRUE(field$required)) paste0(field$label, " *") else field$label
   path_of <- function(field) paste0("/values/", field$name)
-  field_ids <- character()
   components <- list(list(id = "title", component = "Text", text = title, variant = "h3"))
+  blocks <- list()   # per field: the ids of its label, control, other input and help
   for (field in spec) {
+    field_ids <- character()
     id <- paste0("field-", field$name)
     binding <- list(path = path_of(field))
     component <- switch(field$type,
@@ -283,6 +292,63 @@
                                             text = field$help, variant = "caption")))
       field_ids <- c(field_ids, help_id)
     }
+    blocks[[length(blocks) + 1L]] <- list(field = field, ids = field_ids)
+  }
+  # Lay out each section (fields without one stay at the top level): consecutive
+  # half-width fields share a Row of two Columns; a lone half field stays full width.
+  layout_items <- function(group) {
+    items <- character()
+    i <- 1L
+    while (i <= length(group)) {
+      block <- group[[i]]
+      nxt <- if (i < length(group)) group[[i + 1L]] else NULL
+      if (identical(block$field$width, "half") && !is.null(nxt) && identical(nxt$field$width, "half")) {
+        cells <- vapply(list(block, nxt), function(b) {
+          cell <- paste0("cell-", b$field$name)
+          components[[length(components) + 1L]] <<- list(id = cell, component = "Column",
+                                                         children = as.list(b$ids))
+          cell
+        }, "")
+        pair <- paste0("pair-", block$field$name)
+        components[[length(components) + 1L]] <<- list(id = pair, component = "Row",
+                                                       children = as.list(cells))
+        items <- c(items, pair)
+        i <- i + 2L
+      } else {
+        items <- c(items, block$ids)
+        i <- i + 1L
+      }
+    }
+    items
+  }
+  # Sections appear where their first field is; consecutive ungrouped fields are
+  # laid out together at their own position.
+  field_ids <- character()
+  placed <- character()
+  i <- 1L
+  while (i <= length(blocks)) {
+    name <- blocks[[i]]$field$section
+    if (!nzchar(name)) {
+      j <- i
+      while (j < length(blocks) && !nzchar(blocks[[j + 1L]]$field$section)) j <- j + 1L
+      field_ids <- c(field_ids, layout_items(blocks[i:j]))
+      i <- j + 1L
+      next
+    }
+    if (!name %in% placed) {
+      placed <- c(placed, name)
+      card <- paste0("section-", length(placed))
+      body <- paste0(card, "-body")
+      heading <- paste0(card, "-title")
+      group <- Filter(function(block) identical(block$field$section, name), blocks)
+      components[[length(components) + 1L]] <- list(id = heading, component = "Text", text = name,
+                                                    variant = "h4")
+      components[[length(components) + 1L]] <- list(id = body, component = "Column",
+                                                    children = as.list(c(heading, layout_items(group))))
+      components[[length(components) + 1L]] <- list(id = card, component = "Card", child = body)
+      field_ids <- c(field_ids, card)
+    }
+    i <- i + 1L
   }
   value_bindings <- stats::setNames(
     lapply(spec, function(field) list(path = path_of(field))),

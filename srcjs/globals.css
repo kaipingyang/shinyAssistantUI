@@ -293,6 +293,16 @@
 }
 [data-slot="aui_a2ui_surface"] [data-aui="col"] { display: flex; flex-direction: column; gap: 0.5rem; }
 [data-slot="aui_a2ui_surface"] [data-aui="row"] { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+/* Side-by-side form cells share the row and wrap on narrow viewers. */
+[data-slot="aui_a2ui_surface"] [data-aui="row"] > [data-aui="col"] { flex: 1 1 14rem; min-width: 0; align-self: stretch; }
+[data-slot="aui_a2ui_surface"] [data-aui="card"] {
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+/* Inside a section or a side-by-side cell, inputs line up with the full width. */
+[data-slot="aui_a2ui_surface"] :is([data-aui="card"], [data-aui="row"] > [data-aui="col"])
+  :is([data-aui="input"], [data-aui="datepicker"], [data-aui="select"]) { max-width: none; }
 [data-slot="aui_a2ui_surface"] [data-aui="header"] { font-size: 1rem; font-weight: 600; margin: 0 0 0.25rem; }
 [data-slot="aui_a2ui_surface"] [data-aui="caption"] { margin: 0; font-size: 0.75rem; color: var(--color-muted-foreground); }
 [data-slot="aui_a2ui_surface"] [data-aui="markdown"] { white-space: pre-wrap; overflow-wrap: anywhere; }

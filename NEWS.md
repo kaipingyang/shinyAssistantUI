@@ -3,6 +3,7 @@
 - **assistant-ui 升级**：`@assistant-ui/react` 0.15.23 → 0.15.37、`react-generative-ui` 0.0.22 → 0.1.11（新增传递依赖 `@assistant-ui/generative-ui` 0.0.12）、`react-lexical` 0.2.15 → 0.2.24、`react-markdown` 0.14.18 → 0.14.26、`react-devtools` 1.2.22 → 1.2.27，精确锁定；`radix-ui` 随之升到 1.8.1。依赖快照为 `dependency-snapshots/js-0.5.7.9017.json`。
 - **单一滚动 owner**：新版 assistant-ui 把粘性 footer 高度计入"已在底部"。滚动到底按钮与审批卡自动滚动改为使用本线程自己的原生底部判断（与流式跟随相同的 8 px 容差），按钮点击恢复同一跟随状态；不再依赖上游 `isAtBottom`。
 - **ResizeObserver 推迟补丁迁移**：上游把视口内容观察移到 `@assistant-ui/store` 的 `observeContentResize`；Plan 145 的单帧合并补丁改为作用于该模块，形状变化时构建失败。
+- **AskUserForm 分组布局**：字段可设 `section`（同名字段放进一张带标题的卡片，卡片出现在该组第一个字段的位置）和 `width: "half"`（同组相邻的两个半宽字段并排一行，窄视图下自动换行；落单的半宽字段仍占整行）。A2UI 表面里的 Card 现在有边框。
 - **AskUserForm 字段选项**：新增 `placeholder`；数字字段 `min`/`max`/`step`；文本字段 `pattern`（POSIX 扩展正则；为保证匹配耗时与输入长度成线性，不接受反向引用和 `\A`、`\z` 等 PCRE 专有写法；正则最长 200 字符，最多 19 个 `|`，`{n}` 最大 50 且嵌套展开不超过 100，带正则的答案最长 500 字符）和 `pattern_hint`；单选字段 `allow_other`（额外的“其他值”输入框）。这些检查在提交时由 R 执行，不通过时在表单内提示。超过 8 个选项的单选自动显示为下拉框。
 - **询问默认用表单**：UI 优先提示词和 AskUserForm 工具描述改为：一次问 3 个及以上问题、需要多选、超过 4 个选项，或需要文本、数字、日期、必填项时用 AskUserForm，并列出完整选项；AskUserQuestion 只用于 1–2 道、每道不超过 4 个选项的单选题（例如确认）。删除了 AskUserQuestion 支持 `kind` text/number 的说明，当前 CLI 未向模型开放这些题型。
 - **AskUserForm 不再重复弹出、长 run_r 不再重复执行**：nanonext REQ socket 默认每 60 秒重发未应答的请求。表单或输出审阅等待超过 60 秒时，每次重发都会再显示一份（实测 12 份后报“Too many forms”），运行超过 60 秒的 run_r 代码会被执行第二次。所有 REQ socket 现在关闭自动重发；表单和审阅服务对同一 `request_id` 只显示一次。run_r 单次执行仍有 60 秒等待上限：超时后代码可能仍在 R 会话里运行，返回给 Claude 的错误现在明确说明这一点，并要求不要自动重跑。
