@@ -1,11 +1,27 @@
-drain_plan67_loop <- function(seconds = 0.15) {
+# Mirror shiny:::serviceApp(): run due later callbacks, then flush reactives, so
+# ExtendedTask's queued same-thread invocation starts as it does in a live app.
+drain_plan67_loop <- function(seconds = 0.15, session = shiny::getDefaultReactiveDomain()) {
+  flush <- function() if (!is.null(session)) session$flushReact()
   deadline <- Sys.time() + seconds
   repeat {
     later::run_now(0)
+    flush()
     if (Sys.time() >= deadline) break
     Sys.sleep(0.005)
   }
   later::run_now(0)
+  flush()
+  invisible(NULL)
+}
+
+# Drain until `condition()` holds (or the timeout passes): ExtendedTask starts a
+# queued same-thread invocation from a promise `finally`, whose timing varies.
+drain_until <- function(condition, timeout = 2) {
+  deadline <- Sys.time() + timeout
+  repeat {
+    drain_plan67_loop(0.02)
+    if (isTRUE(condition()) || Sys.time() >= deadline) break
+  }
   invisible(NULL)
 }
 
@@ -65,7 +81,7 @@ test_that("same-thread invocations retain strict single-consumer ordering", {
     submit_plan67(session, "A", "second")
     expect_identical(gate$entered(), "A:first")
     gate$release("A:first")
-    drain_plan67_loop()
+    drain_until(function() length(gate$entered()) == 2L)
     expect_identical(gate$entered(), c("A:first", "A:second"))
     gate$release("A:second")
     drain_plan67_loop()
@@ -182,7 +198,7 @@ test_that("a stale same-thread cancel does not cancel the newer active run", {
     submit_plan67(session, "A", "first", "run-A-first")
     submit_plan67(session, "A", "second", "run-A-second")
     resolvers[["first"]]()
-    drain_plan67_loop()
+    drain_until(function() length(entered) == 2L)
     expect_identical(entered, c("first", "second"))
 
     session$setInputs(chat_input_cancel = list(

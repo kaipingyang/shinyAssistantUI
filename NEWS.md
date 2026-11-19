@@ -3,6 +3,7 @@
 - **assistant-ui 升级**：`@assistant-ui/react` 0.15.23 → 0.15.37、`react-generative-ui` 0.0.22 → 0.1.11（新增传递依赖 `@assistant-ui/generative-ui` 0.0.12）、`react-lexical` 0.2.15 → 0.2.24、`react-markdown` 0.14.18 → 0.14.26、`react-devtools` 1.2.22 → 1.2.27，精确锁定；`radix-ui` 随之升到 1.8.1。依赖快照为 `dependency-snapshots/js-0.5.7.9017.json`。
 - **单一滚动 owner**：新版 assistant-ui 把粘性 footer 高度计入"已在底部"。滚动到底按钮与审批卡自动滚动改为使用本线程自己的原生底部判断（与流式跟随相同的 8 px 容差），按钮点击恢复同一跟随状态；不再依赖上游 `isAtBottom`。
 - **ResizeObserver 推迟补丁迁移**：上游把视口内容观察移到 `@assistant-ui/store` 的 `observeContentResize`；Plan 145 的单帧合并补丁改为作用于该模块，形状变化时构建失败。
+- **Follow-up 建议 chip 点击可靠发送**：调度器在许可空闲时同步取得许可再启动 run，不再等待一个已完成的 promise 回合；此前点击建议 chip 后 run 会卡住，直到下一次客户端输入。排队中的 run 仍按 FIFO 等待。
 - **长结果懒加载贴底修复**：在工具结果底部继续加载下一块时，若下一块到达与加载结束发生在同一次渲染，此前会失去贴底；现在该次渲染仍遵守贴底状态，回收旧块后继续向下滚动保持在逻辑底部。
 - 自动续写时，工具卡在新版中保持挂载（稳定 part key），展开状态与滚动位置不受影响。
 

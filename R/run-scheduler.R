@@ -72,6 +72,21 @@
     invisible(NULL)
   }
 
+  # Take a free permit synchronously. Awaiting an already-resolved promise adds a
+  # promise turn that was observed (verify_followup, follow-up chip send) not to
+  # continue until the next client input; the exact event-loop cause is not
+  # established. Only genuinely queued runs await a pending permit promise.
+  try_acquire_now <- function(thread_id, run_id) {
+    if (closed || isTRUE(get0(run_id, envir = cancelled, inherits = FALSE,
+                             ifnotfound = FALSE))) return(FALSE)
+    if (active < max_concurrent && !length(waiting)) {
+      active <<- active + 1L
+      assign(run_id, thread_id, envir = active_runs)
+      return(TRUE)
+    }
+    NA
+  }
+
   acquire_permit <- function(thread_id, run_id) {
     promises::promise(function(resolve, reject) {
       if (closed || isTRUE(get0(run_id, envir = cancelled, inherits = FALSE,
@@ -93,7 +108,8 @@
   }
 
   task_body <- coro::async(function(thread_id, run_id, ...) {
-    acquired <- coro::await(acquire_permit(thread_id, run_id))
+    acquired <- try_acquire_now(thread_id, run_id)
+    if (is.na(acquired)) acquired <- coro::await(acquire_permit(thread_id, run_id))
     if (!isTRUE(acquired)) {
       if (exists(run_id, envir = inflight, inherits = FALSE)) rm(list = run_id, envir = inflight)
       if (isTRUE(get0(run_id, envir = cancelled, inherits = FALSE, ifnotfound = FALSE))) {
