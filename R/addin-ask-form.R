@@ -28,6 +28,90 @@
 }
 
 # Normalise model-supplied fields (codeagent .form_validate_fields contract) or
+# Structural limits for model-authored `pattern`s, checked before TRE sees them:
+# TRE expands counted repeats and alternatives into automaton states, so nested
+# repeats such as (a{255}){255} exhaust memory and long alternations are slow.
+.ASK_FORM_PATTERN_MAX <- 200L
+.ASK_FORM_PATTERN_MAX_REPEAT <- 50L
+.ASK_FORM_PATTERN_MAX_EXPANSION <- 100L
+.ASK_FORM_PATTERN_MAX_ALTERNATIVES <- 20L
+.ASK_FORM_PATTERN_MAX_ANSWER <- 500L
+
+# Returns NULL when the pattern is acceptable, otherwise the reason. PURE.
+.ask_form_pattern_problem <- function(pattern) {
+  if (nchar(pattern) > .ASK_FORM_PATTERN_MAX) {
+    return(sprintf("must be at most %d characters", .ASK_FORM_PATTERN_MAX))
+  }
+  chars <- strsplit(pattern, "", fixed = TRUE)[[1L]]
+  n <- length(chars)
+  i <- 1L
+  group_mult <- numeric()   # per open group: largest {} expansion inside it
+  last_mult <- 1            # expansion of the atom just read
+  alternatives <- 0L
+  while (i <= n) {
+    ch <- chars[[i]]
+    atom_mult <- 1
+    if (ch == "\\") {
+      if (i < n && grepl("[1-9AZzbBGk]", chars[[i + 1L]])) {
+        return("must not use backreferences or \\A, \\Z, \\z, \\b, \\B, \\G, \\k; use ^ and $ for anchors")
+      }
+      i <- i + 2L
+    } else if (ch == "[") {
+      j <- i + 1L
+      if (j <= n && chars[[j]] == "^") j <- j + 1L
+      if (j <= n && chars[[j]] == "]") j <- j + 1L
+      while (j <= n && chars[[j]] != "]") {
+        if (chars[[j]] == "[" && j < n && chars[[j + 1L]] %in% c(":", ".", "=")) {
+          close <- regexpr(paste0(chars[[j + 1L]], "]"), substr(pattern, j + 2L, n), fixed = TRUE)
+          if (close < 0) return("has an unterminated bracket expression")
+          j <- j + 2L + close + 1L
+        } else if (chars[[j]] == "\\" && j < n && grepl("[1-9]", chars[[j + 1L]])) {
+          return("must not use backreferences")
+        } else j <- j + 1L
+      }
+      if (j > n) return("has an unterminated bracket expression")
+      i <- j + 1L
+    } else if (ch == "(") {
+      group_mult <- c(group_mult, 1)
+      i <- i + 1L
+      if (i <= n && chars[[i]] == "?") i <- i + 1L   # (?:...) and inline flags
+      next
+    } else if (ch == ")") {
+      if (!length(group_mult)) return("has unbalanced parentheses")
+      atom_mult <- group_mult[length(group_mult)]
+      group_mult <- group_mult[-length(group_mult)]
+      i <- i + 1L
+    } else if (ch == "|") {
+      alternatives <- alternatives + 1L
+      if (alternatives >= .ASK_FORM_PATTERN_MAX_ALTERNATIVES) {
+        return(sprintf("must have fewer than %d alternatives", .ASK_FORM_PATTERN_MAX_ALTERNATIVES))
+      }
+      i <- i + 1L
+    } else if (ch == "{") {
+      close <- regexpr("}", substr(pattern, i, n), fixed = TRUE)
+      if (close < 0) return("has an unterminated {} repeat")
+      counts <- suppressWarnings(as.numeric(strsplit(substr(pattern, i + 1L, i + close - 2L), ",", fixed = TRUE)[[1L]]))
+      if (any(counts[!is.na(counts)] > .ASK_FORM_PATTERN_MAX_REPEAT)) {
+        return(sprintf("must not repeat more than %d times in {}", .ASK_FORM_PATTERN_MAX_REPEAT))
+      }
+      # TRE expands {} repeats into automaton states; nesting multiplies the size.
+      known <- counts[!is.na(counts)]
+      total <- last_mult * (if (length(known)) max(known) else 1)
+      if (total > .ASK_FORM_PATTERN_MAX_EXPANSION) {
+        return(sprintf("nested {} repeats must expand to at most %d", .ASK_FORM_PATTERN_MAX_EXPANSION))
+      }
+      atom_mult <- total
+      i <- i + close
+    } else {
+      i <- i + 1L
+    }
+    if (length(group_mult)) group_mult[length(group_mult)] <- max(group_mult[length(group_mult)], atom_mult)
+    last_mult <- atom_mult
+  }
+  if (length(group_mult)) return("has unbalanced parentheses")
+  NULL
+}
+
 # return a character message the model can act on. PURE.
 .ask_form_validate_fields <- function(fields) {
   if (is.data.frame(fields)) fields <- split(fields, seq_len(nrow(fields)))
@@ -56,6 +140,50 @@
       return(sprintf("Field `%s`: type \"%s\" needs `choices`.", name, type))
     }
     if (length(choices) > 50L) return(sprintf("Field `%s`: at most 50 choices.", name))
+    num_opt <- function(key) {
+      value <- f[[key]]
+      if (is.null(value)) return(NULL)
+      value <- suppressWarnings(as.numeric(unlist(value, use.names = FALSE)))
+      if (length(value) != 1L || !is.finite(value)) return(NA_real_)
+      value
+    }
+    bounds <- lapply(c(min = "min", max = "max", step = "step"), num_opt)
+    if (any(!vapply(bounds, is.null, TRUE)) && !identical(type, "number")) {
+      return(sprintf("Field `%s`: `min`, `max` and `step` apply only to number fields.", name))
+    }
+    if (any(vapply(bounds, function(b) !is.null(b) && is.na(b), TRUE))) {
+      return(sprintf("Field `%s`: `min`, `max` and `step` must be finite numbers.", name))
+    }
+    if (!is.null(bounds$min) && !is.null(bounds$max) && bounds$min > bounds$max) {
+      return(sprintf("Field `%s`: `min` must not exceed `max`.", name))
+    }
+    if (!is.null(bounds$step) && bounds$step <= 0) {
+      return(sprintf("Field `%s`: `step` must be positive.", name))
+    }
+    pattern <- as.character(.ask_form_scalar(f$pattern, ""))
+    if (is.na(pattern)) pattern <- ""
+    if (nzchar(pattern)) {
+      if (!type %in% c("text", "textarea")) {
+        return(sprintf("Field `%s`: `pattern` applies only to text and textarea fields.", name))
+      }
+      problem <- .ask_form_pattern_problem(pattern)
+      if (!is.null(problem)) return(sprintf("Field `%s`: `pattern` %s.", name, problem))
+      # POSIX extended regex (TRE) after the structural checks above: matching time
+      # stays linear in the input, unlike backtracking engines.
+      compiles <- tryCatch({ grepl(pattern, "", perl = FALSE); TRUE }, error = function(e) FALSE,
+                           warning = function(w) FALSE)
+      if (!compiles) return(sprintf("Field `%s`: `pattern` is not a valid regular expression.", name))
+    }
+    allow_other <- isTRUE(as.logical(.ask_form_scalar(f$allow_other, FALSE)))
+    if (allow_other && !identical(type, "select")) {
+      return(sprintf("Field `%s`: `allow_other` applies only to select fields.", name))
+    }
+    placeholder <- as.character(.ask_form_scalar(f$placeholder, ""))
+    if (is.na(placeholder)) placeholder <- ""
+    if (nchar(placeholder) > 200L) return(sprintf("Field `%s`: `placeholder` must be at most 200 characters.", name))
+    if (nzchar(placeholder) && !type %in% c("text", "textarea", "number")) {
+      return(sprintf("Field `%s`: `placeholder` applies only to text, textarea and number fields.", name))
+    }
     default <- unlist(f$default, use.names = FALSE)
     default <- default[!is.na(default)]
     default <- if (!length(default)) "" else paste(as.character(default), collapse = ",")
@@ -67,7 +195,12 @@
       choices = choices,
       default = default,
       required = isTRUE(as.logical(.ask_form_scalar(f$required, FALSE))),
-      help = substr(as.character(.ask_form_scalar(f$help, "")), 1L, 500L)
+      help = substr(as.character(.ask_form_scalar(f$help, "")), 1L, 500L),
+      placeholder = placeholder,
+      min = bounds$min, max = bounds$max, step = bounds$step,
+      pattern = pattern,
+      pattern_hint = substr(as.character(.ask_form_scalar(f$pattern_hint, "")), 1L, 200L),
+      allow_other = allow_other
     )
   }
   names_ <- vapply(out, `[[`, character(1L), "name")
@@ -120,6 +253,9 @@
       date = list(id = id, component = "DateTimeInput", label = label_of(field), value = binding,
                   enableDate = TRUE, enableTime = FALSE)
     )
+    if (nzchar(field$placeholder %||% "") && identical(component$component, "TextField")) {
+      component$placeholder <- field$placeholder
+    }
     # The renderer exposes TextField/ChoicePicker/DateTimeInput labels only as
     # aria-label, so show the label visibly too (CheckBox renders its own). The
     # A2UI Text vocabulary renders plain text, so labels stay literal.
@@ -132,6 +268,15 @@
     }
     components <- c(components, list(component))
     field_ids <- c(field_ids, id)
+    if (isTRUE(field$allow_other)) {
+      # Free-text alternative, bound outside /values so it cannot collide with a field.
+      other_id <- paste0("other-", field$name)
+      components <- c(components, list(list(
+        id = other_id, component = "TextField", label = paste0(field$label, ": other value"),
+        value = list(path = paste0("/other/", field$name)), placeholder = "Or type another value"
+      )))
+      field_ids <- c(field_ids, other_id)
+    }
     if (nzchar(field$help)) {
       help_id <- paste0("help-", field$name)
       components <- c(components, list(list(id = help_id, component = "Text",
@@ -143,11 +288,17 @@
     lapply(spec, function(field) list(path = path_of(field))),
     vapply(spec, `[[`, "", "name")
   )
+  other_fields <- Filter(function(field) isTRUE(field$allow_other), spec)
+  submit_context <- list(formId = form_id, values = value_bindings)
+  if (length(other_fields)) {
+    submit_context$other <- stats::setNames(
+      lapply(other_fields, function(field) list(path = paste0("/other/", field$name))),
+      vapply(other_fields, `[[`, "", "name"))
+  }
   components <- c(components, list(
     list(id = "error", component = "Text", text = list(path = "/error")),
     list(id = "submit", component = "Button", text = submit_label,
-         action = list(event = list(name = "ask_form.submit",
-                                    context = list(formId = form_id, values = value_bindings)))),
+         action = list(event = list(name = "ask_form.submit", context = submit_context))),
     list(id = "cancel", component = "Button", text = "Cancel",
          action = list(event = list(name = "ask_form.cancel", context = list(formId = form_id)))),
     list(id = "actions", component = "Row", children = list("submit", "cancel"))
@@ -155,6 +306,13 @@
   root <- list(id = "root", component = "Column",
                children = as.list(c("title", field_ids, "error", "actions")))
   values <- stats::setNames(lapply(spec, .ask_form_initial), vapply(spec, `[[`, "", "name"))
+  model <- list(values = values, error = "")
+  if (length(other_fields)) {
+    # A default outside the listed choices starts in the other-value input.
+    model$other <- stats::setNames(lapply(other_fields, function(field) {
+      if (nzchar(field$default) && !field$default %in% field$choices) field$default else ""
+    }), vapply(other_fields, `[[`, "", "name"))
+  }
   list(
     list(version = "v0.9.1", createSurface = list(
       surfaceId = form_id, catalogId = "urn:shinyassistantui:a2ui:catalog:v1",
@@ -164,14 +322,15 @@
       surfaceId = form_id, components = c(list(root), components)
     )),
     list(version = "v0.9.1", updateDataModel = list(
-      surfaceId = form_id, path = "/", value = list(values = values, error = "")
+      surfaceId = form_id, path = "/", value = model
     ))
   )
 }
 
 # Coerce and validate submitted values. Returns list(values=, problems=). PURE.
-.ask_form_collect <- function(spec, raw) {
+.ask_form_collect <- function(spec, raw, other = list()) {
   raw <- if (is.list(raw)) raw else list()
+  other <- if (is.list(other)) other else list()
   values <- list()
   problems <- character()
   text_of <- function(x) {
@@ -187,7 +346,27 @@
         if (!nzchar(text)) NULL
         else if (length(number) != 1L || !is.finite(number)) {
           problems <- c(problems, sprintf("%s must be a number.", field$label)); NULL
-        } else number
+        } else {
+          if (!is.null(field$min) && number < field$min) {
+            problems <- c(problems, sprintf("%s must be at least %s.", field$label, format(field$min)))
+          }
+          if (!is.null(field$max) && number > field$max) {
+            problems <- c(problems, sprintf("%s must be at most %s.", field$label, format(field$max)))
+          }
+          if (!is.null(field$step)) {
+            base <- field$min %||% 0
+            ratio <- (number - base) / field$step
+            # Very large ratios cannot be checked reliably in double precision.
+            off_grid <- !is.finite(ratio) || abs(ratio) > 1e12 ||
+              abs(ratio - round(ratio)) > 1e-9
+            if (off_grid) {
+              problems <- c(problems, sprintf("%s must be a multiple of %s%s.", field$label,
+                                              format(field$step),
+                                              if (base != 0) paste0(" from ", format(base)) else ""))
+            }
+          }
+          number
+        }
       },
       checkbox = isTRUE(as.logical(unlist(value)[1L] %||% FALSE)),
       multiselect = {
@@ -200,7 +379,13 @@
       },
       select = {
         pick <- text_of(value)
-        if (nzchar(pick) && !pick %in% field$choices) {
+        typed <- if (isTRUE(field$allow_other)) trimws(text_of(other[[field$name]])) else ""
+        if (nchar(typed) > 200L) {
+          problems <- c(problems, sprintf("%s: the other value is too long.", field$label))
+          typed <- substr(typed, 1L, 200L)
+        }
+        if (nzchar(typed)) typed
+        else if (nzchar(pick) && !pick %in% field$choices) {
           problems <- c(problems, sprintf("%s has an unknown choice.", field$label)); ""
         } else pick
       },
@@ -216,7 +401,21 @@
         if (nchar(text) > .ASK_FORM_MAX_TEXT) {
           problems <- c(problems, sprintf("%s is too long.", field$label))
           substr(text, 1L, .ASK_FORM_MAX_TEXT)
-        } else text
+        } else {
+          has_pattern <- nzchar(field$pattern %||% "")
+          if (has_pattern && nchar(text) > .ASK_FORM_PATTERN_MAX_ANSWER) {
+            problems <- c(problems, sprintf("%s is too long.", field$label))
+          }
+          matched <- if (has_pattern && nzchar(text) && nchar(text) <= .ASK_FORM_PATTERN_MAX_ANSWER) {
+            tryCatch(isTRUE(grepl(field$pattern, text, perl = FALSE)),
+                     error = function(e) FALSE, warning = function(w) FALSE)
+          } else TRUE
+          if (!matched) {
+            hint <- if (nzchar(field$pattern_hint %||% "")) field$pattern_hint else "the expected format"
+            problems <- c(problems, sprintf("%s: expected %s.", field$label, hint))
+          }
+          text
+        }
       }
     )
     empty <- !identical(field$type, "checkbox") &&
@@ -438,7 +637,7 @@
              .ask_form_summary_ops(surface_id, entry$title, entry$spec, status_text[["user"]]), emit)
       return(invisible(TRUE))
     }
-    collected <- .ask_form_collect(entry$spec, context$values)
+    collected <- .ask_form_collect(entry$spec, context$values, context$other)
     if (length(collected$problems)) {
       safe(emit, list(list(version = "v0.9.1", updateDataModel = list(
         surfaceId = surface_id, path = "/error",

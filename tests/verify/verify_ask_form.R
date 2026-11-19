@@ -250,6 +250,43 @@ main <- function() {
   checks <- c(checks, "submits_typed_values_and_shows_summary")
   shot("form-submitted")
 
+  # 1b) Field options: placeholder, pattern, number bounds, dropdown, other value.
+  stage <- "field-options"
+  countries <- c("China", "Japan", "USA", "UK", "France", "Germany", "Italy", "Spain", "India", "Brazil")
+  id <- ask(mcp, list(title = "Study options", submit_label = "Save", fields = list(
+    list(name = "study", label = "Study id", type = "text", required = TRUE, placeholder = "bgb_xxxx_101",
+         pattern = "^[a-z0-9_]+$", pattern_hint = "lowercase letters, digits and _"),
+    list(name = "cycle", label = "Cycle days", type = "number", min = 7, max = 56, step = 7),
+    list(name = "country", label = "Country", type = "select", choices = as.list(countries), default = "Japan"),
+    list(name = "hemo", label = "Tumour type", type = "select", choices = list("IO-Solid", "Solid", "Hemo"),
+         allow_other = TRUE)
+  )))
+  wait(sprintf("(%s)?.innerText.includes('Study options') && !!%s", surf, button("Save")))
+  stopifnot(isTRUE(value(sprintf("(%s).getAttribute('placeholder')==='bgb_xxxx_101'", control("study")))))
+  stopifnot(isTRUE(value(sprintf("(%s).tagName==='SELECT' && (%s).value==='Japan'", control("country"), control("country")))))
+  stopifnot(isTRUE(value(sprintf("!!(%s).querySelector('[name=\"/other/hemo\"]')", surf))))
+  type_into(control("study"), "BGB X")
+  type_into(control("cycle"), "30")
+  mouse_click(button("Save"))
+  wait(sprintf("(%s).innerText.includes('lowercase letters, digits and _') && (%s).innerText.includes('multiple of 7')", surf, surf))
+  stopifnot(is.null(poll_rpc(mcp, id)))
+  checks <- c(checks, "pattern_and_step_errors_block_submit")
+  shot("form-field-option-errors")
+  type_into(control("study"), "bgb_x_101")
+  type_into(control("cycle"), "28")
+  mouse_click(control("country"))
+  value(sprintf("(()=>{const s=%s;s.value='India';s.dispatchEvent(new Event('change',{bubbles:true}));return true})()", control("country")))
+  key("Escape", "Escape", 27L)
+  type_into(sprintf("(%s).querySelector('[name=\"/other/hemo\"]')", surf), "Lymphoma")
+  mouse_click(button("Save"))
+  msg <- await_rpc(mcp, id, 20)
+  result <- result_json(msg)
+  stopifnot(isTRUE(result$submitted), identical(result$values$study, "bgb_x_101"),
+            identical(as.numeric(result$values$cycle), 28), identical(result$values$country, "India"),
+            identical(result$values$hemo, "Lymphoma"))
+  checks <- c(checks, "dropdown_and_other_value_submit")
+  shot("form-field-options-submitted")
+
   # 2) Cancel button.
   stage <- "cancel"
   id <- ask(mcp, list(title = "Confirm delete", fields = list(list(name = "ok", type = "checkbox"))))

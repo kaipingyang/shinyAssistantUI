@@ -7,7 +7,7 @@ type A2uiRenderJson =
   | readonly A2uiRenderJson[]
   | { readonly [key: string]: A2uiRenderJson };
 type A2uiRenderObject = { readonly [key: string]: A2uiRenderJson };
-import { Component, useMemo, useRef, type CSSProperties, type FC, type ReactNode } from "react";
+import { Component, createElement, useMemo, useRef, type CSSProperties, type FC, type ReactNode } from "react";
 import {
   JSONGenerativeUI,
   createActionRegistry,
@@ -100,9 +100,28 @@ export function openSafeA2uiUrl(
   }
 }
 
+// Long single-choice lists render as a dropdown; both use the same binding by name.
+export const DROPDOWN_OPTION_THRESHOLD = 8;
+const radioGroup = defaultGenerativeUILibrary.RadioGroup;
+const select = defaultGenerativeUILibrary.Select;
+if (!radioGroup || !select) throw new Error("assistant-ui A2UI choice vocabulary is unavailable");
+type ChoiceComponent = FC<Record<string, unknown>>;
+const RadioChoice = radioGroup.render as unknown as ChoiceComponent;
+const SelectChoice = select.render as unknown as ChoiceComponent;
+const adaptiveRadioGroup = {
+  ...radioGroup,
+  // Separate components keep each variant's hooks isolated if the option count changes.
+  render: (props: Record<string, unknown>) => {
+    const options = Array.isArray(props.options) ? props.options : [];
+    if (options.length <= DROPDOWN_OPTION_THRESHOLD) return createElement(RadioChoice, props);
+    // A placeholder option keeps an unanswered dropdown from showing the first choice.
+    return createElement(SelectChoice, { placeholder: "Select\u2026", ...props });
+  },
+};
+
 export const a2uiRuntimeLibrary: GenerativeUILibrary = Object.fromEntries(
   RUNTIME_COMPONENTS.map((name) => {
-    const entry = name === "Image" ? safeImage : defaultGenerativeUILibrary[name];
+    const entry = name === "Image" ? safeImage : name === "RadioGroup" ? adaptiveRadioGroup : defaultGenerativeUILibrary[name];
     if (!entry) throw new Error(`assistant-ui A2UI component ${name} is unavailable`);
     return [name, entry];
   }),

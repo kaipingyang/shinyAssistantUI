@@ -195,3 +195,55 @@ describe("A2UI local openUrl function", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 });
+
+describe("A2UI single-choice layout", () => {
+  const surface = (count: number) => {
+    const options = Array.from({ length: count }, (_, i) => ({ label: `Option ${i + 1}`, value: `o${i + 1}` }));
+    return [
+      { version: "v0.9", createSurface: { surfaceId: "surface-choice" } },
+      { version: "v0.9", updateComponents: {
+        surfaceId: "surface-choice",
+        components: [
+          { id: "root", component: "Column", children: ["pick", "submit"] },
+          { id: "pick", component: "ChoicePicker", label: "Country", variant: "mutuallyExclusive",
+            options, value: { path: "/pick" } },
+          { id: "submit", component: "Button", text: "Submit", action: {
+            event: { name: "submit", context: { pick: { path: "/pick" } } },
+          } },
+        ],
+      } },
+      { version: "v0.9", updateDataModel: { surfaceId: "surface-choice", path: "/", contents: { pick: "o2" } } },
+    ];
+  };
+
+  it("renders more than eight options as a dropdown that submits the chosen value", () => {
+    const dispatch = vi.fn();
+    const view = render(
+      <A2uiRuntimeView surfaceId="surface-choice" spec={null} operations={surface(10)} dispatch={dispatch} />,
+    );
+    const select = view.getByRole("combobox", { name: "Country" }) as HTMLSelectElement;
+    expect(view.queryAllByRole("radio")).toHaveLength(0);
+    expect(select.value).toBe("o2");
+    fireEvent.change(select, { target: { value: "o9" } });
+    fireEvent.click(view.getByRole("button", { name: "Submit" }));
+    expect(dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ context: { pick: "o9" } }));
+  });
+
+  it("keeps up to eight options as radio buttons", () => {
+    const view = render(<A2uiRuntimeView surfaceId="surface-choice" spec={null} operations={surface(8)} />);
+    expect(view.getAllByRole("radio")).toHaveLength(8);
+    expect(view.queryByRole("combobox")).toBeNull();
+  });
+
+  it("switches between radio buttons and a dropdown when the options change", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const view = render(<A2uiRuntimeView surfaceId="surface-choice" spec={null} operations={surface(3)} />);
+    expect(view.getAllByRole("radio")).toHaveLength(3);
+    view.rerender(<A2uiRuntimeView surfaceId="surface-choice" spec={null} operations={surface(12)} />);
+    expect(view.getByRole("combobox", { name: "Country" })).toBeTruthy();
+    view.rerender(<A2uiRuntimeView surfaceId="surface-choice" spec={null} operations={surface(2)} />);
+    expect(view.getAllByRole("radio")).toHaveLength(2);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+});

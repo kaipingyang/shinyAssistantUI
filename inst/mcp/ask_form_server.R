@@ -94,6 +94,17 @@ field_schema <- list(
       "Pre-filled value as text. multiselect: comma-separated; checkbox: \"true\"/\"false\";",
       "date: YYYY-MM-DD.")),
     required = list(type = "boolean", description = "Whether the user must fill it in."),
+    placeholder = list(type = "string", maxLength = 200,
+                       description = "text/textarea/number: example shown in the empty input."),
+    min = list(type = "number", description = "number: smallest allowed value."),
+    max = list(type = "number", description = "number: largest allowed value."),
+    step = list(type = "number", description = "number: value must be min + k * step."),
+    pattern = list(type = "string", maxLength = 200,
+                   description = "text/textarea: POSIX extended regular expression the answer must match (\\d, \\w, {n} and | work; anchor with ^ and $; no lookaround or backreferences; at most 200 characters, 19 `|`, {n} up to 50 and nested {} expanding to at most 100; answers up to 500 characters)."),
+    pattern_hint = list(type = "string", maxLength = 200,
+                        description = "How the expected format is described to the user, e.g. \"yyyymmdd\"."),
+    allow_other = list(type = "boolean",
+                       description = "select: also offer a free-text input for a value not in `choices`."),
     help = list(type = "string", maxLength = 500, description = "Short hint under the field.")
   ),
   required = list("name", "type")
